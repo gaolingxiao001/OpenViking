@@ -37,8 +37,8 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.throws(() => getConfig(), /running daemon directory/);
   });
 
-  it('rejects markdown delivery', () => {
-    setEnv('LARK_DAEMON_REPLY_FORMAT', 'markdown');
-    assert.throws(() => getConfig(), /LARK_DAEMON_REPLY_FORMAT/);
+  it('rejects an out-of-range codex effort', () => {
+    setEnv('LARK_DAEMON_CODEX_EFFORT', 'turbo');
+    assert.throws(() => getConfig(), /LARK_DAEMON_CODEX_EFFORT/);
   });
 });

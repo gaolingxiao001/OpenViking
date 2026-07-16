@@ -2,18 +2,16 @@
 
 一个单用户、本机常驻的飞书 Codex Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
 
-它通过 `lark-cli event +subscribe` 接收机器人消息，所有聊天共用同一个全局 `codex exec` 会话（跨聊天连续上下文），先判断“这句话是否值得回复”，再选择普通回复、thread 回复或直接发到当前 chat。Agent 还可以列出机器人已加入的群，并在用户要求时主动向另一个 chat 发消息。日常使用不需要 `@`。
+daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂进一个常驻的 `codex app-server` 线程；codex 通过专用的 Lark 工具自己把回复发回飞书。所有聊天共用同一个全局线程（跨聊天连续上下文），空闲时用 `turn/start` 发消息，正在思考时用 `turn/steer` 插话，因此思考中途来的新消息会即时进入同一轮。日常使用不需要 `@`。
 
 ## 交互规则
 
 - 所有聊天统一具有工作区写权限，可让 Codex 在配置的工作区里完成任务；因此只应把 Agent 加入你信任的聊天。
-- 所有聊天共享同一个全局 Codex 会话，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
-- 明确问题、任务、纠正和有效续聊通常会回复。
-- “收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
+- 所有聊天共享同一个全局 Codex 线程，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
+- 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和其他暂不支持的消息不会触发回复。
-- 连续对话通常直接发到 chat；需要引用上下文时普通回复；子话题或已有 thread 使用 thread。
 
-结构化最终回复的 chat 与 message 目标仍由 daemon 固定。跨 chat 发送走专用的 `list_lark_chats` / `send_lark_message` 工具：前者只返回机器人已经加入的群，后者只接受完整 `chat_id` 和纯文本。Codex 不直接通过 shell 调用 `lark-cli`。
+所有出站消息走专用 MCP 工具：`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`list_lark_chats`（解析群名，只返回机器人已加入的群）。工具只接受完整 id 和纯文本；Codex 不直接通过 shell 调用 `lark-cli`。
 
 ## 飞书前置条件
 
@@ -52,7 +50,7 @@ pm2 restart lark-web --update-env
 ./scripts/deploy.sh [git-ref]
 ```
 
-PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 会话、去重记录和待发送回复。
+PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 全局线程 id、消息去重记录和活动账本。
 
 ## Activity 页面
 
@@ -64,19 +62,17 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 - 今天的交互直接显示；每个来源的旧记录和只含旧活动的来源默认折叠，可继续加载。
 - 页面每 5 秒在本机刷新一次，标签页隐藏时暂停；没有外部资源或云端服务。
 
-这些活动作为保留历史的事件账本写入同一个 SQLite，并与消息、turn、outbox 的状态变更放在同一事务中。升级时会为已有历史做一次幂等 backfill；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用和裁剪后的正文，不暴露飞书 message/chat ID、Codex session、幂等键或 raw event。
+这些活动作为保留历史的事件账本写入同一个 SQLite。升级时会为已有历史做一次幂等 backfill；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用和裁剪后的正文，不暴露飞书 message/chat ID、Codex session、幂等键或 raw event。
 
 ## 可靠性边界
 
-- 消息先写 SQLite，再启动 Codex；所有聊天共用一个全局 Codex 会话，因此 Codex turn 全局串行（并发固定为 1），绝不并发 `resume` 同一会话。
-- 单一全局 Codex session 持久化于 meta 表，跨聊天连续续接，不使用 `resume --last`；策略变化或会话失效时轮换，进程中断时清空并在下轮用历史重建。
-- 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；新会话首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
-- 思考期间来了新消息，旧答案会暂缓，下一轮结合新消息重新判断。
-- 回复使用持久幂等键；进程重启后会恢复安全范围内的待发送项。
-- `send_lark_message` 的主动跨 chat 发送发生在 Codex turn 内，并带 lark-cli 幂等键、遵守 `LARK_DAEMON_DRY_RUN`；当前不进入 daemon outbox/Activity，进程中断后不会由 daemon 自动恢复。
+- 消息先写 SQLite（状态直接 DONE），再喂给常驻的 `codex app-server` 线程；空闲 `turn/start`，忙时 `turn/steer` 插话，steer 竞态失败会回退成 `turn/start`，消息不丢。
+- 单一全局线程 id 持久化于 meta 表并带 policyHash；重连时 `thread/resume`，policy（system prompt / model / workspace）变化则视为新线程；app-server 意外退出按指数退避（1s 起，30s 封顶）重连，期间投递入队。
+- 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
+- codex 通过 MCP 工具自己发送回复（带 lark-cli 幂等键、遵守 `LARK_DAEMON_DRY_RUN`），daemon 不再持有 outbox/投递/freshness 机制；daemon 侧没有回复重试，重复投递由幂等键约束。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。
-- Activity 账本保留脱敏后的短摘要；老记录由网页折叠，不因业务表的 90 天清理而消失。
-- `lark-cli --text` 没有 stdin/file 参数，因此发送瞬间，回复正文会出现在同一 macOS 用户可见的子进程参数中。
+- Activity 账本保留脱敏后的短摘要（含收消息、turn 开始/结束、steer、agent 输出）；老记录由网页折叠，不因业务表的清理而消失。
+- 单个 turn 没有 watchdog，codex 若长时间不结束一轮，该轮会一直 active（后续消息仍会 steer 进来）。
 
 当前固定为 raw 事件、text 回复；不支持 compact 订阅或 markdown 图片解析。
 
@@ -86,5 +82,5 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 2. 私聊只发“收到，谢谢”，应保持静默。
 3. 群里不 `@` 发一个尚未解决的问题；Agent 有增量价值时回复。
 4. 群里发闲聊或人与人的对话，应保持静默。
-5. Agent 思考时立即补一句纠正；旧答案不应抢先发出。
+5. Agent 思考时立即补一句纠正；该补充会 steer 进同一轮，最终回复应结合它、不发过时答案。
 6. 私聊要求 Agent 向另一个已加入群发送测试消息；Agent 应先解析群名，再通过专用工具发送，并在当前私聊确认结果。

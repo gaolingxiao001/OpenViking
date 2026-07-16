@@ -1,26 +1,6 @@
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from './process-utils.mjs';
 
-function findMessageId(value, depth = 0) {
-  if (depth > 8 || value === null || value === undefined) return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findMessageId(item, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (typeof value !== 'object') return null;
-  for (const key of ['message_id', 'messageId']) {
-    if (typeof value[key] === 'string') return value[key];
-  }
-  for (const child of Object.values(value)) {
-    const found = findMessageId(child, depth + 1);
-    if (found) return found;
-  }
-  return null;
-}
-
 function findChatName(value, depth = 0) {
   if (depth > 8 || value === null || value === undefined) return null;
   if (Array.isArray(value)) {
@@ -76,20 +56,14 @@ export class LarkClient {
       const text = `${result.stdout}\n${result.stderr}`;
       const missing = check.required.filter((flag) => !text.includes(flag));
       if (result.code !== 0 || missing.length > 0) {
-        const error = `lark-cli preflight failed for ${check.args.join(' ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}`;
-        if (this.config.strictCliPreflight) throw new Error(error);
-        this.logger.warn('lark_preflight_warning', { error });
+        throw new Error(`lark-cli preflight failed for ${check.args.join(' ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}`);
       }
       outputs.push(text.trim().split(/\r?\n/).at(-1) || 'unknown');
     }
     const doctor = await this.registry.run(this.config.larkCliBin, [...prefix, 'doctor'], {
       timeoutMs: 30_000,
     });
-    if (doctor.code !== 0) {
-      const error = 'lark-cli doctor failed for the selected profile';
-      if (this.config.strictCliPreflight) throw new Error(error);
-      this.logger.warn('lark_doctor_warning', { error });
-    }
+    if (doctor.code !== 0) throw new Error('lark-cli doctor failed for the selected profile');
     const version = await this.registry.run(this.config.larkCliBin, ['--version'], {
       timeoutMs: 10_000,
     });
@@ -180,37 +154,6 @@ export class LarkClient {
       throw new Error('lark-cli chat lookup returned invalid JSON');
     }
     return findChatName(parsed);
-  }
-
-  async sendOutbound(outbox) {
-    if (this.config.dryRun) return { remoteMessageId: `dry-run-${outbox.id}` };
-    const args = ['--profile', this.profile, 'im'];
-    if (outbox.deliveryMode === 'chat') {
-      if (!outbox.targetChatId) throw new Error('chat delivery is missing target_chat_id');
-      args.push('+messages-send', '--as', 'bot', '--chat-id', outbox.targetChatId);
-    } else {
-      if (!['reply', 'thread'].includes(outbox.deliveryMode)) {
-        throw new Error(`unsupported delivery mode: ${outbox.deliveryMode}`);
-      }
-      args.push('+messages-reply', '--as', 'bot', '--message-id', outbox.replyToMessageId);
-    }
-    args.push(
-      '--text', outbox.body,
-      '--idempotency-key', outbox.idempotencyKey,
-      '--format', 'json',
-    );
-    if (outbox.deliveryMode === 'thread') args.push('--reply-in-thread');
-    const result = await this.registry.run(this.config.larkCliBin, args, {
-      cwd: this.config.projectDir,
-      timeoutMs: this.config.sendTimeoutMs,
-    });
-    if (result.timedOut) throw new Error(`lark-cli delivery timed out after ${this.config.sendTimeoutMs}ms`);
-    if (result.code !== 0) {
-      throw new Error(result.stderr.trim().slice(-2000) || `lark-cli delivery exited ${result.code}`);
-    }
-    let parsed = null;
-    try { parsed = JSON.parse(result.stdout); } catch {}
-    return { remoteMessageId: findMessageId(parsed) };
   }
 
   async stop() {

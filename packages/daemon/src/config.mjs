@@ -111,7 +111,6 @@ export function getConfig() {
     tempDir: path.join(dataDir, 'tmp'),
     workspace,
     systemPromptPath: path.join(promptDir, 'system-prompt.md'),
-    responseSchemaPath: path.join(promptDir, 'response.schema.json'),
     larkToolServerPath: path.join(sourceDir, 'lark-tools.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
@@ -127,24 +126,13 @@ export function getConfig() {
     allowedMessageTypes: csvEnv('LARK_DAEMON_ALLOWED_MESSAGE_TYPES').size > 0
       ? csvEnv('LARK_DAEMON_ALLOWED_MESSAGE_TYPES')
       : new Set(['text', 'post']),
-    debounceMs: intEnv('LARK_DAEMON_DEBOUNCE_MS', 750, { min: 0, max: 30_000 }),
-    freshnessGraceMs: intEnv('LARK_DAEMON_FRESHNESS_GRACE_MS', 600, { min: 0, max: 30_000 }),
-    codexTimeoutMs: intEnv('LARK_DAEMON_CODEX_TIMEOUT_MS', 1_200_000, { min: 10_000 }),
     sendTimeoutMs: intEnv('LARK_DAEMON_SEND_TIMEOUT_MS', 30_000, { min: 1_000 }),
     shutdownTimeoutMs: intEnv('LARK_DAEMON_SHUTDOWN_TIMEOUT_MS', 20_000, { min: 5_000, max: 25_000 }),
     maxReplyChars: intEnv('LARK_DAEMON_MAX_REPLY_CHARS', 30_000, { min: 100, max: 100_000 }),
     maxEventBytes: intEnv('LARK_DAEMON_MAX_EVENT_BYTES', 1_000_000, { min: 1_024, max: 10_000_000 }),
     maxEventAgeMs: intEnv('LARK_DAEMON_MAX_EVENT_AGE_MS', 86_400_000, { min: 60_000 }),
-    maxBatchSize: intEnv('LARK_DAEMON_MAX_BATCH_SIZE', 20, { min: 1, max: 100 }),
-    maxQueuedPerConversation: intEnv('LARK_DAEMON_MAX_QUEUED_PER_CONVERSATION', 50, { min: 1, max: 1_000 }),
-    maxQueuedTotal: intEnv('LARK_DAEMON_MAX_QUEUED_TOTAL', 500, { min: 1, max: 10_000 }),
-    maxQueuedAgeMs: intEnv('LARK_DAEMON_MAX_QUEUED_AGE_MS', 600_000, { min: 60_000, max: 86_400_000 }),
     historyLimit: intEnv('LARK_DAEMON_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
     retentionMs: intEnv('LARK_DAEMON_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
-    sendRetries: intEnv('LARK_DAEMON_SEND_RETRIES', 3, { min: 1, max: 10 }),
-    uncertainAfterMs: intEnv('LARK_DAEMON_IDEMPOTENCY_WINDOW_MS', 3_300_000, { min: 60_000, max: 3_600_000 }),
-    replyFormat: enumEnv('LARK_DAEMON_REPLY_FORMAT', 'text', ['text']),
-    strictCliPreflight: boolEnv('LARK_DAEMON_STRICT_CLI_PREFLIGHT', true),
     dryRun: boolEnv('LARK_DAEMON_DRY_RUN', false),
   };
 }
@@ -158,10 +146,6 @@ export function publicConfig(config) {
     port: config.port,
     httpEnabled: config.httpEnabled,
     eventMode: config.eventMode,
-    debounceMs: config.debounceMs,
-    freshnessGraceMs: config.freshnessGraceMs,
     dryRun: config.dryRun,
-    maxQueuedPerConversation: config.maxQueuedPerConversation,
-    maxQueuedTotal: config.maxQueuedTotal,
   };
 }

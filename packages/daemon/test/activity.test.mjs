@@ -41,28 +41,6 @@ function event(id, content = `message ${id}`, overrides = {}) {
   };
 }
 
-function replyDecision(reply = 'agent answer') {
-  return {
-    action: 'reply',
-    reasonCode: 'direct_request',
-    deliveryMode: 'reply',
-    reply,
-  };
-}
-
-function lifecycleToOutbox(store, id, startAt = 1_700_000_000_000) {
-  const inboundEvent = event(id);
-  assert.equal(store.ingest(inboundEvent, null, startAt).inserted, true);
-  const turn = store.claimBatch(inboundEvent.conversationKey, 20, startAt + 1);
-  const created = store.createOutboxIfFresh(
-    turn.id,
-    replyDecision(`answer ${id}`),
-    startAt + 2,
-  );
-  assert.equal(created.stale, false);
-  return { inboundEvent, turn, outbox: created.outbox };
-}
-
 function request(port, pathname, { method = 'GET', headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const call = http.request({
@@ -101,75 +79,29 @@ describe('activity store', { concurrency: false }, () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it('records the live receive-to-send lifecycle exactly once without leaking private transport fields', () => {
+  it('records message.received once, deduplicated, without leaking private ids or raw fields', () => {
     const now = 1_700_000_100_000;
-    const inboundEvent = event('private', 'show this user-authored text', {
+    const inbound = event('private', 'show this user-authored text', {
       conversationKey: 'profile:tenant:oc-private-secret:main',
       chatId: 'oc-private-secret',
       messageId: 'om-private-message',
       eventId: 'evt-private-event',
-      raw: { token: 'raw-token-sentinel', body: 'raw-body-sentinel' },
+      raw: { token: 'raw-token-sentinel' },
     });
+    assert.equal(store.ingest(inbound, null, now).inserted, true);
+    assert.equal(store.ingest(inbound, null, now + 1).inserted, false);
 
-    assert.equal(store.ingest(inboundEvent, null, now).inserted, true);
-    assert.equal(store.ingest(inboundEvent, null, now + 1).inserted, false);
-    const turn = store.claimBatch(inboundEvent.conversationKey, 20, now + 2);
-    const { outbox } = store.createOutboxIfFresh(
-      turn.id,
-      replyDecision('visible agent answer'),
-      now + 3,
-    );
-    assert.equal(store.prepareOutboxAttempt(outbox.id, 5_000, now + 4).ready, true);
-    assert.equal(store.markOutboxSent(outbox.id, 'om-private-remote', now + 5), true);
-    assert.equal(store.markOutboxSent(outbox.id, 'om-replayed-remote', now + 6), false);
-    assert.equal(store.prepareOutboxAttempt(outbox.id, 5_000, now + 7).ready, false);
+    const feed = store.listActivities({ limit: 100 }).activities;
+    assert.deepEqual(feed.map((a) => a.kind), ['message.received']);
+    const received = feed[0];
+    assert.equal(received.summary, 'show this user-authored text');
+    assert.match(received.conversationRef, /^[a-f0-9]{12}$/);
 
-    const feed = store.listActivities({ limit: 100 }).activities.reverse();
-    assert.deepEqual(feed.map((activity) => activity.kind), [
-      'message.received',
-      'agent.started',
-      'agent.decided',
-      'delivery.queued',
-      'delivery.attempt',
-      'delivery.sent',
-    ]);
-    assert.equal(new Set(feed.map((activity) => activity.id)).size, feed.length);
-
-    const privateOutbox = store.db.prepare(`
-      SELECT idempotency_key, reply_to_message_id, remote_message_id FROM outbox WHERE id = ?
-    `).get(outbox.id);
     const serialized = JSON.stringify(feed);
-    for (const privateValue of [
-      inboundEvent.conversationKey,
-      inboundEvent.chatId,
-      inboundEvent.messageId,
-      inboundEvent.eventId,
-      privateOutbox.idempotency_key,
-      privateOutbox.reply_to_message_id,
-      privateOutbox.remote_message_id,
-      'raw-token-sentinel',
-      'raw-body-sentinel',
+    for (const secret of [
+      inbound.conversationKey, inbound.chatId, inbound.messageId, inbound.eventId, 'raw-token-sentinel',
     ]) {
-      assert.equal(serialized.includes(privateValue), false, `public activity leaked ${privateValue}`);
-    }
-    for (const activity of feed) {
-      assert.match(activity.conversationRef, /^[a-f0-9]{12}$/);
-      assert.match(activity.sourceRef, /^[a-f0-9]{12}$/);
-      assert.equal(activity.sourceType, 'group');
-      for (const privateKey of [
-        'conv_key',
-        'conversationKey',
-        'chatId',
-        'messageId',
-        'replyToMessageId',
-        'remoteMessageId',
-        'idempotencyKey',
-        'raw',
-        'token',
-      ]) {
-        assert.equal(Object.hasOwn(activity, privateKey), false);
-        assert.equal(Object.hasOwn(activity.metadata, privateKey), false);
-      }
+      assert.equal(serialized.includes(secret), false, `leaked ${secret}`);
     }
 
     store.recordActivity({
@@ -178,7 +110,6 @@ describe('activity store', { concurrency: false }, () => {
       summary: 'safe',
       metadata: {
         chatId: 'uuid-chat-sentinel',
-        eventId: 'uuid-event-sentinel',
         conversationKey: 'uuid-conversation-sentinel',
         reasonCode: 'direct_request',
       },
@@ -289,114 +220,17 @@ describe('activity store', { concurrency: false }, () => {
     assert.equal(rows.every((row) => row.sourceRef === 'system'), true);
   });
 
-  it('assigns attention priority and durable status to ignored, silent, failed, retry, and uncertain paths', () => {
-    const base = 1_700_000_200_000;
-
+  it('marks a filtered message ignored with its reason and blanks the body', () => {
     const ignored = event('ignored', 'ignored-private-body');
-    store.ingest(ignored, 'unsupported_message_type', base);
-
-    const silentEvent = event('silent');
-    store.ingest(silentEvent, null, base + 10);
-    const silentTurn = store.claimBatch(silentEvent.conversationKey, 20, base + 11);
-    assert.equal(store.completeSilent(silentTurn.id, {
-      action: 'ignore',
-      reasonCode: 'ack',
-      deliveryMode: 'reply',
-      reply: '',
-    }, base + 12), true);
-
-    const failedEvent = event('agent-failed');
-    store.ingest(failedEvent, null, base + 20);
-    const failedTurn = store.claimBatch(failedEvent.conversationKey, 20, base + 21);
-    assert.equal(store.failTurn(failedTurn.id, 'Codex process exited', base + 22), true);
-
-    const retry = lifecycleToOutbox(store, 'retry-failed', base + 30);
-    store.prepareOutboxAttempt(retry.outbox.id, 5_000, base + 33);
-    assert.equal(store.markOutboxFailure(retry.outbox.id, 'temporary failure', 2, base + 34), 'RETRY');
-    store.prepareOutboxAttempt(retry.outbox.id, 5_000, base + 35);
-    assert.equal(store.markOutboxFailure(retry.outbox.id, 'permanent failure', 2, base + 36), 'FAILED');
-
-    const uncertain = lifecycleToOutbox(store, 'uncertain', base + 40);
-    store.prepareOutboxAttempt(uncertain.outbox.id, 100, base + 43);
-    const uncertainResult = store.prepareOutboxAttempt(uncertain.outbox.id, 100, base + 144);
-    assert.equal(uncertainResult.ready, false);
-    assert.equal(uncertainResult.uncertain, true);
-
+    store.ingest(ignored, 'unsupported_message_type', 1_700_000_200_000);
     const activities = store.listActivities({ limit: 100 }).activities;
-    const activity = (kind) => {
-      const found = activities.find((candidate) => candidate.kind === kind);
-      assert.ok(found, `missing ${kind}`);
-      return found;
-    };
+    const found = activities.find((a) => a.kind === 'message.ignored');
+    assert.ok(found);
     assert.deepEqual(
-      ['severity', 'priority', 'status'].map((key) => activity('message.ignored')[key]),
+      ['severity', 'priority', 'status'].map((key) => found[key]),
       ['info', 20, 'RULE_IGNORED'],
     );
-    assert.deepEqual(
-      ['severity', 'priority', 'status'].map((key) => activity('agent.silent')[key]),
-      ['info', 25, 'SILENT'],
-    );
-    assert.deepEqual(
-      ['severity', 'priority', 'status'].map((key) => activity('agent.failed')[key]),
-      ['error', 95, 'DEAD'],
-    );
-    assert.deepEqual(
-      ['severity', 'priority', 'status'].map((key) => activity('delivery.retry')[key]),
-      ['warn', 78, 'RETRY'],
-    );
-    assert.deepEqual(
-      ['severity', 'priority', 'status'].map((key) => activity('delivery.failed')[key]),
-      ['error', 100, 'FAILED'],
-    );
-    assert.deepEqual(
-      ['severity', 'priority', 'status'].map((key) => activity('delivery.uncertain')[key]),
-      ['error', 100, 'UNCERTAIN'],
-    );
     assert.equal(JSON.stringify(activities).includes('ignored-private-body'), false);
-    assert.equal(store.activityOverview(base + 200).attention, 3);
-  });
-
-  it('backfills a legacy database once and remains idempotent across repeated opens', () => {
-    const lifecycle = lifecycleToOutbox(store, 'legacy', 1_600_000_000_000);
-    store.prepareOutboxAttempt(lifecycle.outbox.id, 5_000, 1_600_000_000_003);
-    store.markOutboxSent(lifecycle.outbox.id, 'om-legacy-remote', 1_600_000_000_004);
-    store.close();
-
-    const legacy = new DatabaseSync(databasePath);
-    legacy.exec('DROP TABLE activities');
-    legacy.close();
-
-    store = new Store(databasePath, quietLogger);
-    const first = store.listActivities({ limit: 100 }).activities;
-    const firstCount = store.stats().activities;
-    assert.equal(firstCount, 5);
-    assert.deepEqual(first.toReversed().map((item) => item.kind), [
-      'message.received',
-      'agent.started',
-      'agent.decided',
-      'delivery.queued',
-      'delivery.sent',
-    ]);
-    assert.deepEqual(first.map((item) => item.kind).sort(), [
-      'agent.decided',
-      'agent.started',
-      'delivery.queued',
-      'delivery.sent',
-      'message.received',
-    ].sort());
-    assert.equal(first.every((item) => item.metadata.backfilled === true), true);
-
-    store.close();
-    store = new Store(databasePath, quietLogger);
-    assert.equal(store.stats().activities, firstCount);
-    assert.deepEqual(
-      store.listActivities({ limit: 100 }).activities.map((item) => item.id),
-      first.map((item) => item.id),
-    );
-
-    store.close();
-    store = new Store(databasePath, quietLogger);
-    assert.equal(store.stats().activities, firstCount);
   });
 
   it('uses a stable keyset cursor when a newer activity arrives between pages', () => {
@@ -432,20 +266,38 @@ describe('activity store', { concurrency: false }, () => {
     assert.equal(new Set(seen).size, oldIds.length);
   });
 
-  it('keeps the append-only activity history when operational rows are pruned', () => {
-    const lifecycle = lifecycleToOutbox(store, 'old', 1_000);
-    store.prepareOutboxAttempt(lifecycle.outbox.id, 5_000, 1_003);
-    store.markOutboxSent(lifecycle.outbox.id, 'om-old-remote', 1_004);
+  it('keeps the append-only activity history when inbound rows are pruned', () => {
+    store.ingest(event('old', 'old body'), null, 1_000);
     const before = store.listActivities({ limit: 100 }).activities;
-
     const removed = store.prune(1_000, 10_000);
     assert.ok(removed.inbound > 0);
-    assert.ok(removed.outbox > 0);
-    assert.ok(removed.turns > 0);
     assert.equal(store.stats().activities, before.length);
     assert.deepEqual(
       store.listActivities({ limit: 100 }).activities.map((item) => item.id),
       before.map((item) => item.id),
+    );
+  });
+
+  it('backfills inbound activities once and stays idempotent across reopens', () => {
+    store.ingest(event('legacy', 'legacy body'), null, 1_600_000_000_000);
+    store.close();
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec('DROP TABLE activities');
+    legacy.close();
+
+    store = new Store(databasePath, quietLogger);
+    const first = store.listActivities({ limit: 100 }).activities;
+    assert.deepEqual(first.map((item) => item.kind), ['message.received']);
+    assert.equal(first.every((item) => item.metadata.backfilled === true), true);
+    const firstCount = store.stats().activities;
+
+    store.close();
+    store = new Store(databasePath, quietLogger);
+    assert.equal(store.stats().activities, firstCount);
+    assert.deepEqual(
+      store.listActivities({ limit: 100 }).activities.map((item) => item.id),
+      first.map((item) => item.id),
     );
   });
 });

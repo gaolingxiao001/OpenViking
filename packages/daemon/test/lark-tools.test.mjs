@@ -185,7 +185,7 @@ describe('Lark proactive IM tool service', () => {
 });
 
 describe('Lark proactive IM MCP protocol', () => {
-  it('advertises only the two narrow tools and serves both tool calls', async () => {
+  it('advertises only the three narrow tools and serves the tool calls', async () => {
     const service = {
       async listChats() {
         return { chats: [{ chat_id: 'oc_memorize123456', name: 'Memorize', chat_mode: 'group', chat_status: 'normal' }], count: 1, has_more: false };
@@ -193,17 +193,43 @@ describe('Lark proactive IM MCP protocol', () => {
       async sendMessage() {
         return { sent: true, chat_id: 'oc_memorize123456', message_id: 'om_sent12345678', idempotency_key: 'key' };
       },
+      async replyMessage() {
+        return { sent: true, reply_to_message_id: 'om_target1234567', reply_in_thread: true, message_id: 'om_reply12345678', idempotency_key: 'key' };
+      },
     };
     const handle = createMcpHandler(service);
     const initialized = await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(initialized.result.serverInfo.name, 'lark-daemon-im');
     const listed = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ['list_lark_chats', 'send_lark_message']);
-    assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), ['list_lark_chats', 'send_lark_message']);
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ['list_lark_chats', 'send_lark_message', 'reply_lark_message']);
+    assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), ['list_lark_chats', 'send_lark_message', 'reply_lark_message']);
     const chats = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: { query: 'memo' } } });
     assert.match(chats.result.content[0].text, /Memorize.*oc_memorize123456/);
     const sent = await handle({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', text: 'hi' } } });
     assert.equal(sent.result.structuredContent.sent, true);
+    const replied = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', text: 'hi', reply_in_thread: true } } });
+    assert.equal(replied.result.structuredContent.sent, true);
+    assert.match(replied.result.content[0].text, /om_target1234567/);
+  });
+
+  it('validates reply ids and builds the reply lark-cli invocation', async () => {
+    const calls = [];
+    const service = new LarkToolService(
+      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false },
+      async (_bin, args) => {
+        calls.push(args);
+        return { code: 0, signal: null, stdout: JSON.stringify({ ok: true, data: { message_id: 'om_new123456789' } }), stderr: '', timedOut: false };
+      },
+    );
+    await assert.rejects(service.replyMessage({ message_id: 'om_short', text: 'hi' }), /full om_/);
+    await assert.rejects(service.replyMessage({ message_id: 'om_target1234567', text: '' }), /must not be empty/);
+    const result = await service.replyMessage({ message_id: 'om_target1234567', text: 'hello', reply_in_thread: true });
+    assert.equal(result.sent, true);
+    assert.equal(result.message_id, 'om_new123456789');
+    const rendered = calls[0].join(' ');
+    assert.match(rendered, /\+messages-reply/);
+    assert.match(rendered, /--message-id om_target1234567/);
+    assert.match(rendered, /--reply-in-thread/);
   });
 
   it('returns tool failures as MCP errors without breaking the session', async () => {
@@ -269,7 +295,7 @@ describe('Lark proactive IM MCP protocol', () => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: {} } })}\n`);
       await waitFor(3);
       assert.equal(responses[0].result.serverInfo.name, 'lark-daemon-im');
-      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'send_lark_message']);
+      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'send_lark_message', 'reply_lark_message']);
       assert.match(responses[2].result.content[0].text, /Fixture Chat/);
     } finally {
       child.stdin.end();

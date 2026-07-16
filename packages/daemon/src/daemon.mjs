@@ -4,9 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
 import { ProcessRegistry } from './process-utils.mjs';
-import { CodexRunner } from './codex.mjs';
+import { CodexAgent, formatInboundLine } from './codex.mjs';
 import { LarkClient } from './lark.mjs';
-import { Semaphore } from './semaphore.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 
@@ -81,10 +80,6 @@ export class LarkDaemon {
     this.codex = null;
     this.lark = null;
     this.httpServer = null;
-    // All chats share one global Codex session; turns must never resume it concurrently.
-    this.semaphore = new Semaphore(1);
-    this.scheduled = new Map();
-    this.runningConversations = new Set();
     this.startedAt = Date.now();
     this.ready = false;
     this.shuttingDown = false;
@@ -105,9 +100,6 @@ export class LarkDaemon {
         summary: fields.summary,
         status: fields.status,
         conversationKey: fields.conversationKey,
-        turnId: fields.turnId,
-        inboundSeq: fields.inboundSeq,
-        outboxId: fields.outboxId,
         metadata: fields.metadata,
         occurredAtMs: fields.occurredAtMs,
       });
@@ -119,7 +111,6 @@ export class LarkDaemon {
 
   async start() {
     fs.mkdirSync(this.config.dataDir, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(this.config.tempDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(this.config.workspace, { recursive: true, mode: 0o700 });
     this.lock.acquire();
     try {
@@ -129,37 +120,24 @@ export class LarkDaemon {
         status: 'STARTING',
         metadata: { eventMode: this.config.eventMode },
       }, 'starting');
-      this.codex = new CodexRunner(this.config, this.registry, this.logger.child({ component: 'codex' }));
-      this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
-
-      const interrupted = this.store.recoverInterrupted();
-      if (interrupted > 0) {
-        this.logger.warn('interrupted_turns_quarantined', { count: interrupted });
-        this.recordSystemActivity('system.recovery', {
-          summary: `隔离了 ${interrupted} 个被中断的判断`,
-          status: 'RECOVERED',
-          metadata: { interruptedTurns: interrupted },
-        }, 'recover-interrupted');
-      }
       this.runMaintenance();
 
-      const [codexInfo, larkInfo] = await Promise.all([
-        this.codex.preflight(),
-        this.lark.preflight(),
-      ]);
+      this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
+      const larkInfo = await this.lark.preflight();
       this.config.profile = larkInfo.profile;
-      this.logger.info('cli_preflight_ok', {
-        codexVersion: codexInfo.version,
-        larkVersion: larkInfo.version,
-      });
+      this.logger.info('cli_preflight_ok', { larkVersion: larkInfo.version });
       this.recordSystemActivity('system.preflight_ok', {
-        summary: 'Codex 与 lark-cli 均可用',
+        summary: 'lark-cli 可用',
         status: 'OK',
-        metadata: {
-          codexVersion: codexInfo.version,
-          larkVersion: larkInfo.version,
-        },
+        metadata: { larkVersion: larkInfo.version },
       }, 'preflight-ok');
+
+      this.codex = new CodexAgent(this.config, this.store, this.logger.child({ component: 'codex' }));
+      await this.codex.start();
+      this.recordSystemActivity('system.subscriber_started', {
+        summary: 'Codex app-server 已连接',
+        status: 'RUNNING',
+      }, 'codex-connected');
 
       if (this.config.httpEnabled) await this.startHttpServer();
       this.lark.startSubscription(
@@ -175,19 +153,8 @@ export class LarkDaemon {
         status: 'RUNNING',
       }, 'subscriber-started');
 
-      const recoveredOutboxes = await this.recoverOutboxes();
-      if (recoveredOutboxes > 0) {
-        this.recordSystemActivity('system.recovery', {
-          summary: `检查了 ${recoveredOutboxes} 条待发送回复`,
-          status: 'RECOVERED',
-          metadata: { outboxes: recoveredOutboxes },
-        }, 'recover-outboxes');
-      }
       this.ready = true;
       this.refreshChatNames();
-      for (const conversationKey of this.store.queuedConversationKeys()) {
-        this.scheduleConversation(conversationKey, 0);
-      }
       this.maintenanceTimer = setInterval(() => this.runMaintenance(), 86_400_000);
       this.maintenanceTimer.unref();
       this.logger.info('daemon_ready', {
@@ -247,10 +214,7 @@ export class LarkDaemon {
     const filterReason = deterministicFilter(event, this.config);
     let result;
     try {
-      result = this.store.ingest(event, filterReason, Date.now(), {
-        perConversation: this.config.maxQueuedPerConversation,
-        total: this.config.maxQueuedTotal,
-      });
+      result = this.store.ingest(event, filterReason, Date.now());
     } catch (error) {
       this.logger.error('event_persist_failed', { error: safeError(error) });
       this.recordSystemActivity('system.persist_failed', {
@@ -278,207 +242,24 @@ export class LarkDaemon {
       });
       return;
     }
-    this.logger.info('event_queued', {
+    this.logger.info('event_delivered', {
       messageRef: opaqueRef(event.messageId),
       chatRef: opaqueRef(event.chatId),
       conversationRef: opaqueRef(event.conversationKey),
       chatType: event.chatType,
     });
-    this.scheduleConversation(event.conversationKey, this.config.debounceMs);
-  }
-
-  scheduleConversation(conversationKey, delayMs = this.config.debounceMs) {
-    if (this.shuttingDown) return;
-    const current = this.scheduled.get(conversationKey);
-    if (current) clearTimeout(current);
-    const timer = setTimeout(() => {
-      this.scheduled.delete(conversationKey);
-      void this.dispatchConversation(conversationKey);
-    }, delayMs);
-    this.scheduled.set(conversationKey, timer);
-  }
-
-  async dispatchConversation(conversationKey) {
-    if (!this.ready || this.shuttingDown || this.runningConversations.has(conversationKey)) return;
-    this.runningConversations.add(conversationKey);
-    const release = await this.semaphore.acquire();
-    try {
-      if (!this.shuttingDown) await this.processConversation(conversationKey);
-    } catch (error) {
-      this.logger.error('conversation_worker_failed', {
-        conversationRef: opaqueRef(conversationKey),
-        error,
-      });
-      this.recordSystemActivity('system.worker_failed', {
-        summary: safeError(error),
-        status: 'FAILED',
-        conversationKey,
-      });
-    } finally {
-      release();
-      this.runningConversations.delete(conversationKey);
-      if (!this.shuttingDown && this.store.hasQueued(conversationKey)) {
-        this.scheduleConversation(conversationKey, this.config.debounceMs);
-      }
-    }
-  }
-
-  async processConversation(conversationKey) {
-    const expired = this.store.expireQueued(Date.now() - this.config.maxQueuedAgeMs);
-    if (expired > 0) this.logger.warn('queued_events_expired', { count: expired });
-    const turn = this.store.claimBatch(conversationKey, this.config.maxBatchSize);
-    if (!turn) return;
-    try {
-      const global = this.store.getGlobalSession();
-      const policyHash = this.codex.policyHash;
-      let sessionId = global.sessionId;
-      if (sessionId && global.policyHash !== policyHash) {
-        this.store.clearGlobalSession();
-        sessionId = null;
-        this.logger.info('codex_session_rotated_for_policy', {
-          conversationRef: opaqueRef(conversationKey),
-        });
-        this.recordSystemActivity('agent.session_rotated', {
-          summary: '策略变化，已开始新的 Codex 上下文',
-          status: 'ROTATED',
-          conversationKey,
-          turnId: turn.id,
-          inboundSeq: turn.endSeq,
-        });
-      }
-      const history = this.store.history(this.config.historyLimit);
-      const turnLog = {
-        turnId: turn.id,
-        conversationRef: opaqueRef(conversationKey),
-        batchSize: turn.messages.length,
-      };
-      this.logger.info('codex_turn_started', turnLog);
-
-      const result = await this.codex.runTurn({
-        turn,
-        sessionId,
-        history,
-        onSessionId: (newSessionId) => this.store.setGlobalSession(newSessionId, policyHash),
-      });
-      if (result.staleSessionReset && !result.sessionId) this.store.clearGlobalSession();
-      if (!result.ok) {
-        this.store.failTurn(turn.id, result.error);
-        this.logger.error('codex_turn_failed', { ...turnLog, durationMs: result.durationMs, error: result.error });
-        return;
-      }
-
-      this.logger.info('codex_turn_decided', {
-        ...turnLog,
-        durationMs: result.durationMs,
-        action: result.decision.action,
-        reasonCode: result.decision.reasonCode,
-        deliveryMode: result.decision.deliveryMode,
-      });
-      if (result.decision.action === 'ignore') {
-        this.store.completeSilent(turn.id, result.decision);
-        return;
-      }
-
-      const created = this.store.createOutboxIfFresh(turn.id, result.decision);
-      if (created.stale) {
-        this.logger.info('reply_withheld_for_freshness', turnLog);
-        return;
-      }
-      await delay(this.config.freshnessGraceMs);
-      if (this.store.cancelOutboxIfStale(created.outbox.id)) {
-        this.logger.info('reply_cancelled_for_newer_message', turnLog);
-        return;
-      }
-      await this.deliverOutbox(created.outbox);
-    } catch (error) {
-      const message = safeError(error);
-      let quarantined = false;
-      try { quarantined = this.store.failTurn(turn.id, message); } catch {}
-      this.logger.error('claimed_turn_failed', {
-        turnId: turn.id,
-        conversationRef: opaqueRef(conversationKey),
-        quarantined,
-        error: message,
-      });
-    }
-  }
-
-  async deliverOutbox(outbox) {
-    let current = outbox;
-    for (let attempt = 0; attempt < this.config.sendRetries; attempt += 1) {
-      if (this.shuttingDown) return;
-      if (this.store.cancelOutboxIfStale(current.id)) {
-        this.scheduleConversation(current.conversationKey, this.config.debounceMs);
-        return;
-      }
-      const prepared = this.store.prepareOutboxAttempt(current.id, this.config.uncertainAfterMs);
-      if (!prepared.ready) {
-        if (prepared.uncertain) {
-          this.logger.error('outbox_uncertain', { outboxId: current.id });
-        }
-        return;
-      }
-      current = prepared.outbox;
-      try {
-        const sent = await this.lark.sendOutbound(current);
-        this.store.markOutboxSent(
-          current.id,
-          sent.remoteMessageId,
-          Date.now(),
-          this.config.dryRun,
-        );
-        this.logger.info('outbound_sent', {
-          outboxId: current.id,
-          conversationRef: opaqueRef(current.conversationKey),
-          remoteMessageRef: opaqueRef(sent.remoteMessageId),
-          deliveryMode: current.deliveryMode,
-          dryRun: this.config.dryRun,
-        });
-        return;
-      } catch (error) {
-        const nextStatus = this.store.markOutboxFailure(
-          current.id,
-          safeError(error),
-          this.config.sendRetries,
-        );
-        this.logger.error('outbound_send_failed', {
-          outboxId: current.id,
-          attempt: current.attemptCount,
-          deliveryMode: current.deliveryMode,
-          nextStatus,
-          error,
-        });
-        if (nextStatus !== 'RETRY') return;
-        await delay(500 * (2 ** attempt));
-      }
-    }
-  }
-
-  async recoverOutboxes() {
-    const pending = this.store.pendingOutboxes();
-    if (pending.length > 0) this.logger.warn('recovering_outboxes', { count: pending.length });
-    for (const outbox of pending) {
-      if (this.store.cancelOutboxIfStale(outbox.id)) {
-        this.scheduleConversation(outbox.conversationKey, 0);
-        continue;
-      }
-      await this.deliverOutbox(outbox);
-    }
-    return pending.length;
+    this.codex.deliver(formatInboundLine(event), result.inbound.seq);
   }
 
   runMaintenance() {
     if (!this.store) return;
-    const expired = this.store.expireQueued(Date.now() - this.config.maxQueuedAgeMs);
     const removed = this.store.prune(this.config.retentionMs);
-    if (expired > 0 || Object.values(removed).some((count) => count > 0)) {
-      this.logger.info('state_maintenance_completed', { expired, removed });
+    if (Object.values(removed).some((count) => count > 0)) {
+      this.logger.info('state_maintenance_completed', { removed });
       this.recordSystemActivity('system.maintenance', {
-        summary: expired > 0
-          ? `清理完成；${expired} 条排队消息已过期`
-          : '历史运行状态清理完成',
+        summary: '历史运行状态清理完成',
         status: 'COMPLETED',
-        metadata: { expired, removed },
+        metadata: { removed },
       });
     }
     if (this.ready) this.refreshChatNames();
@@ -546,15 +327,11 @@ export class LarkDaemon {
       status: ready ? 'ready' : (healthy ? 'starting' : 'unhealthy'),
       subscriber: this.lark?.subscriptionRunning ? 'running' : 'stopped',
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
-      activeTurns: this.runningConversations.size,
-      scheduledConversations: this.scheduled.size,
+      activeTurns: this.codex?.state.activeTurn ?? 0,
+      scheduledConversations: 0,
     };
     if (includeState) body.state = this.store?.stats() ?? {};
-    return {
-      healthy,
-      ready,
-      body,
-    };
+    return { healthy, ready, body };
   }
 
   async startHttpServer() {
@@ -683,16 +460,8 @@ export class LarkDaemon {
       }, 'stopping');
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       this.maintenanceTimer = null;
-      for (const timer of this.scheduled.values()) clearTimeout(timer);
-      this.scheduled.clear();
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
-      try { this.store?.closeRunningSubscriberActivities(); } catch (error) {
-        this.logger.warn('subscriber_activity_close_failed', { error: safeError(error) });
-      }
-      const workerDeadline = Date.now() + Math.min(this.config.shutdownTimeoutMs - 5_000, 10_000);
-      while (this.runningConversations.size > 0 && Date.now() < workerDeadline) {
-        await delay(25);
-      }
+      try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }
       try { await this.registry.stopAll(Math.min(3_000, this.config.shutdownTimeoutMs)); } catch {}
       if (this.httpServer) {
         await Promise.race([

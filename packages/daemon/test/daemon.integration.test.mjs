@@ -21,19 +21,17 @@ async function waitFor(predicate, timeoutMs = 5_000) {
 }
 
 describe('daemon event path', { concurrency: false }, () => {
-  it('persists a raw event, runs Codex, and commits one dry-run reply', async () => {
+  it('persists a raw event and steers the formatted line into the codex app-server', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-e2e-'));
     const fakeLark = path.join(directory, 'fake-lark.mjs');
     const fakeCodex = path.join(directory, 'fake-codex.mjs');
+    const codexLog = path.join(directory, 'codex-input.log');
+
     executable(fakeLark, `
       const args = process.argv.slice(2);
       if (args.includes('--version')) { console.log('lark-cli 1.0.56'); process.exit(0); }
-      if (args.includes('profile') && args.includes('list')) {
-        console.log(JSON.stringify([{ name: 'auto-profile', active: true }]));
-        process.exit(0);
-      }
       if (args.includes('--help')) {
-        console.log('--event-types --quiet +chat-list +messages-reply +messages-send');
+        console.log('--event-types --quiet +messages-reply +messages-send +chat-list');
         process.exit(0);
       }
       if (args.includes('doctor')) { console.log(JSON.stringify({ ok: true })); process.exit(0); }
@@ -46,32 +44,48 @@ describe('daemon event path', { concurrency: false }, () => {
         console.log(JSON.stringify({ message_id: 'om-agent' }));
       }
     `);
+
+    // Minimal codex app-server: newline-delimited JSON-RPC over stdio. Records every
+    // turn/start input text to FAKE_CODEX_LOG so the test can assert delivery.
     executable(fakeCodex, `
       import fs from 'node:fs';
-      const args = process.argv.slice(2);
-      if (args.includes('--version')) { console.log('codex-cli 0.test'); process.exit(0); }
-      if (args.includes('login') && args.includes('status')) { console.log('Logged in using test'); process.exit(0); }
-      if (args.includes('--help')) {
-        console.log('--output-schema --output-last-message');
-        process.exit(0);
-      }
-      if (!args.some((arg) => arg.includes('mcp_servers.lark_daemon_im.args=') && arg.includes('auto-profile'))) {
-        console.error('missing auto-discovered profile in Lark MCP config');
-        process.exit(2);
-      }
-      process.stdin.resume();
-      process.stdin.on('end', () => {
-        const index = args.indexOf('--output-last-message');
-        const output = args[index + 1];
-        const decision = JSON.stringify({ action: 'reply', reason_code: 'direct_request', delivery_mode: 'chat', reply: '测试回复' });
-        fs.writeFileSync(output, decision);
-        console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-test' }));
-        console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: decision } }));
+      import readline from 'node:readline';
+      const log = process.env.FAKE_CODEX_LOG;
+      const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+      const rl = readline.createInterface({ input: process.stdin });
+      let turnSeq = 0;
+      rl.on('line', (line) => {
+        let msg;
+        try { msg = JSON.parse(line); } catch { return; }
+        if (msg.method === 'initialize') { send({ id: msg.id, result: {} }); return; }
+        if (msg.method === 'initialized') { return; }
+        if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
+          send({ id: msg.id, result: { thread: { id: 'thread-test' } } });
+          send({ method: 'thread/started', params: { thread: { id: 'thread-test' } } });
+          return;
+        }
+        if (msg.method === 'turn/start') {
+          const text = msg.params.input.map((part) => part.text).join('');
+          fs.appendFileSync(log, text + '\\n');
+          send({ id: msg.id, result: {} });
+          const turnId = 'turn-' + (++turnSeq);
+          send({ method: 'turn/started', params: { turn: { id: turnId } } });
+          send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
+          return;
+        }
+        if (msg.method === 'turn/steer') {
+          const text = msg.params.input.map((part) => part.text).join('');
+          fs.appendFileSync(log, text + '\\n');
+          send({ id: msg.id, result: {} });
+          return;
+        }
       });
     `);
 
     const now = Date.now();
     const previousEvent = process.env.FAKE_LARK_EVENT;
+    const previousLog = process.env.FAKE_CODEX_LOG;
+    process.env.FAKE_CODEX_LOG = codexLog;
     process.env.FAKE_LARK_EVENT = JSON.stringify({
       schema: '2.0',
       header: {
@@ -100,28 +114,28 @@ describe('daemon event path', { concurrency: false }, () => {
       dataDir: path.join(directory, 'data'),
       databasePath: path.join(directory, 'data', 'state.sqlite3'),
       lockPath: path.join(directory, 'data', 'daemon.lock'),
-      tempDir: path.join(directory, 'data', 'tmp'),
       workspace: path.join(directory, 'workspace'),
       larkCliBin: fakeLark,
       codexBin: fakeCodex,
-      profile: '',
-      writeSenderIds: new Set(['ou-e2e']),
+      profile: 'test-profile',
       port: 0,
       httpEnabled: false,
-      debounceMs: 10,
-      freshnessGraceMs: 10,
-      codexTimeoutMs: 3_000,
-      sendTimeoutMs: 1_000,
-      dryRun: true,
       logLevel: 'error',
     };
     const daemon = new LarkDaemon(config, createLogger('error', { test: 'e2e' }));
     try {
       await daemon.start();
-      await waitFor(() => daemon.store.stats().outbox.DRY_RUN === 1);
+      await waitFor(() => fs.existsSync(codexLog)
+        && fs.readFileSync(codexLog, 'utf8').includes('[chat=oc-e2e msg=om-e2e'));
+
+      const logged = fs.readFileSync(codexLog, 'utf8');
+      assert.match(logged, /\[chat=oc-e2e msg=om-e2e time=.* from=ou-e2e\] 请回复我/);
+
       assert.equal(daemon.store.stats().inbound.DONE, 1);
-      const outbox = daemon.store.db.prepare('SELECT delivery_mode, target_chat_id FROM outbox').get();
-      assert.deepEqual({ ...outbox }, { delivery_mode: 'chat', target_chat_id: 'oc-e2e' });
+      // No outbox rows are ever created in steer mode.
+      assert.equal(daemon.store.stats().outbox.PENDING, undefined);
+      assert.equal(daemon.store.stats().outbox.SENT, undefined);
+
       const global = daemon.store.getGlobalSession();
       assert.equal(global.sessionId, 'thread-test');
       assert.match(global.policyHash, /^[a-f0-9]{64}$/);
@@ -129,6 +143,8 @@ describe('daemon event path', { concurrency: false }, () => {
       await daemon.shutdown('test', 0);
       if (previousEvent === undefined) delete process.env.FAKE_LARK_EVENT;
       else process.env.FAKE_LARK_EVENT = previousEvent;
+      if (previousLog === undefined) delete process.env.FAKE_CODEX_LOG;
+      else process.env.FAKE_CODEX_LOG = previousLog;
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });

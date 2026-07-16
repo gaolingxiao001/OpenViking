@@ -61,6 +61,28 @@ export const LARK_TOOLS = [
       openWorldHint: true,
     },
   },
+  {
+    name: 'reply_lark_message',
+    title: 'Reply to a Lark message',
+    description: 'Reply as the bot to a specific Lark message, quoting it. Use the full msg id from the bracketed inbound line. Set reply_in_thread to continue (or start) a thread. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to reply to. Never guess or reconstruct a shortened ID.' },
+        text: { type: 'string', minLength: 1, description: 'Plain-text reply body.' },
+        reply_in_thread: { type: 'boolean', default: false, description: 'Reply inside the message thread (continue or start one).' },
+        idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
+      },
+      required: ['message_id', 'text'],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
 ];
 
 function appendBounded(current, chunk) {
@@ -315,6 +337,46 @@ export class LarkToolService {
       idempotency_key: idempotencyKey,
     };
   }
+
+  async replyMessage(input = {}) {
+    const messageId = typeof input.message_id === 'string' ? input.message_id.trim() : '';
+    const text = typeof input.text === 'string' ? neutralizeMassMention(input.text.trim()) : '';
+    const replyInThread = input.reply_in_thread === true;
+    if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId)) throw new Error('message_id must be a full om_ Lark message ID');
+    if (!text) throw new Error('text must not be empty');
+    if (text.length > this.options.maxTextChars) {
+      throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
+    }
+    const idempotencyKey = typeof input.idempotency_key === 'string' && input.idempotency_key
+      ? input.idempotency_key
+      : randomUUID();
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(idempotencyKey)) {
+      throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
+    }
+    if (this.options.dryRun) {
+      return {
+        sent: false,
+        dry_run: true,
+        reply_to_message_id: messageId,
+        reply_in_thread: replyInThread,
+        message_id: null,
+        idempotency_key: idempotencyKey,
+      };
+    }
+    const args = [
+      '+messages-reply', '--as', 'bot', '--message-id', messageId,
+      '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
+    ];
+    if (replyInThread) args.push('--reply-in-thread');
+    const data = await this.runLark(args, 'reply to Lark message');
+    return {
+      sent: true,
+      reply_to_message_id: messageId,
+      reply_in_thread: replyInThread,
+      message_id: findMessageId(data),
+      idempotency_key: idempotencyKey,
+    };
+  }
 }
 
 function textResult(data, text) {
@@ -369,6 +431,14 @@ export function createMcpHandler(service) {
           }
           const remote = data.message_id ? ` message_id=${data.message_id}` : '';
           return { jsonrpc: '2.0', id, result: textResult(data, `Sent Lark message to chat_id=${data.chat_id}.${remote}`) };
+        }
+        if (name === 'reply_lark_message') {
+          const data = await service.replyMessage(input);
+          if (data.dry_run) {
+            return { jsonrpc: '2.0', id, result: textResult(data, `Dry run only: no Lark reply was sent to message_id=${data.reply_to_message_id}.`) };
+          }
+          const remote = data.message_id ? ` message_id=${data.message_id}` : '';
+          return { jsonrpc: '2.0', id, result: textResult(data, `Replied to message_id=${data.reply_to_message_id}.${remote}`) };
         }
         throw new Error(`unknown tool: ${name}`);
       } catch (error) {

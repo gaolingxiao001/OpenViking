@@ -1,8 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { opaqueRef, redactSensitive } from './logger.mjs';
+import { opaqueRef } from './logger.mjs';
 import {
   activityDefinition,
   activityPhase,
@@ -38,30 +37,6 @@ function rowToInbound(row) {
     status: row.status,
     filterReason: row.filter_reason,
     turnId: row.turn_id === null ? null : number(row.turn_id),
-  };
-}
-
-function rowToOutbox(row) {
-  if (!row) return null;
-  return {
-    id: number(row.id),
-    turnId: number(row.turn_id),
-    conversationKey: row.conv_key,
-    idempotencyKey: row.idempotency_key,
-    replyToMessageId: row.reply_to_message_id,
-    targetChatId: row.target_chat_id,
-    deliveryMode: row.delivery_mode || (row.reply_in_thread ? 'thread' : 'reply'),
-    replyInThread: Boolean(row.reply_in_thread),
-    body: row.body,
-    status: row.status,
-    attemptCount: number(row.attempt_count),
-    lastAttemptMs: row.last_attempt_ms === null ? null : number(row.last_attempt_ms),
-    remoteMessageId: row.remote_message_id,
-    createdAtMs: number(row.created_at_ms),
-    updatedAtMs: number(row.updated_at_ms),
-    sentAtMs: row.sent_at_ms === null ? null : number(row.sent_at_ms),
-    lastError: row.last_error,
-    snapshotSeq: row.snapshot_seq === undefined ? undefined : number(row.snapshot_seq),
   };
 }
 
@@ -405,13 +380,6 @@ export class Store {
     `);
     this.getInboundByMessage = this.db.prepare('SELECT * FROM inbound WHERE message_id = ?');
     this.getInboundByEvent = this.db.prepare('SELECT * FROM inbound WHERE event_id = ?');
-    this.updateLastIngress = this.db.prepare(`
-      UPDATE conversations
-      SET last_ingress_seq = CASE WHEN last_ingress_seq < ? THEN ? ELSE last_ingress_seq END,
-          updated_at_ms = ?
-      WHERE conv_key = ?
-    `);
-    this.getConversationStatement = this.db.prepare('SELECT * FROM conversations WHERE conv_key = ?');
     this.getMetaStatement = this.db.prepare('SELECT value FROM meta WHERE key = ?');
     this.setMetaStatement = this.db.prepare(`
       INSERT INTO meta(key, value) VALUES (?, ?)
@@ -920,22 +888,14 @@ export class Store {
     }
   }
 
-  ingest(event, filterReason = null, now = Date.now(), queueLimits = null) {
+  // The daemon is a thin pipe now: an accepted message is recorded DONE and handed
+  // straight to the codex thread. Filtered messages are recorded RULE_IGNORED with a
+  // blanked body. Dedup is by message_id/event_id unique constraints.
+  ingest(event, filterReason = null, now = Date.now()) {
     return this.transaction(() => {
       this.insertConversation.run(event.conversationKey, now, now);
       this.rememberChatSource(event.chatId, event.chatType, now);
-      let effectiveFilterReason = filterReason;
-      if (!effectiveFilterReason && queueLimits) {
-        const total = number(this.db.prepare(`
-          SELECT COUNT(*) AS count FROM inbound WHERE status = 'QUEUED'
-        `).get().count);
-        const conversation = number(this.db.prepare(`
-          SELECT COUNT(*) AS count FROM inbound WHERE status = 'QUEUED' AND conv_key = ?
-        `).get(event.conversationKey).count);
-        if (total >= queueLimits.total) effectiveFilterReason = 'queue_total_full';
-        else if (conversation >= queueLimits.perConversation) effectiveFilterReason = 'queue_conversation_full';
-      }
-      const status = effectiveFilterReason ? 'RULE_IGNORED' : 'QUEUED';
+      const status = filterReason ? 'RULE_IGNORED' : 'DONE';
       const result = this.insertInbound.run(
         event.messageId,
         event.eventId,
@@ -949,158 +909,36 @@ export class Store {
         event.parentId,
         event.threadId,
         event.threadRootId,
-        effectiveFilterReason ? '' : event.content,
-        JSON.stringify(effectiveFilterReason ? [] : event.mentions),
+        filterReason ? '' : event.content,
+        JSON.stringify(filterReason ? [] : event.mentions),
         '{}',
         event.createTimeMs,
         now,
         status,
-        effectiveFilterReason,
+        filterReason,
       );
       const inserted = number(result.changes) > 0;
       let row = this.getInboundByMessage.get(event.messageId);
       if (!row && event.eventId) row = this.getInboundByEvent.get(event.eventId);
-      if (inserted && !effectiveFilterReason) {
-        this.updateLastIngress.run(row.seq, row.seq, now, event.conversationKey);
-      }
       if (inserted) {
-        const ignored = Boolean(effectiveFilterReason);
-        const queueRejected = ['queue_total_full', 'queue_conversation_full'].includes(effectiveFilterReason);
+        const ignored = Boolean(filterReason);
         this.recordActivity({
           eventKey: `inbound:${row.seq}:${ignored ? 'ignored' : 'received'}`,
           kind: ignored ? 'message.ignored' : 'message.received',
           conversationKey: event.conversationKey,
           inboundSeq: number(row.seq),
           status,
-          severity: queueRejected ? 'warn' : undefined,
-          priority: queueRejected ? 85 : undefined,
-          summary: ignored
-            ? `未进入 Agent：${reasonLabel(effectiveFilterReason)}`
-            : event.content,
+          summary: ignored ? `未进入 Agent：${reasonLabel(filterReason)}` : event.content,
           occurredAtMs: now,
           metadata: {
             chatType: event.chatType,
             messageType: event.messageType,
-            filterReason: effectiveFilterReason,
+            filterReason,
           },
         }, now);
       }
-      return { inserted, inbound: rowToInbound(row), filterReason: row?.filter_reason ?? effectiveFilterReason };
+      return { inserted, inbound: rowToInbound(row), filterReason: row?.filter_reason ?? filterReason };
     });
-  }
-
-  expireQueued(cutoffMs, now = Date.now()) {
-    return this.transaction(() => {
-      const rows = this.db.prepare(`
-        SELECT seq, conv_key, content FROM inbound
-        WHERE status = 'QUEUED' AND received_at_ms < ?
-      `).all(cutoffMs);
-      if (rows.length === 0) return 0;
-      this.db.prepare(`
-        UPDATE inbound
-        SET status = 'RULE_IGNORED', filter_reason = 'queue_expired',
-            content = '', mentions_json = '[]', last_error = NULL
-        WHERE status = 'QUEUED' AND received_at_ms < ?
-      `).run(cutoffMs);
-      for (const row of rows) {
-        this.recordActivity({
-          eventKey: `inbound:${row.seq}:expired`,
-          kind: 'message.expired',
-          conversationKey: row.conv_key,
-          inboundSeq: number(row.seq),
-          status: 'RULE_IGNORED',
-          summary: row.content || '排队时间过长，消息未交给 Agent',
-          occurredAtMs: now,
-          metadata: { filterReason: 'queue_expired' },
-        }, now);
-      }
-      return rows.length;
-    });
-  }
-
-  queuedConversationKeys() {
-    return this.db.prepare(`
-      SELECT conv_key, MIN(seq) AS first_seq
-      FROM inbound
-      WHERE status = 'QUEUED'
-      GROUP BY conv_key
-      ORDER BY first_seq
-    `).all().map((row) => row.conv_key);
-  }
-
-  hasQueued(conversationKey) {
-    return Boolean(this.db.prepare(`
-      SELECT 1 AS present FROM inbound WHERE conv_key = ? AND status = 'QUEUED' LIMIT 1
-    `).get(conversationKey));
-  }
-
-  claimBatch(conversationKey, limit, now = Date.now()) {
-    return this.transaction(() => {
-      const rows = this.db.prepare(`
-        SELECT * FROM inbound
-        WHERE conv_key = ? AND status = 'QUEUED'
-        ORDER BY seq
-        LIMIT ?
-      `).all(conversationKey, limit);
-      if (rows.length === 0) return null;
-
-      const startSeq = number(rows[0].seq);
-      const endSeq = number(rows.at(-1).seq);
-      const snapshotSeq = endSeq;
-      const conversation = this.getConversationStatement.get(conversationKey);
-      const targetMessageId = rows.at(-1).message_id;
-      const inserted = this.db.prepare(`
-        INSERT INTO turns(
-          conv_key, start_seq, end_seq, snapshot_seq, target_message_id,
-          status, started_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?)
-      `).run(conversationKey, startSeq, endSeq, snapshotSeq, targetMessageId, now, now);
-      const turnId = number(inserted.lastInsertRowid);
-      this.db.prepare(`
-        UPDATE inbound SET status = 'RUNNING', turn_id = ?
-        WHERE conv_key = ? AND status = 'QUEUED' AND seq BETWEEN ? AND ?
-      `).run(turnId, conversationKey, startSeq, endSeq);
-
-      this.recordActivity({
-        eventKey: `turn:${turnId}:started`,
-        kind: 'agent.started',
-        conversationKey,
-        turnId,
-        inboundSeq: endSeq,
-        status: 'RUNNING',
-        summary: rows.at(-1).content,
-        occurredAtMs: now,
-        metadata: {
-          batchSize: rows.length,
-          inboundSeqs: rows.map((row) => number(row.seq)),
-        },
-      }, now);
-
-      return {
-        id: turnId,
-        conversationKey,
-        startSeq,
-        endSeq,
-        snapshotSeq,
-        targetMessageId,
-        pendingDraft: conversation.pending_draft_json
-          ? JSON.parse(conversation.pending_draft_json)
-          : null,
-        messages: rows.map(rowToInbound),
-      };
-    });
-  }
-
-  getConversation(conversationKey) {
-    const row = this.getConversationStatement.get(conversationKey);
-    if (!row) return null;
-    return {
-      conversationKey: row.conv_key,
-      pendingDraft: row.pending_draft_json ? JSON.parse(row.pending_draft_json) : null,
-      lastIngressSeq: number(row.last_ingress_seq),
-      createdAtMs: number(row.created_at_ms),
-      updatedAtMs: number(row.updated_at_ms),
-    };
   }
 
   // One Codex session is shared across every chat (cross-chat infinite context),
@@ -1121,433 +959,29 @@ export class Store {
     this.deleteGlobalSessionStatement.run();
   }
 
-  completeSilent(turnId, decision, now = Date.now()) {
-    return this.transaction(() => {
-      const turn = this.db.prepare('SELECT * FROM turns WHERE id = ?').get(turnId);
-      const updated = this.db.prepare(`
-        UPDATE turns
-        SET status = 'SILENT', decision_action = ?, reason_code = ?, reply = ?,
-            updated_at_ms = ?, completed_at_ms = ?
-        WHERE id = ? AND status = 'RUNNING'
-      `).run(decision.action, decision.reasonCode, decision.reply, now, now, turnId);
-      if (number(updated.changes) === 0) return false;
-      this.db.prepare(`
-        UPDATE inbound SET status = 'DONE' WHERE turn_id = ? AND status = 'RUNNING'
-      `).run(turnId);
-      this.db.prepare(`
-        UPDATE conversations SET pending_draft_json = NULL, updated_at_ms = ?
-        WHERE conv_key = (SELECT conv_key FROM turns WHERE id = ?)
-      `).run(now, turnId);
-      this.recordActivity({
-        eventKey: `turn:${turnId}:decision`,
-        kind: 'agent.silent',
-        conversationKey: turn.conv_key,
-        turnId,
-        inboundSeq: number(turn.end_seq),
-        status: 'SILENT',
-        summary: `未回复：${reasonLabel(decision.reasonCode)}`,
-        occurredAtMs: now,
-        metadata: { action: decision.action, reasonCode: decision.reasonCode },
-      }, now);
-      return true;
-    });
-  }
-
-  failTurn(turnId, error, now = Date.now()) {
-    return this.transaction(() => {
-      const safeError = redactSensitive(error).slice(0, 4000);
-      const turn = this.db.prepare('SELECT * FROM turns WHERE id = ?').get(turnId);
-      const updated = this.db.prepare(`
-        UPDATE turns SET status = 'DEAD', error = ?, updated_at_ms = ?, completed_at_ms = ?
-        WHERE id = ? AND status = 'RUNNING'
-      `).run(safeError, now, now, turnId);
-      if (number(updated.changes) === 0) return false;
-      this.db.prepare(`
-        UPDATE inbound SET status = 'DEAD', last_error = ?
-        WHERE turn_id = ? AND status = 'RUNNING'
-      `).run(safeError, turnId);
-      this.recordActivity({
-        eventKey: `turn:${turnId}:failed`,
-        kind: 'agent.failed',
-        conversationKey: turn.conv_key,
-        turnId,
-        inboundSeq: number(turn.end_seq),
-        status: 'DEAD',
-        summary: safeError,
-        occurredAtMs: now,
-      }, now);
-      return true;
-    });
-  }
-
-  createOutboxIfFresh(turnId, decision, now = Date.now()) {
-    return this.transaction(() => {
-      const turn = this.db.prepare(`
-        SELECT t.*, c.last_ingress_seq
-        FROM turns t JOIN conversations c ON c.conv_key = t.conv_key
-        WHERE t.id = ?
-      `).get(turnId);
-      if (!turn || turn.status !== 'RUNNING') throw new Error(`turn ${turnId} is not running`);
-
-      if (number(turn.last_ingress_seq) > number(turn.snapshot_seq)) {
-        const draft = {
-          originTurnId: turnId,
-          originTargetMessageId: turn.target_message_id,
-          reply: decision.reply,
-          reasonCode: decision.reasonCode,
-          deliveryMode: decision.deliveryMode,
-          withheldAtMs: now,
-        };
-        this.db.prepare(`
-          UPDATE turns
-          SET status = 'STALE', decision_action = ?, reason_code = ?, reply = ?,
-              updated_at_ms = ?, completed_at_ms = ?
-          WHERE id = ?
-        `).run(decision.action, decision.reasonCode, decision.reply, now, now, turnId);
-        this.db.prepare(`UPDATE inbound SET status = 'DONE' WHERE turn_id = ?`).run(turnId);
-        this.db.prepare(`
-          UPDATE conversations SET pending_draft_json = ?, updated_at_ms = ? WHERE conv_key = ?
-        `).run(JSON.stringify(draft), now, turn.conv_key);
-        this.recordActivity({
-          eventKey: `turn:${turnId}:stale`,
-          kind: 'agent.stale',
-          conversationKey: turn.conv_key,
-          turnId,
-          inboundSeq: number(turn.end_seq),
-          status: 'STALE',
-          summary: '有更新消息，旧回复未发送',
-          occurredAtMs: now,
-          metadata: {
-            reasonCode: decision.reasonCode,
-            requestedDeliveryMode: decision.deliveryMode,
-          },
-        }, now);
-        return { stale: true, outbox: null };
-      }
-
-      const target = this.db.prepare(`
-        SELECT message_id, chat_id, chat_type, thread_id FROM inbound WHERE seq = ?
-      `).get(turn.end_seq);
-      let deliveryMode = decision.deliveryMode;
-      if (target.chat_type === 'p2p' && deliveryMode === 'thread') deliveryMode = 'reply';
-      if (target.chat_type !== 'p2p' && target.thread_id) deliveryMode = 'thread';
-      const idempotencyKey = randomUUID();
-      const inserted = this.db.prepare(`
-        INSERT INTO outbox(
-          turn_id, conv_key, idempotency_key, reply_to_message_id,
-          reply_in_thread, delivery_mode, target_chat_id, body,
-          status, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
-      `).run(
-        turnId,
-        turn.conv_key,
-        idempotencyKey,
-        target.message_id,
-        deliveryMode === 'thread' ? 1 : 0,
-        deliveryMode,
-        target.chat_id,
-        decision.reply,
-        now,
-        now,
-      );
-      this.db.prepare(`
-        UPDATE turns
-        SET status = 'OUTBOX_PENDING', decision_action = ?, reason_code = ?, reply = ?,
-            updated_at_ms = ?, completed_at_ms = ?
-        WHERE id = ?
-      `).run(decision.action, decision.reasonCode, decision.reply, now, now, turnId);
-      this.db.prepare(`UPDATE inbound SET status = 'DONE' WHERE turn_id = ?`).run(turnId);
-      this.db.prepare(`
-        UPDATE conversations SET pending_draft_json = NULL, updated_at_ms = ? WHERE conv_key = ?
-      `).run(now, turn.conv_key);
-
-      const outbox = this.db.prepare(`
-        SELECT o.*, t.snapshot_seq FROM outbox o JOIN turns t ON t.id = o.turn_id WHERE o.id = ?
-      `).get(inserted.lastInsertRowid);
-      const outboxId = number(inserted.lastInsertRowid);
-      this.recordActivity({
-        eventKey: `turn:${turnId}:decision`,
-        kind: 'agent.decided',
-        conversationKey: turn.conv_key,
-        turnId,
-        inboundSeq: number(turn.end_seq),
-        outboxId,
-        status: 'OUTBOX_PENDING',
-        summary: decision.reply,
-        occurredAtMs: now,
-        metadata: {
-          action: decision.action,
-          reasonCode: decision.reasonCode,
-          requestedDeliveryMode: decision.deliveryMode,
-          deliveryMode,
-        },
-      }, now);
-      this.recordActivity({
-        eventKey: `outbox:${outboxId}:queued`,
-        kind: 'delivery.queued',
-        conversationKey: turn.conv_key,
-        turnId,
-        inboundSeq: number(turn.end_seq),
-        outboxId,
-        status: 'PENDING',
-        summary: decision.reply,
-        occurredAtMs: now,
-        metadata: { deliveryMode },
-      }, now);
-      return { stale: false, outbox: rowToOutbox(outbox) };
-    });
-  }
-
-  cancelOutboxIfStale(outboxId, now = Date.now()) {
-    return this.transaction(() => {
-      const row = this.db.prepare(`
-        SELECT o.*, t.snapshot_seq, t.end_seq, t.reason_code, c.last_ingress_seq
-        FROM outbox o
-        JOIN turns t ON t.id = o.turn_id
-        JOIN conversations c ON c.conv_key = o.conv_key
-        WHERE o.id = ?
-      `).get(outboxId);
-      if (!row || !['PENDING', 'RETRY'].includes(row.status)) return false;
-      if (number(row.last_ingress_seq) <= number(row.snapshot_seq)) return false;
-
-      const draft = {
-        originTurnId: number(row.turn_id),
-        originTargetMessageId: row.reply_to_message_id,
-        reply: row.body,
-        reasonCode: row.reason_code,
-        deliveryMode: row.delivery_mode || (row.reply_in_thread ? 'thread' : 'reply'),
-        withheldAtMs: now,
-      };
-      this.db.prepare(`
-        UPDATE outbox SET status = 'CANCELLED_STALE', updated_at_ms = ? WHERE id = ?
-      `).run(now, outboxId);
-      this.db.prepare(`
-        UPDATE turns SET status = 'STALE', updated_at_ms = ? WHERE id = ?
-      `).run(now, row.turn_id);
-      this.db.prepare(`
-        UPDATE conversations SET pending_draft_json = ?, updated_at_ms = ? WHERE conv_key = ?
-      `).run(JSON.stringify(draft), now, row.conv_key);
-      this.recordActivity({
-        eventKey: `turn:${row.turn_id}:stale`,
-        kind: 'agent.stale',
-        conversationKey: row.conv_key,
-        turnId: number(row.turn_id),
-        inboundSeq: number(row.end_seq),
-        status: 'STALE',
-        summary: '有更新消息，旧回复未发送',
-        occurredAtMs: now,
-        metadata: { reasonCode: row.reason_code },
-      }, now);
-      this.recordActivity({
-        eventKey: `outbox:${outboxId}:cancelled_stale`,
-        kind: 'delivery.cancelled',
-        conversationKey: row.conv_key,
-        turnId: number(row.turn_id),
-        outboxId,
-        status: 'CANCELLED_STALE',
-        summary: '有更新消息，旧回复未发送',
-        occurredAtMs: now,
-        metadata: { deliveryMode: row.delivery_mode },
-      }, now);
-      return true;
-    });
-  }
-
-  pendingOutboxes() {
-    return this.db.prepare(`
-      SELECT o.*, t.snapshot_seq
-      FROM outbox o JOIN turns t ON t.id = o.turn_id
-      WHERE o.status IN ('PENDING', 'RETRY', 'SENDING')
-      ORDER BY o.id
-    `).all().map(rowToOutbox);
-  }
-
-  prepareOutboxAttempt(outboxId, uncertainAfterMs, now = Date.now()) {
-    return this.transaction(() => {
-      const row = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(outboxId);
-      if (!row || !['PENDING', 'RETRY', 'SENDING'].includes(row.status)) {
-        return { ready: false, outbox: rowToOutbox(row) };
-      }
-      if (row.status === 'SENDING' && row.last_attempt_ms && now - number(row.last_attempt_ms) > uncertainAfterMs) {
-        this.db.prepare(`
-          UPDATE outbox SET status = 'UNCERTAIN', updated_at_ms = ?,
-            last_error = 'previous send may have succeeded outside the idempotency window'
-          WHERE id = ?
-        `).run(now, outboxId);
-        this.recordActivity({
-          eventKey: `outbox:${outboxId}:uncertain`,
-          kind: 'delivery.uncertain',
-          conversationKey: row.conv_key,
-          turnId: number(row.turn_id),
-          outboxId,
-          status: 'UNCERTAIN',
-          summary: '上一次发送可能已经成功，已停止自动重试',
-          occurredAtMs: now,
-          metadata: { deliveryMode: row.delivery_mode, attempt: number(row.attempt_count) },
-        }, now);
-        const uncertain = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(outboxId);
-        return { ready: false, uncertain: true, outbox: rowToOutbox(uncertain) };
-      }
-      this.db.prepare(`
-        UPDATE outbox
-        SET status = 'SENDING', attempt_count = attempt_count + 1,
-            last_attempt_ms = ?, updated_at_ms = ?, last_error = NULL
-        WHERE id = ?
-      `).run(now, now, outboxId);
-      const prepared = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(outboxId);
-      this.recordActivity({
-        eventKey: `outbox:${outboxId}:attempt:${prepared.attempt_count}`,
-        kind: 'delivery.attempt',
-        conversationKey: prepared.conv_key,
-        turnId: number(prepared.turn_id),
-        outboxId,
-        status: 'SENDING',
-        summary: prepared.body,
-        occurredAtMs: now,
-        metadata: {
-          deliveryMode: prepared.delivery_mode,
-          attempt: number(prepared.attempt_count),
-        },
-      }, now);
-      return {
-        ready: true,
-        outbox: rowToOutbox(prepared),
-      };
-    });
-  }
-
-  markOutboxSent(outboxId, remoteMessageId, now = Date.now(), dryRun = false) {
-    return this.transaction(() => {
-      const status = dryRun ? 'DRY_RUN' : 'SENT';
-      const row = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(outboxId);
-      const updated = this.db.prepare(`
-        UPDATE outbox
-        SET status = ?, remote_message_id = ?, updated_at_ms = ?, sent_at_ms = ?, last_error = NULL
-        WHERE id = ? AND status = 'SENDING'
-      `).run(status, remoteMessageId, now, now, outboxId);
-      if (number(updated.changes) === 0) return false;
-      this.db.prepare(`
-        UPDATE turns SET status = ?, updated_at_ms = ?
-        WHERE id = (SELECT turn_id FROM outbox WHERE id = ?)
-      `).run(status, now, outboxId);
-      this.recordActivity({
-        eventKey: `outbox:${outboxId}:${status.toLowerCase()}`,
-        kind: dryRun ? 'delivery.dry_run' : 'delivery.sent',
-        conversationKey: row.conv_key,
-        turnId: number(row.turn_id),
-        outboxId,
-        status,
-        summary: row.body,
-        occurredAtMs: now,
-        metadata: {
-          deliveryMode: row.delivery_mode,
-          attempt: number(row.attempt_count),
-          dryRun,
-        },
-      }, now);
-      return true;
-    });
-  }
-
-  markOutboxFailure(outboxId, error, maxAttempts, now = Date.now()) {
-    return this.transaction(() => {
-      const row = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(outboxId);
-      if (!row || row.status !== 'SENDING') return null;
-      const safeError = redactSensitive(error).slice(0, 4000);
-      const nextStatus = number(row.attempt_count) >= maxAttempts ? 'FAILED' : 'RETRY';
-      const updated = this.db.prepare(`
-        UPDATE outbox SET status = ?, last_error = ?, updated_at_ms = ?
-        WHERE id = ? AND status = 'SENDING'
-      `).run(nextStatus, safeError, now, outboxId);
-      if (number(updated.changes) === 0) return null;
-      if (nextStatus === 'FAILED') {
-        this.db.prepare(`
-          UPDATE turns SET status = 'SEND_FAILED', error = ?, updated_at_ms = ?
-          WHERE id = ?
-        `).run(safeError, now, row.turn_id);
-      }
-      this.recordActivity({
-        eventKey: `outbox:${outboxId}:${nextStatus === 'FAILED' ? 'failed' : `retry:${row.attempt_count}`}`,
-        kind: nextStatus === 'FAILED' ? 'delivery.failed' : 'delivery.retry',
-        conversationKey: row.conv_key,
-        turnId: number(row.turn_id),
-        outboxId,
-        status: nextStatus,
-        summary: safeError,
-        occurredAtMs: now,
-        metadata: {
-          deliveryMode: row.delivery_mode,
-          attempt: number(row.attempt_count),
-        },
-      }, now);
-      return nextStatus;
-    });
-  }
-
-  // Global cross-chat history for injecting context into a fresh/reset session.
-  // DONE inbound already excludes the in-flight RUNNING batch, so no seq guard is needed.
+  // Cross-chat history injected into a fresh thread's first turn. Only inbound DONE
+  // rows exist now (codex sends its own replies via lark-cli, and its own bot messages
+  // are filtered out on the way in), so history is user-message context only.
+  // ponytail: the bot's own replies are not in history; a resumed thread keeps codex's
+  // in-process context, but a fresh thread after a policy change loses prior answers.
   history(limit) {
     if (limit <= 0) return [];
     const rows = this.db.prepare(`
-      SELECT * FROM (
-        SELECT received_at_ms AS at_ms, 'inbound' AS direction,
-               COALESCE(sender_id, 'unknown') AS actor,
-               chat_id AS chat_id, thread_id AS thread_id, content AS text
-        FROM inbound
-        WHERE status = 'DONE'
-        UNION ALL
-        SELECT COALESCE(o.sent_at_ms, o.created_at_ms) AS at_ms, 'outbound' AS direction,
-               'me' AS actor,
-               o.target_chat_id AS chat_id, i.thread_id AS thread_id, o.body AS text
-        FROM outbox o LEFT JOIN inbound i ON i.message_id = o.reply_to_message_id
-        WHERE o.status IN ('SENT', 'DRY_RUN')
-      )
-      ORDER BY at_ms DESC
+      SELECT received_at_ms AS at_ms, COALESCE(sender_id, 'unknown') AS actor,
+             chat_id AS chat_id, thread_id AS thread_id, content AS text
+      FROM inbound
+      WHERE status = 'DONE'
+      ORDER BY received_at_ms DESC
       LIMIT ?
     `).all(limit);
     return rows.reverse().map((row) => ({
       atMs: number(row.at_ms),
-      direction: row.direction,
+      direction: 'inbound',
       actor: row.actor,
       chatId: row.chat_id,
       threadId: row.thread_id,
       text: row.text,
     }));
-  }
-
-  recoverInterrupted(now = Date.now()) {
-    return this.transaction(() => {
-      const interrupted = this.db.prepare(`
-        SELECT * FROM turns WHERE status = 'RUNNING' ORDER BY id
-      `).all();
-      // ponytail: a crash mid-resume can leave the one shared session's rollout poisoned,
-      // so any interruption discards the global session and the next turn replays history.
-      if (interrupted.length > 0) this.deleteGlobalSessionStatement.run();
-      this.db.prepare(`
-        UPDATE turns
-        SET status = 'INTERRUPTED', error = 'daemon stopped during Codex turn',
-            updated_at_ms = ?, completed_at_ms = ?
-        WHERE status = 'RUNNING'
-      `).run(now, now);
-      this.db.prepare(`
-        UPDATE inbound
-        SET status = 'DEAD', last_error = 'daemon stopped during Codex turn'
-        WHERE status = 'RUNNING'
-      `).run();
-      for (const turn of interrupted) {
-        this.recordActivity({
-          eventKey: `turn:${turn.id}:interrupted`,
-          kind: 'agent.interrupted',
-          conversationKey: turn.conv_key,
-          turnId: number(turn.id),
-          inboundSeq: number(turn.end_seq),
-          status: 'INTERRUPTED',
-          summary: 'daemon stopped during Codex turn',
-          occurredAtMs: now,
-        }, now);
-      }
-      return interrupted.length;
-    });
   }
 
   prune(retentionMs, now = Date.now()) {

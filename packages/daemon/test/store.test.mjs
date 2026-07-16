@@ -45,10 +45,10 @@ describe('Store', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it('deduplicates event and message replay durably', () => {
+  it('records an accepted message DONE and deduplicates replay durably', () => {
     assert.equal(store.ingest(event('1')).inserted, true);
     assert.equal(store.ingest(event('1')).inserted, false);
-    assert.equal(store.queuedConversationKeys().length, 1);
+    assert.equal(store.stats().inbound.DONE, 1);
 
     store.close();
     store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
@@ -120,10 +120,11 @@ describe('Store', () => {
   it('does not persist raw event envelopes and blanks ignored content', () => {
     const accepted = event('raw', 'visible', { raw: { token: 'secret-sentinel' } });
     store.ingest(accepted);
-    const acceptedRow = store.db.prepare('SELECT raw_json, content FROM inbound WHERE message_id = ?')
+    const acceptedRow = store.db.prepare('SELECT raw_json, content, status FROM inbound WHERE message_id = ?')
       .get(accepted.messageId);
     assert.equal(acceptedRow.raw_json, '{}');
     assert.equal(acceptedRow.content, 'visible');
+    assert.equal(acceptedRow.status, 'DONE');
 
     const ignored = event('ignored', 'private ignored body', { raw: { app_secret: 'secret-sentinel' } });
     store.ingest(ignored, 'unsupported_message_type');
@@ -138,248 +139,48 @@ describe('Store', () => {
     });
   });
 
-  it('applies queue caps atomically while retaining ignored IDs', () => {
-    const limits = { perConversation: 1, total: 2 };
-    assert.equal(store.ingest(event('1'), null, Date.now(), limits).filterReason, null);
-    assert.equal(
-      store.ingest(event('2'), null, Date.now(), limits).filterReason,
-      'queue_conversation_full',
-    );
-    const other = event('3', 'other', { conversationKey: 'default:tenant:oc-other:main', chatId: 'oc-other' });
-    assert.equal(store.ingest(other, null, Date.now(), limits).filterReason, null);
-    const third = event('4', 'third', { conversationKey: 'default:tenant:oc-third:main', chatId: 'oc-third' });
-    assert.equal(store.ingest(third, null, Date.now(), limits).filterReason, 'queue_total_full');
-    assert.equal(store.stats().inbound.QUEUED, 2);
-    assert.equal(store.stats().inbound.RULE_IGNORED, 2);
-  });
-
-  it('batches one conversation and creates one durable outbox row', () => {
-    store.ingest(event('1'));
-    store.ingest(event('2'));
-    const turn = store.claimBatch(event('1').conversationKey, 20);
-    assert.equal(turn.messages.length, 2);
-    assert.equal(turn.targetMessageId, 'om-2');
-
-    const created = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'reply',
-      reply: 'answer',
-    });
-    assert.equal(created.stale, false);
-    assert.equal(created.outbox.replyToMessageId, 'om-2');
-    assert.equal(created.outbox.targetChatId, 'oc-chat');
-    assert.equal(created.outbox.deliveryMode, 'reply');
-
-    const prepared = store.prepareOutboxAttempt(created.outbox.id, 3_000_000);
-    assert.equal(prepared.ready, true);
-    assert.equal(prepared.outbox.idempotencyKey, created.outbox.idempotencyKey);
-    store.markOutboxSent(created.outbox.id, 'om-agent');
-    assert.equal(store.stats().outbox.SENT, 1);
-  });
-
-  it('uses agent-selected thread delivery from a group main chat', () => {
-    const main = event('main-thread-request');
-    store.ingest(main);
-    const turn = store.claimBatch(main.conversationKey, 20);
-    const { outbox } = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'continuation',
-      deliveryMode: 'thread',
-      reply: 'start a thread',
-    });
-    assert.equal(outbox.deliveryMode, 'thread');
-    assert.equal(outbox.replyInThread, true);
-  });
-
-  it('keeps an existing Lark thread inside that thread', () => {
-    const threaded = event('thread', 'thread message', {
-      conversationKey: 'default:tenant:oc-chat:thread:omt-topic',
-      threadId: 'omt-topic',
-      threadRootId: 'om-root',
-      rootId: 'om-root',
-    });
-    store.ingest(threaded);
-    const turn = store.claimBatch(threaded.conversationKey, 20);
-    const { outbox } = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'continuation',
-      deliveryMode: 'reply',
-      reply: 'thread answer',
-    });
-    assert.equal(outbox.deliveryMode, 'thread');
-    assert.equal(outbox.replyInThread, true);
-  });
-
-  it('persists a standalone chat target selected by the agent', () => {
-    const message = event('chat-route');
-    store.ingest(message);
-    const turn = store.claimBatch(message.conversationKey, 20);
-    const { outbox } = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'chat',
-      reply: 'standalone answer',
-    });
-    assert.equal(outbox.deliveryMode, 'chat');
-    assert.equal(outbox.targetChatId, 'oc-chat');
-    assert.equal(outbox.replyToMessageId, message.messageId);
-    assert.equal(outbox.replyInThread, false);
-  });
-
-  it('withholds an old draft when a newer message arrives during a turn', () => {
-    store.ingest(event('1'));
-    const turn = store.claimBatch(event('1').conversationKey, 20);
-    store.ingest(event('2', '不是，我的意思是第二种'));
-
-    const created = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'reply',
-      reply: 'old answer',
-    });
-    assert.equal(created.stale, true);
-    assert.equal(store.pendingOutboxes().length, 0);
-    assert.equal(store.getConversation(event('1').conversationKey).pendingDraft.reply, 'old answer');
-    assert.equal(store.getConversation(event('1').conversationKey).pendingDraft.deliveryMode, 'reply');
-    assert.equal(store.hasQueued(event('1').conversationKey), true);
-  });
-
-  it('does not claim unseen overflow messages as part of the freshness snapshot', () => {
-    store.ingest(event('1'));
-    store.ingest(event('2'));
-    const turn = store.claimBatch(event('1').conversationKey, 1);
-    const created = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'reply',
-      reply: 'only saw the first message',
-    });
-    assert.equal(created.stale, true);
-    assert.equal(store.hasQueued(event('1').conversationKey), true);
-  });
-
-  it('reuses the same idempotency key for a retry', () => {
-    store.ingest(event('1'));
-    const turn = store.claimBatch(event('1').conversationKey, 20);
-    const { outbox } = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'reply',
-      reply: 'answer',
-    });
-    const first = store.prepareOutboxAttempt(outbox.id, 3_000_000).outbox;
-    assert.equal(store.markOutboxFailure(outbox.id, 'temporary', 3), 'RETRY');
-    const second = store.prepareOutboxAttempt(outbox.id, 3_000_000).outbox;
-    assert.equal(second.idempotencyKey, first.idempotencyKey);
-    assert.equal(second.attemptCount, 2);
-  });
-
-  it('fails a turn only while it is running', () => {
-    store.ingest(event('1'));
-    const turn = store.claimBatch(event('1').conversationKey, 20);
-    assert.equal(store.failTurn(turn.id, 'first failure'), true);
-    assert.equal(store.failTurn(turn.id, 'must not overwrite'), false);
-    const row = store.db.prepare('SELECT status, error FROM turns WHERE id = ?').get(turn.id);
-    assert.deepEqual({ ...row }, { status: 'DEAD', error: 'first failure' });
-  });
-
-  it('never freshness-cancels an outbox already in SENDING', () => {
-    store.ingest(event('1'));
-    const turn = store.claimBatch(event('1').conversationKey, 20);
-    const { outbox } = store.createOutboxIfFresh(turn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'reply',
-      reply: 'answer',
-    });
-    assert.equal(store.prepareOutboxAttempt(outbox.id, 3_000_000).ready, true);
-    store.ingest(event('2', 'newer message'));
-    assert.equal(store.cancelOutboxIfStale(outbox.id), false);
-    const row = store.db.prepare('SELECT status FROM outbox WHERE id = ?').get(outbox.id);
-    assert.equal(row.status, 'SENDING');
-    assert.equal(store.getConversation(event('1').conversationKey).pendingDraft, null);
+  it('records message.received and message.ignored activities', () => {
+    store.ingest(event('1', 'hello there'));
+    store.ingest(event('2', 'private'), 'unsupported_message_type');
+    const kinds = store.listActivities({ limit: 100 }).activities.map((a) => a.kind).sort();
+    assert.deepEqual(kinds, ['message.ignored', 'message.received']);
+    const serialized = JSON.stringify(store.listActivities({ limit: 100 }).activities);
+    assert.equal(serialized.includes('private'), false);
   });
 
   it('stores one global session shared across chats and clears it durably', () => {
     assert.deepEqual(store.getGlobalSession(), { sessionId: null, policyHash: null });
-    store.setGlobalSession('session-abc', 'a'.repeat(64));
-    assert.deepEqual(store.getGlobalSession(), { sessionId: 'session-abc', policyHash: 'a'.repeat(64) });
+    store.setGlobalSession('thread-abc', 'a'.repeat(64));
+    assert.deepEqual(store.getGlobalSession(), { sessionId: 'thread-abc', policyHash: 'a'.repeat(64) });
 
     const databasePath = path.join(directory, 'state.sqlite3');
     store.close();
     store = new Store(databasePath, quietLogger);
-    assert.equal(store.getGlobalSession().sessionId, 'session-abc');
+    assert.equal(store.getGlobalSession().sessionId, 'thread-abc');
     store.clearGlobalSession();
     assert.equal(store.getGlobalSession().sessionId, null);
   });
 
-  it('returns global cross-chat history tagged by chat for a reset session', () => {
+  it('returns cross-chat DONE history tagged by chat, oldest first', () => {
     const a = event('a', 'from chat A', { conversationKey: 'default:tenant:oc-a:main', chatId: 'oc-a' });
     const b = event('b', 'from chat B', { conversationKey: 'default:tenant:oc-b:main', chatId: 'oc-b' });
-    for (const message of [a, b]) {
-      store.ingest(message);
-      const turn = store.claimBatch(message.conversationKey, 20);
-      const { outbox } = store.createOutboxIfFresh(turn.id, {
-        action: 'reply', reasonCode: 'direct_request', deliveryMode: 'chat', reply: `answer ${message.chatId}`,
-      });
-      store.prepareOutboxAttempt(outbox.id, 3_000_000);
-      store.markOutboxSent(outbox.id, `remote-${message.chatId}`);
-    }
+    store.ingest(a, null, 1_000);
+    store.ingest(b, null, 2_000);
     const history = store.history(30);
-    const chats = new Set(history.map((row) => row.chatId));
-    assert.ok(chats.has('oc-a') && chats.has('oc-b'));
-    const outbound = history.filter((row) => row.direction === 'outbound');
-    assert.ok(outbound.length >= 2);
+    assert.deepEqual(history.map((row) => row.chatId), ['oc-a', 'oc-b']);
+    assert.equal(history.every((row) => row.direction === 'inbound'), true);
     assert.deepEqual(store.history(0), []);
   });
 
-  it('migrates legacy reply_in_thread outboxes without changing idempotency keys', () => {
-    const replyEvent = event('legacy-reply');
-    store.ingest(replyEvent);
-    const replyTurn = store.claimBatch(replyEvent.conversationKey, 20);
-    const replyOutbox = store.createOutboxIfFresh(replyTurn.id, {
-      action: 'reply',
-      reasonCode: 'direct_request',
-      deliveryMode: 'reply',
-      reply: 'legacy reply',
-    }).outbox;
-
-    const threadEvent = event('legacy-thread', 'thread', {
-      conversationKey: 'default:tenant:oc-thread:main',
-      chatId: 'oc-thread',
-    });
-    store.ingest(threadEvent);
-    const threadTurn = store.claimBatch(threadEvent.conversationKey, 20);
-    const threadOutbox = store.createOutboxIfFresh(threadTurn.id, {
-      action: 'reply',
-      reasonCode: 'continuation',
-      deliveryMode: 'thread',
-      reply: 'legacy thread',
-    }).outbox;
-
-    const databasePath = path.join(directory, 'state.sqlite3');
-    store.close();
-    const legacy = new DatabaseSync(databasePath);
-    legacy.exec('ALTER TABLE outbox DROP COLUMN delivery_mode');
-    legacy.exec('ALTER TABLE outbox DROP COLUMN target_chat_id');
-    legacy.close();
-
-    store = new Store(databasePath, quietLogger);
-    const rows = store.db.prepare(`
-      SELECT idempotency_key, delivery_mode, target_chat_id FROM outbox ORDER BY id
-    `).all();
-    assert.deepEqual(rows.map((row) => ({ ...row })), [
-      {
-        idempotency_key: replyOutbox.idempotencyKey,
-        delivery_mode: 'reply',
-        target_chat_id: 'oc-chat',
-      },
-      {
-        idempotency_key: threadOutbox.idempotencyKey,
-        delivery_mode: 'thread',
-        target_chat_id: 'oc-thread',
-      },
-    ]);
+  it('prunes old inbound but keeps the append-only activity ledger', () => {
+    store.ingest(event('old', 'old body'), null, 1_000);
+    const before = store.listActivities({ limit: 100 }).activities;
+    const removed = store.prune(1_000, 10_000);
+    assert.ok(removed.inbound > 0);
+    assert.equal(store.stats().activities, before.length);
+    assert.deepEqual(
+      store.listActivities({ limit: 100 }).activities.map((item) => item.id),
+      before.map((item) => item.id),
+    );
   });
 });
