@@ -2,7 +2,7 @@
 
 一个单用户、本机常驻的飞书 Codex Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
 
-它通过 `lark-cli event +subscribe` 接收机器人消息，所有聊天共用同一个全局 `codex exec` 会话（跨聊天连续上下文），先判断“这句话是否值得回复”，再选择普通回复、thread 回复或直接发到当前 chat。日常使用不需要 `@`。
+它通过 `lark-cli event +subscribe` 接收机器人消息，所有聊天共用同一个全局 `codex exec` 会话（跨聊天连续上下文），先判断“这句话是否值得回复”，再选择普通回复、thread 回复或直接发到当前 chat。Agent 还可以列出机器人已加入的群，并在用户要求时主动向另一个 chat 发消息。日常使用不需要 `@`。
 
 ## 交互规则
 
@@ -13,7 +13,7 @@
 - 图片、文件和其他暂不支持的消息不会触发回复。
 - 连续对话通常直接发到 chat；需要引用上下文时普通回复；子话题或已有 thread 使用 thread。
 
-chat 与 message 目标始终由 daemon 固定，Codex 只能选择三种投递方式，不能自行选择群或联系人，也不能直接调用 `lark-cli`。
+结构化最终回复的 chat 与 message 目标仍由 daemon 固定。跨 chat 发送走专用的 `list_lark_chats` / `send_lark_message` 工具：前者只返回机器人已经加入的群，后者只接受完整 `chat_id` 和纯文本。Codex 不直接通过 shell 调用 `lark-cli`。
 
 ## 飞书前置条件
 
@@ -23,7 +23,8 @@ chat 与 message 目标始终由 daemon 固定，Codex 只能选择三种投递�
 2. 私聊消息权限 `im:message.p2p_msg`（或对应只读权限）。
 3. 群聊不 `@` 也要收到消息，需要敏感权限 `im:message.group_msg`；只有 group-at 权限时，平台不会投递普通群消息。
 4. 机器人发消息权限 `im:message:send_as_bot`。
-5. 把机器人加入需要参与的群，并把应用可见范围限制为自己的日常使用范围。
+5. 获取机器人所在群列表权限 `im:chat:read`。
+6. 把机器人加入需要参与的群，并把应用可见范围限制为自己的日常使用范围。
 
 本机的 `lark-cli` 和 `codex` 需要已经登录。daemon 会固定启动时选中的 lark profile，不会跟随后续默认 profile 的变化。
 
@@ -72,6 +73,7 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；新会话首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
 - 思考期间来了新消息，旧答案会暂缓，下一轮结合新消息重新判断。
 - 回复使用持久幂等键；进程重启后会恢复安全范围内的待发送项。
+- `send_lark_message` 的主动跨 chat 发送发生在 Codex turn 内，并带 lark-cli 幂等键、遵守 `LARK_DAEMON_DRY_RUN`；当前不进入 daemon outbox/Activity，进程中断后不会由 daemon 自动恢复。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。
 - Activity 账本保留脱敏后的短摘要；老记录由网页折叠，不因业务表的 90 天清理而消失。
 - `lark-cli --text` 没有 stdin/file 参数，因此发送瞬间，回复正文会出现在同一 macOS 用户可见的子进程参数中。
@@ -85,3 +87,4 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 3. 群里不 `@` 发一个尚未解决的问题；Agent 有增量价值时回复。
 4. 群里发闲聊或人与人的对话，应保持静默。
 5. Agent 思考时立即补一句纠正；旧答案不应抢先发出。
+6. 私聊要求 Agent 向另一个已加入群发送测试消息；Agent 应先解析群名，再通过专用工具发送，并在当前私聊确认结果。

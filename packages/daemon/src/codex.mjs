@@ -142,16 +142,21 @@ export class CodexRunner {
     this.logger = logger;
     this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
     this.developerInstructionsText = this.developerInstructions();
+  }
+
+  get policyHash() {
     // One global session is shared across all chats; policyHash only detects when the
-    // instructions/model/workspace change so the daemon can rotate that single session.
-    this.policyHash = createHash('sha256')
+    // instructions/model/workspace/profile change so the daemon can rotate that single session.
+    return createHash('sha256')
       .update(this.developerInstructionsText)
       .update('\0')
       .update(this.config.codexModel || 'default-model')
       .update('\0')
       .update(this.config.workspace)
       .update('\0')
-      .update('delivery-v2')
+      .update(this.config.profile || 'unresolved-profile')
+      .update('\0')
+      .update('delivery-v3-proactive-im')
       .digest('hex');
   }
 
@@ -169,6 +174,9 @@ export class CodexRunner {
     });
     if (auth.code !== 0) {
       throw new Error(`Codex is not authenticated; run ${this.config.codexBin} login --device-auth`);
+    }
+    if (!this.config.larkToolServerPath || !fs.existsSync(this.config.larkToolServerPath)) {
+      throw new Error('Lark MCP tool server is missing');
     }
     return { version: `${version.stdout}\n${version.stderr}`.trim().split(/\r?\n/).at(-1) };
   }
@@ -215,6 +223,24 @@ export class CodexRunner {
       '-c', `sandbox_mode="${sandbox}"`,
       '-c', `model_reasoning_effort="${this.config.codexEffort}"`,
     ];
+    const larkProfile = this.config.profile || '';
+    if (larkProfile) {
+      const toolArgs = [
+        this.config.larkToolServerPath,
+        '--lark-cli-bin', this.config.larkCliBin,
+        '--profile', larkProfile,
+        '--project-dir', this.config.projectDir,
+        '--timeout-ms', String(this.config.sendTimeoutMs),
+        '--max-text-chars', String(this.config.maxReplyChars),
+        '--dry-run', String(Boolean(this.config.dryRun)),
+      ];
+      configArgs.push(
+        '-c', `mcp_servers.lark_daemon_im.command=${tomlString(process.execPath)}`,
+        '-c', `mcp_servers.lark_daemon_im.args=${JSON.stringify(toolArgs)}`,
+        '-c', 'mcp_servers.lark_daemon_im.startup_timeout_sec=10',
+        '-c', `mcp_servers.lark_daemon_im.tool_timeout_sec=${Math.max(10, Math.ceil(this.config.sendTimeoutMs / 1_000) + 5)}`,
+      );
+    }
     let args;
     if (sessionId) {
       args = [

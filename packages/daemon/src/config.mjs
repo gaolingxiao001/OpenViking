@@ -112,6 +112,7 @@ export function getConfig() {
     workspace,
     systemPromptPath: path.join(promptDir, 'system-prompt.md'),
     responseSchemaPath: path.join(promptDir, 'response.schema.json'),
+    larkToolServerPath: path.join(sourceDir, 'lark-tools.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     codexModel: process.env.LARK_DAEMON_CODEX_MODEL || '',

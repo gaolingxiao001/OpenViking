@@ -48,7 +48,7 @@ export class LarkClient {
     const prefix = ['--profile', this.profile];
     const checks = [
       { args: ['event', '+subscribe', '--help'], required: ['--event-types', '--quiet'] },
-      { args: ['im', '--help'], required: ['+messages-reply', '+messages-send'] },
+      { args: ['im', '--help'], required: ['+chat-list', '+messages-reply', '+messages-send'] },
     ];
     const outputs = [];
     for (const check of checks) {

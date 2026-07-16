@@ -28,8 +28,12 @@ describe('daemon event path', { concurrency: false }, () => {
     executable(fakeLark, `
       const args = process.argv.slice(2);
       if (args.includes('--version')) { console.log('lark-cli 1.0.56'); process.exit(0); }
+      if (args.includes('profile') && args.includes('list')) {
+        console.log(JSON.stringify([{ name: 'auto-profile', active: true }]));
+        process.exit(0);
+      }
       if (args.includes('--help')) {
-        console.log('--event-types --quiet +messages-reply +messages-send');
+        console.log('--event-types --quiet +chat-list +messages-reply +messages-send');
         process.exit(0);
       }
       if (args.includes('doctor')) { console.log(JSON.stringify({ ok: true })); process.exit(0); }
@@ -50,6 +54,10 @@ describe('daemon event path', { concurrency: false }, () => {
       if (args.includes('--help')) {
         console.log('--output-schema --output-last-message');
         process.exit(0);
+      }
+      if (!args.some((arg) => arg.includes('mcp_servers.lark_daemon_im.args=') && arg.includes('auto-profile'))) {
+        console.error('missing auto-discovered profile in Lark MCP config');
+        process.exit(2);
       }
       process.stdin.resume();
       process.stdin.on('end', () => {
@@ -96,7 +104,7 @@ describe('daemon event path', { concurrency: false }, () => {
       workspace: path.join(directory, 'workspace'),
       larkCliBin: fakeLark,
       codexBin: fakeCodex,
-      profile: 'test-profile',
+      profile: '',
       writeSenderIds: new Set(['ou-e2e']),
       port: 0,
       httpEnabled: false,

@@ -139,6 +139,67 @@ describe('Codex response protocol', () => {
     }
   });
 
+  it('injects the dedicated Lark MCP server into fresh and resumed turns', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-codex-mcp-'));
+    const invocations = [];
+    const registry = {
+      async run(_bin, args) {
+        invocations.push(args);
+        return { code: 1, stdout: '', stderr: 'probe complete' };
+      },
+    };
+    const config = {
+      codexBin: 'codex',
+      codexModel: '',
+      codexEffort: 'medium',
+      codexTimeoutMs: 1_000,
+      maxReplyChars: 1_000,
+      sendTimeoutMs: 5_000,
+      tempDir,
+      workspace: path.dirname(tempDir),
+      projectDir: '/release',
+      larkCliBin: '/fake/lark-cli',
+      larkToolServerPath: '/release/packages/daemon/src/lark-tools.mjs',
+      profile: 'fixed-profile',
+      dryRun: true,
+      systemPromptPath: new URL('../agent/system-prompt.md', import.meta.url),
+      responseSchemaPath: new URL('../agent/response.schema.json', import.meta.url).pathname,
+    };
+
+    try {
+      const runner = new CodexRunner(config, registry, { warn() {} });
+      await runner.execute({ prompt: 'fresh', sessionId: null, turnId: 1 });
+      await runner.execute({ prompt: 'resume', sessionId: '00000000-0000-0000-0000-000000000000', turnId: 2 });
+      assert.equal(invocations.length, 2);
+      for (const args of invocations) {
+        const rendered = args.join('\n');
+        assert.match(rendered, /mcp_servers\.lark_daemon_im\.command/);
+        assert.match(rendered, /lark-tools\.mjs/);
+        assert.match(rendered, /fixed-profile/);
+        assert.match(rendered, /--dry-run.*true/);
+        assert.match(rendered, /mcp_servers\.lark_daemon_im\.tool_timeout_sec=10/);
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses a profile discovered after CodexRunner construction', () => {
+    const config = {
+      codexBin: 'codex',
+      codexModel: '',
+      codexEffort: 'medium',
+      workspace: '/workspace',
+      profile: '',
+      systemPromptPath: new URL('../agent/system-prompt.md', import.meta.url),
+    };
+    const runner = new CodexRunner(config, {}, { warn() {} });
+    const unresolvedHash = runner.policyHash;
+    config.profile = 'auto-discovered-profile';
+    assert.notEqual(runner.policyHash, unresolvedHash);
+    assert.match(runner.policyHash, /^[a-f0-9]{64}$/);
+  });
+
   it('strips only Lark/Feishu credentials from the inherited environment', () => {
     const environment = {
       PATH: '/bin',
