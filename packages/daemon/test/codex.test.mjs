@@ -569,7 +569,7 @@ describe('CodexAgent session rotation (slash commands)', () => {
     agent.stopping = true;
   });
 
-  it('lists visible model ids and swallows model/list failures', async () => {
+  it('lists visible models with their efforts and swallows model/list failures', async () => {
     const store = makeStore();
     const { agent, children } = newAgent(store);
     const child = await handshake(agent, children);
@@ -581,18 +581,63 @@ describe('CodexAgent session rotation (slash commands)', () => {
       id: request.id,
       result: {
         data: [
-          { id: 'gpt-5.5', hidden: false },
+          {
+            id: 'gpt-5.5',
+            hidden: false,
+            supportedReasoningEfforts: [
+              { reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'high' },
+            ],
+          },
           { id: 'gpt-5.5-internal', hidden: true },
           { id: 'gpt-5.5-codex', hidden: false },
         ],
       },
     });
-    assert.deepEqual(await listing, ['gpt-5.5', 'gpt-5.5-codex']);
+    assert.deepEqual(await listing, [
+      { id: 'gpt-5.5', efforts: ['low', 'medium', 'high'] },
+      { id: 'gpt-5.5-codex', efforts: [] },
+    ]);
 
     const failing = agent.listModels();
     await flush();
     const second = child.ofMethod('model/list').at(-1);
     child.feed({ id: second.id, error: { message: 'unsupported' } });
     assert.deepEqual(await failing, []);
+  });
+
+  it('unwraps the API error of a failed turn and notifies the failure callback', async () => {
+    const failures = [];
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    const { agent, children } = newAgent(store, {
+      onTurnFailed: (info) => failures.push(info),
+    });
+    const child = await handshake(agent, children);
+
+    agent.deliver('hi', 59);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-fail' } } });
+    const apiBlob = JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        code: 'unsupported_value',
+        message: "Unsupported value: 'minimal' is not supported with this model.",
+      },
+      status: 400,
+    });
+    child.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 't-fail', status: 'failed', error: { message: apiBlob } } },
+    });
+
+    assert.deepEqual(failures, [{
+      inboundSeqs: [59],
+      error: "Unsupported value: 'minimal' is not supported with this model.",
+    }]);
+    const completed = activities.find((activity) => activity.kind === 'agent.turn_completed');
+    assert.match(completed.summary, /Unsupported value/);
+    assert.match(completed.metadata.error, /Unsupported value/);
+    assert.doesNotMatch(JSON.stringify(completed), /object Object/);
   });
 });

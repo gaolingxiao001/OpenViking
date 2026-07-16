@@ -41,6 +41,8 @@ pm2 logs lark-daemon --lines 100
 - **工作区改动不会生效**:线上跑的是 `~/.local/lib/lark-daemon/releases/<version>-<ts>-<commit>` 下的 release(pm2),`.env` 统一 symlink 到 `~/.local/lib/lark-daemon/env`。必须 commit 后跑 deploy.sh 才上线。
 - **运行数据**:`~/.local/share/lark-daemon/lark-daemon.sqlite3`(activities / inbound / turns / conversations 表)。查一次交互到底发生了什么,先 `sqlite3` 查 activities。
 - **模型侧真相**:codex rollout 在 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,记录模型实际看到的输入和工具调用顺序,是 daemon activity 之外的第二证据源。
+- **effort 校验与失败通知**:`/effort` 按 `model/list` 里当前模型的 `supportedReasoningEfforts` 校验(不支持的档位如 minimal 会让每个 turn 都 400);turn failed 时 daemon 解包 API 错误(`turnErrorText`)记入 activity,并经 `notifyTurnFailure` 引用回复发信人。
+- **禁止自部署**:system-prompt 明确禁止 Lark 里的 codex 对 lark-daemon 自身执行 deploy.sh/pm2 操作——`pm2 delete` 会连带杀掉它自己所在的进程树,部署会死在 `pm2 start` 之前(2026-07-17 发生过)。
 - **steer 语义(已知且接受)**:`turn/steer` RPC 成功只代表 codex 收下了消息,实际注入要等当前推理步(reasoning + tool call)结束,还有约 6s 每轮的注入开销。所以 turn 进行中来的消息,竞态窗口约一个模型步(10-15s),模型正在发的回复拦不住。除非明确要求改成 turn/interrupt + 合并重发,否则不要"修"这个。
 
 ## 约定

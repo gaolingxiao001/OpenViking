@@ -3,7 +3,9 @@
 // reaches codex. Any unambiguous prefix of a command name works (/h → /help,
 // /m gpt-5.5 → /model gpt-5.5); effort levels match by prefix too.
 
-export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+// Static fallback only (offline); when connected, /effort validates against the
+// current model's supportedReasoningEfforts from model/list.
+export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 
 const COMMANDS = ['new', 'help', 'model', 'effort'];
 
@@ -64,12 +66,14 @@ export async function executeCommand(command, codex) {
     };
   }
 
+  let models = [];
+  try { models = (await codex.listModels?.()) ?? []; } catch { /* offline: no options */ }
+
   if (command.name === 'model') {
-    let available = [];
-    try { available = (await codex.listModels?.()) ?? []; } catch { /* offline: no options */ }
+    const ids = models.map((model) => model.id);
     if (!command.arg) {
       const lines = [`当前模型：${codex.model || '（默认）'}`];
-      if (available.length > 0) lines.push(`可选：${available.join('、')}`);
+      if (ids.length > 0) lines.push(`可选：${ids.join('、')}`);
       lines.push('用法：/model <名称>（支持前缀匹配）');
       return { ok: true, text: lines.join('\n') };
     }
@@ -77,11 +81,11 @@ export async function executeCommand(command, codex) {
       return { ok: false, text: `无效的模型名：${command.arg}` };
     }
     let target = command.arg;
-    if (available.length > 0) {
-      const matches = matchPrefix(command.arg, available);
+    if (ids.length > 0) {
+      const matches = matchPrefix(command.arg, ids);
       if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
       if (matches.length === 0) {
-        return { ok: false, text: `未找到模型：${command.arg}\n可选：${available.join('、')}` };
+        return { ok: false, text: `未找到模型：${command.arg}\n可选：${ids.join('、')}` };
       }
       [target] = matches;
     }
@@ -89,16 +93,23 @@ export async function executeCommand(command, codex) {
     return { ok: true, text: `已切换模型：${target}（下一轮生效，上下文保留）` };
   }
 
-  // effort
+  // effort: validate against what the current model actually supports — an
+  // unsupported level (e.g. minimal on gpt-5.6) makes every turn fail with a 400.
+  // Unknown current model → union across listed models; offline → static list.
+  const current = models.find((model) => model.id === codex.model);
+  const modelEfforts = current?.efforts?.length
+    ? current.efforts
+    : [...new Set(models.flatMap((model) => model.efforts ?? []))];
+  const supported = modelEfforts.length > 0 ? modelEfforts : EFFORT_LEVELS;
   if (!command.arg) {
-    return { ok: true, text: `当前推理档位：${codex.effort}\n可选：${EFFORT_LEVELS.join('、')}` };
+    return { ok: true, text: `当前推理档位：${codex.effort}\n可选：${supported.join('、')}` };
   }
-  const levels = matchPrefix(command.arg.toLowerCase(), EFFORT_LEVELS);
+  const levels = matchPrefix(command.arg.toLowerCase(), supported);
   if (levels.length !== 1) {
     const head = levels.length > 1
       ? `档位有歧义：${levels.join('、')}`
-      : `无效档位：${command.arg}`;
-    return { ok: false, text: `${head}\n可选：${EFFORT_LEVELS.join('、')}` };
+      : `不支持的档位：${command.arg}`;
+    return { ok: false, text: `${head}\n可选：${supported.join('、')}` };
   }
   codex.setEffort(levels[0]);
   const threadId = await codex.rotateSession({ resume: false });

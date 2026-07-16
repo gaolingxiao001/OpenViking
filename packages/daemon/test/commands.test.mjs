@@ -82,7 +82,10 @@ describe('executeCommand', () => {
   it('model without an arg reports the current model and the available options', async () => {
     const codex = fakeCodex({
       model: '',
-      listModels: async () => ['gpt-5.5', 'gpt-5.5-codex'],
+      listModels: async () => [
+        { id: 'gpt-5.5', efforts: ['low', 'medium'] },
+        { id: 'gpt-5.5-codex', efforts: [] },
+      ],
     });
     const outcome = await executeCommand({ name: 'model', arg: '' }, codex);
     assert.equal(outcome.ok, true);
@@ -92,7 +95,12 @@ describe('executeCommand', () => {
   });
 
   it('model resolves prefixes against the live list and rejects unknown or ambiguous names', async () => {
-    const codex = fakeCodex({ listModels: async () => ['gpt-5.5', 'gpt-5.5-codex'] });
+    const codex = fakeCodex({
+      listModels: async () => [
+        { id: 'gpt-5.5', efforts: [] },
+        { id: 'gpt-5.5-codex', efforts: [] },
+      ],
+    });
 
     const prefixed = await executeCommand({ name: 'model', arg: 'gpt-5.5-c' }, codex);
     assert.equal(prefixed.ok, true);
@@ -140,6 +148,29 @@ describe('executeCommand', () => {
     const unknown = await executeCommand({ name: 'effort', arg: 'turbo' }, codex);
     assert.equal(unknown.ok, false);
     assert.equal(codex.calls.length, 2);
+  });
+
+  it('effort validates against the current model and rejects unsupported levels', async () => {
+    const codex = fakeCodex({
+      model: 'gpt-5.6-sol',
+      listModels: async () => [
+        { id: 'gpt-5.5', efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'] },
+        { id: 'gpt-5.6-sol', efforts: ['none', 'low', 'medium', 'high', 'xhigh'] },
+      ],
+    });
+
+    const unsupported = await executeCommand({ name: 'effort', arg: 'minimal' }, codex);
+    assert.equal(unsupported.ok, false);
+    assert.match(unsupported.text, /不支持的档位：minimal/);
+    assert.match(unsupported.text, /none、low、medium、high、xhigh/);
+    assert.equal(codex.calls.length, 0);
+
+    const none = await executeCommand({ name: 'effort', arg: 'n' }, codex);
+    assert.equal(none.ok, true);
+    assert.deepEqual(codex.calls[0], ['setEffort', 'none']);
+
+    const listing = await executeCommand({ name: 'effort', arg: '' }, codex);
+    assert.match(listing.text, /可选：none、low、medium、high、xhigh/);
   });
 
   it('unknown commands answer with help instead of reaching codex', async () => {

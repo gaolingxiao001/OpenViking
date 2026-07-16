@@ -55,6 +55,15 @@ describe('Store', () => {
     assert.equal(store.ingest(event('1')).inserted, false);
   });
 
+  it('looks an inbound row up by seq for failure notices', () => {
+    const { inbound } = store.ingest(event('7', 'needs a reply'));
+    const found = store.inboundBySeq(inbound.seq);
+    assert.equal(found.messageId, 'om-7');
+    assert.equal(found.content, 'needs a reply');
+    assert.equal(store.inboundBySeq(9999), null);
+    assert.equal(store.inboundBySeq(null), null);
+  });
+
   it('persists group chat names and applies retry timing without scheduling p2p lookups', () => {
     const now = 1_700_000_000_000;
     const group = event('named-source', 'group message', {

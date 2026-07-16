@@ -961,6 +961,11 @@ export class Store {
     return row ? number(row.seq) : null;
   }
 
+  inboundBySeq(seq) {
+    if (seq === null || seq === undefined) return null;
+    return rowToInbound(this.db.prepare('SELECT * FROM inbound WHERE seq = ?').get(seq));
+  }
+
   clearGlobalSession() {
     this.deleteGlobalSessionStatement.run();
   }

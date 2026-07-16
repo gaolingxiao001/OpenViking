@@ -115,7 +115,7 @@ export function getConfig() {
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     codexModel: process.env.LARK_DAEMON_CODEX_MODEL || '',
-    codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['minimal', 'low', 'medium', 'high', 'xhigh']),
+    codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
     host,
     port: intEnv('LARK_DAEMON_PORT', 3738, { min: 1, max: 65535 }),
     httpEnabled: boolEnv('LARK_DAEMON_HTTP_ENABLED', true),

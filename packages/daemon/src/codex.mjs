@@ -8,6 +8,21 @@ function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
 }
 
+// turn/completed carries error as an object whose .message is often a JSON blob
+// wrapping the upstream API error; unwrap to the innermost human-readable message.
+export function turnErrorText(error) {
+  if (error === null || error === undefined) return '';
+  const raw = typeof error === 'string'
+    ? error
+    : typeof error.message === 'string' ? error.message : JSON.stringify(error);
+  try {
+    const parsed = JSON.parse(raw);
+    const inner = parsed?.error?.message ?? parsed?.message;
+    if (typeof inner === 'string' && inner.trim()) return safe(inner);
+  } catch { /* not JSON: use as-is */ }
+  return safe(raw);
+}
+
 function cleanToolPart(value, fallback) {
   const text = String(value ?? '')
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
@@ -172,6 +187,7 @@ export class CodexAgent {
     this.reconnectBaseMs = options.reconnectBaseMs ?? 1000;
     this.reconnectCapMs = options.reconnectCapMs ?? 30_000;
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
+    this.onTurnFailed = options.onTurnFailed ?? null; // ({ inboundSeqs, error }) => void
 
     this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
     this.developerInstructionsText = this.developerInstructions(config.profile);
@@ -325,14 +341,24 @@ export class CodexAgent {
     const inboundSeqs = this._associatedInboundSeqs();
     this.activeTurnId = null;
     this.startingTurn = false;
+    const failed = status === 'failed';
+    const errorText = error ? turnErrorText(error) : '';
     this._recordActivity('agent.turn_completed', {
       turnId,
       inboundSeq: inboundSeqs.at(-1) ?? null,
       status,
-      metadata: { status, error: error ? safe(error) : undefined, inboundSeqs },
+      summary: failed ? errorText : undefined,
+      metadata: { status, error: errorText || undefined, inboundSeqs },
     });
     this.activeInboundSeqs = [];
     this.startingItems = [];
+    if (failed && this.onTurnFailed) {
+      try {
+        this.onTurnFailed({ inboundSeqs, error: errorText || '未知错误' });
+      } catch (callbackError) {
+        this.logger.warn('turn_failure_notify_failed', { error: safe(callbackError) });
+      }
+    }
     this._drain();
   }
 
@@ -648,8 +674,9 @@ export class CodexAgent {
     this.store.setSetting?.('codex_effort', effort);
   }
 
-  // Visible model ids from the app-server, for /model discovery and prefix
-  // resolution. Empty while disconnected or when the server lacks model/list.
+  // Visible models from the app-server with their supported reasoning efforts,
+  // for /model discovery and /effort validation. Empty while disconnected or
+  // when the server lacks model/list.
   async listModels() {
     if (!this.child) return [];
     try {
@@ -657,7 +684,12 @@ export class CodexAgent {
       const models = Array.isArray(result?.data) ? result.data : [];
       return models
         .filter((model) => model && !model.hidden && typeof model.id === 'string')
-        .map((model) => model.id);
+        .map((model) => ({
+          id: model.id,
+          efforts: (Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [])
+            .map((effort) => (typeof effort === 'string' ? effort : effort?.reasoningEffort))
+            .filter((effort) => typeof effort === 'string' && effort),
+        }));
     } catch (error) {
       this.logger.info('codex_model_list_failed', { error: safe(error) });
       return [];

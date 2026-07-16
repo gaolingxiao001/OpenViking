@@ -134,7 +134,9 @@ export class LarkDaemon {
         metadata: { larkVersion: larkInfo.version },
       }, 'preflight-ok');
 
-      this.codex = new CodexAgent(this.config, this.store, this.logger.child({ component: 'codex' }));
+      this.codex = new CodexAgent(this.config, this.store, this.logger.child({ component: 'codex' }), {
+        onTurnFailed: (info) => { void this.notifyTurnFailure(info); },
+      });
       await this.codex.start();
       this.recordSystemActivity('system.subscriber_started', {
         summary: 'Codex app-server 已连接',
@@ -263,6 +265,38 @@ export class LarkDaemon {
       chatType: event.chatType,
     });
     this.codex.deliver(formatInboundLine(event), result.inbound.seq);
+  }
+
+  // A failed codex turn consumes its messages without replying; tell the sender
+  // programmatically so failures are never silent. Best effort: reply to the last
+  // inbound message of the failed turn.
+  async notifyTurnFailure({ inboundSeqs, error }) {
+    if (this.shuttingDown) return;
+    const seq = Array.isArray(inboundSeqs) ? inboundSeqs.at(-1) : null;
+    const inbound = seq === null || seq === undefined ? null : this.store.inboundBySeq(seq);
+    const notice = `⚠️ 这一轮处理失败，没有生成回复：${error}`.slice(0, 600)
+      + '\n（消息不会自动重试；可再发一次，或用 /effort、/model 调整后重试）';
+    this.recordSystemActivity('agent.failure_notice', {
+      summary: safeError(error),
+      status: inbound?.messageId ? 'NOTIFYING' : 'NO_TARGET',
+      conversationKey: inbound?.conversationKey,
+      inboundSeq: seq ?? undefined,
+    });
+    if (!inbound?.messageId) return;
+    try {
+      await this.lark.replyMessage(inbound.messageId, notice);
+    } catch (sendError) {
+      this.logger.warn('turn_failure_notice_failed', {
+        messageRef: opaqueRef(inbound.messageId),
+        error: safeChatLookupError(sendError),
+      });
+      this.recordSystemActivity('agent.failure_notice', {
+        summary: safeChatLookupError(sendError),
+        status: 'FAILED',
+        conversationKey: inbound.conversationKey,
+        inboundSeq: seq ?? undefined,
+      });
+    }
   }
 
   // Slash commands never touch the model: execute deterministically against the
