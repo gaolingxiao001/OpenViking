@@ -18,25 +18,29 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="identity">
-          <div class="title-row">
-            <h1>Zayn</h1>
-            <span id="service-status" class="service-status" role="status" aria-live="polite">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span id="service-status-text">正在连接</span>
-            </span>
-          </div>
-          <div class="service-line" aria-label="服务状态">
-            <span id="current-state">正在读取活动</span>
-            <span id="subscriber-value">订阅 —</span>
-            <span id="queue-value">队列 —</span>
-            <span id="uptime-value">运行 —</span>
-            <time id="last-updated">等待数据</time>
-          </div>
+          <h1>Zayn</h1>
+          <span id="service-status" class="service-status" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="service-status-text">正在连接</span>
+          </span>
         </div>
 
-        <button id="privacy-toggle" class="quiet-button" type="button" aria-pressed="false">
-          隐藏正文
-        </button>
+        <div class="topbar-actions">
+          <details class="runtime-details">
+            <summary>运行状态</summary>
+            <div class="runtime-panel" aria-label="服务状态">
+              <span id="current-state">正在读取活动</span>
+              <span id="subscriber-value">订阅 —</span>
+              <span id="queue-value">队列 —</span>
+              <span id="uptime-value">运行 —</span>
+              <time id="last-updated">等待数据</time>
+            </div>
+          </details>
+
+          <button id="privacy-toggle" class="quiet-button" type="button" aria-pressed="false">
+            隐藏正文
+          </button>
+        </div>
       </div>
     </header>
 

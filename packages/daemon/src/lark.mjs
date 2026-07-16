@@ -21,6 +21,24 @@ function findMessageId(value, depth = 0) {
   return null;
 }
 
+function findChatName(value, depth = 0) {
+  if (depth > 8 || value === null || value === undefined) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findChatName(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof value !== 'object') return null;
+  if (typeof value.name === 'string' && value.name.trim()) return value.name.trim();
+  for (const child of Object.values(value)) {
+    const found = findChatName(child, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 export class LarkClient {
   constructor(config, registry, logger) {
     this.config = config;
@@ -138,6 +156,30 @@ export class LarkClient {
 
   get subscriptionRunning() {
     return Boolean(this.subscriber && this.subscriber.exitCode === null);
+  }
+
+  async getChatName(chatId) {
+    const result = await this.registry.run(this.config.larkCliBin, [
+      '--profile', this.profile,
+      'im', 'chats', 'get',
+      '--as', 'bot',
+      '--chat-id', chatId,
+      '--format', 'json',
+    ], {
+      cwd: this.config.projectDir,
+      timeoutMs: 15_000,
+    });
+    if (result.timedOut) throw new Error('lark-cli chat lookup timed out after 15000ms');
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim().slice(-2000) || `lark-cli chat lookup exited ${result.code}`);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new Error('lark-cli chat lookup returned invalid JSON');
+    }
+    return findChatName(parsed);
   }
 
   async sendOutbound(outbox) {

@@ -18,6 +18,14 @@ function safeError(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
 }
 
+function safeChatLookupError(error) {
+  return safeError(error)
+    .replace(/\b(?:om|oc|ou|on|omt|cli)_[A-Za-z0-9_-]{6,}\b/g, '[LARK_ID]');
+}
+
+const CHAT_NAME_REFRESH_MS = 24 * 60 * 60 * 1_000;
+const CHAT_NAME_RETRY_BASE_MS = 5 * 60 * 1_000;
+
 const SECURITY_HEADERS = Object.freeze({
   'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
   'x-content-type-options': 'nosniff',
@@ -84,6 +92,7 @@ export class LarkDaemon {
     this.maintenanceTimer = null;
     this.runId = randomUUID();
     this.activitySequence = 0;
+    this.chatNameLookups = new Map();
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -175,6 +184,7 @@ export class LarkDaemon {
         }, 'recover-outboxes');
       }
       this.ready = true;
+      this.refreshChatNames();
       for (const conversationKey of this.store.queuedConversationKeys()) {
         this.scheduleConversation(conversationKey, 0);
       }
@@ -259,6 +269,7 @@ export class LarkDaemon {
       });
       return;
     }
+    this.scheduleChatNameLookup(event.chatId);
     if (result.filterReason) {
       this.logger.info('event_rule_ignored', {
         messageRef: opaqueRef(event.messageId),
@@ -468,6 +479,62 @@ export class LarkDaemon {
           : '历史运行状态清理完成',
         status: 'COMPLETED',
         metadata: { expired, removed },
+      });
+    }
+    if (this.ready) this.refreshChatNames();
+  }
+
+  refreshChatNames(limit = 20) {
+    if (this.shuttingDown || !this.store || !this.lark?.profile) return;
+    for (const source of this.store.dueChatNameLookups(Date.now(), limit)) {
+      this.scheduleChatNameLookup(source.chatId);
+    }
+  }
+
+  scheduleChatNameLookup(chatId) {
+    if (this.shuttingDown || !this.store || !this.lark?.profile
+      || this.chatNameLookups.has(chatId)) return false;
+    const source = this.store.chatNameLookupCandidate(chatId);
+    if (!source) return false;
+    const lookup = this.lookupChatName(source)
+      .catch((error) => {
+        this.logger.warn('chat_name_lookup_internal_failed', {
+          chatRef: opaqueRef(chatId),
+          error: safeChatLookupError(error),
+        });
+      })
+      .finally(() => {
+        this.chatNameLookups.delete(chatId);
+        if (this.ready && !this.shuttingDown) queueMicrotask(() => this.refreshChatNames());
+      });
+    this.chatNameLookups.set(chatId, lookup);
+    return true;
+  }
+
+  async lookupChatName(source) {
+    try {
+      const name = await this.lark.getChatName(source.chatId);
+      if (this.shuttingDown) return;
+      const now = Date.now();
+      if (name) {
+        this.store.saveChatSourceName(source.chatId, name, now + CHAT_NAME_REFRESH_MS, now);
+        this.logger.info('chat_name_resolved', { chatRef: source.sourceRef });
+        return;
+      }
+      this.store.deferChatSourceName(source.chatId, 'EMPTY', now + CHAT_NAME_REFRESH_MS, now);
+      this.logger.debug('chat_name_empty', { chatRef: source.sourceRef });
+    } catch (error) {
+      if (this.shuttingDown) return;
+      const now = Date.now();
+      const backoffMs = Math.min(
+        CHAT_NAME_REFRESH_MS,
+        CHAT_NAME_RETRY_BASE_MS * (2 ** Math.min(source.failureCount, 8)),
+      );
+      this.store.deferChatSourceName(source.chatId, 'RETRY', now + backoffMs, now);
+      this.logger.warn('chat_name_lookup_failed', {
+        chatRef: source.sourceRef,
+        retryInMs: backoffMs,
+        error: safeChatLookupError(error),
       });
     }
   }

@@ -65,6 +65,22 @@ function rowToOutbox(row) {
   };
 }
 
+function rowToChatSource(row) {
+  if (!row) return null;
+  return {
+    chatId: row.chat_id,
+    sourceRef: row.source_ref,
+    chatType: row.chat_type,
+    name: row.name,
+    lookupStatus: row.lookup_status,
+    failureCount: number(row.failure_count),
+    lastLookupAtMs: row.last_lookup_at_ms === null ? null : number(row.last_lookup_at_ms),
+    nextLookupAtMs: number(row.next_lookup_at_ms),
+    createdAtMs: number(row.created_at_ms),
+    updatedAtMs: number(row.updated_at_ms),
+  };
+}
+
 function parseJsonObject(value) {
   try {
     const parsed = JSON.parse(value || '{}');
@@ -133,6 +149,7 @@ function rowToPublicActivity(row) {
     conversationRef: opaqueRef(row.conv_key),
     sourceRef,
     sourceType,
+    sourceName: row.source_name ? maskPublicIdentifiers(row.source_name) : null,
     turnId: row.turn_id === null ? null : number(row.turn_id),
     inboundSeq: row.inbound_seq === null ? null : number(row.inbound_seq),
     outboxId: row.outbox_id === null ? null : number(row.outbox_id),
@@ -154,8 +171,10 @@ export class Store {
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.migrate();
     this.prepare();
+    this.backfillChatSources();
     this.backfillActivities();
     this.backfillActivitySources();
+    this.backfillActivitySourceNames();
   }
 
   migrate() {
@@ -268,6 +287,7 @@ export class Store {
         conv_key TEXT,
         source_ref TEXT,
         source_type TEXT,
+        source_name TEXT,
         turn_id INTEGER,
         inbound_seq INTEGER,
         outbox_id INTEGER,
@@ -289,6 +309,22 @@ export class Store {
         ON activities(turn_id, id);
       CREATE INDEX IF NOT EXISTS activities_inbound
         ON activities(inbound_seq, id);
+
+      CREATE TABLE IF NOT EXISTS chat_sources (
+        chat_id TEXT PRIMARY KEY,
+        source_ref TEXT NOT NULL,
+        chat_type TEXT NOT NULL,
+        name TEXT,
+        lookup_status TEXT NOT NULL DEFAULT 'PENDING',
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_lookup_at_ms INTEGER,
+        next_lookup_at_ms INTEGER NOT NULL DEFAULT 0,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS chat_sources_lookup
+        ON chat_sources(chat_type, next_lookup_at_ms);
     `);
     const inboundColumns = new Set(
       this.db.prepare('PRAGMA table_info(inbound)').all().map((row) => row.name),
@@ -327,7 +363,9 @@ export class Store {
     const activityColumns = new Set(
       this.db.prepare('PRAGMA table_info(activities)').all().map((row) => row.name),
     );
-    if (!activityColumns.has('source_ref') || !activityColumns.has('source_type')) {
+    if (!activityColumns.has('source_ref')
+      || !activityColumns.has('source_type')
+      || !activityColumns.has('source_name')) {
       this.db.exec('BEGIN IMMEDIATE');
       try {
         if (!activityColumns.has('source_ref')) {
@@ -335,6 +373,9 @@ export class Store {
         }
         if (!activityColumns.has('source_type')) {
           this.db.exec('ALTER TABLE activities ADD COLUMN source_type TEXT');
+        }
+        if (!activityColumns.has('source_name')) {
+          this.db.exec('ALTER TABLE activities ADD COLUMN source_name TEXT');
         }
         this.db.exec('COMMIT');
       } catch (error) {
@@ -382,29 +423,65 @@ export class Store {
     this.insertActivityStatement = this.db.prepare(`
       INSERT OR IGNORE INTO activities(
         event_key, kind, category, severity, priority, title, summary,
-        conv_key, source_ref, source_type, turn_id, inbound_seq, outbox_id,
+        conv_key, source_ref, source_type, source_name, turn_id, inbound_seq, outbox_id,
         status, detail_json, occurred_at_ms, recorded_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     this.updateActivitySourceStatement = this.db.prepare(`
-      UPDATE activities SET source_ref = ?, source_type = ?
+      UPDATE activities SET source_ref = ?, source_type = ?, source_name = ?
       WHERE id = ? AND source_ref IS NULL
     `);
     this.getActivitySourceByInboundStatement = this.db.prepare(`
-      SELECT chat_id, chat_type FROM inbound WHERE seq = ?
+      SELECT inbound.chat_id, inbound.chat_type, chat_sources.name AS source_name
+      FROM inbound
+      LEFT JOIN chat_sources ON chat_sources.chat_id = inbound.chat_id
+      WHERE inbound.seq = ?
     `);
     this.getActivitySourceByTurnStatement = this.db.prepare(`
-      SELECT inbound.chat_id, inbound.chat_type
-      FROM turns JOIN inbound ON inbound.seq = turns.end_seq
+      SELECT inbound.chat_id, inbound.chat_type, chat_sources.name AS source_name
+      FROM turns
+      JOIN inbound ON inbound.seq = turns.end_seq
+      LEFT JOIN chat_sources ON chat_sources.chat_id = inbound.chat_id
       WHERE turns.id = ?
     `);
     this.getActivitySourceByOutboxStatement = this.db.prepare(`
       SELECT COALESCE(outbox.target_chat_id, inbound.chat_id) AS chat_id,
-             inbound.chat_type AS chat_type
+             inbound.chat_type AS chat_type,
+             chat_sources.name AS source_name
       FROM outbox
       LEFT JOIN turns ON turns.id = outbox.turn_id
       LEFT JOIN inbound ON inbound.seq = turns.end_seq
+      LEFT JOIN chat_sources
+        ON chat_sources.chat_id = COALESCE(outbox.target_chat_id, inbound.chat_id)
       WHERE outbox.id = ?
+    `);
+    this.getChatSourceStatement = this.db.prepare(`
+      SELECT * FROM chat_sources WHERE chat_id = ?
+    `);
+    this.upsertChatSourceStatement = this.db.prepare(`
+      INSERT INTO chat_sources(
+        chat_id, source_ref, chat_type, lookup_status, failure_count,
+        next_lookup_at_ms, created_at_ms, updated_at_ms
+      ) VALUES (?, ?, ?, 'PENDING', 0, 0, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET
+        source_ref = excluded.source_ref,
+        chat_type = excluded.chat_type,
+        updated_at_ms = MAX(chat_sources.updated_at_ms, excluded.updated_at_ms)
+    `);
+    this.resolveChatSourceStatement = this.db.prepare(`
+      UPDATE chat_sources
+      SET name = ?, lookup_status = 'RESOLVED', failure_count = 0,
+          last_lookup_at_ms = ?, next_lookup_at_ms = ?, updated_at_ms = ?
+      WHERE chat_id = ?
+    `);
+    this.deferChatSourceStatement = this.db.prepare(`
+      UPDATE chat_sources
+      SET lookup_status = ?, failure_count = failure_count + 1,
+          last_lookup_at_ms = ?, next_lookup_at_ms = ?, updated_at_ms = ?
+      WHERE chat_id = ?
+    `);
+    this.updateActivitiesSourceNameStatement = this.db.prepare(`
+      UPDATE activities SET source_name = ? WHERE source_ref = ?
     `);
   }
 
@@ -420,6 +497,8 @@ export class Store {
       row = this.getActivitySourceByTurnStatement.get(activity.turnId);
     }
     if (!row?.chat_id) {
+      const chatId = chatIdFromConversationKey(activity.conversationKey);
+      const source = chatId ? this.getChatSourceStatement.get(chatId) : null;
       return {
         sourceRef: sourceRefFromConversationKey(activity.conversationKey) || null,
         sourceType: ['p2p', 'group'].includes(
@@ -427,11 +506,13 @@ export class Store {
         )
           ? (activity.sourceType || activity.chatType || activity.metadata?.chatType)
           : null,
+        sourceName: source?.name ?? null,
       };
     }
     return {
       sourceRef: opaqueRef(row.chat_id),
       sourceType: ['p2p', 'group'].includes(row.chat_type) ? row.chat_type : null,
+      sourceName: row.source_name ?? null,
     };
   }
 
@@ -453,6 +534,7 @@ export class Store {
       activity.conversationKey ?? null,
       source.sourceRef,
       source.sourceType,
+      source.sourceName,
       activity.turnId ?? null,
       activity.inboundSeq ?? null,
       activity.outboxId ?? null,
@@ -486,11 +568,111 @@ export class Store {
         updated += number(this.updateActivitySourceStatement.run(
           source.sourceRef,
           source.sourceType,
+          source.sourceName,
           row.id,
         ).changes);
       }
       return updated;
     });
+  }
+
+  rememberChatSource(chatId, chatType, now = Date.now()) {
+    if (!chatId || !['p2p', 'group'].includes(chatType)) return false;
+    const result = this.upsertChatSourceStatement.run(
+      chatId,
+      opaqueRef(chatId),
+      chatType,
+      now,
+      now,
+    );
+    return number(result.changes) > 0;
+  }
+
+  backfillChatSources() {
+    return this.transaction(() => {
+      let updated = 0;
+      const rows = this.db.prepare(`
+        SELECT chat_id, chat_type,
+               MIN(received_at_ms) AS created_at_ms,
+               MAX(received_at_ms) AS updated_at_ms
+        FROM inbound
+        WHERE chat_type IN ('p2p', 'group')
+        GROUP BY chat_id, chat_type
+      `).all();
+      for (const row of rows) {
+        updated += number(this.upsertChatSourceStatement.run(
+          row.chat_id,
+          opaqueRef(row.chat_id),
+          row.chat_type,
+          number(row.created_at_ms),
+          number(row.updated_at_ms),
+        ).changes);
+      }
+      return updated;
+    });
+  }
+
+  chatNameLookupCandidate(chatId, now = Date.now()) {
+    const row = this.getChatSourceStatement.get(chatId);
+    if (!row || row.chat_type !== 'group' || number(row.next_lookup_at_ms) > now) return null;
+    return rowToChatSource(row);
+  }
+
+  dueChatNameLookups(now = Date.now(), limit = 20) {
+    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+    return this.db.prepare(`
+      SELECT * FROM chat_sources
+      WHERE chat_type = 'group' AND next_lookup_at_ms <= ?
+      ORDER BY next_lookup_at_ms, updated_at_ms
+      LIMIT ?
+    `).all(now, safeLimit).map(rowToChatSource);
+  }
+
+  saveChatSourceName(chatId, name, nextLookupAtMs, now = Date.now()) {
+    const safeName = cleanActivityText(name, 200);
+    if (!safeName) return false;
+    return this.transaction(() => {
+      const source = this.getChatSourceStatement.get(chatId);
+      if (!source || source.chat_type !== 'group') return false;
+      const updated = this.resolveChatSourceStatement.run(
+        safeName,
+        now,
+        nextLookupAtMs,
+        now,
+        chatId,
+      );
+      if (number(updated.changes) === 0) return false;
+      this.updateActivitiesSourceNameStatement.run(safeName, source.source_ref);
+      return true;
+    });
+  }
+
+  deferChatSourceName(chatId, status, nextLookupAtMs, now = Date.now()) {
+    const safeStatus = status === 'EMPTY' ? 'EMPTY' : 'RETRY';
+    return number(this.deferChatSourceStatement.run(
+      safeStatus,
+      now,
+      nextLookupAtMs,
+      now,
+      chatId,
+    ).changes) > 0;
+  }
+
+  backfillActivitySourceNames() {
+    return number(this.db.prepare(`
+      UPDATE activities
+      SET source_name = (
+        SELECT chat_sources.name
+        FROM chat_sources
+        WHERE chat_sources.source_ref = activities.source_ref
+      )
+      WHERE source_name IS NULL
+        AND EXISTS (
+          SELECT 1 FROM chat_sources
+          WHERE chat_sources.source_ref = activities.source_ref
+            AND chat_sources.name IS NOT NULL
+        )
+    `).run().changes);
   }
 
   closeRunningSubscriberActivities(status = 'STOPPED') {
@@ -741,6 +923,7 @@ export class Store {
   ingest(event, filterReason = null, now = Date.now(), queueLimits = null) {
     return this.transaction(() => {
       this.insertConversation.run(event.conversationKey, now, now);
+      this.rememberChatSource(event.chatId, event.chatType, now);
       let effectiveFilterReason = filterReason;
       if (!effectiveFilterReason && queueLimits) {
         const total = number(this.db.prepare(`

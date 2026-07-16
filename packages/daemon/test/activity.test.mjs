@@ -240,6 +240,37 @@ describe('activity store', { concurrency: false }, () => {
     );
   });
 
+  it('persists a resolved group name on old and new activity without exposing its chat id', () => {
+    const now = 1_700_000_175_000;
+    const chatId = 'oc-private-source-name-sentinel';
+    const group = event('named-group', 'hello from the group', {
+      chatId,
+      conversationKey: `profile:tenant:${chatId}:main`,
+    });
+    const result = store.ingest(group, null, now);
+    assert.equal(result.inserted, true);
+    assert.equal(store.listActivities({ limit: 10 }).activities[0].sourceName, null);
+
+    assert.equal(store.saveChatSourceName(chatId, '日常协作群', now + 86_400_000, now + 1), true);
+    store.recordActivity({
+      eventKey: 'named-group:after-resolution',
+      kind: 'system.maintenance',
+      conversationKey: group.conversationKey,
+      sourceType: 'group',
+      summary: 'after name resolution',
+      occurredAtMs: now + 2,
+    });
+    let activities = store.listActivities({ limit: 10 }).activities;
+    assert.equal(activities.every((activity) => activity.sourceName === '日常协作群'), true);
+    assert.equal(JSON.stringify(activities).includes(chatId), false);
+
+    store.close();
+    store = new Store(databasePath, quietLogger);
+    activities = store.listActivities({ limit: 10 }).activities;
+    assert.equal(activities.every((activity) => activity.sourceName === '日常协作群'), true);
+    assert.equal(JSON.stringify(activities).includes(chatId), false);
+  });
+
   it('closes stale subscriber lifecycle rows so only the current listener is running', () => {
     for (let index = 1; index <= 3; index += 1) {
       store.closeRunningSubscriberActivities();

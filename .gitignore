@@ -5,3 +5,4 @@ data/
 agent/.tmp/
 coverage/
 node_modules/
+.loopy/

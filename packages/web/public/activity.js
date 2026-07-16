@@ -112,6 +112,7 @@ function activity(raw) {
     summary: String(raw.summary || ''),
     sourceRef: raw.sourceRef == null ? '' : String(raw.sourceRef),
     sourceType: raw.sourceType == null ? '' : String(raw.sourceType).toLowerCase(),
+    sourceName: raw.sourceName == null ? '' : String(raw.sourceName),
     conversationRef: String(raw.conversationRef || ''),
     turnId: raw.turnId == null ? null : String(raw.turnId),
     inboundSeq: raw.inboundSeq == null ? null : String(raw.inboundSeq),
@@ -165,6 +166,7 @@ function buildStories() {
     const status = lastValue(events, (row) => KNOWN_STATUS.has(row.status) ? row.status : '');
     const rawSourceRef = lastValue(events, (row) => row.sourceRef);
     const sourceType = lastValue(events, (row) => row.sourceType || row.metadata.chatType);
+    const sourceName = lastValue(events, (row) => row.sourceName);
     const isSystem = !rawSourceRef || rawSourceRef === 'system' || sourceType === 'system';
     const sourceRef = isSystem ? '' : rawSourceRef;
     const failed = events.some(isFailure);
@@ -194,6 +196,7 @@ function buildStories() {
       status,
       sourceRef,
       sourceType,
+      sourceName,
       sourceKey: sourceRef ? `chat:${sourceRef}` : 'system',
       isSystem,
       failed,
@@ -275,6 +278,7 @@ function technicalData(story) {
     at: new Date(row.createdAtMs).toISOString(),
     sourceRef: row.sourceRef || undefined,
     sourceType: row.sourceType || undefined,
+    sourceName: row.sourceName || undefined,
     conversationRef: row.conversationRef || undefined,
     turnId: row.turnId,
     inboundSeq: row.inboundSeq,
@@ -290,44 +294,50 @@ function storyCard(story) {
   details.dataset.tone = story.tone;
 
   const summary = el('summary');
-  const heading = el('div', 'story-heading-row');
-  const titleWrap = el('div');
-  const titleLine = el('div', 'story-title-line');
-  titleLine.append(el('span', 'story-title', story.latest.title || kindLabels[story.latest.kind] || story.latest.kind));
-  const label = storyLabel(story);
-  if (label) titleLine.append(el('span', 'story-chip', label));
-  titleWrap.append(titleLine);
+  const messages = el('div', 'message-stack');
+  const input = storyInput(story);
+  const output = storyOutput(story);
+  const addMessage = (direction, value) => {
+    if (!value) return;
+    const line = el('div', `message-row ${direction}`);
+    line.dataset.direction = direction;
+    const bubbleClass = direction === 'outgoing'
+      ? 'message-bubble agent-message'
+      : direction === 'note'
+        ? 'message-bubble note-message'
+        : 'message-bubble';
+    line.append(el('div', bubbleClass, displayText(value)));
+    messages.append(line);
+  };
+  addMessage('incoming', input);
+  addMessage('outgoing', output);
+  if (!input && !output) addMessage('note', story.latest.summary);
+  if (messages.childElementCount) summary.append(messages);
 
-  const notes = [];
-  const mode = storyMeta(story, 'deliveryMode');
-  const reason = storyMeta(story, 'reasonCode');
-  if (mode) notes.push({ chat: '直接发送', reply: '普通引用', thread: 'Thread' }[mode] || mode);
-  if (reason) notes.push(reasonLabels[reason] || reason);
-  if (notes.length) titleWrap.append(el('div', 'story-subtitle', notes.join(' · ')));
-
+  const meta = el('div', 'turn-meta');
   const time = el('time', 'story-time', clock(story.at));
   time.dateTime = new Date(story.at).toISOString();
   time.title = exact(story.at);
-  heading.append(titleWrap, time);
-  summary.append(heading);
-
-  const preview = el('div', 'story-preview');
-  const input = storyInput(story);
-  const output = storyOutput(story);
-  const addPreview = (direction, mark, value) => {
-    if (!value) return;
-    const line = el('div', direction === 'output' ? 'preview-line agent-message' : 'preview-line');
-    line.dataset.direction = direction;
-    line.append(el('span', 'direction', mark), el('span', 'preview-text', displayText(value)));
-    preview.append(line);
-  };
-  addPreview('input', '“', input);
-  addPreview('output', '→', output);
-  if (!input && !output) addPreview('note', '·', story.latest.summary);
-  if (preview.childElementCount) summary.append(preview);
+  meta.append(time);
+  const label = storyLabel(story);
+  if (label) meta.append(el('span', 'turn-status', label));
+  meta.append(el('span', 'turn-disclosure', '详情'));
+  summary.append(meta);
   details.append(summary);
 
   const body = el('div', 'story-body');
+  const facts = el('dl', 'turn-facts');
+  const addFact = (labelText, value) => {
+    if (!value) return;
+    facts.append(el('dt', '', labelText), el('dd', '', value));
+  };
+  const mode = storyMeta(story, 'deliveryMode');
+  const reason = storyMeta(story, 'reasonCode');
+  addFact('记录', story.latest.title || kindLabels[story.latest.kind] || story.latest.kind);
+  addFact('判断', reasonLabels[reason] || reason);
+  addFact('发送', { chat: '直接发送', reply: '普通引用', thread: 'Thread' }[mode] || mode);
+  if (facts.childElementCount) body.append(facts);
+
   const stages = el('ol', 'stage-list');
   for (const row of story.events) {
     const stage = el('li', 'stage');
@@ -361,6 +371,7 @@ function matches(story) {
   if (state.filter === 'system' && !story.isSystem) return false;
   if (!state.query) return true;
   const searchable = JSON.stringify({
+    sourceName: story.sourceName,
     sourceRef: story.sourceRef,
     sourceType: story.sourceType,
     events: story.events,
@@ -376,6 +387,7 @@ function groupSources(stories) {
         key: story.sourceKey,
         ref: story.sourceRef,
         type: story.sourceType,
+        name: story.sourceName,
         isSystem: story.isSystem,
         stories: [],
         at: story.at,
@@ -385,6 +397,7 @@ function groupSources(stories) {
     group.stories.push(story);
     group.at = Math.max(group.at, story.at);
     if (!group.type && story.sourceType) group.type = story.sourceType;
+    if (!group.name && story.sourceName) group.name = story.sourceName;
   }
   return [...grouped.values()].sort((a, b) => {
     if (a.isSystem !== b.isSystem) return a.isSystem ? 1 : -1;
@@ -392,16 +405,25 @@ function groupSources(stories) {
   });
 }
 
-function shortRef(value) {
-  if (!value) return '';
-  return value.length > 10 ? `${value.slice(0, 8)}…` : value;
+function sourceDisplayName(group) {
+  if (group.name) return group.name;
+  if (group.isSystem) return '系统';
+  if (group.type === 'p2p' || group.type === 'private') return '私聊';
+  if (group.type === 'group' || group.type === 'group_chat') return '未命名群聊';
+  return '聊天';
 }
 
-function sourceName(group) {
-  if (group.isSystem) return '系统';
+function sourceKind(group) {
+  if (group.isSystem) return '系统记录';
   if (group.type === 'p2p' || group.type === 'private') return '私聊';
   if (group.type === 'group' || group.type === 'group_chat') return '群聊';
   return '聊天';
+}
+
+function sourceAvatar(group) {
+  if (group.isSystem) return '系';
+  if (group.type === 'p2p' || group.type === 'private') return '私';
+  return '群';
 }
 
 function sourceSection(group, options = {}) {
@@ -409,13 +431,17 @@ function sourceSection(group, options = {}) {
     group.isSystem ? 'source-group system-source' : 'source-group');
   section.dataset.sourceKey = group.key;
   const heading = el(group.isSystem ? 'summary' : 'header', 'source-heading');
-  const title = el('h2', 'source-title', sourceName(group));
-  if (group.ref) {
-    const ref = el('span', 'source-ref', shortRef(group.ref));
-    ref.title = group.ref;
-    title.append(ref);
-  }
-  heading.append(title, el('span', 'section-meta', `${group.stories.length} 条`));
+  const identity = el('div', 'source-identity');
+  const copy = el('div', 'source-copy');
+  copy.append(
+    el('h2', 'source-title', sourceDisplayName(group)),
+    el('div', 'source-subtitle', `${sourceKind(group)} · ${group.stories.length} 条`),
+  );
+  identity.append(el('span', 'source-avatar', sourceAvatar(group)), copy);
+  const time = el('time', 'source-time', clock(group.at));
+  time.dateTime = new Date(group.at).toISOString();
+  time.title = exact(group.at);
+  heading.append(identity, time);
   section.append(heading);
   if (group.isSystem) {
     section.open = options.openSources?.has(group.key)

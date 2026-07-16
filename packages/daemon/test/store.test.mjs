@@ -55,6 +55,68 @@ describe('Store', () => {
     assert.equal(store.ingest(event('1')).inserted, false);
   });
 
+  it('persists group chat names and applies retry timing without scheduling p2p lookups', () => {
+    const now = 1_700_000_000_000;
+    const group = event('named-source', 'group message', {
+      chatId: 'oc-named-source',
+      conversationKey: 'default:tenant:oc-named-source:main',
+    });
+    const direct = event('direct-source', 'direct message', {
+      chatId: 'oc-direct-source',
+      chatType: 'p2p',
+      conversationKey: 'default:tenant:oc-direct-source:main',
+    });
+    store.ingest(group, null, now);
+    store.ingest(direct, null, now + 1);
+
+    assert.deepEqual(
+      store.dueChatNameLookups(now + 2).map((source) => source.chatId),
+      [group.chatId],
+    );
+    assert.equal(store.deferChatSourceName(group.chatId, 'RETRY', now + 5_000, now + 2), true);
+    assert.equal(store.chatNameLookupCandidate(group.chatId, now + 4_999), null);
+    assert.equal(store.chatNameLookupCandidate(group.chatId, now + 5_000).failureCount, 1);
+    assert.equal(
+      store.saveChatSourceName(group.chatId, 'Backend 日常群', now + 86_400_000, now + 5_001),
+      true,
+    );
+
+    const databasePath = path.join(directory, 'state.sqlite3');
+    store.close();
+    store = new Store(databasePath, quietLogger);
+    const persisted = store.db.prepare(`
+      SELECT name, lookup_status, failure_count FROM chat_sources WHERE chat_id = ?
+    `).get(group.chatId);
+    assert.deepEqual({ ...persisted }, {
+      name: 'Backend 日常群',
+      lookup_status: 'RESOLVED',
+      failure_count: 0,
+    });
+  });
+
+  it('migrates existing group inbound rows into due chat sources', () => {
+    const legacyGroup = event('legacy-source', 'legacy group message', {
+      chatId: 'oc-legacy-source',
+      conversationKey: 'default:tenant:oc-legacy-source:main',
+    });
+    store.ingest(legacyGroup, null, 1_600_000_000_000);
+    const databasePath = path.join(directory, 'state.sqlite3');
+    store.close();
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec('DROP TABLE chat_sources');
+    legacy.exec('ALTER TABLE activities DROP COLUMN source_name');
+    legacy.close();
+
+    store = new Store(databasePath, quietLogger);
+    const source = store.chatNameLookupCandidate(legacyGroup.chatId, Date.now());
+    assert.ok(source);
+    assert.equal(source.chatType, 'group');
+    assert.equal(source.lookupStatus, 'PENDING');
+    assert.equal(source.name, null);
+    assert.equal(JSON.stringify(store.listActivities({ limit: 10 })).includes(legacyGroup.chatId), false);
+  });
+
   it('does not persist raw event envelopes and blanks ignored content', () => {
     const accepted = event('raw', 'visible', { raw: { token: 'secret-sentinel' } });
     store.ingest(accepted);
