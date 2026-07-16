@@ -175,14 +175,10 @@ export class CodexAgent {
 
     this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
     this.developerInstructionsText = this.developerInstructions(config.profile);
-    // One global thread is shared across every chat; policyHash only detects when the
-    // instructions/model/workspace change so a stored thread is not resumed under a
-    // different policy.
-    this.policyHash = createHash('sha256')
-      .update(this.developerInstructionsText).update('\0')
-      .update(config.codexModel || 'default-model').update('\0')
-      .update(config.workspace).update('\0')
-      .update('steer-v1').digest('hex');
+    // Model/effort start from env config but can be switched at runtime via the
+    // /model and /effort slash commands; overrides persist in the store's meta table.
+    this.model = store.getSetting?.('codex_model') ?? config.codexModel ?? '';
+    this.effort = store.getSetting?.('codex_effort') ?? config.codexEffort;
 
     this.child = null;
     this.threadId = null;
@@ -206,6 +202,17 @@ export class CodexAgent {
 
   developerInstructions(profile) {
     return `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${profile}`;
+  }
+
+  // One global thread is shared across every chat; policyHash only detects when the
+  // instructions/model/workspace change so a stored thread is not resumed under a
+  // different policy. Computed on demand because /model changes it at runtime.
+  get policyHash() {
+    return createHash('sha256')
+      .update(this.developerInstructionsText).update('\0')
+      .update(this.model || 'default-model').update('\0')
+      .update(this.config.workspace).update('\0')
+      .update('steer-v1').digest('hex');
   }
 
   get state() {
@@ -389,6 +396,10 @@ export class CodexAgent {
   }
 
   _handleNotification(method, params) {
+    // After a session rotate, the abandoned thread's dying turn may still emit
+    // notifications; never let them corrupt the new thread's turn state.
+    const threadId = params.threadId ?? params.turn?.threadId ?? null;
+    if (threadId && this.threadId && threadId !== this.threadId) return;
     switch (method) {
       case 'turn/started':
         this._onTurnStarted(params.turn?.id ?? params.turnId ?? null);
@@ -554,8 +565,8 @@ export class CodexAgent {
       cwd: this.config.workspace,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { model_reasoning_effort: this.config.codexEffort },
-      ...(this.config.codexModel ? { model: this.config.codexModel } : {}),
+      config: { model_reasoning_effort: this.effort },
+      ...(this.model ? { model: this.model } : {}),
     };
     if (this.storedThreadId) {
       try {
@@ -571,6 +582,81 @@ export class CodexAgent {
     this.threadId = result?.thread?.id;
     if (!this.threadId) throw new Error('thread/start returned no thread id');
     this.needsHistoryPrefix = true;
+  }
+
+  // Rebuild the codex thread without restarting the child (slash commands).
+  // resume=true re-opens the current thread under the current model/effort params
+  // (context kept, fresh-start fallback inside _startOrResumeThread); resume=false
+  // is /new: an empty thread with no history prefix. Returns the new thread id, or
+  // null while disconnected (the stored policy/settings apply on reconnect).
+  async rotateSession({ resume = false } = {}) {
+    if (!resume) {
+      this.storedThreadId = null;
+      this.store.clearGlobalSession?.();
+    }
+    if (!this.child || !this.threadId) return null;
+    const previousThreadId = this.threadId;
+    if (this.activeTurnId) {
+      try {
+        await this._request('turn/interrupt', {
+          threadId: previousThreadId,
+          turnId: this.activeTurnId,
+        });
+      } catch { /* best effort; the thread is being replaced anyway */ }
+    }
+    // ponytail: a turn/start still in flight (startingTurn) cannot be interrupted by
+    // id yet; its turn runs out on the abandoned thread. Window is one RPC ack.
+    this.activeTurnId = null;
+    this.startingTurn = false;
+    this.startingItems = [];
+    this.activeInboundSeqs = [];
+    this.storedThreadId = resume ? previousThreadId : null;
+    this.threadId = null; // deliver() queues while the new thread comes up
+    try {
+      await this._startOrResumeThread();
+    } catch (error) {
+      // No usable thread: recycle the child so the reconnect loop rebuilds a clean
+      // connection instead of stranding the queue behind a null threadId.
+      this.logger.warn('codex_rotate_failed', { error: safe(error) });
+      if (this.child) terminateProcessTree(this.child, 'SIGKILL');
+      throw error;
+    }
+    if (!resume) this.needsHistoryPrefix = false; // /new means a clean slate
+    this.store.setGlobalSession(this.threadId, this.policyHash);
+    this._recordActivity('agent.session_rotated', {
+      summary: resume ? '会话参数已更新' : '已开启新会话',
+      metadata: { resume },
+    });
+    this._drain();
+    return this.threadId;
+  }
+
+  // /model and /effort persist only after the rotate succeeds, so a rejected value
+  // never sticks; on failure the previous value is restored for the reconnect loop.
+  async setModel(model) {
+    const previous = this.model;
+    this.model = model;
+    try {
+      const threadId = await this.rotateSession({ resume: true });
+      this.store.setSetting?.('codex_model', model);
+      return threadId;
+    } catch (error) {
+      this.model = previous;
+      throw error;
+    }
+  }
+
+  async setEffort(effort) {
+    const previous = this.effort;
+    this.effort = effort;
+    try {
+      const threadId = await this.rotateSession({ resume: true });
+      this.store.setSetting?.('codex_effort', effort);
+      return threadId;
+    } catch (error) {
+      this.effort = previous;
+      throw error;
+    }
   }
 
   _handleExit(child, code, signal) {

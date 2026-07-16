@@ -413,6 +413,17 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.deepEqual(completed.metadata.inboundSeqs, [81]);
   });
 
+  it('ignores notifications carrying a stale thread id after a rotate', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    agent.deliver('a');
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-old', threadId: 'th-0' } } });
+    assert.equal(agent.activeTurnId, null);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-live', threadId: 'th-1' } } });
+    assert.equal(agent.activeTurnId, 't-live');
+  });
+
   it('records a Lark delivery tool as the single outgoing message and resolves its inbound source', async () => {
     const activities = [];
     const store = makeStore();
@@ -453,5 +464,120 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(delivery.metadata.deliveryMode, 'thread');
     assert.equal(delivery.metadata.toolLabel, '飞书回复');
     assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
+  });
+});
+
+describe('CodexAgent session rotation (slash commands)', () => {
+  it('/new interrupts the active turn, starts an empty thread, and skips the history prefix', async () => {
+    const store = makeStore({
+      history: [{
+        atMs: Date.UTC(2026, 0, 1), direction: 'inbound', actor: 'ou_past1234abcd',
+        chatId: 'oc_past1234abcd', threadId: null, text: 'earlier question',
+      }],
+    });
+    let cleared = false;
+    store.clearGlobalSession = () => { cleared = true; };
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('a');
+    child.feed({ method: 'turn/started', params: { turn: { id: 't1' } } });
+
+    const rotating = agent.rotateSession({ resume: false });
+    await flush();
+    const interrupt = child.ofMethod('turn/interrupt').at(-1);
+    assert.equal(interrupt.params.threadId, 'th-1');
+    assert.equal(interrupt.params.turnId, 't1');
+    child.feed({ id: interrupt.id, result: {} });
+    await flush();
+    const start = child.ofMethod('thread/start').at(-1);
+    child.feed({ id: start.id, result: { thread: { id: 'th-2' } } });
+    assert.equal(await rotating, 'th-2');
+    assert.equal(agent.threadId, 'th-2');
+    assert.equal(cleared, true);
+    assert.equal(store.getGlobalSession().sessionId, 'th-2');
+
+    agent.deliver('after-new');
+    assert.equal(child.ofMethod('turn/start').at(-1).params.input[0].text, 'after-new');
+  });
+
+  it('queues messages arriving mid-rotate and delivers them to the new thread', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    const rotating = agent.rotateSession({ resume: false });
+    await flush();
+    agent.deliver('during-rotate');
+    const start = child.ofMethod('thread/start').at(-1);
+    child.feed({ id: start.id, result: { thread: { id: 'th-2' } } });
+    await rotating;
+    const turn = child.ofMethod('turn/start').at(-1);
+    assert.equal(turn.params.threadId, 'th-2');
+    assert.equal(turn.params.input[0].text, 'during-rotate');
+  });
+
+  it('/model re-opens the same thread under new params and persists only on success', async () => {
+    const store = makeStore();
+    const settings = {};
+    store.setSetting = (key, value) => { settings[key] = value; };
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    const oldHash = agent.policyHash;
+
+    const switching = agent.setModel('gpt-test');
+    await flush();
+    const resume = child.ofMethod('thread/resume').at(-1);
+    assert.equal(resume.params.threadId, 'th-1');
+    assert.equal(resume.params.model, 'gpt-test');
+    child.feed({ id: resume.id, result: { thread: { id: 'th-1' } } });
+    assert.equal(await switching, 'th-1');
+    assert.equal(settings.codex_model, 'gpt-test');
+    assert.notEqual(agent.policyHash, oldHash);
+    assert.equal(store.getGlobalSession().policyHash, agent.policyHash);
+  });
+
+  it('reverts the model and does not persist when the rotate fails', async () => {
+    const store = makeStore();
+    const settings = {};
+    store.setSetting = (key, value) => { settings[key] = value; };
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    child.exitCode = 0; // keep terminateProcessTree from signalling a real pgid
+
+    const switching = agent.setModel('gpt-broken');
+    await flush();
+    const resume = child.ofMethod('thread/resume').at(-1);
+    child.feed({ id: resume.id, error: { message: 'no such thread' } });
+    await flush();
+    const start = child.ofMethod('thread/start').at(-1);
+    child.feed({ id: start.id, error: { message: 'bad model' } });
+    await assert.rejects(switching, /bad model/);
+    assert.equal(agent.model, '');
+    assert.equal(settings.codex_model, undefined);
+  });
+
+  it('/effort while disconnected persists the level for the next handshake', async () => {
+    const store = makeStore();
+    const settings = {};
+    store.setSetting = (key, value) => { settings[key] = value; };
+    store.getSetting = (key) => settings[key] ?? null;
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    child.simulateExit(1);
+
+    assert.equal(await agent.setEffort('xhigh'), null);
+    assert.equal(settings.codex_effort, 'xhigh');
+
+    await waitFor(() => children.length === 2);
+    const reconnect = children[1];
+    await flush();
+    reconnect.feed({ id: 1, result: {} });
+    await flush();
+    const resume = reconnect.ofMethod('thread/resume').at(-1);
+    assert.equal(resume.params.config.model_reasoning_effort, 'xhigh');
+    reconnect.feed({ id: 2, result: { thread: { id: 'th-1' } } });
+    await flush();
+    agent.stopping = true;
   });
 });

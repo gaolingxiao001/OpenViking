@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { terminateProcessTree } from './process-utils.mjs';
 
 function findChatName(value, depth = 0) {
@@ -130,6 +131,32 @@ export class LarkClient {
 
   get subscriptionRunning() {
     return Boolean(this.subscriber && this.subscriber.exitCode === null);
+  }
+
+  // Direct quote-reply from the daemon itself (slash-command responses). Codex
+  // replies go through the MCP tool server instead; this path never carries
+  // model output.
+  async replyMessage(messageId, text) {
+    if (this.config.dryRun) return { sent: false, dryRun: true };
+    const result = await this.registry.run(this.config.larkCliBin, [
+      '--profile', this.profile,
+      'im', '+messages-reply', '--as', 'bot',
+      '--message-id', messageId,
+      '--text', text,
+      '--idempotency-key', randomUUID(),
+      '--format', 'json',
+    ], {
+      cwd: this.config.projectDir,
+      timeoutMs: this.config.sendTimeoutMs,
+    });
+    if (result.timedOut) throw new Error(`lark-cli reply timed out after ${this.config.sendTimeoutMs}ms`);
+    let parsed = null;
+    try { parsed = JSON.parse(result.stdout); } catch {}
+    if (result.code !== 0 || parsed?.ok === false) {
+      const detail = parsed?.error?.message || result.stderr.trim() || `exit ${result.code}`;
+      throw new Error(`lark-cli reply failed: ${detail.slice(-2000)}`);
+    }
+    return { sent: true };
   }
 
   async getChatName(chatId) {

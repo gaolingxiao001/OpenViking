@@ -5,6 +5,7 @@ import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
 import { ProcessRegistry } from './process-utils.mjs';
 import { CodexAgent, formatInboundLine } from './codex.mjs';
+import { executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
@@ -100,6 +101,7 @@ export class LarkDaemon {
         summary: fields.summary,
         status: fields.status,
         conversationKey: fields.conversationKey,
+        inboundSeq: fields.inboundSeq,
         metadata: fields.metadata,
         occurredAtMs: fields.occurredAtMs,
       });
@@ -212,9 +214,12 @@ export class LarkDaemon {
       return;
     }
     const filterReason = deterministicFilter(event, this.config);
+    // '/'-prefixed text is reserved for local slash commands: handled by the daemon
+    // itself, recorded as filtered so it never enters codex delivery or history.
+    const command = filterReason ? null : parseCommand(event.content);
     let result;
     try {
-      result = this.store.ingest(event, filterReason, Date.now());
+      result = this.store.ingest(event, command ? 'slash_command' : filterReason, Date.now());
     } catch (error) {
       this.logger.error('event_persist_failed', { error: safeError(error) });
       this.recordSystemActivity('system.persist_failed', {
@@ -234,6 +239,15 @@ export class LarkDaemon {
       return;
     }
     this.scheduleChatNameLookup(event.chatId);
+    if (command) {
+      this.logger.info('event_slash_command', {
+        messageRef: opaqueRef(event.messageId),
+        chatRef: opaqueRef(event.chatId),
+        command: command.name ?? 'unknown',
+      });
+      void this.handleSlashCommand(command, event, result.inbound);
+      return;
+    }
     if (result.filterReason) {
       this.logger.info('event_rule_ignored', {
         messageRef: opaqueRef(event.messageId),
@@ -249,6 +263,39 @@ export class LarkDaemon {
       chatType: event.chatType,
     });
     this.codex.deliver(formatInboundLine(event), result.inbound.seq);
+  }
+
+  // Slash commands never touch the model: execute deterministically against the
+  // codex agent's connection state, then reply straight back through lark-cli.
+  async handleSlashCommand(command, event, inbound) {
+    const label = command.name ? `/${command.name}` : String(event.content).trim().split(/\s+/)[0];
+    let outcome;
+    try {
+      outcome = await executeCommand(command, this.codex);
+    } catch (error) {
+      outcome = { ok: false, text: `命令执行失败：${safeError(error)}` };
+    }
+    this.recordSystemActivity('command.executed', {
+      summary: `${label} → ${outcome.text.split('\n')[0]}`,
+      status: outcome.ok ? 'OK' : 'FAILED',
+      conversationKey: event.conversationKey,
+      inboundSeq: inbound?.seq,
+      metadata: { chatType: event.chatType },
+    });
+    try {
+      await this.lark.replyMessage(event.messageId, outcome.text);
+    } catch (error) {
+      this.logger.warn('command_reply_failed', {
+        messageRef: opaqueRef(event.messageId),
+        error: safeChatLookupError(error),
+      });
+      this.recordSystemActivity('command.reply_failed', {
+        summary: safeChatLookupError(error),
+        status: 'FAILED',
+        conversationKey: event.conversationKey,
+        inboundSeq: inbound?.seq,
+      });
+    }
   }
 
   runMaintenance() {

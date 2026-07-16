@@ -965,6 +965,15 @@ export class Store {
     this.deleteGlobalSessionStatement.run();
   }
 
+  // Runtime overrides (e.g. /model, /effort) in the same meta KV table.
+  getSetting(key) {
+    return this.getMetaStatement.get(`setting:${key}`)?.value ?? null;
+  }
+
+  setSetting(key, value) {
+    this.setMetaStatement.run(`setting:${key}`, String(value));
+  }
+
   // Cross-chat history injected into a fresh thread's first turn. Only inbound DONE
   // rows exist now (codex sends its own replies via lark-cli, and its own bot messages
   // are filtered out on the way in), so history is user-message context only.
