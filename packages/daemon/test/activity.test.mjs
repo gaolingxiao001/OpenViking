@@ -154,6 +154,8 @@ describe('activity store', { concurrency: false }, () => {
     }
     for (const activity of feed) {
       assert.match(activity.conversationRef, /^[a-f0-9]{12}$/);
+      assert.match(activity.sourceRef, /^[a-f0-9]{12}$/);
+      assert.equal(activity.sourceType, 'group');
       for (const privateKey of [
         'conv_key',
         'conversationKey',
@@ -184,6 +186,76 @@ describe('activity store', { concurrency: false }, () => {
     const privacy = store.listActivities({ limit: 1 }).activities[0];
     assert.deepEqual(privacy.metadata, { reasonCode: 'direct_request' });
     assert.equal(JSON.stringify(privacy).includes('uuid-'), false);
+  });
+
+  it('groups main chat and thread activity under a stable private source reference', () => {
+    const now = 1_700_000_150_000;
+    const main = event('source-main', 'main message', {
+      chatId: 'oc-shared-private-source',
+      chatType: 'p2p',
+      conversationKey: 'profile:tenant:oc-shared-private-source:main',
+    });
+    const thread = event('source-thread', 'thread message', {
+      chatId: 'oc-shared-private-source',
+      chatType: 'p2p',
+      conversationKey: 'profile:tenant:oc-shared-private-source:thread:omt-private-thread',
+      threadId: 'omt-private-thread',
+    });
+    const other = event('source-other', 'other message', {
+      chatId: 'oc-other-private-source',
+      conversationKey: 'profile:tenant:oc-other-private-source:main',
+    });
+    const mainResult = store.ingest(main, 'ambient', now);
+    const threadResult = store.ingest(thread, 'ambient', now + 1);
+    const otherResult = store.ingest(other, 'ambient', now + 2);
+
+    const rows = store.listActivities({ limit: 20 }).activities;
+    const byInbound = (seq, activityRows = rows) => (
+      activityRows.find((row) => row.inboundSeq === seq)
+    );
+    const mainActivity = byInbound(mainResult.inbound.seq);
+    const threadActivity = byInbound(threadResult.inbound.seq);
+    const otherActivity = byInbound(otherResult.inbound.seq);
+    assert.ok(mainActivity && threadActivity && otherActivity);
+    assert.equal(mainActivity.sourceRef, threadActivity.sourceRef);
+    assert.notEqual(mainActivity.conversationRef, threadActivity.conversationRef);
+    assert.notEqual(mainActivity.sourceRef, otherActivity.sourceRef);
+    assert.equal(mainActivity.sourceType, 'p2p');
+    assert.equal(otherActivity.sourceType, 'group');
+    assert.match(mainActivity.sourceRef, /^[a-f0-9]{12}$/);
+    assert.equal(JSON.stringify(rows).includes('oc-shared-private-source'), false);
+
+    const sourceRef = mainActivity.sourceRef;
+    const removed = store.prune(1, now + 10);
+    assert.ok(removed.inbound > 0);
+    assert.equal(
+      byInbound(mainResult.inbound.seq, store.listActivities({ limit: 20 }).activities).sourceRef,
+      sourceRef,
+    );
+    store.close();
+    store = new Store(databasePath, quietLogger);
+    assert.equal(
+      byInbound(mainResult.inbound.seq, store.listActivities({ limit: 20 }).activities).sourceRef,
+      sourceRef,
+    );
+  });
+
+  it('closes stale subscriber lifecycle rows so only the current listener is running', () => {
+    for (let index = 1; index <= 3; index += 1) {
+      store.closeRunningSubscriberActivities();
+      store.recordActivity({
+        eventKey: `run:${index}:subscriber-started`,
+        kind: 'system.subscriber_started',
+        status: 'RUNNING',
+        summary: '正在接收飞书消息事件',
+        occurredAtMs: index,
+      }, index);
+    }
+    const rows = store.listActivities({ limit: 10 }).activities
+      .filter((row) => row.kind === 'system.subscriber_started');
+    assert.equal(rows.filter((row) => row.status === 'RUNNING').length, 1);
+    assert.equal(rows.filter((row) => row.status === 'STOPPED').length, 2);
+    assert.equal(rows.every((row) => row.sourceRef === 'system'), true);
   });
 
   it('assigns attention priority and durable status to ignored, silent, failed, retry, and uncertain paths', () => {
@@ -347,7 +419,7 @@ describe('activity store', { concurrency: false }, () => {
   });
 });
 
-describe('activity HTTP console', { concurrency: false }, () => {
+describe('daemon activity API', { concurrency: false }, () => {
   let directory;
   let daemon;
   let port;
@@ -381,18 +453,14 @@ describe('activity HTTP console', { concurrency: false }, () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it('serves the console, assets, and private activity API with strict response headers', async () => {
+  it('serves only the private activity API and health endpoints with strict response headers', async () => {
     const page = await request(port, '/');
-    assert.equal(page.status, 200);
-    assert.match(page.headers['content-type'], /^text\/html/);
-    assert.match(page.body, /Zayn/);
+    assert.equal(page.status, 404);
 
     const css = await request(port, '/activity.css');
-    assert.equal(css.status, 200);
-    assert.match(css.headers['content-type'], /^text\/css/);
+    assert.equal(css.status, 404);
     const javascript = await request(port, '/activity.js');
-    assert.equal(javascript.status, 200);
-    assert.match(javascript.headers['content-type'], /^text\/javascript/);
+    assert.equal(javascript.status, 404);
 
     const api = await request(port, '/api/activity?limit=1');
     assert.equal(api.status, 200);

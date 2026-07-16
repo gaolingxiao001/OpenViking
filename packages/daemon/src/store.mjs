@@ -79,6 +79,16 @@ function maskPublicIdentifiers(value) {
     .replace(/\b(?:om|oc|ou|on|omt|cli)_[A-Za-z0-9_-]{6,}\b/g, '[LARK_ID]');
 }
 
+function chatIdFromConversationKey(value) {
+  if (!value) return null;
+  const match = String(value).match(/:([^:]+):(?:main|thread:[^:]+)$/);
+  return match?.[1] || null;
+}
+
+function sourceRefFromConversationKey(value) {
+  return opaqueRef(chatIdFromConversationKey(value)) || opaqueRef(value);
+}
+
 const PUBLIC_METADATA_KEYS = new Set([
   'action', 'attempt', 'backfilled', 'batchSize', 'bytes', 'chatType',
   'code', 'codexVersion', 'deliveryMode', 'dryRun', 'eventMode', 'exitCode',
@@ -110,6 +120,8 @@ function publicMetadata(value) {
 }
 
 function rowToPublicActivity(row) {
+  const sourceRef = row.source_ref || (row.conv_key ? sourceRefFromConversationKey(row.conv_key) : 'system');
+  const sourceType = row.source_type || (row.conv_key ? null : 'system');
   return {
     id: number(row.id),
     kind: row.kind,
@@ -119,6 +131,8 @@ function rowToPublicActivity(row) {
     title: maskPublicIdentifiers(row.title),
     summary: maskPublicIdentifiers(row.summary),
     conversationRef: opaqueRef(row.conv_key),
+    sourceRef,
+    sourceType,
     turnId: row.turn_id === null ? null : number(row.turn_id),
     inboundSeq: row.inbound_seq === null ? null : number(row.inbound_seq),
     outboxId: row.outbox_id === null ? null : number(row.outbox_id),
@@ -141,6 +155,7 @@ export class Store {
     this.migrate();
     this.prepare();
     this.backfillActivities();
+    this.backfillActivitySources();
   }
 
   migrate() {
@@ -251,6 +266,8 @@ export class Store {
         title TEXT NOT NULL,
         summary TEXT NOT NULL DEFAULT '',
         conv_key TEXT,
+        source_ref TEXT,
+        source_type TEXT,
         turn_id INTEGER,
         inbound_seq INTEGER,
         outbox_id INTEGER,
@@ -307,6 +324,28 @@ export class Store {
         throw error;
       }
     }
+    const activityColumns = new Set(
+      this.db.prepare('PRAGMA table_info(activities)').all().map((row) => row.name),
+    );
+    if (!activityColumns.has('source_ref') || !activityColumns.has('source_type')) {
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        if (!activityColumns.has('source_ref')) {
+          this.db.exec('ALTER TABLE activities ADD COLUMN source_ref TEXT');
+        }
+        if (!activityColumns.has('source_type')) {
+          this.db.exec('ALTER TABLE activities ADD COLUMN source_type TEXT');
+        }
+        this.db.exec('COMMIT');
+      } catch (error) {
+        try { this.db.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS activities_source
+        ON activities(source_ref, id DESC)
+    `);
   }
 
   prepare() {
@@ -343,10 +382,57 @@ export class Store {
     this.insertActivityStatement = this.db.prepare(`
       INSERT OR IGNORE INTO activities(
         event_key, kind, category, severity, priority, title, summary,
-        conv_key, turn_id, inbound_seq, outbox_id, status, detail_json,
-        occurred_at_ms, recorded_at_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        conv_key, source_ref, source_type, turn_id, inbound_seq, outbox_id,
+        status, detail_json, occurred_at_ms, recorded_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    this.updateActivitySourceStatement = this.db.prepare(`
+      UPDATE activities SET source_ref = ?, source_type = ?
+      WHERE id = ? AND source_ref IS NULL
+    `);
+    this.getActivitySourceByInboundStatement = this.db.prepare(`
+      SELECT chat_id, chat_type FROM inbound WHERE seq = ?
+    `);
+    this.getActivitySourceByTurnStatement = this.db.prepare(`
+      SELECT inbound.chat_id, inbound.chat_type
+      FROM turns JOIN inbound ON inbound.seq = turns.end_seq
+      WHERE turns.id = ?
+    `);
+    this.getActivitySourceByOutboxStatement = this.db.prepare(`
+      SELECT COALESCE(outbox.target_chat_id, inbound.chat_id) AS chat_id,
+             inbound.chat_type AS chat_type
+      FROM outbox
+      LEFT JOIN turns ON turns.id = outbox.turn_id
+      LEFT JOIN inbound ON inbound.seq = turns.end_seq
+      WHERE outbox.id = ?
+    `);
+  }
+
+  resolveActivitySource(activity) {
+    let row = null;
+    if (activity.inboundSeq !== undefined && activity.inboundSeq !== null) {
+      row = this.getActivitySourceByInboundStatement.get(activity.inboundSeq);
+    }
+    if (!row?.chat_id && activity.outboxId !== undefined && activity.outboxId !== null) {
+      row = this.getActivitySourceByOutboxStatement.get(activity.outboxId);
+    }
+    if (!row?.chat_id && activity.turnId !== undefined && activity.turnId !== null) {
+      row = this.getActivitySourceByTurnStatement.get(activity.turnId);
+    }
+    if (!row?.chat_id) {
+      return {
+        sourceRef: sourceRefFromConversationKey(activity.conversationKey) || null,
+        sourceType: ['p2p', 'group'].includes(
+          activity.sourceType || activity.chatType || activity.metadata?.chatType,
+        )
+          ? (activity.sourceType || activity.chatType || activity.metadata?.chatType)
+          : null,
+      };
+    }
+    return {
+      sourceRef: opaqueRef(row.chat_id),
+      sourceType: ['p2p', 'group'].includes(row.chat_type) ? row.chat_type : null,
+    };
   }
 
   recordActivity(activity, recordedAtMs = Date.now()) {
@@ -355,6 +441,7 @@ export class Store {
     }
     const definition = activityDefinition(activity.kind);
     const metadata = cleanActivityMetadata(activity.metadata);
+    const source = this.resolveActivitySource(activity);
     const result = this.insertActivityStatement.run(
       cleanActivityText(activity.eventKey, 500),
       activity.kind,
@@ -364,6 +451,8 @@ export class Store {
       cleanActivityText(activity.title ?? definition.title, 200),
       cleanActivityText(activity.summary, 4000),
       activity.conversationKey ?? null,
+      source.sourceRef,
+      source.sourceType,
       activity.turnId ?? null,
       activity.inboundSeq ?? null,
       activity.outboxId ?? null,
@@ -373,6 +462,43 @@ export class Store {
       recordedAtMs,
     );
     return number(result.changes) > 0;
+  }
+
+  backfillActivitySources() {
+    return this.transaction(() => {
+      let updated = 0;
+      const rows = this.db.prepare(`
+        SELECT id, conv_key, inbound_seq, outbox_id, turn_id, detail_json
+        FROM activities
+        WHERE source_ref IS NULL
+          AND (inbound_seq IS NOT NULL OR outbox_id IS NOT NULL OR turn_id IS NOT NULL)
+        ORDER BY id
+      `).all();
+      for (const row of rows) {
+        const source = this.resolveActivitySource({
+          inboundSeq: row.inbound_seq,
+          outboxId: row.outbox_id,
+          turnId: row.turn_id,
+          conversationKey: row.conv_key,
+          chatType: parseJsonObject(row.detail_json).chatType,
+        });
+        if (!source.sourceRef) continue;
+        updated += number(this.updateActivitySourceStatement.run(
+          source.sourceRef,
+          source.sourceType,
+          row.id,
+        ).changes);
+      }
+      return updated;
+    });
+  }
+
+  closeRunningSubscriberActivities(status = 'STOPPED') {
+    const safeStatus = status === 'FAILED' ? 'FAILED' : 'STOPPED';
+    return number(this.db.prepare(`
+      UPDATE activities SET status = ?
+      WHERE kind = 'system.subscriber_started' AND status = 'RUNNING'
+    `).run(safeStatus).changes);
   }
 
   backfillActivities(now = Date.now()) {

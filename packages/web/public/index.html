@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    >
+    <meta name="color-scheme" content="light dark">
+    <title>Zayn Activity</title>
+    <link rel="stylesheet" href="/activity.css">
+    <script src="/activity.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#activity-feed">跳到活动记录</a>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="identity">
+          <div class="title-row">
+            <h1>Zayn</h1>
+            <span id="service-status" class="service-status" role="status" aria-live="polite">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span id="service-status-text">正在连接</span>
+            </span>
+          </div>
+          <div class="service-line" aria-label="服务状态">
+            <span id="current-state">正在读取活动</span>
+            <span id="subscriber-value">订阅 —</span>
+            <span id="queue-value">队列 —</span>
+            <span id="uptime-value">运行 —</span>
+            <time id="last-updated">等待数据</time>
+          </div>
+        </div>
+
+        <button id="privacy-toggle" class="quiet-button" type="button" aria-pressed="false">
+          隐藏正文
+        </button>
+      </div>
+    </header>
+
+    <main id="activity-feed" class="activity-feed" tabindex="-1">
+      <div class="controls">
+        <label class="search-box" for="activity-search">
+          <span class="search-icon" aria-hidden="true"></span>
+          <span class="visually-hidden">搜索活动</span>
+          <input
+            id="activity-search"
+            type="search"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="搜索消息、回复或错误"
+          >
+        </label>
+
+        <nav id="filters" class="filter-list" aria-label="活动筛选">
+          <button type="button" data-filter="all" aria-pressed="true">全部</button>
+          <button type="button" data-filter="reply" aria-pressed="false">回复</button>
+          <button type="button" data-filter="ignore" aria-pressed="false">忽略</button>
+          <button type="button" data-filter="failed" aria-pressed="false">失败</button>
+          <button type="button" data-filter="system" aria-pressed="false">系统</button>
+        </nav>
+      </div>
+
+      <div id="connection-notice" class="connection-notice" role="alert" hidden></div>
+
+      <div id="source-list" class="source-list"></div>
+
+      <details id="older-sources" class="older-sources" hidden>
+        <summary>
+          <span>更早的来源</span>
+          <span id="older-sources-summary" class="section-meta"></span>
+        </summary>
+        <div id="older-source-list" class="source-list source-list-old"></div>
+      </details>
+
+      <div id="empty-state" class="empty-state" aria-live="polite">
+        <h2>正在读取活动</h2>
+        <p>消息、判断和发送结果会显示在这里。</p>
+      </div>
+
+      <div class="pagination">
+        <button id="load-older" class="load-older" type="button" hidden>加载更早</button>
+      </div>
+    </main>
+  </body>
+</html>

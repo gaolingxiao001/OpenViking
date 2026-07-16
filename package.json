@@ -1,16 +1,22 @@
 {
-  "name": "lark-daemon",
-  "version": "0.3.0",
+  "name": "lark-local-agent",
+  "version": "0.4.0",
   "private": true,
-  "description": "A local Lark event daemon that lets Codex participate selectively in conversations.",
+  "description": "A local Lark agent with independently runnable daemon and activity web modules.",
   "type": "module",
+  "workspaces": [
+    "packages/daemon",
+    "packages/web"
+  ],
   "engines": {
     "node": ">=22.5"
   },
   "scripts": {
-    "start": "node src/main.mjs",
-    "check": "for file in src/*.mjs scripts/*.mjs; do node --check \"$file\" || exit 1; done",
-    "test": "node --test test/*.test.mjs",
-    "health": "node scripts/healthcheck.mjs"
+    "start": "node packages/daemon/src/main.mjs",
+    "start:daemon": "node packages/daemon/src/main.mjs",
+    "start:web": "node packages/web/src/main.mjs",
+    "check": "for file in packages/daemon/src/*.mjs packages/daemon/scripts/*.mjs packages/web/src/*.mjs packages/web/scripts/*.mjs packages/web/public/*.js; do node --check \"$file\" || exit 1; done",
+    "test": "node --test packages/daemon/test/*.test.mjs packages/web/test/*.test.mjs",
+    "health": "node packages/web/scripts/healthcheck.mjs"
   }
 }

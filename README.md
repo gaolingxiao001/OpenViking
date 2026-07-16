@@ -1,6 +1,6 @@
 # lark-daemon
 
-一个单用户、本机常驻的飞书 Codex Agent。
+一个单用户、本机常驻的飞书 Codex Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
 
 它通过 `lark-cli event +subscribe` 接收机器人消息，所有聊天共用同一个全局 `codex exec` 会话（跨聊天连续上下文），先判断“这句话是否值得回复”，再选择普通回复、thread 回复或直接发到当前 chat。日常使用不需要 `@`。
 
@@ -34,6 +34,8 @@ cd /Users/bytedance/Documents/work/lark-daemon
 cp .env.example .env
 npm test
 npm run check
+npm run start:daemon   # 127.0.0.1:3738
+npm run start:web      # 127.0.0.1:3737
 ```
 
 源码目录使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.local/lib/lark-daemon/releases/`，其 `.env` 把工作区设为 `/Users/bytedance/Documents/work`。
@@ -41,24 +43,27 @@ npm run check
 ## 日常运维
 
 ```bash
-pm2 status lark-daemon
+pm2 status lark-daemon lark-web
 pm2 logs lark-daemon --lines 100
 curl http://127.0.0.1:3737/ready
 pm2 restart lark-daemon --update-env
+pm2 restart lark-web --update-env
+./scripts/deploy.sh [git-ref]
 ```
 
-PM2 负责异常重启，daemon 自身保证单实例。运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 会话、去重记录和待发送回复。
+PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 会话、去重记录和待发送回复。
 
 ## Activity 页面
 
 打开 [http://127.0.0.1:3737/](http://127.0.0.1:3737/) 可以查看本机活动账本：消息是否收到、Codex 为什么回复或保持静默、选择了哪种投递方式，以及发送是否成功。
 
-- 需要处理的失败和结果不确定项始终置顶。
-- 正在判断、排队或发送的项目排在其后。
-- 今天的正常交互展开显示；系统噪声和旧记录默认折叠，可继续加载。
+- 活动按真实飞书 chat source 分组；同一 chat 的主消息和 thread 归在一起，只显示脱敏后的短引用。
+- 失败保留在原时间位置并标红；没有“需要处理”队列。
+- `ignore` 是明确但无色的状态；Agent 回复正文使用蓝色底。
+- 今天的交互直接显示；每个来源的旧记录和只含旧活动的来源默认折叠，可继续加载。
 - 页面每 5 秒在本机刷新一次，标签页隐藏时暂停；没有外部资源或云端服务。
 
-这些活动以 append-only 事件写入同一个 SQLite，并与消息、turn、outbox 的状态变更放在同一事务中。升级时会为已有历史做一次幂等 backfill；普通状态清理不会删除 activity。网页 API 只返回脱敏后的会话引用和裁剪后的正文，不暴露飞书 message/chat ID、Codex session、幂等键或 raw event。
+这些活动作为保留历史的事件账本写入同一个 SQLite，并与消息、turn、outbox 的状态变更放在同一事务中。升级时会为已有历史做一次幂等 backfill；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用和裁剪后的正文，不暴露飞书 message/chat ID、Codex session、幂等键或 raw event。
 
 ## 可靠性边界
 

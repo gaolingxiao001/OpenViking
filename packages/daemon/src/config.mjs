@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
-export const projectDir = path.resolve(sourceDir, '..');
+export const moduleDir = path.resolve(sourceDir, '..');
+export const projectDir = path.resolve(moduleDir, '..', '..');
 
 function parseEnvLine(line) {
   const trimmed = line.trim();
@@ -94,7 +95,7 @@ export function getConfig() {
   if (eventMode !== 'raw') {
     throw new Error('LARK_DAEMON_EVENT_MODE must be raw; compact events omit security and thread fields');
   }
-  const promptDir = path.join(projectDir, 'agent');
+  const promptDir = path.join(moduleDir, 'agent');
   if (pathsOverlap(workspace, projectDir)) {
     throw new Error('LARK_DAEMON_WORKSPACE must not overlap the running daemon directory');
   }
@@ -116,7 +117,7 @@ export function getConfig() {
     codexModel: process.env.LARK_DAEMON_CODEX_MODEL || '',
     codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['minimal', 'low', 'medium', 'high', 'xhigh']),
     host,
-    port: intEnv('LARK_DAEMON_PORT', 3737, { min: 1, max: 65535 }),
+    port: intEnv('LARK_DAEMON_PORT', 3738, { min: 1, max: 65535 }),
     httpEnabled: boolEnv('LARK_DAEMON_HTTP_ENABLED', true),
     logLevel: enumEnv('LARK_DAEMON_LOG_LEVEL', 'info', ['debug', 'info', 'warn', 'error']),
     eventMode,

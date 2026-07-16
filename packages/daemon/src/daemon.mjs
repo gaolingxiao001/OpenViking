@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import http from 'node:http';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
@@ -161,6 +160,7 @@ export class LarkDaemon {
 
       await delay(500);
       if (!this.lark.subscriptionRunning) throw new Error('lark-cli subscriber exited during startup');
+      this.store.closeRunningSubscriberActivities();
       this.recordSystemActivity('system.subscriber_started', {
         summary: '正在接收飞书消息事件',
         status: 'RUNNING',
@@ -491,13 +491,6 @@ export class LarkDaemon {
   }
 
   async startHttpServer() {
-    const webDir = path.join(this.config.projectDir, 'web');
-    const assets = new Map([
-      ['/', { type: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(webDir, 'index.html'), 'utf8') }],
-      ['/activity', { type: 'text/html; charset=utf-8', body: fs.readFileSync(path.join(webDir, 'index.html'), 'utf8') }],
-      ['/activity.css', { type: 'text/css; charset=utf-8', body: fs.readFileSync(path.join(webDir, 'activity.css'), 'utf8') }],
-      ['/activity.js', { type: 'text/javascript; charset=utf-8', body: fs.readFileSync(path.join(webDir, 'activity.js'), 'utf8') }],
-    ]);
     this.httpServer = http.createServer((request, response) => {
       try {
       if (!requestIsSameOrigin(request)) {
@@ -521,12 +514,6 @@ export class LarkDaemon {
         url = new URL(request.url, 'http://localhost');
       } catch {
         send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_request_target' });
-        return;
-      }
-
-      const asset = assets.get(url.pathname);
-      if (asset && url.searchParams.size === 0) {
-        send(response, 200, asset.type, asset.body);
         return;
       }
 
@@ -632,6 +619,9 @@ export class LarkDaemon {
       for (const timer of this.scheduled.values()) clearTimeout(timer);
       this.scheduled.clear();
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
+      try { this.store?.closeRunningSubscriberActivities(); } catch (error) {
+        this.logger.warn('subscriber_activity_close_failed', { error: safeError(error) });
+      }
       const workerDeadline = Date.now() + Math.min(this.config.shutdownTimeoutMs - 5_000, 10_000);
       while (this.runningConversations.size > 0 && Date.now() < workerDeadline) {
         await delay(25);

@@ -1,5 +1,5 @@
 const host = process.env.LARK_DAEMON_HOST || '127.0.0.1';
-const port = process.env.LARK_DAEMON_PORT || '3737';
+const port = process.env.LARK_DAEMON_PORT || '3738';
 
 try {
   const response = await fetch(`http://${host}:${port}/ready`, {
