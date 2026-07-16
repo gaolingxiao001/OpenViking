@@ -65,17 +65,28 @@ export async function executeCommand(command, codex) {
   }
 
   if (command.name === 'model') {
+    let available = [];
+    try { available = (await codex.listModels?.()) ?? []; } catch { /* offline: no options */ }
     if (!command.arg) {
-      return { ok: true, text: `当前模型：${codex.model || '（默认）'}\n用法：/model <名称>` };
+      const lines = [`当前模型：${codex.model || '（默认）'}`];
+      if (available.length > 0) lines.push(`可选：${available.join('、')}`);
+      lines.push('用法：/model <名称>（支持前缀匹配）');
+      return { ok: true, text: lines.join('\n') };
     }
     if (!MODEL_NAME.test(command.arg)) {
       return { ok: false, text: `无效的模型名：${command.arg}` };
     }
-    const threadId = await codex.setModel(command.arg);
-    return {
-      ok: true,
-      text: `已切换模型：${command.arg}${threadId ? `\n会话：${threadId}` : '（重连后生效）'}`,
-    };
+    let target = command.arg;
+    if (available.length > 0) {
+      const matches = matchPrefix(command.arg, available);
+      if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
+      if (matches.length === 0) {
+        return { ok: false, text: `未找到模型：${command.arg}\n可选：${available.join('、')}` };
+      }
+      [target] = matches;
+    }
+    codex.setModel(target);
+    return { ok: true, text: `已切换模型：${target}（下一轮生效，上下文保留）` };
   }
 
   // effort
@@ -89,9 +100,6 @@ export async function executeCommand(command, codex) {
       : `无效档位：${command.arg}`;
     return { ok: false, text: `${head}\n可选：${EFFORT_LEVELS.join('、')}` };
   }
-  const threadId = await codex.setEffort(levels[0]);
-  return {
-    ok: true,
-    text: `已切换推理档位：${levels[0]}${threadId ? `\n会话：${threadId}` : '（重连后生效）'}`,
-  };
+  codex.setEffort(levels[0]);
+  return { ok: true, text: `已切换推理档位：${levels[0]}（下一轮生效，上下文保留）` };
 }

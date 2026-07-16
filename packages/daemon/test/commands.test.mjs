@@ -79,16 +79,41 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /重连/);
   });
 
-  it('model without an arg reports the current model and never rotates', async () => {
-    const codex = fakeCodex({ model: '' });
+  it('model without an arg reports the current model and the available options', async () => {
+    const codex = fakeCodex({
+      model: '',
+      listModels: async () => ['gpt-5.5', 'gpt-5.5-codex'],
+    });
     const outcome = await executeCommand({ name: 'model', arg: '' }, codex);
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /（默认）/);
+    assert.match(outcome.text, /可选：gpt-5\.5、gpt-5\.5-codex/);
     assert.equal(codex.calls.length, 0);
   });
 
-  it('model switches on a valid name and rejects garbage', async () => {
-    const codex = fakeCodex();
+  it('model resolves prefixes against the live list and rejects unknown or ambiguous names', async () => {
+    const codex = fakeCodex({ listModels: async () => ['gpt-5.5', 'gpt-5.5-codex'] });
+
+    const prefixed = await executeCommand({ name: 'model', arg: 'gpt-5.5-c' }, codex);
+    assert.equal(prefixed.ok, true);
+    assert.deepEqual(codex.calls, [['setModel', 'gpt-5.5-codex']]);
+
+    const exact = await executeCommand({ name: 'model', arg: 'gpt-5.5' }, codex);
+    assert.equal(exact.ok, true);
+    assert.deepEqual(codex.calls.at(-1), ['setModel', 'gpt-5.5']);
+
+    const ambiguous = await executeCommand({ name: 'model', arg: 'gpt' }, codex);
+    assert.equal(ambiguous.ok, false);
+    assert.match(ambiguous.text, /歧义/);
+
+    const unknown = await executeCommand({ name: 'model', arg: 'claude-x' }, codex);
+    assert.equal(unknown.ok, false);
+    assert.match(unknown.text, /未找到模型/);
+    assert.equal(codex.calls.length, 2);
+  });
+
+  it('model accepts a raw name when no list is available and rejects garbage', async () => {
+    const codex = fakeCodex({ listModels: async () => [] });
     const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.5-codex' }, codex);
     assert.equal(outcome.ok, true);
     assert.deepEqual(codex.calls, [['setModel', 'gpt-5.5-codex']]);

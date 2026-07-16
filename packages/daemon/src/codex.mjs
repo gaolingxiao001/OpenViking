@@ -205,14 +205,14 @@ export class CodexAgent {
   }
 
   // One global thread is shared across every chat; policyHash only detects when the
-  // instructions/model/workspace change so a stored thread is not resumed under a
-  // different policy. Computed on demand because /model changes it at runtime.
+  // instructions/workspace change so a stored thread is not resumed under a different
+  // policy. Model/effort are deliberately not part of the hash: they are per-turn
+  // overrides now, and switching them must not orphan the stored thread.
   get policyHash() {
     return createHash('sha256')
       .update(this.developerInstructionsText).update('\0')
-      .update(this.model || 'default-model').update('\0')
       .update(this.config.workspace).update('\0')
-      .update('steer-v1').digest('hex');
+      .update('steer-v2').digest('hex');
   }
 
   get state() {
@@ -252,9 +252,14 @@ export class CodexAgent {
     }
     this.startingTurn = true;
     this.startingItems = items.map((item) => ({ text: item.text, seq: item.seq }));
+    // model/effort ride on every turn/start: thread/resume does not re-apply its
+    // config to an already-running thread, so per-turn overrides are the only way
+    // /model and /effort reliably take effect.
     this._request('turn/start', {
       threadId: this.threadId,
       input: [{ type: 'text', text: body }],
+      effort: this.effort,
+      ...(this.model ? { model: this.model } : {}),
     }).catch((error) => {
       this.startingTurn = false;
       this.startingItems = [];
@@ -631,31 +636,31 @@ export class CodexAgent {
     return this.threadId;
   }
 
-  // /model and /effort persist only after the rotate succeeds, so a rejected value
-  // never sticks; on failure the previous value is restored for the reconnect loop.
-  async setModel(model) {
-    const previous = this.model;
+  // /model and /effort are plain field updates: the values ride on the next
+  // turn/start (see _startTurn), so the thread and its context are untouched.
+  setModel(model) {
     this.model = model;
-    try {
-      const threadId = await this.rotateSession({ resume: true });
-      this.store.setSetting?.('codex_model', model);
-      return threadId;
-    } catch (error) {
-      this.model = previous;
-      throw error;
-    }
+    this.store.setSetting?.('codex_model', model);
   }
 
-  async setEffort(effort) {
-    const previous = this.effort;
+  setEffort(effort) {
     this.effort = effort;
+    this.store.setSetting?.('codex_effort', effort);
+  }
+
+  // Visible model ids from the app-server, for /model discovery and prefix
+  // resolution. Empty while disconnected or when the server lacks model/list.
+  async listModels() {
+    if (!this.child) return [];
     try {
-      const threadId = await this.rotateSession({ resume: true });
-      this.store.setSetting?.('codex_effort', effort);
-      return threadId;
+      const result = await this._request('model/list', {});
+      const models = Array.isArray(result?.data) ? result.data : [];
+      return models
+        .filter((model) => model && !model.hidden && typeof model.id === 'string')
+        .map((model) => model.id);
     } catch (error) {
-      this.effort = previous;
-      throw error;
+      this.logger.info('codex_model_list_failed', { error: safe(error) });
+      return [];
     }
   }
 

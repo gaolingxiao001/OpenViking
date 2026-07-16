@@ -517,44 +517,32 @@ describe('CodexAgent session rotation (slash commands)', () => {
     assert.equal(turn.params.input[0].text, 'during-rotate');
   });
 
-  it('/model re-opens the same thread under new params and persists only on success', async () => {
+  it('/model and /effort apply to the next turn/start without touching the thread', async () => {
     const store = makeStore();
     const settings = {};
     store.setSetting = (key, value) => { settings[key] = value; };
     const { agent, children } = newAgent(store);
     const child = await handshake(agent, children);
-    const oldHash = agent.policyHash;
+    const hashBefore = agent.policyHash;
 
-    const switching = agent.setModel('gpt-test');
-    await flush();
-    const resume = child.ofMethod('thread/resume').at(-1);
-    assert.equal(resume.params.threadId, 'th-1');
-    assert.equal(resume.params.model, 'gpt-test');
-    child.feed({ id: resume.id, result: { thread: { id: 'th-1' } } });
-    assert.equal(await switching, 'th-1');
+    agent.deliver('before-switch');
+    let turn = child.ofMethod('turn/start').at(-1);
+    assert.equal(turn.params.model, undefined);
+    assert.equal(turn.params.effort, 'medium');
+    child.feed({ method: 'turn/started', params: { turn: { id: 't1' } } });
+    child.feed({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+
+    agent.setModel('gpt-test');
+    agent.setEffort('xhigh');
     assert.equal(settings.codex_model, 'gpt-test');
-    assert.notEqual(agent.policyHash, oldHash);
-    assert.equal(store.getGlobalSession().policyHash, agent.policyHash);
-  });
+    assert.equal(settings.codex_effort, 'xhigh');
+    assert.equal(agent.threadId, 'th-1');            // same thread, context kept
+    assert.equal(agent.policyHash, hashBefore);       // model is not policy
 
-  it('reverts the model and does not persist when the rotate fails', async () => {
-    const store = makeStore();
-    const settings = {};
-    store.setSetting = (key, value) => { settings[key] = value; };
-    const { agent, children } = newAgent(store);
-    const child = await handshake(agent, children);
-    child.exitCode = 0; // keep terminateProcessTree from signalling a real pgid
-
-    const switching = agent.setModel('gpt-broken');
-    await flush();
-    const resume = child.ofMethod('thread/resume').at(-1);
-    child.feed({ id: resume.id, error: { message: 'no such thread' } });
-    await flush();
-    const start = child.ofMethod('thread/start').at(-1);
-    child.feed({ id: start.id, error: { message: 'bad model' } });
-    await assert.rejects(switching, /bad model/);
-    assert.equal(agent.model, '');
-    assert.equal(settings.codex_model, undefined);
+    agent.deliver('after-switch');
+    turn = child.ofMethod('turn/start').at(-1);
+    assert.equal(turn.params.model, 'gpt-test');
+    assert.equal(turn.params.effort, 'xhigh');
   });
 
   it('/effort while disconnected persists the level for the next handshake', async () => {
@@ -566,7 +554,7 @@ describe('CodexAgent session rotation (slash commands)', () => {
     const child = await handshake(agent, children);
     child.simulateExit(1);
 
-    assert.equal(await agent.setEffort('xhigh'), null);
+    agent.setEffort('xhigh');
     assert.equal(settings.codex_effort, 'xhigh');
 
     await waitFor(() => children.length === 2);
@@ -579,5 +567,32 @@ describe('CodexAgent session rotation (slash commands)', () => {
     reconnect.feed({ id: 2, result: { thread: { id: 'th-1' } } });
     await flush();
     agent.stopping = true;
+  });
+
+  it('lists visible model ids and swallows model/list failures', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    const listing = agent.listModels();
+    await flush();
+    const request = child.ofMethod('model/list').at(-1);
+    child.feed({
+      id: request.id,
+      result: {
+        data: [
+          { id: 'gpt-5.5', hidden: false },
+          { id: 'gpt-5.5-internal', hidden: true },
+          { id: 'gpt-5.5-codex', hidden: false },
+        ],
+      },
+    });
+    assert.deepEqual(await listing, ['gpt-5.5', 'gpt-5.5-codex']);
+
+    const failing = agent.listModels();
+    await flush();
+    const second = child.ofMethod('model/list').at(-1);
+    child.feed({ id: second.id, error: { message: 'unsupported' } });
+    assert.deepEqual(await failing, []);
   });
 });
