@@ -964,16 +964,16 @@ export class Store {
   // are filtered out on the way in), so history is user-message context only.
   // ponytail: the bot's own replies are not in history; a resumed thread keeps codex's
   // in-process context, but a fresh thread after a policy change loses prior answers.
-  history(limit) {
+  history(limit, beforeSeq = null) {
     if (limit <= 0) return [];
     const rows = this.db.prepare(`
       SELECT received_at_ms AS at_ms, COALESCE(sender_id, 'unknown') AS actor,
              chat_id AS chat_id, thread_id AS thread_id, content AS text
       FROM inbound
-      WHERE status = 'DONE'
+      WHERE status = 'DONE' AND seq < ?
       ORDER BY received_at_ms DESC
       LIMIT ?
-    `).all(limit);
+    `).all(beforeSeq ?? Number.MAX_SAFE_INTEGER, limit);
     return rows.reverse().map((row) => ({
       atMs: number(row.at_ms),
       direction: 'inbound',

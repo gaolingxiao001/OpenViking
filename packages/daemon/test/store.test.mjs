@@ -172,6 +172,13 @@ describe('Store', () => {
     assert.deepEqual(store.history(0), []);
   });
 
+  it('cuts history off before a given seq so the current batch is not duplicated', () => {
+    store.ingest(event('one', 'earlier message'), null, 1_000);
+    const current = store.ingest(event('two', 'current message'), null, 2_000);
+    const history = store.history(30, current.inbound.seq);
+    assert.deepEqual(history.map((row) => row.text), ['earlier message']);
+  });
+
   it('prunes old inbound but keeps the append-only activity ledger', () => {
     store.ingest(event('old', 'old body'), null, 1_000);
     const before = store.listActivities({ limit: 100 }).activities;
