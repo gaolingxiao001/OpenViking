@@ -1,0 +1,16 @@
+{
+  "name": "lark-daemon",
+  "version": "0.3.0",
+  "private": true,
+  "description": "A local Lark event daemon that lets Codex participate selectively in conversations.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "check": "for file in src/*.mjs scripts/*.mjs; do node --check \"$file\" || exit 1; done",
+    "test": "node --test test/*.test.mjs",
+    "health": "node scripts/healthcheck.mjs"
+  }
+}

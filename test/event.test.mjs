@@ -1,0 +1,140 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { normalizeEvent, deterministicFilter } from '../src/event.mjs';
+
+function config(overrides = {}) {
+  return {
+    ignoredSenderIds: new Set(),
+    allowedMessageTypes: new Set(['text', 'post']),
+    maxEventAgeMs: 86_400_000,
+    ...overrides,
+  };
+}
+
+describe('normalizeEvent', () => {
+  it('preserves raw thread scope and human-readable text', () => {
+    const now = Date.now();
+    const event = normalizeEvent({
+      schema: '2.0',
+      header: {
+        event_id: 'evt-1',
+        event_type: 'im.message.receive_v1',
+        tenant_key: 'tenant-1',
+        create_time: String(now),
+      },
+      event: {
+        sender: {
+          sender_id: { open_id: 'ou-user' },
+          sender_type: 'user',
+        },
+        message: {
+          message_id: 'om-reply',
+          root_id: 'om-root',
+          parent_id: 'om-root',
+          thread_id: 'omt-topic',
+          chat_id: 'oc-chat',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({ text: '帮我看一下这个问题' }),
+          create_time: String(now),
+        },
+      },
+    }, 'work');
+
+    assert.equal(event.content, '帮我看一下这个问题');
+    assert.equal(event.senderType, 'user');
+    assert.equal(event.threadId, 'omt-topic');
+    assert.equal(event.threadRootId, 'om-root');
+    assert.equal(event.conversationKey, 'work:tenant-1:oc-chat:thread:omt-topic');
+  });
+
+  it('keeps an ordinary quoted reply in the main conversation without thread_id', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-quoted',
+      root_id: 'om-root',
+      parent_id: 'om-root',
+      chat_id: 'oc-chat',
+      chat_type: 'group',
+      message_type: 'text',
+      content: '普通引用回复',
+      sender_id: 'ou-user',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.threadId, null);
+    assert.equal(event.threadRootId, null);
+    assert.equal(event.conversationKey, 'default:-:oc-chat:main');
+  });
+
+  it('accepts the compact compatibility format', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      event_id: 'evt-2',
+      message_id: 'om-2',
+      chat_id: 'oc-2',
+      chat_type: 'p2p',
+      message_type: 'text',
+      content: 'hello',
+      sender_id: 'ou-2',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, 'hello');
+    assert.equal(event.conversationKey, 'default:-:oc-2:main');
+  });
+
+  it('does not leak rich-text tag names into post content', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-post',
+      chat_id: 'oc-post',
+      chat_type: 'group',
+      message_type: 'post',
+      content: JSON.stringify({
+        zh_cn: {
+          title: '结论',
+          content: [[{ tag: 'text', text: '已经完成' }]],
+        },
+      }),
+      sender_id: 'ou-post',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '结论\n已经完成');
+  });
+});
+
+describe('deterministicFilter', () => {
+  it('filters bots, unsupported media, and explicit deny-list senders', () => {
+    const base = {
+      type: 'im.message.receive_v1',
+      senderType: 'user',
+      senderId: 'ou-user',
+      chatId: 'oc-chat',
+      chatType: 'p2p',
+      messageType: 'text',
+      content: 'hello',
+      createTimeMs: Date.now(),
+    };
+    assert.equal(deterministicFilter({ ...base, senderType: 'bot' }, config()), 'bot_message');
+    assert.equal(deterministicFilter({ ...base, senderType: 'app' }, config()), 'bot_message');
+    assert.equal(deterministicFilter({ ...base, messageType: 'image' }, config()), 'unsupported_message_type');
+    assert.equal(
+      deterministicFilter(base, config({ ignoredSenderIds: new Set(['ou-user']) })),
+      'ignored_sender',
+    );
+  });
+
+  it('considers both visible groups and P2P conversations', () => {
+    const base = {
+      type: 'im.message.receive_v1',
+      senderType: 'user',
+      senderId: 'ou-user',
+      chatId: 'oc-chat',
+      chatType: 'group',
+      messageType: 'text',
+      content: 'hello',
+      createTimeMs: Date.now(),
+    };
+    assert.equal(deterministicFilter(base, config()), null);
+    assert.equal(deterministicFilter({ ...base, chatType: 'p2p' }, config()), null);
+  });
+});
