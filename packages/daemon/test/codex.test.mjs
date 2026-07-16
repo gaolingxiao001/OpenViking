@@ -311,4 +311,147 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(reconnect.ofMethod('turn/start').at(-1).params.input[0].text, 'during-down');
     agent.stopping = true;
   });
+
+  it('associates completed tool calls with the active inbound message without storing arguments', async () => {
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('read memory', 41);
+    child.feed({ method: 'turn/started', params: { turn: { id: 'turn-tool' } } });
+    child.feed({
+      method: 'item/completed',
+      params: {
+        turnId: 'turn-tool',
+        item: {
+          type: 'mcpToolCall',
+          id: 'item-1',
+          server: 'openviking',
+          tool: 'read_resource',
+          status: 'completed',
+          arguments: { uri: 'viking://private/path', api_key: 'must-not-persist' },
+          durationMs: 37,
+          result: { content: [{ type: 'text', text: 'must-not-persist' }] },
+          error: null,
+        },
+      },
+    });
+
+    const tool = activities.find((activity) => activity.kind === 'agent.tool');
+    assert.ok(tool);
+    assert.equal(tool.turnId, 'turn-tool');
+    assert.equal(tool.inboundSeq, 41);
+    assert.equal(tool.summary, 'openviking · read_resource');
+    assert.deepEqual(tool.metadata, {
+      itemType: 'mcpToolCall',
+      toolLabel: 'openviking · read_resource',
+      toolName: 'read_resource',
+      toolServer: 'openviking',
+      toolStatus: 'completed',
+      durationMs: 37,
+      inboundSeqs: [41],
+    });
+    assert.doesNotMatch(JSON.stringify(tool), /private\/path|must-not-persist/);
+  });
+
+  it('records only a generic tool failure and associates items completed during turn startup', async () => {
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('fast tool', 73);
+    child.feed({
+      method: 'item/completed',
+      params: {
+        turnId: 'turn-fast-tool',
+        item: {
+          type: 'mcpToolCall',
+          id: 'item-fast-failed',
+          server: 'openviking',
+          tool: 'read_resource',
+          status: 'failed',
+          arguments: { uri: 'viking://private/path' },
+          durationMs: 18,
+          result: null,
+          error: {
+            message: 'failed for viking://private/path and om_private12345678 with full result',
+          },
+        },
+      },
+    });
+
+    const failure = activities.find((activity) => activity.kind === 'agent.tool');
+    assert.ok(failure);
+    assert.equal(failure.turnId, 'turn-fast-tool');
+    assert.equal(failure.inboundSeq, 73);
+    assert.equal(failure.status, 'FAILED');
+    assert.equal(failure.metadata.toolError, undefined);
+    assert.doesNotMatch(JSON.stringify(failure), /private\/path|om_private|full result/);
+  });
+
+  it('keeps the incoming association if a turn completes during the startup window', async () => {
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('very fast turn', 81);
+    child.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 'turn-very-fast', status: 'completed', error: null } },
+    });
+
+    const completed = activities.find((activity) => activity.kind === 'agent.turn_completed');
+    assert.ok(completed);
+    assert.equal(completed.turnId, 'turn-very-fast');
+    assert.equal(completed.inboundSeq, 81);
+    assert.deepEqual(completed.metadata.inboundSeqs, [81]);
+  });
+
+  it('records a Lark delivery tool as the single outgoing message and resolves its inbound source', async () => {
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    store.inboundSeqForMessageId = (messageId) => messageId === 'om_target12345678' ? 55 : null;
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('question', 41);
+    child.feed({ method: 'turn/started', params: { turn: { id: 'turn-reply' } } });
+    child.feed({
+      method: 'item/completed',
+      params: {
+        turnId: 'turn-reply',
+        item: {
+          type: 'mcpToolCall',
+          id: 'item-2',
+          server: 'lark_daemon_im',
+          tool: 'reply_lark_message',
+          status: 'completed',
+          arguments: {
+            message_id: 'om_target12345678',
+            text: '只显示一次的回复',
+            reply_in_thread: true,
+          },
+          durationMs: 120,
+          result: null,
+          error: null,
+        },
+      },
+    });
+
+    const delivery = activities.find((activity) => activity.kind === 'agent.tool');
+    assert.ok(delivery);
+    assert.equal(delivery.summary, '只显示一次的回复');
+    assert.equal(delivery.status, 'SENT');
+    assert.equal(delivery.inboundSeq, 55);
+    assert.equal(delivery.metadata.deliveryMode, 'thread');
+    assert.equal(delivery.metadata.toolLabel, '飞书回复');
+    assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
+  });
 });

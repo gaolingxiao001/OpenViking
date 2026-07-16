@@ -21,33 +21,56 @@ test('activity UI exposes the five compact filters without action-oriented failu
   assert.match(js, /if \(story\.tone === 'ignore'\) return '忽略';/);
 });
 
-test('activity UI groups by opaque source, prefers a stored chat name, and folds old content', () => {
+test('activity UI renders one transcript and labels only incoming messages with their source', () => {
   assert.match(js, /raw\.sourceRef/);
   assert.match(js, /sourceName: raw\.sourceName/);
   assert.match(js, /const sourceName = lastValue\(events, \(row\) => row\.sourceName\)/);
-  assert.match(js, /name: story\.sourceName/);
-  assert.match(js, /if \(group\.name\) return group\.name/);
+  assert.match(html, /id="transcript" class="transcript"/);
+  assert.match(js, /renderTranscript\(dom\.transcript, recent/);
+  assert.doesNotMatch(js, /function groupSources\(/);
+  assert.doesNotMatch(js, /function sourceSection\(/);
+  assert.match(js, /if \(story\.sourceName\) return story\.sourceName/);
   assert.match(js, /return '未命名群聊'/);
-  assert.match(js, /sourceName: story\.sourceName/);
-  assert.match(js, /rawSourceRef === 'system'/);
-  assert.match(js, /sourceKey: sourceRef \? `chat:\$\{sourceRef\}` : 'system'/);
-  assert.match(js, /a\.isSystem !== b\.isSystem/);
-  assert.doesNotMatch(js, /el\('span', 'source-ref'/);
-  assert.match(js, /sourceRef: row\.sourceRef \|\| undefined/);
-  assert.match(html, /id="older-sources"[^>]*hidden/);
-  assert.match(js, /className, 'source-old'|el\('details', 'source-old'\)/);
-  assert.match(js, /'source-group system-source'/);
+  assert.match(js, /direction === 'incoming' && !source\.isSystem/);
+  assert.match(js, /el\('span', 'source-label'/);
+  assert.doesNotMatch(js, /direction === 'outgoing'[\s\S]{0,160}source-label/);
+  assert.match(html, /id="older-records"[^>]*hidden/);
+  assert.match(html, />更早记录</);
 });
 
 test('message transcript uses incoming and outgoing bubbles with a blue agent reply', () => {
-  assert.match(js, /addMessage\('incoming', input\)/);
-  assert.match(js, /addMessage\('outgoing', output\)/);
+  assert.match(js, /for \(const input of inputs\) addMessage\('incoming', input\.text, input\)/);
+  assert.match(js, /for \(const output of outputs\) addMessage\('outgoing', output\)/);
   assert.match(js, /`message-row \$\{direction\}`/);
   assert.match(css, /\.message-row\.incoming\s*\{[^}]*justify-content: flex-start/s);
   assert.match(css, /\.message-row\.outgoing\s*\{[^}]*justify-content: flex-end/s);
-  assert.match(css, /\.message-bubble\s*\{[^}]*max-width: 76%/s);
-  assert.match(css, /@media \(max-width: 460px\)[\s\S]*\.message-bubble\s*\{[^}]*max-width: 88%/s);
+  assert.match(css, /\.message-column\s*\{[^}]*max-width: 76%/s);
+  assert.match(css, /@media \(max-width: 460px\)[\s\S]*\.message-column\s*\{[^}]*max-width: 88%/s);
   assert.match(css, /\.agent-message\s*\{[^}]*background: var\(--blue\)[^}]*color: #fff/s);
+});
+
+test('each incoming event gets its own bubble and its own source label', () => {
+  assert.match(js, /function storyInputs\(story\)/);
+  assert.match(js, /\.filter\(\(row\) => INPUT_KINDS\.has\(row\.kind\) && row\.summary\)/);
+  assert.match(js, /text: row\.summary/);
+  assert.match(js, /sourceName: row\.sourceName \|\| story\.sourceName/);
+  assert.match(js, /sourceType: row\.sourceType \|\| row\.metadata\.chatType \|\| story\.sourceType/);
+  assert.match(js, /function messageRow\(source, direction, value\)/);
+  assert.match(js, /sourceDisplayName\(source\)/);
+  assert.doesNotMatch(js, /\[\.\.\.new Set\(values\)\]\.join/);
+});
+
+test('outgoing text keeps every Lark send while deduplicating legacy delivery copies', () => {
+  assert.match(js, /'agent\.tool': '工具调用'/);
+  assert.match(js, /function storyOutputs\(story\)/);
+  assert.match(js, /row\.kind === 'agent\.tool' && row\.metadata\.deliveryMode && REPLIED\.has\(row\.status\)/);
+  assert.match(js, /outputs\.push\(row\.summary\)/);
+  assert.match(js, /const legacyKey = row\.outboxId \|\| row\.summary/);
+  assert.match(js, /if \(seenLegacy\.has\(legacyKey\)\) continue/);
+  assert.match(js, /if \(toolTexts\.has\(row\.summary\)\) continue/);
+  assert.match(js, /const note = rows\.find\(\(row\) => row\.kind === 'agent\.note'\)/);
+  assert.match(js, /const decision = rows\.find\(\(row\) => row\.kind === 'agent\.decided'\)/);
+  assert.match(js, /return \[note\?\.summary \|\| decision\?\.summary \|\| ''\]\.filter\(Boolean\)/);
 });
 
 test('status color is limited to lightweight status text and ignore stays neutral', () => {
@@ -72,11 +95,59 @@ test('native details keep summaries compact and reveal operational detail on dem
   assert.doesNotMatch(html, /<details class="runtime-details" open/);
 });
 
+test('expanded details do not repeat message bodies and keep only decisions, tools, and diagnostics', () => {
+  assert.match(js, /function eventIsTool\(row\)/);
+  assert.match(js, /function eventIsDiagnostic\(row\)/);
+  assert.match(js, /function operationalEvents\(story\)/);
+  assert.match(js, /operationalEvents\(story\)/);
+  assert.match(js, /addFact\('判断'/);
+  assert.match(js, /addFact\('发送'/);
+  assert.match(js, /addFact\('状态'/);
+  assert.doesNotMatch(js, /addFact\('记录'/);
+  assert.doesNotMatch(js, /for \(const row of story\.events\) \{[\s\S]{0,500}stage-summary/);
+  assert.doesNotMatch(js, /summary: state\.hideText && row\.summary/);
+  assert.match(js, /const stageTitle = eventIsTool\(row\)[\s\S]*row\.metadata\.toolLabel/);
+  assert.match(js, /const stageSummary = eventIsTool\(row\)[\s\S]*isFailure\(row\) \? '调用失败' : ''/);
+  assert.match(js, /!visibleTexts\.has\(stageSummary\)/);
+  assert.match(js, /stageSummary !== stageTitle/);
+});
+
+test('incoming messages without an agent reply collapse even when there is only one', () => {
+  assert.match(js, /const INPUT_KINDS = new Set\(\['message\.received', 'message\.ignored', 'message\.duplicate'\]\)/);
+  assert.match(js, /\.filter\(\(row\) => INPUT_KINDS\.has\(row\.kind\) && row\.summary\)/);
+  assert.match(js, /function isQuietIncoming\(story\)/);
+  assert.match(js, /function compactTranscript\(stories\)/);
+  assert.match(js, /runType === 'quiet-incoming'[\s\S]*\? run\.length > 0/);
+  assert.match(js, /\? 'quiet-incoming'/);
+  assert.match(js, /el\('details', 'quiet-incoming-fold'\)/);
+  assert.match(js, /`\$\{quietIncomingCount\(batch\.stories\)\} 条未回复消息`/);
+  assert.match(js, /compactTranscript\(stories\)/);
+  assert.match(js, /Boolean\(state\.query\) \|\| state\.filter === 'ignore'/);
+  assert.match(js, /operationalEvents\(story\)\.length === 0/);
+  assert.match(css, /\.quiet-incoming-fold\s*>\s*summary/);
+});
+
+test('routine system chatter folds while tools and diagnostics stay in the transcript', () => {
+  assert.match(js, /function isRoutineSystem\(story\)/);
+  assert.match(js, /story\.isSystem && !story\.failed/);
+  assert.match(js, /operationalEvents\(story\)\.length === 0/);
+  assert.match(js, /\? 'system-activity'/);
+  assert.match(js, /function systemActivityFold\(batch, openedFolds\)/);
+  assert.match(js, /el\('details', 'system-activity-fold'\)/);
+  assert.match(js, /`\$\{batch\.stories\.length\} 条系统记录`/);
+  assert.match(js, /state\.filter === 'system'/);
+  assert.match(js, /function shouldDisplayStory\(story\)/);
+  assert.match(js, /!isRoutineSystem\(story\)/);
+  assert.match(js, /filter\(shouldDisplayStory\)/);
+  assert.match(css, /\.system-activity-fold\s*>\s*summary/);
+});
+
 test('small viewport rules prevent page overflow and keep filters scrollable', () => {
   assert.match(css, /html\s*\{[^}]*overflow-x: hidden/s);
   assert.match(css, /body\s*\{[^}]*overflow-x: hidden/s);
   assert.match(css, /\.filter-list\s*\{[^}]*overflow-x: auto/s);
   assert.match(css, /\.technical-details pre\s*\{[^}]*max-width: 100%[^}]*overflow: auto/s);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*scroll-behavior: auto/);
 });
 
 test('renderer uses safe DOM APIs only', () => {

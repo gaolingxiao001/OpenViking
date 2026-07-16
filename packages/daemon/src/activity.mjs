@@ -9,6 +9,7 @@ const DEFINITIONS = Object.freeze({
   'agent.turn_completed': { category: 'agent', severity: 'info', priority: 62, title: '完成一轮' },
   'agent.steered': { category: 'agent', severity: 'info', priority: 58, title: '中途追加' },
   'agent.note': { category: 'agent', severity: 'info', priority: 45, title: 'Agent 输出' },
+  'agent.tool': { category: 'agent', severity: 'info', priority: 48, title: '工具调用' },
   'agent.started': { category: 'agent', severity: 'info', priority: 60, title: '开始判断' },
   'agent.decided': { category: 'agent', severity: 'info', priority: 65, title: '决定回复' },
   'agent.silent': { category: 'agent', severity: 'info', priority: 25, title: '保持静默' },

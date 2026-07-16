@@ -6,12 +6,18 @@ const IGNORED = new Set(['SILENT', 'IGNORED', 'RULE_IGNORED']);
 const STALE = new Set(['STALE', 'CANCELLED', 'CANCELLED_STALE', 'STOPPED']);
 const FAILED = new Set(['DEAD', 'FAILED', 'SEND_FAILED', 'UNCERTAIN', 'INTERRUPTED', 'ERROR']);
 const KNOWN_STATUS = new Set([...ACTIVE, ...REPLIED, ...IGNORED, ...STALE, ...FAILED]);
+const INPUT_KINDS = new Set(['message.received', 'message.ignored', 'message.duplicate']);
 
 const kindLabels = {
   'message.received': '收到消息',
   'message.ignored': '规则忽略',
   'message.expired': '消息已过期',
   'message.duplicate': '重复消息',
+  'agent.turn_started': '开始一轮',
+  'agent.turn_completed': '完成一轮',
+  'agent.steered': '中途追加',
+  'agent.note': 'Agent 输出',
+  'agent.tool': '工具调用',
   'agent.started': '开始判断',
   'agent.decided': '决定回复',
   'agent.silent': '保持静默',
@@ -80,10 +86,10 @@ const dom = {
   privacy: $('#privacy-toggle'),
   filters: $('#filters'),
   notice: $('#connection-notice'),
-  sourceList: $('#source-list'),
-  olderSources: $('#older-sources'),
-  olderSourcesSummary: $('#older-sources-summary'),
-  olderSourceList: $('#older-source-list'),
+  transcript: $('#transcript'),
+  olderRecords: $('#older-records'),
+  olderRecordsSummary: $('#older-records-summary'),
+  olderTranscript: $('#older-transcript'),
   empty: $('#empty-state'),
   loadOlder: $('#load-older'),
 };
@@ -139,6 +145,23 @@ function isFailure(row) {
   return row.severity === 'error'
     || FAILED.has(row.status)
     || /(?:failed|uncertain|interrupted)$/.test(row.kind);
+}
+
+function eventIsTool(row) {
+  const metadataKeys = Object.keys(row.metadata || {});
+  return /(?:^|\.)(?:tool|command|exec|call)(?:\.|$)/i.test(row.kind)
+    || metadataKeys.some((key) => /(?:tool|command|exec|call)/i.test(key));
+}
+
+function eventIsDiagnostic(row) {
+  return isFailure(row)
+    || row.severity === 'warn'
+    || /(?:retry|expired|cancelled|dropped|recovery)$/.test(row.kind)
+    || Boolean(row.metadata?.error);
+}
+
+function operationalEvents(story) {
+  return story.events.filter((row) => eventIsTool(row) || eventIsDiagnostic(row));
 }
 
 function buildStories() {
@@ -197,7 +220,6 @@ function buildStories() {
       sourceRef,
       sourceType,
       sourceName,
-      sourceKey: sourceRef ? `chat:${sourceRef}` : 'system',
       isSystem,
       failed,
       active,
@@ -211,19 +233,42 @@ function storyMeta(story, key) {
   return lastValue(story.events, (row) => row.metadata[key]);
 }
 
-function storyInput(story) {
-  const values = story.events
-    .filter((row) => row.kind === 'message.received')
-    .map((row) => row.summary)
-    .filter(Boolean);
-  return [...new Set(values)].join('\n');
+function storyInputs(story) {
+  return story.events
+    .filter((row) => INPUT_KINDS.has(row.kind) && row.summary)
+    .map((row) => ({
+      text: row.summary,
+      sourceName: row.sourceName || story.sourceName,
+      sourceType: row.sourceType || row.metadata.chatType || story.sourceType,
+      isSystem: false,
+    }));
 }
 
-function storyOutput(story) {
+function storyOutputs(story) {
+  const toolTexts = new Set(story.events
+    .filter((row) => row.kind === 'agent.tool' && row.metadata.deliveryMode && REPLIED.has(row.status))
+    .map((row) => row.summary)
+    .filter(Boolean));
+  const outputs = [];
+  const seenLegacy = new Set();
+  for (const row of story.events) {
+    if (!row.summary) continue;
+    if (row.kind === 'agent.tool' && row.metadata.deliveryMode && REPLIED.has(row.status)) {
+      outputs.push(row.summary);
+      continue;
+    }
+    if (row.kind !== 'delivery.sent' && row.kind !== 'delivery.dry_run') continue;
+    if (toolTexts.has(row.summary)) continue;
+    const legacyKey = row.outboxId || row.summary;
+    if (seenLegacy.has(legacyKey)) continue;
+    seenLegacy.add(legacyKey);
+    outputs.push(row.summary);
+  }
+  if (outputs.length > 0) return outputs;
   const rows = [...story.events].reverse();
-  return rows.find((row) => row.kind === 'delivery.sent' || row.kind === 'delivery.dry_run')?.summary
-    || rows.find((row) => row.kind === 'agent.decided')?.summary
-    || '';
+  const note = rows.find((row) => row.kind === 'agent.note');
+  const decision = rows.find((row) => row.kind === 'agent.decided');
+  return [note?.summary || decision?.summary || ''].filter(Boolean);
 }
 
 function displayText(value) {
@@ -283,9 +328,32 @@ function technicalData(story) {
     turnId: row.turnId,
     inboundSeq: row.inboundSeq,
     outboxId: row.outboxId,
-    summary: state.hideText && row.summary ? '[正文已隐藏]' : row.summary,
     metadata: row.metadata,
   }));
+}
+
+function sourceDisplayName(story) {
+  if (story.sourceName) return story.sourceName;
+  if (story.sourceType === 'p2p' || story.sourceType === 'private') return '私聊';
+  if (story.sourceType === 'group' || story.sourceType === 'group_chat') return '未命名群聊';
+  return '聊天';
+}
+
+function messageRow(source, direction, value) {
+  const line = el('div', `message-row ${direction}`);
+  line.dataset.direction = direction;
+  const bubbleClass = direction === 'outgoing'
+    ? 'message-bubble agent-message'
+    : direction === 'note'
+      ? 'message-bubble note-message'
+      : 'message-bubble';
+  const column = el('div', 'message-column');
+  if (direction === 'incoming' && !source.isSystem) {
+    column.append(el('span', 'source-label', sourceDisplayName(source)));
+  }
+  column.append(el('div', bubbleClass, displayText(value)));
+  line.append(column);
+  return line;
 }
 
 function storyCard(story) {
@@ -295,23 +363,15 @@ function storyCard(story) {
 
   const summary = el('summary');
   const messages = el('div', 'message-stack');
-  const input = storyInput(story);
-  const output = storyOutput(story);
-  const addMessage = (direction, value) => {
+  const inputs = storyInputs(story);
+  const outputs = storyOutputs(story);
+  const addMessage = (direction, value, source = story) => {
     if (!value) return;
-    const line = el('div', `message-row ${direction}`);
-    line.dataset.direction = direction;
-    const bubbleClass = direction === 'outgoing'
-      ? 'message-bubble agent-message'
-      : direction === 'note'
-        ? 'message-bubble note-message'
-        : 'message-bubble';
-    line.append(el('div', bubbleClass, displayText(value)));
-    messages.append(line);
+    messages.append(messageRow(source, direction, value));
   };
-  addMessage('incoming', input);
-  addMessage('outgoing', output);
-  if (!input && !output) addMessage('note', story.latest.summary);
+  for (const input of inputs) addMessage('incoming', input.text, input);
+  for (const output of outputs) addMessage('outgoing', output);
+  if (!inputs.length && !outputs.length) addMessage('note', story.latest.summary);
   if (messages.childElementCount) summary.append(messages);
 
   const meta = el('div', 'turn-meta');
@@ -333,23 +393,36 @@ function storyCard(story) {
   };
   const mode = storyMeta(story, 'deliveryMode');
   const reason = storyMeta(story, 'reasonCode');
-  addFact('记录', story.latest.title || kindLabels[story.latest.kind] || story.latest.kind);
   addFact('判断', reasonLabels[reason] || reason);
   addFact('发送', { chat: '直接发送', reply: '普通引用', thread: 'Thread' }[mode] || mode);
+  addFact('状态', storyLabel(story) || story.status);
   if (facts.childElementCount) body.append(facts);
 
-  const stages = el('ol', 'stage-list');
-  for (const row of story.events) {
+  const operations = el('ol', 'operation-list');
+  const visibleTexts = new Set([
+    ...inputs.map((input) => input.text),
+    ...outputs,
+    !inputs.length && !outputs.length ? story.latest.summary : '',
+  ].filter(Boolean));
+  for (const row of operationalEvents(story)) {
     const stage = el('li', 'stage');
     const stageTime = el('time', 'stage-time', clock(row.createdAtMs, true));
     stageTime.dateTime = new Date(row.createdAtMs).toISOString();
     const copy = el('div');
-    copy.append(el('div', 'stage-title', row.title || kindLabels[row.kind] || row.kind));
-    if (row.summary) copy.append(el('div', 'stage-summary', displayText(row.summary)));
+    const stageTitle = eventIsTool(row)
+      ? row.metadata.toolLabel || kindLabels[row.kind] || row.kind
+      : row.title || kindLabels[row.kind] || row.kind;
+    const stageSummary = eventIsTool(row)
+      ? (isFailure(row) ? '调用失败' : '')
+      : row.summary;
+    copy.append(el('div', 'stage-title', stageTitle));
+    if (stageSummary && !visibleTexts.has(stageSummary) && stageSummary !== stageTitle) {
+      copy.append(el('div', 'stage-summary', displayText(stageSummary)));
+    }
     stage.append(stageTime, copy);
-    stages.append(stage);
+    operations.append(stage);
   }
-  body.append(stages);
+  if (operations.childElementCount) body.append(operations);
 
   const tech = el('details', 'technical-details');
   tech.append(el('summary', '', '技术信息'), el('pre', '', JSON.stringify(technicalData(story), null, 2)));
@@ -358,9 +431,133 @@ function storyCard(story) {
   return details;
 }
 
-function renderStoryList(container, stories) {
+function isQuietIncoming(story) {
+  return !story.isSystem
+    && storyInputs(story).length > 0
+    && storyOutputs(story).length === 0
+    && !story.active
+    && !story.failed
+    && operationalEvents(story).length === 0;
+}
+
+function quietIncomingCount(stories) {
+  return stories.reduce((count, story) => count + storyInputs(story).length, 0);
+}
+
+function isRoutineSystem(story) {
+  return story.isSystem && !story.failed
+    && operationalEvents(story).length === 0;
+}
+
+function shouldDisplayStory(story) {
+  return !isRoutineSystem(story)
+    || state.filter === 'system'
+    || Boolean(state.query);
+}
+
+function compactTranscript(stories) {
+  const compacted = [];
+  let run = [];
+  let runType = '';
+  const flush = () => {
+    const shouldBatch = runType === 'quiet-incoming'
+      ? run.length > 0
+      : run.length > 1;
+    if (shouldBatch) {
+      compacted.push({
+        batchType: runType,
+        key: `${runType}:${run[0].key}:${run.at(-1).key}`,
+        stories: run,
+      });
+    } else if (run.length === 1) {
+      compacted.push(run[0]);
+    }
+    run = [];
+    runType = '';
+  };
+  for (const story of stories) {
+    const type = isQuietIncoming(story)
+      ? 'quiet-incoming'
+      : isRoutineSystem(story)
+        ? 'system-activity'
+        : '';
+    if (type && type === runType) {
+      run.push(story);
+      continue;
+    }
+    flush();
+    if (type) {
+      runType = type;
+      run.push(story);
+    } else {
+      compacted.push(story);
+    }
+  }
+  flush();
+  return compacted;
+}
+
+function quietIncomingFold(batch, openedFolds) {
+  const fold = el('details', 'quiet-incoming-fold');
+  fold.dataset.foldKey = batch.key;
+  fold.open = openedFolds.has(batch.key)
+    || Boolean(state.query) || state.filter === 'ignore';
+
+  const summary = el('summary');
+  const copy = el('span', 'quiet-fold-copy', `${quietIncomingCount(batch.stories)} 条未回复消息`);
+  const time = el('time', 'story-time', clock(batch.stories[0].at));
+  time.dateTime = new Date(batch.stories[0].at).toISOString();
+  time.title = exact(batch.stories[0].at);
+  summary.append(copy, time, el('span', 'turn-disclosure', '展开'));
+  fold.append(summary);
+
+  const list = el('div', 'quiet-incoming-list');
+  for (const story of batch.stories) {
+    const item = el('div', 'quiet-incoming-item');
+    for (const input of storyInputs(story)) {
+      item.append(messageRow(input, 'incoming', input.text));
+    }
+    const itemTime = el('time', 'quiet-incoming-time', clock(story.at, true));
+    itemTime.dateTime = new Date(story.at).toISOString();
+    itemTime.title = exact(story.at);
+    item.append(itemTime);
+    list.append(item);
+  }
+  fold.append(list);
+  return fold;
+}
+
+function systemActivityFold(batch, openedFolds) {
+  const fold = el('details', 'system-activity-fold');
+  fold.dataset.foldKey = batch.key;
+  fold.open = openedFolds.has(batch.key)
+    || Boolean(state.query) || state.filter === 'system';
+
+  const summary = el('summary');
+  const copy = el('span', 'system-fold-copy', `${batch.stories.length} 条系统记录`);
+  const time = el('time', 'story-time', clock(batch.stories[0].at));
+  time.dateTime = new Date(batch.stories[0].at).toISOString();
+  time.title = exact(batch.stories[0].at);
+  summary.append(copy, time, el('span', 'turn-disclosure', '展开'));
+  fold.append(summary);
+
+  const list = el('div', 'system-activity-list');
+  for (const story of batch.stories) list.append(storyCard(story));
+  fold.append(list);
+  return fold;
+}
+
+function renderTranscript(container, stories, openedFolds = new Set()) {
   const fragment = document.createDocumentFragment();
-  for (const story of stories) fragment.append(storyCard(story));
+  for (const item of compactTranscript(stories)) {
+    if (item.batchType === 'quiet-incoming') {
+      fragment.append(quietIncomingFold(item, openedFolds));
+    } else if (item.batchType === 'system-activity') {
+      fragment.append(systemActivityFold(item, openedFolds));
+    } else {
+      fragment.append(storyCard(item));
+    }
+  }
   container.replaceChildren(fragment);
 }
 
@@ -379,107 +576,15 @@ function matches(story) {
   return searchable.includes(state.query);
 }
 
-function groupSources(stories) {
-  const grouped = new Map();
-  for (const story of stories) {
-    if (!grouped.has(story.sourceKey)) {
-      grouped.set(story.sourceKey, {
-        key: story.sourceKey,
-        ref: story.sourceRef,
-        type: story.sourceType,
-        name: story.sourceName,
-        isSystem: story.isSystem,
-        stories: [],
-        at: story.at,
-      });
-    }
-    const group = grouped.get(story.sourceKey);
-    group.stories.push(story);
-    group.at = Math.max(group.at, story.at);
-    if (!group.type && story.sourceType) group.type = story.sourceType;
-    if (!group.name && story.sourceName) group.name = story.sourceName;
-  }
-  return [...grouped.values()].sort((a, b) => {
-    if (a.isSystem !== b.isSystem) return a.isSystem ? 1 : -1;
-    return b.at - a.at;
-  });
-}
-
-function sourceDisplayName(group) {
-  if (group.name) return group.name;
-  if (group.isSystem) return '系统';
-  if (group.type === 'p2p' || group.type === 'private') return '私聊';
-  if (group.type === 'group' || group.type === 'group_chat') return '未命名群聊';
-  return '聊天';
-}
-
-function sourceKind(group) {
-  if (group.isSystem) return '系统记录';
-  if (group.type === 'p2p' || group.type === 'private') return '私聊';
-  if (group.type === 'group' || group.type === 'group_chat') return '群聊';
-  return '聊天';
-}
-
-function sourceAvatar(group) {
-  if (group.isSystem) return '系';
-  if (group.type === 'p2p' || group.type === 'private') return '私';
-  return '群';
-}
-
-function sourceSection(group, options = {}) {
-  const section = el(group.isSystem ? 'details' : 'section',
-    group.isSystem ? 'source-group system-source' : 'source-group');
-  section.dataset.sourceKey = group.key;
-  const heading = el(group.isSystem ? 'summary' : 'header', 'source-heading');
-  const identity = el('div', 'source-identity');
-  const copy = el('div', 'source-copy');
-  copy.append(
-    el('h2', 'source-title', sourceDisplayName(group)),
-    el('div', 'source-subtitle', `${sourceKind(group)} · ${group.stories.length} 条`),
-  );
-  identity.append(el('span', 'source-avatar', sourceAvatar(group)), copy);
-  const time = el('time', 'source-time', clock(group.at));
-  time.dateTime = new Date(group.at).toISOString();
-  time.title = exact(group.at);
-  heading.append(identity, time);
-  section.append(heading);
-  if (group.isSystem) {
-    section.open = options.openSources?.has(group.key)
-      || state.filter === 'system'
-      || Boolean(state.query)
-      || Boolean(group.stories[0]?.failed);
-  }
-
-  const recent = options.allOld ? group.stories : group.stories.filter(isCurrentOrToday);
-  const older = options.allOld ? [] : group.stories.filter((story) => !isCurrentOrToday(story));
-  const list = el('div', 'story-list');
-  renderStoryList(list, recent);
-  section.append(list);
-
-  if (older.length) {
-    const fold = el('details', 'source-old');
-    fold.dataset.foldKey = group.key;
-    fold.open = options.openFolds?.has(group.key) || Boolean(state.query) || state.filter !== 'all';
-    const summary = el('summary');
-    summary.append(el('span', '', '更早'), el('span', 'section-meta', `${older.length} 条`));
-    const oldList = el('div', 'story-list');
-    renderStoryList(oldList, older);
-    fold.append(summary, oldList);
-    section.append(fold);
-  }
-  return section;
-}
-
 function openStoryKeys() {
   return new Set([...document.querySelectorAll('.story[open]')].map((node) => node.dataset.storyKey));
 }
 
-function openFoldKeys() {
-  return new Set([...document.querySelectorAll('.source-old[open]')].map((node) => node.dataset.foldKey));
-}
-
-function openSourceKeys() {
-  return new Set([...document.querySelectorAll('.system-source[open]')].map((node) => node.dataset.sourceKey));
+function openCompactFoldKeys() {
+  return new Set([...document.querySelectorAll(
+    '.quiet-incoming-fold[open], .system-activity-fold[open]',
+  )]
+    .map((node) => node.dataset.foldKey));
 }
 
 function updateCurrentState(stories) {
@@ -493,25 +598,19 @@ function updateCurrentState(stories) {
 
 function render() {
   const openedStories = openStoryKeys();
-  const openedFolds = openFoldKeys();
-  const openedSources = openSourceKeys();
-  const olderSourcesWasOpen = dom.olderSources.open;
+  const openedCompactFolds = openCompactFoldKeys();
+  const olderRecordsWasOpen = dom.olderRecords.open;
   const allStories = buildStories();
-  const stories = allStories.filter(matches);
-  const groups = groupSources(stories);
-  const currentGroups = groups.filter((group) => group.stories.some(isCurrentOrToday));
-  const oldGroups = groups.filter((group) => !group.stories.some(isCurrentOrToday));
+  const stories = allStories.filter(matches).filter(shouldDisplayStory);
+  const recent = stories.filter(isCurrentOrToday);
+  const older = stories.filter((story) => !isCurrentOrToday(story));
 
-  dom.sourceList.replaceChildren(...currentGroups.map((group) =>
-    sourceSection(group, { openFolds: openedFolds, openSources: openedSources })));
-  dom.olderSourceList.replaceChildren(...oldGroups.map((group) =>
-    sourceSection(group, { allOld: true, openSources: openedSources })));
-  dom.olderSources.hidden = oldGroups.length === 0;
-  dom.olderSourcesSummary.textContent = oldGroups.length
-    ? `${oldGroups.length} 个 · ${oldGroups.reduce((sum, group) => sum + group.stories.length, 0)} 条`
-    : '';
-  dom.olderSources.open = oldGroups.length > 0 && (
-    olderSourcesWasOpen || Boolean(state.query) || state.filter !== 'all'
+  renderTranscript(dom.transcript, recent, openedCompactFolds);
+  renderTranscript(dom.olderTranscript, older, openedCompactFolds);
+  dom.olderRecords.hidden = older.length === 0;
+  dom.olderRecordsSummary.textContent = older.length ? `${older.length} 条` : '';
+  dom.olderRecords.open = older.length > 0 && (
+    olderRecordsWasOpen || Boolean(state.query) || state.filter !== 'all'
   );
 
   const count = stories.length;

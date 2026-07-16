@@ -83,9 +83,9 @@ function sourceRefFromConversationKey(value) {
 const PUBLIC_METADATA_KEYS = new Set([
   'action', 'attempt', 'backfilled', 'batchSize', 'bytes', 'chatType',
   'code', 'codexVersion', 'deliveryMode', 'dryRun', 'eventMode', 'exitCode',
-  'expired', 'filterReason', 'inboundSeqs', 'interruptedTurns', 'larkVersion',
+  'durationMs', 'expired', 'filterReason', 'inboundSeqs', 'interruptedTurns', 'itemType', 'larkVersion',
   'messageType', 'outboxes', 'reason', 'reasonCode', 'removed',
-  'requestedDeliveryMode', 'signal',
+  'requestedDeliveryMode', 'signal', 'toolLabel', 'toolName', 'toolServer', 'toolStatus',
 ]);
 const PUBLIC_NESTED_METADATA_KEYS = new Set(['conversations', 'inbound', 'outbox', 'turns']);
 
@@ -953,6 +953,12 @@ export class Store {
   setGlobalSession(sessionId, policyHash) {
     this.setMetaStatement.run('global_session_id', sessionId);
     this.setMetaStatement.run('global_policy_hash', policyHash);
+  }
+
+  inboundSeqForMessageId(messageId) {
+    if (!messageId) return null;
+    const row = this.getInboundByMessage.get(messageId);
+    return row ? number(row.seq) : null;
   }
 
   clearGlobalSession() {

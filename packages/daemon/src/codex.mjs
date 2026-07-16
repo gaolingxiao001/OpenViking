@@ -8,6 +8,100 @@ function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
 }
 
+function cleanToolPart(value, fallback) {
+  const text = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text ? text.slice(0, 80) : fallback;
+}
+
+function completedToolActivity(item) {
+  if (!item || typeof item !== 'object') return null;
+  const durationMs = Number.isFinite(item.durationMs) ? Math.max(0, item.durationMs) : undefined;
+  const failed = item.status === 'failed' || item.status === 'declined' || Boolean(item.error);
+  const common = (itemType, toolLabel, extra = {}) => ({
+    kind: 'agent.tool',
+    summary: toolLabel,
+    status: failed ? 'FAILED' : 'COMPLETED',
+    metadata: {
+      itemType,
+      toolLabel,
+      toolStatus: cleanToolPart(item.status, failed ? 'failed' : 'completed'),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...extra,
+    },
+  });
+
+  if (item.type === 'mcpToolCall') {
+    const toolServer = cleanToolPart(item.server, 'mcp');
+    const toolName = cleanToolPart(item.tool, 'tool');
+    const isLarkDelivery = toolServer === 'lark_daemon_im'
+      && ['reply_lark_message', 'send_lark_message'].includes(toolName);
+    if (isLarkDelivery) {
+      const reply = item.arguments && typeof item.arguments === 'object'
+        ? String(item.arguments.text ?? '').trim()
+        : '';
+      const deliveryMode = toolName === 'send_lark_message'
+        ? 'chat'
+        : item.arguments?.reply_in_thread === true ? 'thread' : 'reply';
+      const toolLabel = toolName === 'send_lark_message' ? '飞书发送' : '飞书回复';
+      const activity = common('mcpToolCall', toolLabel, {
+        toolName,
+        toolServer,
+        deliveryMode,
+      });
+      activity.summary = reply || toolLabel;
+      activity.status = failed ? 'FAILED' : 'SENT';
+      return activity;
+    }
+    return common('mcpToolCall', `${toolServer} · ${toolName}`, { toolName, toolServer });
+  }
+
+  if (item.type === 'dynamicToolCall') {
+    const toolName = cleanToolPart(item.tool, 'tool');
+    const namespace = cleanToolPart(item.namespace, 'dynamic');
+    return common('dynamicToolCall', `${namespace} · ${toolName}`, {
+      toolName,
+      toolServer: namespace,
+    });
+  }
+
+  if (item.type === 'commandExecution') {
+    const actionName = item.commandActions?.find((action) => action?.name)?.name;
+    const toolName = cleanToolPart(actionName, 'shell');
+    return common('commandExecution', toolName === 'shell' ? '运行命令' : `运行命令 · ${toolName}`, {
+      toolName,
+      ...(Number.isInteger(item.exitCode) ? { exitCode: item.exitCode } : {}),
+    });
+  }
+
+  if (item.type === 'fileChange') {
+    const count = Array.isArray(item.changes) ? item.changes.length : 0;
+    return common('fileChange', count ? `修改文件 · ${count}` : '修改文件', { toolName: 'file_change' });
+  }
+
+  if (item.type === 'webSearch') {
+    return common('webSearch', '搜索网页', { toolName: 'web_search' });
+  }
+
+  if (item.type === 'imageView') {
+    return common('imageView', '查看图片', { toolName: 'image_view' });
+  }
+
+  if (item.type === 'imageGeneration') {
+    return common('imageGeneration', '生成图片', { toolName: 'image_generation' });
+  }
+
+  if (item.type === 'collabAgentToolCall') {
+    return common('collabAgentToolCall', '协作 Agent', {
+      toolName: cleanToolPart(typeof item.tool === 'string' ? item.tool : item.tool?.type, 'collaboration'),
+    });
+  }
+
+  return null;
+}
+
 function delay(ms) {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -95,6 +189,8 @@ export class CodexAgent {
     this.storedThreadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;      // turn/start sent, turn/started not yet observed
+    this.startingItems = [];         // inbound items waiting for turn/started
+    this.activeInboundSeqs = [];     // inbound rows associated with the live app-server turn
     this.needsHistoryPrefix = false; // fresh thread: prepend history to the first turn
     this.queue = [];                 // texts waiting for a live idle thread
     this.pending = new Map();        // rpc id -> { resolve, reject }
@@ -148,11 +244,13 @@ export class CodexAgent {
       if (history.length > 0) body = [...history, HISTORY_SEPARATOR, text].join('\n');
     }
     this.startingTurn = true;
+    this.startingItems = items.map((item) => ({ text: item.text, seq: item.seq }));
     this._request('turn/start', {
       threadId: this.threadId,
       input: [{ type: 'text', text: body }],
     }).catch((error) => {
       this.startingTurn = false;
+      this.startingItems = [];
       if (hadPrefix) this.needsHistoryPrefix = true;
       this.logger.warn('codex_turn_start_failed', { error: safe(error) });
       this.queue.unshift(...items); // never drop a message
@@ -167,7 +265,15 @@ export class CodexAgent {
       expectedTurnId,
       input: [{ type: 'text', text }],
     }).then(() => {
-      this._recordActivity('agent.steered', { turnId: expectedTurnId, summary: text });
+      if (seq !== null && seq !== undefined && !this.activeInboundSeqs.includes(seq)) {
+        this.activeInboundSeqs.push(seq);
+      }
+      this._recordActivity('agent.steered', {
+        turnId: expectedTurnId,
+        inboundSeq: seq,
+        summary: text,
+        metadata: { inboundSeqs: [...this.activeInboundSeqs] },
+      });
     }).catch((error) => {
       // Race: the turn ended just as we steered. Re-deliver so the message is not lost.
       this.logger.info('codex_steer_fell_back', { error: safe(error) });
@@ -179,23 +285,42 @@ export class CodexAgent {
   _onTurnStarted(turnId) {
     this.startingTurn = false;
     this.activeTurnId = turnId ?? null;
-    this._recordActivity('agent.turn_started', { turnId: this.activeTurnId });
+    this.activeInboundSeqs = [...new Set(
+      this.startingItems.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
+    )];
+    this.startingItems = [];
+    this._recordActivity('agent.turn_started', {
+      turnId: this.activeTurnId,
+      inboundSeq: this.activeInboundSeqs.at(-1) ?? null,
+      metadata: { inboundSeqs: [...this.activeInboundSeqs] },
+    });
     if (!this.activeTurnId) return;
     const items = this.queue.splice(0);
     for (const item of items) this._steer(item.text, item.seq);
   }
 
+  _associatedInboundSeqs() {
+    if (this.activeInboundSeqs.length > 0) return [...this.activeInboundSeqs];
+    return [...new Set(
+      this.startingItems.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
+    )];
+  }
+
   // turn/completed: idle again. Anything still queued (e.g. a very fast turn that never
   // emitted turn/started) is merged into one fresh turn/start.
-  _onTurnCompleted(status, error) {
-    const turnId = this.activeTurnId;
+  _onTurnCompleted(status, error, completedTurnId = null) {
+    const turnId = this.activeTurnId ?? completedTurnId;
+    const inboundSeqs = this._associatedInboundSeqs();
     this.activeTurnId = null;
     this.startingTurn = false;
     this._recordActivity('agent.turn_completed', {
       turnId,
+      inboundSeq: inboundSeqs.at(-1) ?? null,
       status,
-      metadata: { status, error: error ? safe(error) : undefined },
+      metadata: { status, error: error ? safe(error) : undefined, inboundSeqs },
     });
+    this.activeInboundSeqs = [];
+    this.startingItems = [];
     this._drain();
   }
 
@@ -269,13 +394,47 @@ export class CodexAgent {
         this._onTurnStarted(params.turn?.id ?? params.turnId ?? null);
         break;
       case 'turn/completed':
-        this._onTurnCompleted(params.turn?.status ?? params.status, params.turn?.error ?? params.error);
+        this._onTurnCompleted(
+          params.turn?.status ?? params.status,
+          params.turn?.error ?? params.error,
+          params.turn?.id ?? params.turnId ?? null,
+        );
         break;
       case 'item/completed': {
         const item = params.item;
         const text = item?.text ?? item?.message?.text;
+        const associatedInboundSeqs = this._associatedInboundSeqs();
         if ((item?.type === 'agentMessage' || item?.type === 'agent_message') && text) {
-          this._recordActivity('agent.note', { turnId: this.activeTurnId, summary: text });
+          this._recordActivity('agent.note', {
+            turnId: params.turnId ?? this.activeTurnId,
+            inboundSeq: associatedInboundSeqs.at(-1) ?? null,
+            summary: text,
+            metadata: { inboundSeqs: associatedInboundSeqs },
+          });
+          break;
+        }
+        const tool = completedToolActivity(item);
+        if (tool) {
+          const replyMessageId = item?.type === 'mcpToolCall'
+            && item.server === 'lark_daemon_im'
+            && item.tool === 'reply_lark_message'
+            ? item.arguments?.message_id
+            : null;
+          const resolvedSeq = replyMessageId
+            ? this.store.inboundSeqForMessageId?.(replyMessageId)
+            : null;
+          const inboundSeq = resolvedSeq ?? associatedInboundSeqs.at(-1) ?? null;
+          const inboundSeqs = [...associatedInboundSeqs];
+          if (resolvedSeq !== null && resolvedSeq !== undefined && !inboundSeqs.includes(resolvedSeq)) {
+            inboundSeqs.push(resolvedSeq);
+          }
+          this._recordActivity(tool.kind, {
+            turnId: params.turnId ?? this.activeTurnId,
+            inboundSeq,
+            summary: tool.summary,
+            status: tool.status,
+            metadata: { ...tool.metadata, inboundSeqs },
+          });
         }
         break;
       }
@@ -420,6 +579,8 @@ export class CodexAgent {
     this.threadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;
+    this.startingItems = [];
+    this.activeInboundSeqs = [];
     for (const pending of this.pending.values()) {
       try { pending.reject(new Error('codex connection lost')); } catch { /* ignore */ }
     }
@@ -454,6 +615,8 @@ export class CodexAgent {
         kind,
         summary: fields.summary,
         status: fields.status,
+        turnId: fields.turnId,
+        inboundSeq: fields.inboundSeq,
         metadata: fields.metadata,
       });
     } catch (error) {

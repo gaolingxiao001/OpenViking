@@ -202,6 +202,50 @@ describe('activity store', { concurrency: false }, () => {
     assert.equal(JSON.stringify(activities).includes(chatId), false);
   });
 
+  it('publishes compact tool metadata while keeping tool arguments and Lark ids private', () => {
+    const incoming = event('tool-source', 'run a tool', {
+      messageId: 'om-tool-target-private',
+      chatId: 'oc-tool-chat-private',
+      conversationKey: 'profile:tenant:oc-tool-chat-private:main',
+    });
+    const result = store.ingest(incoming, null, 1_700_000_180_000);
+    assert.equal(store.inboundSeqForMessageId(incoming.messageId), result.inbound.seq);
+    store.recordActivity({
+      eventKey: 'codex:tool:completed',
+      kind: 'agent.tool',
+      turnId: 'turn-app-server-1',
+      inboundSeq: result.inbound.seq,
+      status: 'COMPLETED',
+      summary: 'openviking · read_resource',
+      metadata: {
+        itemType: 'mcpToolCall',
+        toolLabel: 'openviking · read_resource',
+        toolName: 'read_resource',
+        toolServer: 'openviking',
+        toolStatus: 'completed',
+        durationMs: 42,
+        toolError: 'failed for viking://private/sentinel',
+        arguments: { uri: 'viking://private/sentinel' },
+      },
+    }, 1_700_000_180_042);
+
+    const tool = store.listActivities({ limit: 10 }).activities
+      .find((activity) => activity.kind === 'agent.tool');
+    assert.ok(tool);
+    assert.equal(tool.turnId, 'turn-app-server-1');
+    assert.equal(tool.sourceType, 'group');
+    assert.deepEqual(tool.metadata, {
+      durationMs: 42,
+      itemType: 'mcpToolCall',
+      toolLabel: 'openviking · read_resource',
+      toolName: 'read_resource',
+      toolServer: 'openviking',
+      toolStatus: 'completed',
+    });
+    const serialized = JSON.stringify(tool);
+    assert.doesNotMatch(serialized, /viking:\/\/private|om-tool-target|oc-tool-chat/);
+  });
+
   it('closes stale subscriber lifecycle rows so only the current listener is running', () => {
     for (let index = 1; index <= 3; index += 1) {
       store.closeRunningSubscriberActivities();
