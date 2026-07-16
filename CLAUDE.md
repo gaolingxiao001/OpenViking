@@ -19,7 +19,7 @@ lark-cli event +subscribe (lark.mjs 子进程, NDJSON)
   → codex 自己通过 MCP 工具回飞书(lark-tools.mjs 作为 stdio MCP server 挂进 codex)
 ```
 
-- **运行时可变 model/effort**:`/model`、`/effort` 写入 meta 表(`setting:codex_model` / `setting:codex_effort`),优先于 env 配置;值随每次 `turn/start` 以 per-turn override 下发(thread/resume 的 config 对运行中的 thread 不生效,别改回去),下一轮生效、thread 与上下文不动;`/model` 的可选项来自 app-server `model/list`,参数按列表前缀解析。`/new` 走 `rotateSession()`:开空 thread 且不带 history 前缀。
+- **运行时可变 model/effort**:`/model`、`/effort` 写入 meta 表(`setting:codex_model` / `setting:codex_effort`),优先于 env 配置;值随每次 `turn/start` 以 per-turn override 下发(thread/resume 的 config 对运行中的 thread 不生效,别改回去);`/model` 下一轮生效并保留上下文，`/effort` 切换后自动开空 thread，避免旧档位的失败状态污染后续轮次;`/model` 的可选项来自 app-server `model/list`,参数按列表前缀解析。`/new` 走 `rotateSession()`:开空 thread 且不带 history 前缀。
 
 - **全局单线程**:所有 chat 共用一个 codex thread,消息交错进同一上下文,靠行内 `chat=` 标签区分。`policyHash`(system prompt + model + workspace + steer-v1)变化时不再 resume 旧 thread,新 thread 会丢跨会话上下文——改 `packages/daemon/agent/system-prompt.md` 时要意识到这点。
 - **CodexAgent 状态机**(codex.mjs):`activeTurnId` / `startingTurn` / `queue` 三态;turn/start 失败 unshift 回队列,steer 撞上 turn 刚结束会 fallback 到 deliver,断线走 `_reconnectLoop` + `thread/resume`。永不丢消息是硬性不变量,改这里必须跑 codex.test.mjs。

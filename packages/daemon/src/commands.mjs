@@ -101,5 +101,11 @@ export async function executeCommand(command, codex) {
     return { ok: false, text: `${head}\n可选：${EFFORT_LEVELS.join('、')}` };
   }
   codex.setEffort(levels[0]);
-  return { ok: true, text: `已切换推理档位：${levels[0]}（下一轮生效，上下文保留）` };
+  const threadId = await codex.rotateSession({ resume: false });
+  return {
+    ok: true,
+    text: threadId
+      ? `已切换推理档位：${levels[0]}，并已开启新会话：${threadId}`
+      : `已切换推理档位：${levels[0]}，已清除当前会话；重连后将开启新会话`,
+  };
 }

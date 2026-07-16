@@ -127,7 +127,11 @@ describe('executeCommand', () => {
     const codex = fakeCodex();
     const high = await executeCommand({ name: 'effort', arg: 'h' }, codex);
     assert.equal(high.ok, true);
-    assert.deepEqual(codex.calls, [['setEffort', 'high']]);
+    assert.match(high.text, /已开启新会话/);
+    assert.deepEqual(codex.calls, [
+      ['setEffort', 'high'],
+      ['rotate', { resume: false }],
+    ]);
 
     const ambiguous = await executeCommand({ name: 'effort', arg: 'm' }, codex);
     assert.equal(ambiguous.ok, false);
@@ -135,7 +139,7 @@ describe('executeCommand', () => {
 
     const unknown = await executeCommand({ name: 'effort', arg: 'turbo' }, codex);
     assert.equal(unknown.ok, false);
-    assert.equal(codex.calls.length, 1);
+    assert.equal(codex.calls.length, 2);
   });
 
   it('unknown commands answer with help instead of reaching codex', async () => {

@@ -636,8 +636,8 @@ export class CodexAgent {
     return this.threadId;
   }
 
-  // /model and /effort are plain field updates: the values ride on the next
-  // turn/start (see _startTurn), so the thread and its context are untouched.
+  // Model/effort values ride on the next turn/start (see _startTurn). Command
+  // policy decides whether to preserve or rotate the thread after updating them.
   setModel(model) {
     this.model = model;
     this.store.setSetting?.('codex_model', model);
