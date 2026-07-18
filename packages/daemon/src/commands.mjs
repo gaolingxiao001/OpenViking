@@ -19,6 +19,24 @@ export function matchPrefix(token, candidates) {
   return candidates.filter((name) => name.startsWith(token));
 }
 
+// Lark inserts "@_user_N" / "@_all" placeholders into the text for mentions.
+const LEADING_MENTIONS = /^(?:@_(?:user_\d+|all)\s*)+/;
+const TRAILING_MENTIONS = /(?:\s*@_(?:user_\d+|all))+$/;
+
+// Where slash commands are accepted: a private chat takes bare /commands; a group
+// chat only when the message @-mentions the bot, with the mention placeholders
+// stripped before parsing. Returns the parse candidate text, or null when the
+// message is not eligible (it then flows to codex as a normal message).
+// ponytail: any mention counts — the daemon does not know its own open_id, so
+// "@someone /cmd" in a trusted group also triggers; resolve the bot identity if
+// that ever bites.
+export function commandCandidate(event) {
+  const text = String(event.content ?? '').trim();
+  if ((event.chatType ?? 'p2p') === 'p2p') return text;
+  if (!Array.isArray(event.mentions) || event.mentions.length === 0) return null;
+  return text.replace(LEADING_MENTIONS, '').replace(TRAILING_MENTIONS, '').trim();
+}
+
 // null → not a command (does not start with '/'). Otherwise { name, arg } for a
 // unique match, or { name: null, token, matches } for unknown/ambiguous input.
 export function parseCommand(text) {

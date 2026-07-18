@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { EFFORT_LEVELS, executeCommand, matchPrefix, parseCommand } from '../src/commands.mjs';
+import {
+  EFFORT_LEVELS,
+  commandCandidate,
+  executeCommand,
+  matchPrefix,
+  parseCommand,
+} from '../src/commands.mjs';
 
 function fakeCodex(overrides = {}) {
   const calls = [];
@@ -41,6 +47,34 @@ describe('parseCommand', () => {
     assert.equal(unknown.token, 'foo');
     assert.deepEqual(unknown.matches, []);
     assert.equal(parseCommand('/').name, null);
+  });
+});
+
+describe('commandCandidate', () => {
+  it('passes p2p text through unchanged', () => {
+    assert.equal(commandCandidate({ chatType: 'p2p', content: ' /new ', mentions: [] }), '/new');
+    assert.equal(commandCandidate({ chatType: 'p2p', content: '普通消息', mentions: [] }), '普通消息');
+  });
+
+  it('requires a mention in group chats', () => {
+    assert.equal(commandCandidate({ chatType: 'group', content: '/help', mentions: [] }), null);
+    assert.equal(commandCandidate({ chatType: 'group', content: '/help' }), null);
+  });
+
+  it('strips mention placeholders around the command in a group', () => {
+    const mentions = [{ key: '@_user_1', name: 'Zayn', id: 'ou_bot12345678' }];
+    assert.equal(
+      commandCandidate({ chatType: 'group', content: '@_user_1 /new', mentions }),
+      '/new',
+    );
+    assert.equal(
+      commandCandidate({ chatType: 'group', content: '/model gpt-5.5 @_user_1', mentions }),
+      '/model gpt-5.5',
+    );
+    assert.equal(
+      commandCandidate({ chatType: 'group', content: '@_user_1 帮我看看', mentions }),
+      '帮我看看',
+    );
   });
 });
 

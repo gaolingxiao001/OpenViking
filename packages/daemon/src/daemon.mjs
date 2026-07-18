@@ -5,7 +5,7 @@ import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
 import { ProcessRegistry } from './process-utils.mjs';
 import { CodexAgent, formatInboundLine } from './codex.mjs';
-import { executeCommand, parseCommand } from './commands.mjs';
+import { commandCandidate, executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
@@ -218,7 +218,9 @@ export class LarkDaemon {
     const filterReason = deterministicFilter(event, this.config);
     // '/'-prefixed text is reserved for local slash commands: handled by the daemon
     // itself, recorded as filtered so it never enters codex delivery or history.
-    const command = filterReason ? null : parseCommand(event.content);
+    // P2P takes bare /commands; a group only when the bot is @-mentioned.
+    const commandText = filterReason ? null : commandCandidate(event);
+    const command = commandText === null ? null : parseCommand(commandText);
     let result;
     try {
       result = this.store.ingest(event, command ? 'slash_command' : filterReason, Date.now());
