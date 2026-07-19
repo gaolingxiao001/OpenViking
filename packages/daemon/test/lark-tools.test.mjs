@@ -91,6 +91,7 @@ describe('Lark proactive IM tool service', () => {
     assert.deepEqual(result, {
       sent: true,
       chat_id: 'oc_memorize123456',
+      mention_user_ids: [],
       message_id: 'om_sent12345678',
       idempotency_key: 'stable-send-1',
     });
@@ -115,6 +116,40 @@ describe('Lark proactive IM tool service', () => {
     const sentText = args[args.indexOf('--text') + 1];
     assert.equal(sentText, 'hello 所有人');
     assert.doesNotMatch(sentText, /user_id|<at/i);
+  });
+
+  it('renders validated user mentions for sends and replies', async () => {
+    const calls = [];
+    const service = new LarkToolService(options(), async (_command, args) => {
+      calls.push(args);
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    const mentionUserId = 'ou_hermes12345678';
+    const sent = await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      text: 'please handle this',
+      mention_user_ids: [mentionUserId, mentionUserId],
+    });
+    const replied = await service.replyMessage({
+      message_id: 'om_target1234567',
+      text: 'please follow up',
+      mention_user_ids: [mentionUserId],
+    });
+
+    assert.deepEqual(sent.mention_user_ids, [mentionUserId]);
+    assert.deepEqual(replied.mention_user_ids, [mentionUserId]);
+    assert.equal(
+      calls[0][calls[0].indexOf('--text') + 1],
+      `<at user_id="${mentionUserId}"></at> please handle this`,
+    );
+    assert.equal(
+      calls[1][calls[1].indexOf('--text') + 1],
+      `<at user_id="${mentionUserId}"></at> please follow up`,
+    );
+    await assert.rejects(
+      () => service.sendMessage({ chat_id: 'oc_memorize123456', text: 'hi', mention_user_ids: ['Hermes'] }),
+      /full ou_/,
+    );
   });
 
   it('rejects guessed IDs, empty text, oversized text, and CLI failures', async () => {

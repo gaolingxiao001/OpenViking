@@ -23,7 +23,7 @@ lark-cli event +subscribe (lark.mjs 子进程, NDJSON)
 
 - **全局单线程**:所有 chat 共用一个 codex thread,消息交错进同一上下文,靠行内 `chat=` 标签区分。`policyHash`(system prompt + model + workspace + steer-v1)变化时不再 resume 旧 thread,新 thread 会丢跨会话上下文——改 `packages/daemon/agent/system-prompt.md` 时要意识到这点。
 - **CodexAgent 状态机**(codex.mjs):`activeTurnId` / `startingTurn` / `queue` 三态;turn/start 失败 unshift 回队列,steer 撞上 turn 刚结束会 fallback 到 deliver,断线走 `_reconnectLoop` + `thread/resume`。永不丢消息是硬性不变量,改这里必须跑 codex.test.mjs。
-- **出站只走 MCP 工具**:`reply_lark_message` / `send_lark_message` / `list_lark_chats`(lark-tools.mjs)。codex 不允许 shell 调 lark-cli。
+- **出站只走 MCP 工具**:`reply_lark_message` / `send_lark_message` / `list_lark_chats`(lark-tools.mjs)。send/reply 支持可信 open_id 列表 `mention_user_ids`，内部生成真正的飞书 @；codex 不允许 shell 调 lark-cli。
 - **Activity 流水**:daemon 和 CodexAgent 都写 `activities` 表(store.recordActivity),daemon 在 `/api/activity` 提供 JSON,web 包只做代理和渲染(public/activity.js)。
 
 ## 命令
