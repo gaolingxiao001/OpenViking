@@ -528,6 +528,16 @@ export class CodexAgent {
       const args = [
         'app-server', '--listen', 'stdio://',
         '-c', `developer_instructions=${tomlString(this.developerInstructionsText)}`,
+        // The user's interactive ~/.codex config drags desktop-only machinery into
+        // every turn: plugin marketplaces, <recommended_plugins> prompt injections,
+        // plugin-suggestion tools, and multi-agent framing. None of it serves a
+        // chat-reply agent, and it measurably costs prefill size plus whole model
+        // round-trips (~2x wall time on short replies). Skills (~/.agents) and the
+        // lark_daemon_im MCP server configured below are unaffected.
+        '-c', 'features.plugins=false',
+        '-c', 'features.tool_suggest=false',
+        '-c', 'features.multi_agent=false',
+        '-c', 'features.apps=false',
       ];
       // Proactive IM tools (list_lark_chats / send_lark_message) ride along as an
       // MCP stdio server so codex can send messages through a typed, validated path.

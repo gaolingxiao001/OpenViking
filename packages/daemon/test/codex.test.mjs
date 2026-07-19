@@ -190,6 +190,10 @@ describe('formatting helpers', () => {
     assert.match(rendered, /test-profile/);
     assert.match(rendered, /--dry-run.*true/);
     assert.match(rendered, /mcp_servers\.lark_daemon_im\.tool_timeout_sec=10/);
+    assert.match(rendered, /features\.plugins=false/);
+    assert.match(rendered, /features\.tool_suggest=false/);
+    assert.match(rendered, /features\.multi_agent=false/);
+    assert.match(rendered, /features\.apps=false/);
   });
 
   it('strips only Lark/Feishu credentials from the inherited environment', () => {
