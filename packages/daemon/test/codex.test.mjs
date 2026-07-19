@@ -465,6 +465,44 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(delivery.metadata.toolLabel, '飞书回复');
     assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
   });
+
+  it('records a Lark reaction as a delivery associated with its inbound message', async () => {
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    store.inboundSeqForMessageId = (messageId) => messageId === 'om_target12345678' ? 55 : null;
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('acknowledge this', 41);
+    child.feed({ method: 'turn/started', params: { turn: { id: 'turn-reaction' } } });
+    child.feed({
+      method: 'item/completed',
+      params: {
+        turnId: 'turn-reaction',
+        item: {
+          type: 'mcpToolCall',
+          id: 'item-reaction',
+          server: 'lark_daemon_im',
+          tool: 'react_to_lark_message',
+          status: 'completed',
+          arguments: { message_id: 'om_target12345678', emoji_type: 'OK' },
+          durationMs: 80,
+          result: null,
+          error: null,
+        },
+      },
+    });
+
+    const delivery = activities.find((activity) => activity.kind === 'agent.tool');
+    assert.ok(delivery);
+    assert.equal(delivery.summary, 'OK');
+    assert.equal(delivery.status, 'SENT');
+    assert.equal(delivery.inboundSeq, 55);
+    assert.equal(delivery.metadata.deliveryMode, 'reaction');
+    assert.equal(delivery.metadata.toolLabel, '飞书表态');
+    assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
+  });
 });
 
 describe('CodexAgent session rotation (slash commands)', () => {

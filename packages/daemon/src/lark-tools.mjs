@@ -123,6 +123,26 @@ export const LARK_TOOLS = [
       openWorldHint: true,
     },
   },
+  {
+    name: 'react_to_lark_message',
+    title: 'React to a Lark message',
+    description: 'Add one emoji reaction as the bot to a specific Lark message. Prefer this over a short text reply when acknowledgement is useful but you have no new information to add. Use the full msg id from the bracketed inbound line. This is an external side effect: react at most once per decision, and do not also send a text reply for the same decision.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to react to. Never guess or reconstruct a shortened ID.' },
+        emoji_type: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$', description: 'Exact Lark emoji_type, such as OK, THUMBSUP, DONE, THANKS, OnIt, or LGTM.' },
+      },
+      required: ['message_id', 'emoji_type'],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
 ];
 
 function appendBounded(current, chunk) {
@@ -421,6 +441,36 @@ export class LarkToolService {
       idempotency_key: idempotencyKey,
     };
   }
+
+  async reactToMessage(input = {}) {
+    const messageId = typeof input.message_id === 'string' ? input.message_id.trim() : '';
+    const emojiType = typeof input.emoji_type === 'string' ? input.emoji_type.trim() : '';
+    if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId)) throw new Error('message_id must be a full om_ Lark message ID');
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(emojiType)) {
+      throw new Error('emoji_type must be a valid Lark emoji identifier');
+    }
+    if (this.options.dryRun) {
+      return {
+        reacted: false,
+        dry_run: true,
+        message_id: messageId,
+        emoji_type: emojiType,
+        reaction_id: null,
+      };
+    }
+    const data = await this.runLark([
+      'reactions', 'create', '--as', 'bot',
+      '--params', JSON.stringify({ message_id: messageId }),
+      '--data', JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
+      '--format', 'json',
+    ], 'react to Lark message');
+    return {
+      reacted: true,
+      message_id: messageId,
+      emoji_type: emojiType,
+      reaction_id: typeof data?.reaction_id === 'string' ? data.reaction_id : null,
+    };
+  }
 }
 
 function textResult(data, text) {
@@ -483,6 +533,13 @@ export function createMcpHandler(service) {
           }
           const remote = data.message_id ? ` message_id=${data.message_id}` : '';
           return { jsonrpc: '2.0', id, result: textResult(data, `Replied to message_id=${data.reply_to_message_id}.${remote}`) };
+        }
+        if (name === 'react_to_lark_message') {
+          const data = await service.reactToMessage(input);
+          if (data.dry_run) {
+            return { jsonrpc: '2.0', id, result: textResult(data, `Dry run only: no reaction was added to message_id=${data.message_id}.`) };
+          }
+          return { jsonrpc: '2.0', id, result: textResult(data, `Reacted ${data.emoji_type} to message_id=${data.message_id}.`) };
         }
         throw new Error(`unknown tool: ${name}`);
       } catch (error) {

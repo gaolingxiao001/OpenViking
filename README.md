@@ -13,7 +13,7 @@ daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到
 - 本机 slash 命令（私聊直接发 `/` 开头的消息；群聊需要 `@` 机器人再加命令）由 daemon 直接处理并回复，不经过模型：`/new`（开新会话）、`/help`（帮助与当前会话）、`/model [名称]`、`/effort [档位]`。命令名、模型名和 effort 档位都支持前缀匹配（如 `/h`、`/e h`）；`/model` 不带参数会列出可用模型；`/effort` 按当前模型支持的档位校验，不支持的档位会被拒绝。`/model` 下一轮生效且保留当前上下文；`/effort` 与 `/new` 会开启新会话。任何信任聊天里的成员都能执行这些命令，且作用于全局会话。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
-所有出站消息走专用 MCP 工具：`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`list_lark_chats`（解析群名，只返回机器人已加入的群）。发送工具只接受完整 id、纯文本和可选的可信 `mention_user_ids`，后者会生成真正的飞书 @；Codex 不直接通过 shell 调用 `lark-cli`。
+所有出站动作走专用 MCP 工具：`react_to_lark_message`（没有新增信息时用表情轻量回应）、`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`list_lark_chats`（解析群名，只返回机器人已加入的群）。工具只接受完整 id；发送工具只接受纯文本和可选的可信 `mention_user_ids`，后者会生成真正的飞书 @。Codex 不直接通过 shell 调用 `lark-cli`。
 
 ## 飞书前置条件
 
