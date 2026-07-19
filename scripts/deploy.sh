@@ -45,6 +45,9 @@ ln -sf "$ENV_FILE" "$REL/.env"
 echo "running tests in $REL ..."
 (cd "$REL" && npm test >/dev/null && npm run check >/dev/null) || { echo "tests failed — aborting deploy"; exit 1; }
 
+# $BASE/current tracks the last known-good release for rollback.
+PREV="$(readlink "$BASE/current" 2>/dev/null || true)"
+
 pm2 delete lark-daemon lark-web >/dev/null 2>&1 || true
 pm2 start "$REL/ecosystem.config.cjs"
 pm2 save >/dev/null
@@ -59,10 +62,18 @@ for _ in $(seq 30); do
     curl -sf "http://127.0.0.1:$port/ready" >/dev/null 2>&1 || ok=0
   done
   if [ "$ok" = 1 ]; then
+    ln -sfn "$REL" "$BASE/current"
     echo "deployed $REL"
     ls -1dt "$BASE"/releases/* | tail -n +4 | xargs rm -rf
     exit 0
   fi
 done
 echo "daemon/web not ready after 30s — check: pm2 logs lark-daemon lark-web"
+if [ -n "$PREV" ] && [ -d "$PREV" ]; then
+  echo "rolling back to $PREV"
+  pm2 delete lark-daemon lark-web >/dev/null 2>&1 || true
+  pm2 start "$PREV/ecosystem.config.cjs"
+  pm2 save >/dev/null
+  echo "rolled back; failed release kept for inspection: $REL"
+fi
 exit 1

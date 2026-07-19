@@ -991,7 +991,7 @@ export class Store {
              chat_id AS chat_id, thread_id AS thread_id, content AS text
       FROM inbound
       WHERE status = 'DONE' AND seq < ?
-      ORDER BY received_at_ms DESC
+      ORDER BY received_at_ms DESC, seq DESC
       LIMIT ?
     `).all(beforeSeq ?? Number.MAX_SAFE_INTEGER, limit);
     return rows.reverse().map((row) => ({

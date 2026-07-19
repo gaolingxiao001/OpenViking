@@ -162,14 +162,24 @@ function chatTag(chatId, threadId) {
   return threadId ? `${chatId}:${shortenId(threadId)}` : chatId;
 }
 
+// One message must stay one physical line: the system prompt promises that only the
+// leading [ … ] bracket is daemon-authenticated, so a literal newline inside untrusted
+// content would let a sender forge a metadata line (or the history separator) of their
+// own. Line breaks render as ⏎; other control chars collapse to spaces.
+export function oneLine(text) {
+  return String(text ?? '')
+    .replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' \u23CE ')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ');
+}
+
 // Compressed one-line-per-message format (see agent/system-prompt.md "Message format").
 // chat= and msg= carry the full id so codex can call lark-cli; from= and the thread
 // suffix stay shortened stubs.
 export function formatInboundLine(message) {
   let line = `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${shortenId(message.senderId)}] ${message.content}`;
+    + ` time=${isoMinute(message.createTimeMs)} from=${shortenId(message.senderId)}] ${oneLine(message.content)}`;
   if (Array.isArray(message.mentions) && message.mentions.length > 0) {
-    const names = message.mentions.map((m) => `@${m.name || shortenId(m.id)}`).join(' ');
+    const names = message.mentions.map((m) => `@${oneLine(m.name) || shortenId(m.id)}`).join(' ');
     line += ` [mentions: ${names}]`;
   }
   return line;
@@ -177,7 +187,7 @@ export function formatInboundLine(message) {
 
 export function formatHistoryLine(item) {
   const from = item.direction === 'outbound' ? 'me' : shortenId(item.actor);
-  return `[chat=${chatTag(item.chatId, item.threadId)} time=${isoMinute(item.atMs)} from=${from}] ${item.text}`;
+  return `[chat=${chatTag(item.chatId, item.threadId)} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
 }
 
 const HISTORY_SEPARATOR = '--- history above, new messages below ---';

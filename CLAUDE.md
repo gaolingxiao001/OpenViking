@@ -23,7 +23,7 @@ lark-cli event +subscribe (lark.mjs 子进程, NDJSON)
 
 - **全局单线程**:所有 chat 共用一个 codex thread,消息交错进同一上下文,靠行内 `chat=` 标签区分。`policyHash`(system prompt + model + workspace + steer-v1)变化时不再 resume 旧 thread,新 thread 会丢跨会话上下文——改 `packages/daemon/agent/system-prompt.md` 时要意识到这点。
 - **CodexAgent 状态机**(codex.mjs):`activeTurnId` / `startingTurn` / `queue` 三态;turn/start 失败 unshift 回队列,steer 撞上 turn 刚结束会 fallback 到 deliver,断线走 `_reconnectLoop` + `thread/resume`。永不丢消息是硬性不变量,改这里必须跑 codex.test.mjs。
-- **出站只走 MCP 工具**:`reply_lark_message` / `send_lark_message` / `react_to_lark_message` / `retract_lark_message`，跨群先用 `list_lark_chats` / `list_lark_chat_messages` 只读定位上下文(lark-tools.mjs)。send/reply 支持可信 open_id 列表 `mention_user_ids`，内部生成真正的飞书 @；codex 不允许 shell 调 lark-cli。
+- **出站只走 MCP 工具**:`reply_lark_message` / `send_lark_message` / `react_to_lark_message` / `retract_lark_message`，跨群先用 `list_lark_chats` / `list_lark_chat_messages` 只读定位上下文(lark-tools.mjs)。send/reply 支持可信 open_id 列表 `mention_user_ids`，内部生成真正的飞书 @。codex 默认不 shell 调 lark-cli；仅当用户明确要求、可信工具尚未覆盖时，按 system-prompt 的 fallback 规则执行等价单条命令（禁 auth/config/admin）。
 - **Activity 流水**:daemon 和 CodexAgent 都写 `activities` 表(store.recordActivity),daemon 在 `/api/activity` 提供 JSON,web 包只做代理和渲染(public/activity.js)。
 
 ## 命令
@@ -50,4 +50,3 @@ pm2 logs lark-daemon --lines 100
 - 纯 Node 标准库,**零 npm 依赖**(SQLite 用 node:sqlite,故 engines >= 22.5)。加依赖前先想清楚,大概率不需要。
 - ESM `.mjs`,测试用 node:test,不引测试框架。
 - 日志安全不变量:不落敏感内容——`redactSensitive` / `opaqueRef` 包一切外部输入;codex 子进程环境剥掉 `LARK_/FEISHU_*`;HTTP 只绑 loopback 且校验同源。飞书消息正文一律视为不可信输入。
-- 顶层空目录 `agent/ src/ test/ web/` 是包拆分前的残留,可以删。
