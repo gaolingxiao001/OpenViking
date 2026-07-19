@@ -253,7 +253,13 @@ describe('Lark proactive IM MCP protocol', () => {
         return { chats: [{ chat_id: 'oc_memorize123456', name: 'Memorize', chat_mode: 'group', chat_status: 'normal' }], count: 1, has_more: false };
       },
       async listChatMessages() {
-        return { chat_id: 'oc_memorize123456', messages: [{ message_id: 'om_target1234567', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'hello' }], count: 1, has_more: false };
+        return { chat_id: 'oc_memorize123456', as: 'bot', messages: [{ message_id: 'om_target1234567', chat_id: '', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'hello' }], count: 1, has_more: false };
+      },
+      async searchMessages() {
+        return { query: 'deploy', messages: [{ message_id: 'om_found1234567', chat_id: 'oc_elsewhere1234', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'deploy done' }], count: 1, has_more: true };
+      },
+      async listThreadMessages() {
+        return { thread_id: 'omt_topic1234567', as: 'bot', messages: [{ message_id: 'om_inthread12345', chat_id: '', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'thread reply' }], count: 1, has_more: false };
       },
       async sendMessage() {
         return { sent: true, chat_id: 'oc_memorize123456', message_id: 'om_sent12345678', idempotency_key: 'key' };
@@ -272,12 +278,18 @@ describe('Lark proactive IM MCP protocol', () => {
     const initialized = await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(initialized.result.serverInfo.name, 'lark-daemon-im');
     const listed = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-    assert.deepEqual(listed.result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message']);
-    assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message']);
+    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message'];
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name), toolNames);
+    assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), toolNames);
     const chats = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: { query: 'memo' } } });
     assert.match(chats.result.content[0].text, /Memorize.*oc_memorize123456/);
     const messages = await handle({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_lark_chat_messages', arguments: { chat_id: 'oc_memorize123456' } } });
     assert.match(messages.result.content[0].text, /Ada.*hello/);
+    const searched = await handle({ jsonrpc: '2.0', id: 40, method: 'tools/call', params: { name: 'search_lark_messages', arguments: { query: 'deploy' } } });
+    assert.match(searched.result.content[0].text, /om_found1234567.*chat_id=oc_elsewhere1234.*deploy done/);
+    assert.match(searched.result.content[0].text, /More results exist/);
+    const threaded = await handle({ jsonrpc: '2.0', id: 41, method: 'tools/call', params: { name: 'list_lark_thread_messages', arguments: { thread_id: 'omt_topic1234567' } } });
+    assert.match(threaded.result.content[0].text, /omt_topic1234567[\s\S]*thread reply/);
     const sent = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', text: 'hi' } } });
     assert.equal(sent.result.structuredContent.sent, true);
     const replied = await handle({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', text: 'hi', reply_in_thread: true } } });
@@ -305,11 +317,40 @@ describe('Lark proactive IM MCP protocol', () => {
     );
     const listed = await service.listChatMessages({ chat_id: 'oc_memorize123456', limit: 5 });
     assert.equal(listed.messages[0].message_id, 'om_target1234567');
-    assert.match(calls[0].join(' '), /\+chat-messages-list.*--page-size 5/);
+    assert.match(calls[0].join(' '), /\+chat-messages-list.*--as bot.*--page-size 5/);
     const retracted = await service.retractMessage({ message_id: 'om_sent12345678' });
     assert.equal(retracted.retracted, true);
     assert.match(calls[1].join(' '), /messages delete.*message_id.*om_sent12345678/);
     await assert.rejects(service.retractMessage({ message_id: 'om_short' }), /full om_/);
+    const asUser = await service.listChatMessages({ chat_id: 'oc_memorize123456', as: 'user' });
+    assert.equal(asUser.as, 'user');
+    assert.match(calls[2].join(' '), /\+chat-messages-list.*--as user/);
+  });
+
+  it('builds search and thread lark-cli invocations with validated inputs', async () => {
+    const calls = [];
+    const service = new LarkToolService(
+      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false },
+      async (_bin, args) => {
+        calls.push(args);
+        const data = { messages: [{ message_id: 'om_found1234567', chat_id: 'oc_elsewhere1234', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'deploy done' }], has_more: false };
+        return { code: 0, signal: null, stdout: JSON.stringify({ ok: true, data }), stderr: '', timedOut: false };
+      },
+    );
+    const found = await service.searchMessages({ query: 'deploy', chat_id: 'oc_memorize123456', start: '2026-07-17T00:00:00+08:00', limit: 5 });
+    assert.equal(found.messages[0].chat_id, 'oc_elsewhere1234');
+    const rendered = calls[0].join(' ');
+    assert.match(rendered, /\+messages-search.*--as user.*--query deploy.*--page-size 5/);
+    assert.match(rendered, /--chat-id oc_memorize123456.*--start 2026-07-17T00:00:00\+08:00/);
+    await assert.rejects(service.searchMessages({ query: '' }), /must not be empty/);
+    await assert.rejects(service.searchMessages({ query: 'x', start: 'yesterday' }), /ISO 8601/);
+    await assert.rejects(service.searchMessages({ query: 'x', chat_id: 'oc_short' }), /full oc_/);
+
+    const thread = await service.listThreadMessages({ thread_id: 'omt_topic1234567', as: 'user', limit: 10 });
+    assert.equal(thread.as, 'user');
+    assert.equal(thread.messages[0].message_id, 'om_found1234567');
+    assert.match(calls[1].join(' '), /\+threads-messages-list.*--as user.*--thread omt_topic1234567.*--page-size 10/);
+    await assert.rejects(service.listThreadMessages({ thread_id: 'oc_notathread123' }), /full omt_/);
   });
 
   it('validates reply ids and builds the reply lark-cli invocation', async () => {
@@ -395,7 +436,7 @@ describe('Lark proactive IM MCP protocol', () => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: {} } })}\n`);
       await waitFor(3);
       assert.equal(responses[0].result.serverInfo.name, 'lark-daemon-im');
-      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message']);
+      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message']);
       assert.match(responses[2].result.content[0].text, /Fixture Chat/);
     } finally {
       child.stdin.end();
