@@ -52,18 +52,22 @@ function completedToolActivity(item) {
     const toolServer = cleanToolPart(item.server, 'mcp');
     const toolName = cleanToolPart(item.tool, 'tool');
     const isLarkDelivery = toolServer === 'lark_daemon_im'
-      && ['react_to_lark_message', 'reply_lark_message', 'send_lark_message'].includes(toolName);
+      && ['react_to_lark_message', 'retract_lark_message', 'reply_lark_message', 'send_lark_message'].includes(toolName);
     if (isLarkDelivery) {
       const reply = item.arguments && typeof item.arguments === 'object'
         ? String(item.arguments.text ?? item.arguments.emoji_type ?? '').trim()
         : '';
       const deliveryMode = toolName === 'react_to_lark_message'
         ? 'reaction'
+        : toolName === 'retract_lark_message'
+          ? 'retract'
         : toolName === 'send_lark_message'
           ? 'chat'
           : item.arguments?.reply_in_thread === true ? 'thread' : 'reply';
       const toolLabel = toolName === 'react_to_lark_message'
         ? '飞书表态'
+        : toolName === 'retract_lark_message'
+          ? '飞书撤回'
         : toolName === 'send_lark_message' ? '飞书发送' : '飞书回复';
       const activity = common('mcpToolCall', toolLabel, {
         toolName,
