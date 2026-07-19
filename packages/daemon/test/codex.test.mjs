@@ -192,7 +192,6 @@ describe('formatting helpers', () => {
     assert.match(rendered, /mcp_servers\.lark_daemon_im\.tool_timeout_sec=10/);
     assert.match(rendered, /features\.plugins=false/);
     assert.match(rendered, /features\.tool_suggest=false/);
-    assert.match(rendered, /features\.multi_agent=false/);
     assert.match(rendered, /features\.apps=false/);
   });
 

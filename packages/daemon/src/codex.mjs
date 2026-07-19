@@ -536,7 +536,6 @@ export class CodexAgent {
         // lark_daemon_im MCP server configured below are unaffected.
         '-c', 'features.plugins=false',
         '-c', 'features.tool_suggest=false',
-        '-c', 'features.multi_agent=false',
         '-c', 'features.apps=false',
       ];
       // Proactive IM tools (list_lark_chats / send_lark_message) ride along as an
