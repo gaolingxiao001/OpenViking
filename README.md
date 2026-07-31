@@ -2,7 +2,7 @@
 
 一个单用户、本机常驻的飞书 Codex Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
 
-daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂进一个常驻的 `codex app-server` 线程；codex 通过专用的 Lark 工具自己把回复发回飞书。所有聊天共用同一个全局线程（跨聊天连续上下文），空闲时用 `turn/start` 发消息，正在思考时用 `turn/steer` 插话，因此思考中途来的新消息会即时进入同一轮。日常使用不需要 `@`。
+daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂进一个常驻的 `codex app-server` 线程；codex 通过专用的 Lark 工具自己把回复发回飞书。所有聊天共用同一个全局线程（跨聊天连续上下文），空闲时用 `turn/start` 发消息，正在思考时用 `turn/steer` 插话，因此思考中途来的新消息会即时进入同一轮。全局线程空闲时，群聊会先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；私聊仍然立即进入 Codex。日常使用不需要 `@`。
 
 ## 安装
 
@@ -28,6 +28,7 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 
 - 所有聊天统一具有工作区写权限，可让 Codex 在配置的工作区里完成任务；因此只应把 Agent 加入你信任的聊天。
 - 所有聊天共享同一个全局 Codex 线程，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
+- 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn；已有 turn 时继续沿用即时 steer。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和其他暂不支持的消息不会触发回复。
 - 本机 slash 命令（私聊直接发 `/` 开头的消息；群聊需要 `@` 机器人再加命令）由 daemon 直接处理并回复，不经过模型：`/new`（开新会话）、`/help`（帮助与当前会话）、`/model [名称]`、`/effort [档位]`。命令名、模型名和 effort 档位都支持前缀匹配（如 `/h`、`/e h`）；`/model` 不带参数会列出可用模型；`/effort` 按当前模型支持的档位校验，不支持的档位会被拒绝。`/model` 下一轮生效且保留当前上下文；`/effort` 与 `/new` 会开启新会话。任何信任聊天里的成员都能执行这些命令，且作用于全局会话。
@@ -89,6 +90,8 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 ## 可靠性边界
 
 - 消息先写 SQLite（状态直接 DONE），再喂给常驻的 `codex app-server` 线程；空闲 `turn/start`，忙时 `turn/steer` 插话，steer 竞态失败会回退成 `turn/start`，消息不丢。
+- 400ms 群聊窗口只做 transport batching，不创建 chat 专属的 Codex session、history 或 memory。进程在窗口内停止或崩溃，仍可能让已落库消息没来得及喂给 Codex；这版没有加入 durable replay 或 delivery ledger。
+- 这版也没有 command barrier。群消息进入 400ms 窗口后若马上执行 `/new` 或 `/effort`，它可能在全局 session 切换完成后才送入 Codex；命令与待处理消息的严格先后需要单独设计。
 - 单一全局线程 id 持久化于 meta 表并带 policyHash；重连时 `thread/resume`，policy（system prompt / model / workspace）变化则视为新线程；app-server 意外退出按指数退避（1s 起，30s 封顶）重连，期间投递入队。
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
 - codex 通过 MCP 工具自己发送回复（带 lark-cli 幂等键、遵守 `LARK_DAEMON_DRY_RUN`），daemon 不再持有 outbox/投递/freshness 机制；daemon 侧没有回复重试，重复投递由幂等键约束。
@@ -104,5 +107,6 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 2. 私聊只发“收到，谢谢”，应保持静默。
 3. 群里不 `@` 发一个尚未解决的问题；Agent 有增量价值时回复。
 4. 群里发闲聊或人与人的对话，应保持静默。
-5. Agent 思考时立即补一句纠正；该补充会 steer 进同一轮，最终回复应结合它、不发过时答案。
-6. 私聊要求 Agent 向另一个已加入群发送测试消息；Agent 应先解析群名，再通过专用工具发送，并在当前私聊确认结果。
+5. Codex 空闲时，在同一群聊或话题里快速连发一条任务和一条纠正（间隔小于 400ms）；两条应进入同一个 `turn/start`，最终回复采用纠正后的要求。
+6. Agent 思考时立即补一句纠正；该补充会 steer 进同一轮，最终回复应结合它、不发过时答案。
+7. 私聊要求 Agent 向另一个已加入群发送测试消息；Agent 应先解析群名，再通过专用工具发送，并在当前私聊确认结果。

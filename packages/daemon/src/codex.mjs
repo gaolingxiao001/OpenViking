@@ -206,6 +206,7 @@ export class CodexAgent {
     this.reconnectCapMs = options.reconnectCapMs ?? 30_000;
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
     this.onTurnFailed = options.onTurnFailed ?? null; // ({ inboundSeqs, error }) => void
+    this.onAvailable = options.onAvailable ?? null;   // () => void
 
     this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
     this.developerInstructionsText = this.developerInstructions(config.profile);
@@ -225,6 +226,7 @@ export class CodexAgent {
     this.queue = [];                 // texts waiting for a live idle thread
     this.pending = new Map();        // rpc id -> { resolve, reject }
     this.nextId = 0;
+    this.nextQueuedBatchId = 0;
     this.stdoutBuffer = '';
     this.stopping = false;
     this.startedOk = false;
@@ -257,6 +259,10 @@ export class CodexAgent {
     };
   }
 
+  get turnInProgress() {
+    return Boolean(this.activeTurnId || this.startingTurn);
+  }
+
   async start() {
     this.stopping = false;
     await this._handshake();
@@ -265,11 +271,65 @@ export class CodexAgent {
   // ---- outbound state machine -------------------------------------------------
 
   deliver(text, seq = null) {
-    if (this.stopping) return;
-    if (!this.child || !this.threadId) { this.queue.push({ text, seq }); return; }
-    if (this.activeTurnId) { this._steer(text, seq); return; }
-    if (this.startingTurn) { this.queue.push({ text, seq }); return; }
-    this._startTurn([{ text, seq }]);
+    return this.deliverBatch([{ text, seq }]);
+  }
+
+  // Starts one turn atomically when idle. The burst router uses this to keep
+  // same-conversation corrections in one prompt instead of turning the later
+  // lines into steer calls during the turn/start acknowledgement window.
+  deliverBatch(items) {
+    if (this.stopping) return false;
+    if (!Array.isArray(items) || items.length === 0) return false;
+    const batch = items.map(({ text, seq = null }) => ({ text, seq }));
+    if (!this.child || !this.threadId) { this._enqueueBatch(batch); return true; }
+    if (this.activeTurnId) {
+      this._steerBatch(batch);
+      return true;
+    }
+    if (this.startingTurn) { this._enqueueBatch(batch); return true; }
+    if (this.queue.length > 0) {
+      this._enqueueBatch(batch);
+      this._drain();
+      return true;
+    }
+    this._claimBatch(batch);
+    return true;
+  }
+
+  // Atomic transport hand-off: a queued group burst may start only when no older
+  // Codex-owned work exists. A true result means this agent owns every item.
+  tryStartBatch(items) {
+    if (this.stopping
+      || !this.child
+      || !this.threadId
+      || this.turnInProgress
+      || this.queue.length > 0
+      || !Array.isArray(items)
+      || items.length === 0) return false;
+    const batch = items.map(({ text, seq = null }) => ({ text, seq }));
+    this._claimBatch(batch);
+    return true;
+  }
+
+  _claimBatch(batch) {
+    try {
+      this._startTurn(batch);
+    } catch (error) {
+      // Ownership has already crossed the transport boundary. Keep the whole
+      // batch in the Codex queue and retry; never leave half of it behind.
+      this.logger.warn('codex_turn_start_sync_failed', { error: safe(error) });
+      this._enqueueBatch(batch, { front: true });
+      this._scheduleDrain();
+    }
+  }
+
+  _enqueueBatch(batch, { front = false } = {}) {
+    const queuedBatchId = batch.length < 2 ? null : ++this.nextQueuedBatchId;
+    const queued = queuedBatchId === null
+      ? batch
+      : batch.map((item) => ({ ...item, queuedBatchId }));
+    if (front) this.queue.unshift(...queued);
+    else this.queue.push(...queued);
   }
 
   _startTurn(items) {
@@ -299,31 +359,39 @@ export class CodexAgent {
       this.startingItems = [];
       if (hadPrefix) this.needsHistoryPrefix = true;
       this.logger.warn('codex_turn_start_failed', { error: safe(error) });
-      this.queue.unshift(...items); // never drop a message
+      this._enqueueBatch(items, { front: true }); // never drop a message
       this._scheduleDrain();
     });
   }
 
   _steer(text, seq = null) {
+    this._steerBatch([{ text, seq }]);
+  }
+
+  _steerBatch(items) {
     const expectedTurnId = this.activeTurnId;
+    const text = items.map((item) => item.text).join('\n');
+    const seqs = [...new Set(
+      items.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
+    )];
     this._request('turn/steer', {
       threadId: this.threadId,
       expectedTurnId,
       input: [{ type: 'text', text }],
     }).then(() => {
-      if (seq !== null && seq !== undefined && !this.activeInboundSeqs.includes(seq)) {
-        this.activeInboundSeqs.push(seq);
+      for (const seq of seqs) {
+        if (!this.activeInboundSeqs.includes(seq)) this.activeInboundSeqs.push(seq);
       }
       this._recordActivity('agent.steered', {
         turnId: expectedTurnId,
-        inboundSeq: seq,
+        inboundSeq: seqs.at(-1) ?? null,
         summary: text,
         metadata: { inboundSeqs: [...this.activeInboundSeqs] },
       });
     }).catch((error) => {
       // Race: the turn ended just as we steered. Re-deliver so the message is not lost.
       this.logger.info('codex_steer_fell_back', { error: safe(error) });
-      this.deliver(text, seq);
+      this.deliverBatch(items);
     });
   }
 
@@ -342,7 +410,18 @@ export class CodexAgent {
     });
     if (!this.activeTurnId) return;
     const items = this.queue.splice(0);
-    for (const item of items) this._steer(item.text, item.seq);
+    for (let index = 0; index < items.length;) {
+      const queuedBatchId = items[index].queuedBatchId;
+      if (queuedBatchId === undefined) {
+        this._steer(items[index].text, items[index].seq);
+        index += 1;
+        continue;
+      }
+      let end = index + 1;
+      while (items[end]?.queuedBatchId === queuedBatchId) end += 1;
+      this._steerBatch(items.slice(index, end));
+      index = end;
+    }
   }
 
   _associatedInboundSeqs() {
@@ -378,6 +457,7 @@ export class CodexAgent {
       }
     }
     this._drain();
+    this._notifyAvailable();
   }
 
   // Start a turn with everything queued, if the connection is idle.
@@ -385,7 +465,7 @@ export class CodexAgent {
     if (this.stopping || !this.child || !this.threadId) return;
     if (this.activeTurnId || this.startingTurn) return;
     if (this.queue.length === 0) return;
-    this._startTurn(this.queue.splice(0));
+    this._claimBatch(this.queue.splice(0));
   }
 
   _scheduleDrain() {
@@ -393,13 +473,25 @@ export class CodexAgent {
     this.drainTimer = setTimeout(() => {
       this.drainTimer = null;
       this._drain();
+      this._notifyAvailable();
     }, this.reconnectBaseMs);
     this.drainTimer.unref?.();
   }
 
   _flushQueue() {
     const items = this.queue.splice(0);
-    for (const item of items) this.deliver(item.text, item.seq);
+    for (let index = 0; index < items.length;) {
+      const queuedBatchId = items[index].queuedBatchId;
+      if (queuedBatchId === undefined) {
+        this.deliver(items[index].text, items[index].seq);
+        index += 1;
+        continue;
+      }
+      let end = index + 1;
+      while (items[end]?.queuedBatchId === queuedBatchId) end += 1;
+      this.deliverBatch(items.slice(index, end));
+      index = end;
+    }
   }
 
   // ---- JSON-RPC wire ----------------------------------------------------------
@@ -613,6 +705,7 @@ export class CodexAgent {
         this.backoffMs = this.reconnectBaseMs;
         this.store.setGlobalSession(this.threadId, this.policyHash);
         this._flushQueue();
+        this._notifyAvailable();
         finish();
       }).catch(finish);
     });
@@ -686,6 +779,7 @@ export class CodexAgent {
       metadata: { resume },
     });
     this._drain();
+    this._notifyAvailable();
     return this.threadId;
   }
 
@@ -771,6 +865,18 @@ export class CodexAgent {
       });
     } catch (error) {
       this.logger.warn('activity_persist_failed', { kind, error: safe(error) });
+    }
+  }
+
+  _notifyAvailable() {
+    if (!this.onAvailable
+      || this.turnInProgress
+      || this.queue.length > 0
+      || !this.state.connected) return;
+    try {
+      this.onAvailable();
+    } catch (error) {
+      this.logger.warn('codex_available_callback_failed', { error: safe(error) });
     }
   }
 

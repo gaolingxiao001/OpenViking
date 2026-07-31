@@ -9,6 +9,7 @@ import {
   sanitizeCodexEnv,
   shortenId,
 } from '../src/codex.mjs';
+import { GroupBurstRouter } from '../src/group-burst.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
@@ -241,6 +242,240 @@ describe('CodexAgent turn/steer state machine', () => {
     const start = children[0].ofMethod('turn/start').at(-1);
     assert.equal(start.params.threadId, 'th-1');
     assert.equal(start.params.input[0].text, 'hello');
+  });
+
+  it('starts one atomic turn for a same-conversation batch', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    await handshake(agent, children);
+
+    agent.deliverBatch([
+      { text: 'draft request', seq: 11 },
+      { text: 'correction', seq: 12 },
+    ]);
+
+    const starts = children[0].ofMethod('turn/start');
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0].params.input[0].text, 'draft request\ncorrection');
+    assert.equal(children[0].ofMethod('turn/steer').length, 0);
+
+    children[0].feed({ method: 'turn/started', params: { turn: { id: 't-batch' } } });
+    assert.deepEqual(agent.activeInboundSeqs, [11, 12]);
+  });
+
+  it('connects the fixed group burst router to one global Codex turn', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    await handshake(agent, children);
+    let currentTime = 0;
+    const router = new GroupBurstRouter({
+      deliverBatch: (items) => agent.deliverBatch(items),
+      tryStartBatch: (items) => agent.tryStartBatch(items),
+      isConnected: () => agent.state.connected,
+      isTurnInProgress: () => agent.turnInProgress,
+      now: () => currentTime,
+      setTimer: () => ({ unref() {} }),
+      clearTimer() {},
+    });
+
+    router.route({
+      conversationKey: 'test:tenant:oc_group:main',
+      chatType: 'group',
+      text: 'first line',
+      seq: 11,
+    });
+    currentTime = 250;
+    router.route({
+      conversationKey: 'test:tenant:oc_group:main',
+      chatType: 'group',
+      text: 'correction',
+      seq: 12,
+    });
+    currentTime = 400;
+    assert.equal(router.flushReady(), true);
+
+    const starts = children[0].ofMethod('turn/start');
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0].params.input[0].text, 'first line\ncorrection');
+    assert.equal(agent.threadId, 'th-1');
+  });
+
+  it('keeps a routed group batch atomic during the turn/start window', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    const router = new GroupBurstRouter({
+      deliverBatch: (items) => agent.deliverBatch(items),
+      tryStartBatch: (items) => agent.tryStartBatch(items),
+      isConnected: () => agent.state.connected,
+      isTurnInProgress: () => agent.turnInProgress,
+      now: () => 0,
+      setTimer: () => ({ unref() {} }),
+      clearTimer() {},
+    });
+
+    router.route({
+      conversationKey: 'test:tenant:oc_group:main',
+      chatType: 'group',
+      text: 'group first line',
+      seq: 11,
+    });
+    agent.deliver('p2p starts now', 20);
+    router.route({
+      conversationKey: 'test:tenant:oc_group:main',
+      chatType: 'group',
+      text: 'group correction',
+      seq: 12,
+    });
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-p2p' } } });
+
+    const steers = child.ofMethod('turn/steer');
+    assert.equal(steers.length, 1);
+    assert.equal(steers[0].params.input[0].text, 'group first line\ngroup correction');
+  });
+
+  it('steers an active same-conversation batch in one RPC', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('active work', 10);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-active' } } });
+    agent.deliverBatch([
+      { text: 'pending line', seq: 11 },
+      { text: 'live correction', seq: 12 },
+    ]);
+
+    const steers = child.ofMethod('turn/steer');
+    assert.equal(steers.length, 1);
+    assert.equal(steers[0].params.input[0].text, 'pending line\nlive correction');
+    child.feed({ id: steers[0].id, result: {} });
+    await flush();
+    assert.deepEqual(agent.activeInboundSeqs, [10, 11, 12]);
+  });
+
+  it('retries a rejected turn/start as the same complete batch', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliverBatch([
+      { text: 'first line', seq: 21 },
+      { text: 'correction', seq: 22 },
+    ]);
+    const rejected = child.ofMethod('turn/start')[0];
+    child.feed({ id: rejected.id, error: { message: 'temporary start failure' } });
+
+    await waitFor(() => child.ofMethod('turn/start').length === 2);
+    const retried = child.ofMethod('turn/start')[1];
+    assert.equal(retried.params.input[0].text, 'first line\ncorrection');
+    assert.deepEqual(agent.startingItems.map((item) => item.seq), [21, 22]);
+  });
+
+  it('keeps a rejected group batch ahead of P2P during drain backoff', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliverBatch([
+      { text: 'group first line', seq: 21 },
+      { text: 'group correction', seq: 22 },
+    ]);
+    const rejected = child.ofMethod('turn/start')[0];
+    child.feed({ id: rejected.id, error: { message: 'temporary start failure' } });
+    await flush();
+
+    agent.deliver('p2p arrived during backoff', 23);
+
+    const starts = child.ofMethod('turn/start');
+    assert.equal(starts.length, 2);
+    assert.equal(
+      starts[1].params.input[0].text,
+      'group first line\ngroup correction\np2p arrived during backoff',
+    );
+    assert.deepEqual(agent.startingItems.map((item) => item.seq), [21, 22, 23]);
+    assert.equal(agent.queue.length, 0);
+  });
+
+  it('refuses a transport claim while older Codex-owned work is queued', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    await handshake(agent, children);
+    agent.queue.push({ text: 'older work', seq: 31 });
+
+    assert.equal(
+      agent.tryStartBatch([{ text: 'new group burst', seq: 32 }]),
+      false,
+    );
+    assert.equal(children[0].ofMethod('turn/start').length, 0);
+    assert.deepEqual(agent.queue.map((item) => item.seq), [31]);
+  });
+
+  it('keeps a due transport burst across a Codex reconnect', async () => {
+    const store = makeStore();
+    let router;
+    let currentTime = 0;
+    const { agent, children } = newAgent(store, {
+      onAvailable: () => { router?.onAvailable(); },
+    });
+    const firstChild = await handshake(agent, children);
+    router = new GroupBurstRouter({
+      deliverBatch: (items) => agent.deliverBatch(items),
+      tryStartBatch: (items) => agent.tryStartBatch(items),
+      isConnected: () => agent.state.connected,
+      isTurnInProgress: () => agent.turnInProgress,
+      now: () => currentTime,
+      setTimer: () => ({ unref() {} }),
+      clearTimer() {},
+    });
+    router.route({
+      conversationKey: 'test:tenant:oc_group:main',
+      chatType: 'group',
+      text: 'survive reconnect',
+      seq: 41,
+    });
+
+    firstChild.simulateExit(1);
+    currentTime = 400;
+    assert.equal(router.flushReady(), false);
+    assert.equal(router.pendingConversations, 1);
+
+    await waitFor(() => children.length === 2);
+    const reconnect = children[1];
+    await flush();
+    reconnect.feed({ id: 1, result: {} });
+    await flush();
+    const resume = reconnect.ofMethod('thread/resume').at(-1);
+    reconnect.feed({ id: resume.id, result: { thread: { id: 'th-1' } } });
+    await waitFor(() => reconnect.ofMethod('turn/start').length === 1);
+
+    assert.equal(
+      reconnect.ofMethod('turn/start')[0].params.input[0].text,
+      'survive reconnect',
+    );
+    assert.equal(router.pendingConversations, 0);
+    agent.stopping = true;
+  });
+
+  it('notifies the transport when the global turn becomes available', async () => {
+    let available = 0;
+    const store = makeStore();
+    const { agent, children } = newAgent(store, {
+      onAvailable: () => { available += 1; },
+    });
+    await handshake(agent, children);
+    assert.equal(available, 1);
+
+    agent.deliver('work', 21);
+    children[0].feed({ method: 'turn/started', params: { turn: { id: 't-work' } } });
+    assert.equal(agent.turnInProgress, true);
+    children[0].feed({
+      method: 'turn/completed',
+      params: { turn: { id: 't-work', status: 'completed' } },
+    });
+
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(available, 2);
   });
 
   it('prepends cross-chat history to the first turn of a fresh thread only', async () => {

@@ -5,6 +5,7 @@ import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
 import { ProcessRegistry } from './process-utils.mjs';
 import { CodexAgent, formatInboundLine } from './codex.mjs';
+import { GroupBurstRouter } from './group-burst.mjs';
 import { commandCandidate, executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
 import { InstanceLock } from './lock.mjs';
@@ -79,6 +80,7 @@ export class LarkDaemon {
     this.registry = new ProcessRegistry(logger);
     this.store = null;
     this.codex = null;
+    this.groupBurst = null;
     this.lark = null;
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -136,6 +138,13 @@ export class LarkDaemon {
 
       this.codex = new CodexAgent(this.config, this.store, this.logger.child({ component: 'codex' }), {
         onTurnFailed: (info) => { void this.notifyTurnFailure(info); },
+        onAvailable: () => { this.groupBurst?.onAvailable(); },
+      });
+      this.groupBurst = new GroupBurstRouter({
+        deliverBatch: (items) => this.codex.deliverBatch(items),
+        tryStartBatch: (items) => this.codex.tryStartBatch(items),
+        isConnected: () => this.codex.state.connected,
+        isTurnInProgress: () => this.codex.turnInProgress,
       });
       await this.codex.start();
       this.recordSystemActivity('system.subscriber_started', {
@@ -266,7 +275,12 @@ export class LarkDaemon {
       conversationRef: opaqueRef(event.conversationKey),
       chatType: event.chatType,
     });
-    this.codex.deliver(formatInboundLine(event), result.inbound.seq);
+    this.groupBurst.route({
+      conversationKey: event.conversationKey,
+      chatType: event.chatType,
+      text: formatInboundLine(event),
+      seq: result.inbound.seq,
+    });
   }
 
   // A failed codex turn consumes its messages without replying; tell the sender
@@ -544,6 +558,7 @@ export class LarkDaemon {
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       this.maintenanceTimer = null;
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
+      this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }
       try { await this.registry.stopAll(Math.min(3_000, this.config.shutdownTimeoutMs)); } catch {}
       if (this.httpServer) {
