@@ -386,4 +386,62 @@ describe('daemon event path', { concurrency: false }, () => {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it('waits for an active turn before journaling /help and releasing following ingress', async () => {
+    const daemon = new LarkDaemon(
+      { lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
+      createLogger('error', { test: 'command-idle-barrier' }),
+    );
+    const order = [];
+    let releaseIdle;
+    const idle = new Promise((resolve) => { releaseIdle = resolve; });
+    daemon.codex = {
+      runtime: 'codex',
+      threadId: 'thread-active',
+      model: 'gpt-5.6-sol',
+      effort: 'medium',
+      turnInProgress: true,
+      async whenIdle() {
+        order.push('wait-idle');
+        await idle;
+        this.turnInProgress = false;
+      },
+      deliver() { order.push('following-inbound'); },
+    };
+    daemon.store = {
+      appendCognitionJournal(entry) { order.push(`journal:${entry.kind}`); },
+      settleCognitionJournal() { order.push('journal:settled'); },
+      recordActivity() { return true; },
+    };
+    daemon.lark = {
+      async replyMessage() { order.push('command-reply'); },
+    };
+    const event = {
+      chatId: 'oc_command123456',
+      threadId: null,
+      messageId: 'om_command123456',
+      senderId: 'ou_sender123456',
+      content: '/help',
+      conversationKey: 'profile:tenant:oc_command123456:main',
+      chatType: 'p2p',
+    };
+
+    const command = daemon.enqueueIngress(
+      () => daemon.handleSlashCommand({ name: 'help', arg: '' }, event, { seq: 1 }),
+    );
+    const following = daemon.enqueueIngress(() => daemon.codex.deliver('next', 2));
+    await Promise.resolve();
+    assert.deepEqual(order, ['wait-idle']);
+
+    releaseIdle();
+    await Promise.all([command, following]);
+    assert.deepEqual(order, [
+      'wait-idle',
+      'journal:control',
+      'journal:outbound',
+      'command-reply',
+      'journal:settled',
+      'following-inbound',
+    ]);
+  });
 });

@@ -109,6 +109,22 @@ export class GroupBurstRouter {
     return true;
   }
 
+  // Global slash-command barrier: hand every already-arrived group batch to
+  // the current runtime before a /model or /new control action can overtake it.
+  flushAll() {
+    if (this.stopped || this.pending.size === 0) return 0;
+    const entries = [...this.pending.values()]
+      .sort((left, right) => left.order - right.order);
+    let flushed = 0;
+    for (const entry of entries) {
+      if (this.deliverBatch(entry.items) === false) break;
+      this.pending.delete(entry.conversationKey);
+      flushed += 1;
+    }
+    this._schedule();
+    return flushed;
+  }
+
   _schedule() {
     if (this.timer) this.clearTimer(this.timer);
     this.timer = null;

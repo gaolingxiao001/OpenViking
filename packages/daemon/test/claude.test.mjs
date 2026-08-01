@@ -1,0 +1,273 @@
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { fileURLToPath } from 'node:url';
+import { describe, it } from 'node:test';
+import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
+
+const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
+const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
+
+const baseConfig = {
+  systemPromptPath,
+  claudeBin: 'claude',
+  claudeModel: 'sonnet',
+  claudeEffort: 'medium',
+  workspace: '/tmp/lark-agent-workspace',
+  projectDir: '/release',
+  databasePath: '/tmp/lark-daemon-test.sqlite3',
+  profile: 'test-profile',
+  larkCliBin: '/fake/lark-cli',
+  larkToolServerPath: '/release/packages/daemon/src/lark-tools.mjs',
+  sendTimeoutMs: 5_000,
+  maxReplyChars: 1_000,
+  cognitionMaxChars: 120_000,
+  dryRun: true,
+};
+
+class FakeChild extends EventEmitter {
+  constructor() {
+    super();
+    this.pid = 987_654_321;
+    this.exitCode = null;
+    this.writes = [];
+    this.stdin = new EventEmitter();
+    this.stdin.writable = true;
+    this.stdin.write = (value) => { this.writes.push(value); return true; };
+    this.stdin.end = () => {};
+    this.stdout = new EventEmitter();
+    this.stdout.setEncoding = () => {};
+    this.stderr = new EventEmitter();
+    this.stderr.setEncoding = () => {};
+  }
+
+  feed(value) { this.stdout.emit('data', `${JSON.stringify(value)}\n`); }
+  finish(code = 0, signal = null) {
+    if (this.exitCode !== null) return;
+    this.exitCode = code;
+    this.emit('exit', code, signal);
+  }
+  kill(signal = 'SIGTERM') { this.finish(signal === 'SIGKILL' ? 137 : 0, signal); }
+}
+
+const helpFlags = [
+  '--input-format', '--output-format', '--resume', '--session-id', '--mcp-config',
+  '--strict-mcp-config', '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
+  '--append-system-prompt', '--no-chrome', '--model', '--print',
+].join('\n');
+
+function makeStore({ globalOverride = {} } = {}) {
+  let global = {
+    sessionId: null,
+    policyHash: null,
+    runtime: null,
+    epoch: 0,
+    syncedThroughSeq: 0,
+    sessionReady: false,
+    ...globalOverride,
+  };
+  const activities = [];
+  const rows = [
+    {
+      seq: 1, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 1,
+      inboundSeq: 1, chatId: 'oc_old12345678', threadId: null,
+      messageId: 'om_old12345678', actor: 'ou_old12345678', text: 'earlier question',
+    },
+    {
+      seq: 2, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 2,
+      inboundSeq: null, chatId: 'oc_old12345678', threadId: null,
+      messageId: 'om_answer123456', actor: 'me', text: 'earlier answer',
+    },
+    {
+      seq: 3, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 3,
+      inboundSeq: 7, chatId: 'oc_now12345678', threadId: null,
+      messageId: 'om_now12345678', actor: 'ou_now12345678', text: 'current request',
+    },
+    {
+      seq: 4, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 4,
+      inboundSeq: 8, chatId: 'oc_now12345678', threadId: null,
+      messageId: 'om_fix12345678', actor: 'ou_now12345678', text: 'live correction',
+    },
+  ];
+  return {
+    activities,
+    getCognitionState: () => ({ runtime: 'claude', epoch: 1, authorityToken: 'token-claude' }),
+    getGlobalSession: () => global,
+    setGlobalSession(sessionId, policyHash, fields) {
+      global = { sessionId, policyHash, ...fields };
+    },
+    global: () => global,
+    getSetting: () => null,
+    setSetting() {},
+    recordActivity(activity) { activities.push(activity); },
+    cognitionJournal(_epoch, through, after = 0) {
+      return rows.filter((row) => row.seq > after && row.seq <= through);
+    },
+    cognitionJournalBeforeInbound(inboundSeq) {
+      const row = rows.find((item) => item.kind === 'inbound' && item.inboundSeq === inboundSeq);
+      return row ? row.seq - 1 : rows.at(-1).seq;
+    },
+    cognitionJournalSeqForInbound(inboundSeq) {
+      return rows.find((item) => item.kind === 'inbound' && item.inboundSeq === inboundSeq)?.seq ?? 0;
+    },
+  };
+}
+
+async function waitFor(predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error('timed out waiting for condition');
+}
+
+function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {}) {
+  const calls = [];
+  const persistent = [];
+  const spawn = (_bin, args) => {
+    const child = new FakeChild();
+    calls.push({ args, child });
+    queueMicrotask(() => {
+      if (args.includes('--version')) {
+        child.stdout.emit('data', '2.1.220 (Claude Code)\n');
+        child.finish();
+      } else if (args.includes('--help')) {
+        child.stdout.emit('data', helpFlags);
+        child.finish();
+      } else if (args[0] === 'auth') {
+        child.stdout.emit('data', JSON.stringify({ loggedIn }));
+        child.finish();
+      } else {
+        persistent.push(child);
+        child.emit('spawn');
+      }
+    });
+    return child;
+  };
+  const failures = [];
+  const agent = new ClaudeAgent(baseConfig, store, quietLogger, {
+    spawn,
+    startTimeoutMs: 100,
+    startStabilityMs: 1,
+    onTurnFailed: (failure) => failures.push(failure),
+    ...agentOptions,
+  });
+  return { agent, calls, persistent, store, failures };
+}
+
+describe('ClaudeAgent persistent stream-json runtime', () => {
+  it('preflights, starts persistent stream-json, and prefixes the first real turn', async () => {
+    const { agent, calls, persistent, store } = harness();
+    await agent.start();
+
+    assert.equal(calls.length, 4);
+    const args = calls.at(-1).args;
+    for (const value of ['--print', '--input-format', 'stream-json', '--output-format', '--strict-mcp-config']) {
+      assert.ok(args.includes(value));
+    }
+    assert.equal(args[args.indexOf('--model') + 1], 'sonnet');
+    assert.equal(args[args.indexOf('--effort') + 1], 'medium');
+    assert.ok(args.includes('--session-id'));
+    assert.ok(!args.includes('--resume'));
+
+    agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
+    const first = JSON.parse(persistent[0].writes[0]);
+    const body = first.message.content[0].text;
+    assert.match(body, /daemon cognition journal/);
+    assert.match(body, /earlier question/);
+    assert.match(body, /earlier answer/);
+    assert.match(body, /history above, new messages below/);
+    assert.match(body, /current request$/);
+    assert.doesNotMatch(body, /catch-up complete/);
+
+    const sessionId = args[args.indexOf('--session-id') + 1];
+    persistent[0].feed({ type: 'system', subtype: 'init', session_id: sessionId });
+    assert.equal(store.global().sessionReady, true);
+    assert.equal(store.global().syncedThroughSeq, 0);
+    persistent[0].feed({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'telemetry, not a Lark delivery' }] },
+    });
+    persistent[0].feed({ type: 'result', subtype: 'success', result: 'telemetry only' });
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(store.global().syncedThroughSeq, 3);
+    assert.ok(store.activities.some((activity) => activity.metadata?.delivery === 'telemetry_only'));
+    await agent.stop();
+  });
+
+  it('writes a live correction into the active Claude turn and commits one cursor', async () => {
+    const { agent, persistent, store } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('first request', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    agent.deliver('live correction', 8);
+
+    assert.equal(child.writes.length, 2);
+    assert.equal(JSON.parse(child.writes[1]).message.content[0].text, 'live correction');
+    assert.equal(agent.turnInProgress, true);
+    child.feed({ type: 'result', subtype: 'success', result: 'corrected' });
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(store.global().syncedThroughSeq, 4);
+    await agent.stop();
+  });
+
+  it('does not resume a preassigned session that never created a Claude transcript', async () => {
+    const store = makeStore({
+      globalOverride: {
+        sessionId: '00000000-0000-4000-8000-000000000001',
+        policyHash: 'stale-policy',
+        runtime: 'claude',
+        epoch: 1,
+        syncedThroughSeq: 0,
+        sessionReady: false,
+      },
+    });
+    const { agent, calls } = harness({ store });
+    store.global().policyHash = agent.policyHash;
+    await agent.start();
+    const args = calls.at(-1).args;
+    assert.ok(args.includes('--session-id'));
+    assert.ok(!args.includes('--resume'));
+    assert.notEqual(agent.sessionId, '00000000-0000-4000-8000-000000000001');
+    await agent.stop();
+  });
+
+  it('uses a fresh preassigned UUID after a pre-init process crash', async () => {
+    const { agent, calls, persistent } = harness({
+      agentOptions: { reconnectBaseMs: 1, reconnectCapMs: 2 },
+    });
+    await agent.start();
+    const firstArgs = calls.at(-1).args;
+    const firstSessionId = firstArgs[firstArgs.indexOf('--session-id') + 1];
+
+    persistent[0].finish(1);
+    await waitFor(() => persistent.length === 2);
+    const reconnectArgs = calls.at(-1).args;
+    const reconnectSessionId = reconnectArgs[reconnectArgs.indexOf('--session-id') + 1];
+    assert.ok(reconnectArgs.includes('--session-id'));
+    assert.ok(!reconnectArgs.includes('--resume'));
+    assert.notEqual(reconnectSessionId, firstSessionId);
+    await agent.stop();
+  });
+
+  it('fails closed when Claude auth is unavailable', async () => {
+    const { agent, calls } = harness({ loggedIn: false });
+    await assert.rejects(() => agent.start(), /not logged in/);
+    assert.equal(calls.length, 3);
+  });
+
+  it('strips Lark secrets and the nested Claude marker from the child env', () => {
+    const environment = sanitizeClaudeEnv({
+      PATH: '/bin',
+      ANTHROPIC_API_KEY: 'keep-for-claude',
+      LARK_APP_SECRET: 'remove',
+      FEISHU_TOKEN: 'remove',
+      CLAUDECODE: 'remove',
+    });
+    assert.equal(environment.ANTHROPIC_API_KEY, 'keep-for-claude');
+    assert.equal(environment.LARK_APP_SECRET, undefined);
+    assert.equal(environment.FEISHU_TOKEN, undefined);
+    assert.equal(environment.CLAUDECODE, undefined);
+  });
+});

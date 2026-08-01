@@ -58,6 +58,7 @@ export function helpText(codex) {
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
     '',
     `当前会话：${codex.threadId ?? '（未连接）'}`,
+    `Runtime：${codex.runtime ?? 'codex'}`,
     `模型：${codex.model || '（默认）'}`,
     `推理档位：${codex.effort}`,
   ].join('\n');
@@ -103,12 +104,25 @@ export async function executeCommand(command, codex) {
       const matches = matchPrefix(command.arg, ids);
       if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
       if (matches.length === 0) {
-        return { ok: false, text: `未找到模型：${command.arg}\n可选：${ids.join('、')}` };
+        // Claude cannot enumerate Codex's live model list without starting a
+        // second runtime. An explicit codex:<id> is validated by staged Codex
+        // thread/start before the hard switch commits.
+        if (!(ids.includes('codex') && command.arg.startsWith('codex:'))) {
+          return { ok: false, text: `未找到模型：${command.arg}\n可选：${ids.join('、')}` };
+        }
+      } else {
+        [target] = matches;
       }
-      [target] = matches;
     }
-    codex.setModel(target);
-    return { ok: true, text: `已切换模型：${target}（下一轮生效，上下文保留）` };
+    const applied = await codex.setModel(target);
+    if (applied?.runtimeChanged) {
+      const runtimeModel = target.includes(':') ? target.replace(':', ' · ') : target;
+      return {
+        ok: true,
+        text: `已切到 ${runtimeModel}。历史对话会接上；隐藏思考和未落盘的工具过程不会继承`,
+      };
+    }
+    return { ok: true, text: `已切换模型：${target}（下一轮生效，同一 ${codex.runtime ?? 'codex'} session 保留）` };
   }
 
   // effort: validate against what the current model actually supports — an

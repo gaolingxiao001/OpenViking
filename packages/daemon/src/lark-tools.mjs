@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import readline from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
@@ -46,6 +46,13 @@ function renderMessageText(value, mentionUserIds) {
   if (!text) throw new Error('text must not be empty');
   const prefix = mentionUserIds.map((id) => `<at user_id="${id}"></at>`).join(' ');
   return prefix ? `${prefix} ${text}` : text;
+}
+
+function stableActionKey(...parts) {
+  const digest = createHash('sha256')
+    .update(JSON.stringify(parts))
+    .digest('hex');
+  return `ld_${digest.slice(0, 40)}`;
 }
 
 export const LARK_TOOLS = [
@@ -261,6 +268,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     profile: '',
     projectDir: process.cwd(),
     databasePath: '',
+    runtimeToken: '',
     timeoutMs: 30_000,
     maxTextChars: 30_000,
     dryRun: false,
@@ -273,6 +281,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     else if (flag === '--profile') options.profile = value;
     else if (flag === '--project-dir') options.projectDir = value;
     else if (flag === '--database-path') options.databasePath = path.resolve(value);
+    else if (flag === '--runtime-token') options.runtimeToken = value;
     else if (flag === '--timeout-ms') options.timeoutMs = Number.parseInt(value, 10);
     else if (flag === '--max-text-chars') options.maxTextChars = Number.parseInt(value, 10);
     else if (flag === '--dry-run') {
@@ -283,6 +292,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     index += 1;
   }
   if (!options.profile) throw new Error('--profile is required');
+  if (!options.runtimeToken) throw new Error('--runtime-token is required');
   if (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1_000) {
     throw new Error('--timeout-ms must be an integer of at least 1000');
   }
@@ -428,6 +438,10 @@ export class LarkToolService {
       : null;
     this.freshnessDb = null;
     this.freshnessStatement = null;
+    this.authorityStatement = null;
+    this.journalDb = null;
+    this.insertJournalIntent = null;
+    this.settleJournalIntent = null;
   }
 
   _storedFreshness(decisionMessageId) {
@@ -448,6 +462,11 @@ export class LarkToolService {
         FROM inbound
         WHERE inbound.message_id = ?
       `);
+      if (this.options.runtimeToken) {
+        this.authorityStatement = this.freshnessDb.prepare(
+          "SELECT value FROM meta WHERE key = 'active_runtime_token'",
+        );
+      }
     }
     return this.freshnessStatement.get(decisionMessageId);
   }
@@ -476,10 +495,99 @@ export class LarkToolService {
     return decisionMessageId;
   }
 
+  _assertAuthority() {
+    if (!this.options.databasePath || !this.options.runtimeToken) return;
+    if (!this.freshnessDb) this._storedFreshness('__authority_probe__');
+    let active;
+    try { active = this.authorityStatement?.get()?.value; } catch {}
+    if (!active || active !== this.options.runtimeToken) {
+      throw new Error('Delivery blocked: this model runtime no longer owns Lark tool authority. No Lark action was taken.');
+    }
+  }
+
+  _openJournal() {
+    if (!this.options.databasePath || !this.options.runtimeToken) return false;
+    if (this.journalDb) return true;
+    this.journalDb = new DatabaseSync(this.options.databasePath);
+    this.journalDb.exec('PRAGMA busy_timeout = 5000');
+    this.insertJournalIntent = this.journalDb.prepare(`
+      INSERT OR IGNORE INTO cognition_journal(
+        epoch, kind, status, at_ms, chat_id, thread_id, message_id,
+        actor, text, runtime_token, dedupe_key, detail_json
+      ) VALUES (
+        CAST(COALESCE((SELECT value FROM meta WHERE key = 'global_cognition_epoch'), '1') AS INTEGER),
+        'outbound', 'PENDING', ?, ?, ?, ?, 'me', ?, ?, ?, ?
+      )
+    `);
+    this.settleJournalIntent = this.journalDb.prepare(`
+      UPDATE cognition_journal
+      SET status = ?, message_id = COALESCE(?, message_id), detail_json = ?
+      WHERE dedupe_key = ? AND runtime_token = ?
+    `);
+    this.getJournalIntent = this.journalDb.prepare(`
+      SELECT status, message_id FROM cognition_journal WHERE dedupe_key = ?
+    `);
+    return true;
+  }
+
+  _reserveOutbound({ dedupeKey, chatId = null, threadId = null, messageId = null, text, metadata }) {
+    if (!this._openJournal()) return null;
+    if (!chatId && (metadata?.targetMessageId || metadata?.decisionMessageId)) {
+      let scope = null;
+      if (metadata?.targetMessageId) {
+        scope = this.journalDb.prepare(
+          'SELECT chat_id, thread_id FROM inbound WHERE message_id = ?',
+        ).get(metadata.targetMessageId);
+      }
+      if (!scope && metadata?.decisionMessageId) {
+        scope = this.journalDb.prepare(
+          'SELECT chat_id, thread_id FROM inbound WHERE message_id = ?',
+        ).get(metadata.decisionMessageId);
+      }
+      chatId = scope?.chat_id ?? null;
+      threadId = scope?.thread_id ?? null;
+    }
+    const result = this.insertJournalIntent.run(
+      Date.now(), chatId, threadId, messageId, text, this.options.runtimeToken,
+      dedupeKey, JSON.stringify(metadata ?? {}),
+    );
+    const existing = this.getJournalIntent.get(dedupeKey);
+    return {
+      key: dedupeKey,
+      claimed: Number(result.changes) > 0,
+      status: existing?.status ?? 'PENDING',
+      messageId: existing?.message_id ?? null,
+    };
+  }
+
+  _settleOutbound(dedupeKey, status, messageId, metadata) {
+    if (!dedupeKey || !this._openJournal()) return;
+    try {
+      this.settleJournalIntent.run(
+        status,
+        messageId,
+        JSON.stringify(metadata ?? {}),
+        dedupeKey,
+        this.options.runtimeToken,
+      );
+      return true;
+    } catch {
+      // The Lark side effect may already have succeeded. Never turn a
+      // post-send journal failure into a tool failure that invites a duplicate.
+      return false;
+    }
+  }
+
   close() {
     try { this.freshnessDb?.close(); } catch {}
+    try { this.journalDb?.close(); } catch {}
     this.freshnessDb = null;
     this.freshnessStatement = null;
+    this.authorityStatement = null;
+    this.journalDb = null;
+    this.insertJournalIntent = null;
+    this.settleJournalIntent = null;
+    this.getJournalIntent = null;
   }
 
   async runLark(args, operation) {
@@ -492,6 +600,7 @@ export class LarkToolService {
   }
 
   async listChats(input = {}) {
+    this._assertAuthority();
     const query = typeof input.query === 'string' ? input.query.trim().toLocaleLowerCase() : '';
     const limit = Math.min(500, Math.max(1, Number.parseInt(input.limit ?? 100, 10) || 100));
     const chats = [];
@@ -530,6 +639,7 @@ export class LarkToolService {
   }
 
   async listChatMessages(input = {}) {
+    this._assertAuthority();
     const chatId = typeof input.chat_id === 'string' ? input.chat_id.trim() : '';
     const limit = Math.min(50, Math.max(1, Number.parseInt(input.limit ?? 20, 10) || 20));
     const as = input.as === 'user' ? 'user' : 'bot';
@@ -545,6 +655,7 @@ export class LarkToolService {
   }
 
   async searchMessages(input = {}) {
+    this._assertAuthority();
     const query = typeof input.query === 'string' ? input.query.trim() : '';
     if (!query) throw new Error('query must not be empty');
     if (query.length > 200) throw new Error('query must be at most 200 characters');
@@ -576,6 +687,7 @@ export class LarkToolService {
   }
 
   async listThreadMessages(input = {}) {
+    this._assertAuthority();
     const threadId = typeof input.thread_id === 'string' ? input.thread_id.trim() : '';
     const limit = Math.min(50, Math.max(1, Number.parseInt(input.limit ?? 50, 10) || 50));
     const as = input.as === 'user' ? 'user' : 'bot';
@@ -600,10 +712,21 @@ export class LarkToolService {
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
+    this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
-    const idempotencyKey = typeof input.idempotency_key === 'string' && input.idempotency_key
+    const actionKey = stableActionKey('send', input.decision_message_id, chatId, text);
+    const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
-      : randomUUID();
+      : '';
+    if (requestedKey && !/^[A-Za-z0-9_-]{1,64}$/.test(requestedKey)) {
+      throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
+    }
+    // Bind caller-supplied retry labels to the canonical payload. Reusing one
+    // label for two burst messages can no longer make Lark collapse the second
+    // message while the local journal incorrectly records both as sent.
+    const idempotencyKey = requestedKey
+      ? stableActionKey('remote-send', requestedKey, actionKey)
+      : actionKey;
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(idempotencyKey)) {
       throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
     }
@@ -617,15 +740,32 @@ export class LarkToolService {
         idempotency_key: idempotencyKey,
       };
     }
-    const data = await this.runLark([
-      '+messages-send', '--as', 'bot', '--chat-id', chatId,
-      '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
-    ], 'send Lark message');
+    const journal = this._reserveOutbound({
+      dedupeKey: `delivery:${actionKey}`,
+      chatId,
+      text: input.text,
+      metadata: { action: 'send', decisionMessageId: input.decision_message_id },
+    });
+    if (journal && !journal.claimed) {
+      throw new Error(`Delivery blocked: this identical send was already attempted (${journal.status}). No new Lark action was taken.`);
+    }
+    let data;
+    try {
+      data = await this.runLark([
+        '+messages-send', '--as', 'bot', '--chat-id', chatId,
+        '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
+      ], 'send Lark message');
+    } catch (error) {
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'send' });
+      throw error;
+    }
+    const remoteMessageId = findMessageId(data);
+    this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, { action: 'send' });
     return {
       sent: true,
       chat_id: chatId,
       mention_user_ids: mentionUserIds,
-      message_id: findMessageId(data),
+      message_id: remoteMessageId,
       idempotency_key: idempotencyKey,
     };
   }
@@ -639,10 +779,20 @@ export class LarkToolService {
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
+    this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
-    const idempotencyKey = typeof input.idempotency_key === 'string' && input.idempotency_key
+    const actionKey = stableActionKey(
+      'reply', input.decision_message_id, messageId, replyInThread, text,
+    );
+    const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
-      : randomUUID();
+      : '';
+    if (requestedKey && !/^[A-Za-z0-9_-]{1,64}$/.test(requestedKey)) {
+      throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
+    }
+    const idempotencyKey = requestedKey
+      ? stableActionKey('remote-reply', requestedKey, actionKey)
+      : actionKey;
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(idempotencyKey)) {
       throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
     }
@@ -662,13 +812,35 @@ export class LarkToolService {
       '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
     ];
     if (replyInThread) args.push('--reply-in-thread');
-    const data = await this.runLark(args, 'reply to Lark message');
+    const journal = this._reserveOutbound({
+      dedupeKey: `delivery:${actionKey}`,
+      messageId,
+      text: input.text,
+      metadata: {
+        action: 'reply',
+        decisionMessageId: input.decision_message_id,
+        targetMessageId: messageId,
+        replyInThread,
+      },
+    });
+    if (journal && !journal.claimed) {
+      throw new Error(`Delivery blocked: this identical reply was already attempted (${journal.status}). No new Lark action was taken.`);
+    }
+    let data;
+    try {
+      data = await this.runLark(args, 'reply to Lark message');
+    } catch (error) {
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'reply', replyInThread });
+      throw error;
+    }
+    const remoteMessageId = findMessageId(data);
+    this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, { action: 'reply', replyInThread });
     return {
       sent: true,
       reply_to_message_id: messageId,
       reply_in_thread: replyInThread,
       mention_user_ids: mentionUserIds,
-      message_id: findMessageId(data),
+      message_id: remoteMessageId,
       idempotency_key: idempotencyKey,
     };
   }
@@ -680,6 +852,7 @@ export class LarkToolService {
     if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(emojiType)) {
       throw new Error('emoji_type must be a valid Lark emoji identifier');
     }
+    this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
     if (this.options.dryRun) {
       return {
@@ -690,12 +863,34 @@ export class LarkToolService {
         reaction_id: null,
       };
     }
-    const data = await this.runLark([
-      'reactions', 'create', '--as', 'bot',
-      '--params', JSON.stringify({ message_id: messageId }),
-      '--data', JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
-      '--format', 'json',
-    ], 'react to Lark message');
+    const actionKey = stableActionKey('reaction', input.decision_message_id, messageId, emojiType);
+    const journal = this._reserveOutbound({
+      dedupeKey: `delivery:${actionKey}`,
+      messageId,
+      text: `[reaction ${emojiType}]`,
+      metadata: {
+        action: 'reaction',
+        decisionMessageId: input.decision_message_id,
+        targetMessageId: messageId,
+        emojiType,
+      },
+    });
+    if (journal && !journal.claimed) {
+      throw new Error(`Delivery blocked: this identical reaction was already attempted (${journal.status}). No new Lark action was taken.`);
+    }
+    let data;
+    try {
+      data = await this.runLark([
+        'reactions', 'create', '--as', 'bot',
+        '--params', JSON.stringify({ message_id: messageId }),
+        '--data', JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
+        '--format', 'json',
+      ], 'react to Lark message');
+    } catch (error) {
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'reaction', emojiType });
+      throw error;
+    }
+    this._settleOutbound(journal?.key, 'COMMITTED', null, { action: 'reaction', emojiType });
     return {
       reacted: true,
       message_id: messageId,
@@ -707,13 +902,30 @@ export class LarkToolService {
   async retractMessage(input = {}) {
     const messageId = typeof input.message_id === 'string' ? input.message_id.trim() : '';
     if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId)) throw new Error('message_id must be a full om_ Lark message ID');
+    this._assertAuthority();
     if (this.options.dryRun) {
       return { retracted: false, dry_run: true, message_id: messageId };
     }
-    await this.runLark([
-      'messages', 'delete', '--as', 'bot',
-      '--params', JSON.stringify({ message_id: messageId }), '--format', 'json',
-    ], 'retract Lark message');
+    const actionKey = stableActionKey('retract', messageId);
+    const journal = this._reserveOutbound({
+      dedupeKey: `delivery:${actionKey}`,
+      messageId,
+      text: '[message retracted]',
+      metadata: { action: 'retract', targetMessageId: messageId },
+    });
+    if (journal && !journal.claimed) {
+      throw new Error(`Delivery blocked: this identical retraction was already attempted (${journal.status}). No new Lark action was taken.`);
+    }
+    try {
+      await this.runLark([
+        'messages', 'delete', '--as', 'bot',
+        '--params', JSON.stringify({ message_id: messageId }), '--format', 'json',
+      ], 'retract Lark message');
+    } catch (error) {
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'retract' });
+      throw error;
+    }
+    this._settleOutbound(journal?.key, 'COMMITTED', null, { action: 'retract' });
     return { retracted: true, message_id: messageId };
   }
 }

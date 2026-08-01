@@ -165,6 +165,26 @@ describe('executeCommand', () => {
     assert.equal(codex.calls.length, 1);
   });
 
+  it('allows an explicit Codex model while Claude is active', async () => {
+    const codex = fakeCodex({
+      runtime: 'claude',
+      model: 'claude:sonnet',
+      listModels: async () => [
+        { id: 'claude:sonnet', efforts: ['medium'] },
+        { id: 'codex', efforts: [] },
+      ],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        return { runtimeChanged: true, runtime: 'codex', syncedThroughSeq: 12 };
+      },
+    });
+    const outcome = await executeCommand({ name: 'model', arg: 'codex:gpt-5.6-sol' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(codex.calls, [['setModel', 'codex:gpt-5.6-sol']]);
+    assert.match(outcome.text, /已切到 codex · gpt-5\.6-sol/);
+    assert.doesNotMatch(outcome.text, /seq|hidden reasoning/);
+  });
+
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {
     const codex = fakeCodex();
     const high = await executeCommand({ name: 'effort', arg: 'h' }, codex);

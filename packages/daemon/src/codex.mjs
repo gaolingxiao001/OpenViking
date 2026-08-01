@@ -3,6 +3,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
+import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 
 function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
@@ -207,12 +208,19 @@ export class CodexAgent {
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
     this.onTurnFailed = options.onTurnFailed ?? null; // ({ inboundSeqs, error }) => void
     this.onAvailable = options.onAvailable ?? null;   // () => void
+    const cognition = store.getCognitionState?.() ?? { runtime: 'codex', epoch: 1, authorityToken: null };
+    this.runtime = 'codex';
+    this.cognitionEpoch = options.cognitionEpoch ?? cognition.epoch;
+    this.authorityToken = options.authorityToken ?? cognition.authorityToken ?? '';
+    this.sessionPersistence = options.sessionPersistence !== false;
+    this.allowResume = options.allowResume !== false;
+    this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
 
     this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
     this.developerInstructionsText = this.developerInstructions(config.profile);
     // Model/effort start from env config but can be switched at runtime via the
     // /model and /effort slash commands; overrides persist in the store's meta table.
-    this.model = store.getSetting?.('codex_model') ?? config.codexModel ?? '';
+    this.model = options.model ?? store.getSetting?.('codex_model') ?? config.codexModel ?? '';
     this.effort = store.getSetting?.('codex_effort') ?? config.codexEffort;
 
     this.child = null;
@@ -221,6 +229,7 @@ export class CodexAgent {
     this.activeTurnId = null;
     this.startingTurn = false;      // turn/start sent, turn/started not yet observed
     this.startingItems = [];         // inbound items waiting for turn/started
+    this.startingJournalThroughSeq = 0; // promoted only after turn completion
     this.activeInboundSeqs = [];     // inbound rows associated with the live app-server turn
     this.needsHistoryPrefix = false; // fresh thread: prepend history to the first turn
     this.queue = [];                 // texts waiting for a live idle thread
@@ -234,6 +243,8 @@ export class CodexAgent {
     this.backoffMs = this.reconnectBaseMs;
     this.drainTimer = null;
     this.activitySeq = 0;
+    this.idleWaiters = [];
+    this.primeWaiter = null;
   }
 
   developerInstructions(profile) {
@@ -266,6 +277,31 @@ export class CodexAgent {
   async start() {
     this.stopping = false;
     await this._handshake();
+  }
+
+  get sessionDescriptor() {
+    return {
+      runtime: this.runtime,
+      sessionId: this.threadId,
+      policyHash: this.policyHash,
+      epoch: this.cognitionEpoch,
+      syncedThroughSeq: this.syncedThroughSeq,
+    };
+  }
+
+  activateSession() {
+    this.sessionPersistence = true;
+  }
+
+  whenIdle() {
+    if (!this.turnInProgress && this.queue.length === 0) return Promise.resolve();
+    return new Promise((resolve) => this.idleWaiters.push(resolve));
+  }
+
+  primeCognition(text, syncedThroughSeq) {
+    void text;
+    void syncedThroughSeq;
+    return Promise.reject(new Error('standalone cognition catch-up is disabled; prefix the first real turn'));
   }
 
   // ---- outbound state machine -------------------------------------------------
@@ -315,6 +351,13 @@ export class CodexAgent {
     try {
       this._startTurn(batch);
     } catch (error) {
+      if (error instanceof CognitionLimitError) {
+        const inboundSeqs = batch.map((item) => item.seq).filter((seq) => seq != null);
+        this.logger.warn('codex_cognition_limit', { error: safe(error) });
+        try { this.onTurnFailed?.({ inboundSeqs, error: safe(error) }); } catch {}
+        this._notifyAvailable();
+        return;
+      }
       // Ownership has already crossed the transport boundary. Keep the whole
       // batch in the Codex queue and retry; never leave half of it behind.
       this.logger.warn('codex_turn_start_sync_failed', { error: safe(error) });
@@ -332,20 +375,36 @@ export class CodexAgent {
     else this.queue.push(...queued);
   }
 
-  _startTurn(items) {
+  _startTurn(items, { prime = false } = {}) {
     const text = items.map((item) => item.text).join('\n');
     let body = text;
     const hadPrefix = this.needsHistoryPrefix;
-    if (hadPrefix) {
-      this.needsHistoryPrefix = false;
-      // History is prior context only: cut it off before the oldest message of this batch.
+    let journalThroughSeq = this.syncedThroughSeq;
+    if (!prime) {
       const seqs = items.map((item) => item.seq).filter((seq) => seq != null);
       const beforeSeq = seqs.length > 0 ? Math.min(...seqs) : null;
-      const history = this.store.history(this.config.historyLimit, beforeSeq).map(formatHistoryLine);
-      if (history.length > 0) body = [...history, HISTORY_SEPARATOR, text].join('\n');
+      const throughSeq = this.store.cognitionJournalBeforeInbound?.(beforeSeq, this.cognitionEpoch) ?? 0;
+      const needsCatchup = hadPrefix || throughSeq > this.syncedThroughSeq;
+      if (needsCatchup && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
+        const catchup = cognitionHistoryPrefix(
+          this.store,
+          this.cognitionEpoch,
+          throughSeq,
+          this.config.cognitionMaxChars,
+          hadPrefix ? 0 : this.syncedThroughSeq,
+        );
+        journalThroughSeq = catchup.throughSeq;
+        body = `${catchup.text}\n${text}`;
+      } else if (hadPrefix) {
+        // Compatibility fallback for isolated tests and pre-journal stores.
+        const history = this.store.history(this.config.historyLimit, beforeSeq).map(formatHistoryLine);
+        if (history.length > 0) body = [...history, HISTORY_SEPARATOR, text].join('\n');
+      }
+      this.needsHistoryPrefix = false;
     }
     this.startingTurn = true;
     this.startingItems = items.map((item) => ({ text: item.text, seq: item.seq }));
+    this.startingJournalThroughSeq = journalThroughSeq;
     // model/effort ride on every turn/start: thread/resume does not re-apply its
     // config to an already-running thread, so per-turn overrides are the only way
     // /model and /effort reliably take effect.
@@ -357,10 +416,18 @@ export class CodexAgent {
     }).catch((error) => {
       this.startingTurn = false;
       this.startingItems = [];
+      this.startingJournalThroughSeq = 0;
       if (hadPrefix) this.needsHistoryPrefix = true;
       this.logger.warn('codex_turn_start_failed', { error: safe(error) });
-      this._enqueueBatch(items, { front: true }); // never drop a message
-      this._scheduleDrain();
+      if (prime && this.primeWaiter) {
+        const waiter = this.primeWaiter;
+        this.primeWaiter = null;
+        waiter.reject(error);
+        this._notifyAvailable();
+      } else {
+        this._enqueueBatch(items, { front: true }); // never drop a message
+        this._scheduleDrain();
+      }
     });
   }
 
@@ -449,7 +516,34 @@ export class CodexAgent {
     });
     this.activeInboundSeqs = [];
     this.startingItems = [];
-    if (failed && this.onTurnFailed) {
+    if (!failed) {
+      this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.startingJournalThroughSeq);
+      for (const seq of inboundSeqs) {
+        this.syncedThroughSeq = Math.max(
+          this.syncedThroughSeq,
+          this.store.cognitionJournalSeqForInbound?.(seq, this.cognitionEpoch) ?? 0,
+        );
+      }
+    }
+    this.startingJournalThroughSeq = 0;
+    if (this.sessionPersistence && this.threadId) {
+      this.store.setGlobalSession?.(this.threadId, this.policyHash, {
+        runtime: this.runtime,
+        epoch: this.cognitionEpoch,
+        syncedThroughSeq: this.syncedThroughSeq,
+      });
+    }
+    const wasPrime = Boolean(this.primeWaiter);
+    if (this.primeWaiter) {
+      const waiter = this.primeWaiter;
+      this.primeWaiter = null;
+      if (failed) waiter.reject(new Error(errorText || 'codex cognition catch-up failed'));
+      else {
+        this.syncedThroughSeq = waiter.syncedThroughSeq;
+        waiter.resolve();
+      }
+    }
+    if (failed && !wasPrime && this.onTurnFailed) {
       try {
         this.onTurnFailed({ inboundSeqs, error: errorText || '未知错误' });
       } catch (callbackError) {
@@ -614,8 +708,13 @@ export class CodexAgent {
   _handshake() {
     return new Promise((resolve, reject) => {
       const global = this.store.getGlobalSession();
-      this.storedThreadId = (global.sessionId && global.policyHash === this.policyHash)
-        ? global.sessionId : null;
+      const resumable = (this.allowResume
+        && global.sessionId
+        && global.policyHash === this.policyHash
+        && (global.runtime ?? 'codex') === this.runtime
+        && (global.epoch || this.cognitionEpoch) === this.cognitionEpoch);
+      if (resumable) this.syncedThroughSeq = global.syncedThroughSeq ?? this.syncedThroughSeq;
+      this.storedThreadId = resumable ? global.sessionId : null;
 
       const args = [
         'app-server', '--listen', 'stdio://',
@@ -642,6 +741,7 @@ export class CodexAgent {
           '--timeout-ms', String(this.config.sendTimeoutMs),
           '--max-text-chars', String(this.config.maxReplyChars),
           '--dry-run', String(Boolean(this.config.dryRun)),
+          '--runtime-token', this.authorityToken,
         ];
         args.push(
           '-c', `mcp_servers.lark_daemon_im.command=${tomlString(process.execPath)}`,
@@ -704,7 +804,13 @@ export class CodexAgent {
       }).then(() => {
         this.startedOk = true;
         this.backoffMs = this.reconnectBaseMs;
-        this.store.setGlobalSession(this.threadId, this.policyHash);
+        if (this.sessionPersistence) {
+          this.store.setGlobalSession(this.threadId, this.policyHash, {
+            runtime: this.runtime,
+            epoch: this.cognitionEpoch,
+            syncedThroughSeq: this.syncedThroughSeq,
+          });
+        }
         this._flushQueue();
         this._notifyAvailable();
         finish();
@@ -761,6 +867,7 @@ export class CodexAgent {
     this.activeTurnId = null;
     this.startingTurn = false;
     this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
     this.storedThreadId = resume ? previousThreadId : null;
     this.threadId = null; // deliver() queues while the new thread comes up
@@ -774,7 +881,13 @@ export class CodexAgent {
       throw error;
     }
     if (!resume) this.needsHistoryPrefix = false; // /new means a clean slate
-    this.store.setGlobalSession(this.threadId, this.policyHash);
+    if (this.sessionPersistence) {
+      this.store.setGlobalSession(this.threadId, this.policyHash, {
+        runtime: this.runtime,
+        epoch: this.cognitionEpoch,
+        syncedThroughSeq: this.syncedThroughSeq,
+      });
+    }
     this._recordActivity('agent.session_rotated', {
       summary: resume ? '会话参数已更新' : '已开启新会话',
       metadata: { resume },
@@ -825,6 +938,7 @@ export class CodexAgent {
     this.activeTurnId = null;
     this.startingTurn = false;
     this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
     for (const pending of this.pending.values()) {
       try { pending.reject(new Error('codex connection lost')); } catch { /* ignore */ }
@@ -870,10 +984,12 @@ export class CodexAgent {
   }
 
   _notifyAvailable() {
-    if (!this.onAvailable
-      || this.turnInProgress
+    if (this.turnInProgress
       || this.queue.length > 0
       || !this.state.connected) return;
+    const waiters = this.idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+    if (!this.onAvailable) return;
     try {
       this.onAvailable();
     } catch (error) {
@@ -883,6 +999,12 @@ export class CodexAgent {
 
   async stop() {
     this.stopping = true;
+    if (this.primeWaiter) {
+      this.primeWaiter.reject(new Error('codex stopped during cognition catch-up'));
+      this.primeWaiter = null;
+    }
+    const waiters = this.idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
     if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
     const child = this.child;
     if (!child || child.exitCode !== null) return;

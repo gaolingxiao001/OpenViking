@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
 import { ProcessRegistry } from './process-utils.mjs';
-import { CodexAgent, formatInboundLine } from './codex.mjs';
+import { formatInboundLine } from './codex.mjs';
+import { AgentRuntime } from './agent-runtime.mjs';
 import { GroupBurstRouter } from './group-burst.mjs';
 import { commandCandidate, executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
@@ -91,6 +92,7 @@ export class LarkDaemon {
     this.runId = randomUUID();
     this.activitySequence = 0;
     this.chatNameLookups = new Map();
+    this.ingressBarrier = Promise.resolve();
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -136,7 +138,7 @@ export class LarkDaemon {
         metadata: { larkVersion: larkInfo.version },
       }, 'preflight-ok');
 
-      this.codex = new CodexAgent(this.config, this.store, this.logger.child({ component: 'codex' }), {
+      this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => { void this.notifyTurnFailure(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
       });
@@ -148,7 +150,7 @@ export class LarkDaemon {
       });
       await this.codex.start();
       this.recordSystemActivity('system.subscriber_started', {
-        summary: 'Codex app-server 已连接',
+        summary: `${this.codex.runtime} runtime 已连接`,
         status: 'RUNNING',
       }, 'codex-connected');
 
@@ -258,7 +260,10 @@ export class LarkDaemon {
         chatRef: opaqueRef(event.chatId),
         command: command.name ?? 'unknown',
       });
-      void this.handleSlashCommand(command, event, result.inbound);
+      this.enqueueIngress(async () => {
+        this.groupBurst.flushAll();
+        await this.handleSlashCommand(command, event, result.inbound);
+      });
       return;
     }
     if (result.filterReason) {
@@ -275,12 +280,27 @@ export class LarkDaemon {
       conversationRef: opaqueRef(event.conversationKey),
       chatType: event.chatType,
     });
-    this.groupBurst.route({
-      conversationKey: event.conversationKey,
-      chatType: event.chatType,
-      text: formatInboundLine(event),
-      seq: result.inbound.seq,
+    this.enqueueIngress(() => {
+      this.groupBurst.route({
+        conversationKey: event.conversationKey,
+        chatType: event.chatType,
+        text: formatInboundLine(event),
+        seq: result.inbound.seq,
+      });
     });
+  }
+
+  // A slash command and every later accepted message share one global order.
+  // Slow model discovery and two-phase runtime catch-up therefore cannot let a
+  // following message slip into the old runtime.
+  enqueueIngress(action) {
+    const run = this.ingressBarrier.then(async () => {
+      if (!this.shuttingDown) await action();
+    });
+    this.ingressBarrier = run.catch((error) => {
+      this.logger.error('ingress_barrier_action_failed', { error: safeError(error) });
+    });
+    return run;
   }
 
   // A failed codex turn consumes its messages without replying; tell the sender
@@ -299,9 +319,37 @@ export class LarkDaemon {
       inboundSeq: seq ?? undefined,
     });
     if (!inbound?.messageId) return;
+    const journalKey = `failure-notice:${inbound.messageId}`;
+    let journalReserved = false;
+    try {
+      this.store.appendCognitionJournal({
+        kind: 'outbound',
+        status: 'PENDING',
+        chatId: inbound.chatId,
+        threadId: inbound.threadId,
+        messageId: inbound.messageId,
+        actor: 'me',
+        text: notice,
+        dedupeKey: journalKey,
+        metadata: { action: 'daemon_failure_reply' },
+      });
+      journalReserved = true;
+    } catch (error) {
+      this.logger.warn('turn_failure_notice_journal_reserve_failed', { error: safeError(error) });
+      return;
+    }
     try {
       await this.lark.replyMessage(inbound.messageId, notice);
     } catch (sendError) {
+      if (journalReserved) {
+        try {
+          this.store.settleCognitionJournal(journalKey, 'UNCERTAIN', {
+            metadata: { action: 'daemon_failure_reply' },
+          });
+        } catch (error) {
+          this.logger.warn('turn_failure_notice_journal_settle_failed', { error: safeError(error) });
+        }
+      }
       this.logger.warn('turn_failure_notice_failed', {
         messageRef: opaqueRef(inbound.messageId),
         error: safeChatLookupError(sendError),
@@ -312,13 +360,39 @@ export class LarkDaemon {
         conversationKey: inbound.conversationKey,
         inboundSeq: seq ?? undefined,
       });
+      return;
+    }
+    if (journalReserved) {
+      try {
+        this.store.settleCognitionJournal(journalKey, 'COMMITTED', {
+          metadata: { action: 'daemon_failure_reply' },
+        });
+      } catch (error) {
+        // The Lark reply already succeeded. Never report a send failure or
+        // invite a retry because only the post-send journal write failed.
+        this.logger.warn('turn_failure_notice_journal_settle_failed', { error: safeError(error) });
+      }
     }
   }
 
   // Slash commands never touch the model: execute deterministically against the
   // codex agent's connection state, then reply straight back through lark-cli.
   async handleSlashCommand(command, event, inbound) {
+    // Control/outbound journal rows must sit between completed model turns. If a
+    // command were recorded during an active turn, a later steer could advance
+    // the runtime cursor past state that the model never observed.
+    await this.codex.whenIdle();
+    if (this.shuttingDown) return;
     const label = command.name ? `/${command.name}` : String(event.content).trim().split(/\s+/)[0];
+    this.store.appendCognitionJournal({
+      kind: 'control',
+      chatId: event.chatId,
+      threadId: event.threadId,
+      messageId: event.messageId,
+      actor: event.senderId,
+      text: `slash command ${String(event.content).trim()}`,
+      dedupeKey: `command:${event.messageId}`,
+    });
     let outcome;
     try {
       outcome = await executeCommand(command, this.codex);
@@ -332,9 +406,37 @@ export class LarkDaemon {
       inboundSeq: inbound?.seq,
       metadata: { chatType: event.chatType },
     });
+    const journalKey = `command-reply:${event.messageId}`;
+    let journalReserved = false;
+    try {
+      this.store.appendCognitionJournal({
+        kind: 'outbound',
+        status: 'PENDING',
+        chatId: event.chatId,
+        threadId: event.threadId,
+        messageId: event.messageId,
+        actor: 'me',
+        text: outcome.text,
+        dedupeKey: journalKey,
+        metadata: { action: 'daemon_command_reply' },
+      });
+      journalReserved = true;
+    } catch (error) {
+      this.logger.warn('command_reply_journal_reserve_failed', { error: safeError(error) });
+      return;
+    }
     try {
       await this.lark.replyMessage(event.messageId, outcome.text);
     } catch (error) {
+      if (journalReserved) {
+        try {
+          this.store.settleCognitionJournal(journalKey, 'UNCERTAIN', {
+            metadata: { action: 'daemon_command_reply' },
+          });
+        } catch (settleError) {
+          this.logger.warn('command_reply_journal_settle_failed', { error: safeError(settleError) });
+        }
+      }
       this.logger.warn('command_reply_failed', {
         messageRef: opaqueRef(event.messageId),
         error: safeChatLookupError(error),
@@ -345,6 +447,16 @@ export class LarkDaemon {
         conversationKey: event.conversationKey,
         inboundSeq: inbound?.seq,
       });
+      return;
+    }
+    if (journalReserved) {
+      try {
+        this.store.settleCognitionJournal(journalKey, 'COMMITTED', {
+          metadata: { action: 'daemon_command_reply' },
+        });
+      } catch (error) {
+        this.logger.warn('command_reply_journal_settle_failed', { error: safeError(error) });
+      }
     }
   }
 

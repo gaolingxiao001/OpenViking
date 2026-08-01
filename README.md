@@ -1,8 +1,8 @@
 # lark-daemon
 
-一个单用户、本机常驻的飞书 Codex Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
+一个单用户、本机常驻的飞书 AI Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
 
-daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂进一个常驻的 `codex app-server` 线程；codex 通过专用的 Lark 工具自己把回复发回飞书。所有聊天共用同一个全局线程（跨聊天连续上下文），空闲时用 `turn/start` 发消息，正在思考时用 `turn/steer` 插话，因此思考中途来的新消息会即时进入同一轮。全局线程空闲时，群聊会先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；私聊仍然立即进入 Codex。日常使用不需要 `@`。
+daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout；两边都通过同一套 Lark MCP 工具回复。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；思考中途来的纠正会即时进入当前会话。日常使用不需要 `@`。
 
 ## 安装
 
@@ -11,7 +11,8 @@ daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到
 1. Node.js ≥ 22.5（使用 `node:sqlite`，项目本身零 npm 依赖，无需 `npm install`）。
 2. `lark-cli` 已安装并完成 bot 登录（权限见「飞书前置条件」；路径默认 `/opt/homebrew/bin/lark-cli`，可用 `LARK_CLI_BIN` 覆盖）。
 3. `codex` CLI 已安装并登录（默认 `/opt/homebrew/bin/codex`，可用 `CODEX_BIN` 覆盖）。
-4. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
+4. 如需切到 Claude，安装并登录 `claude` CLI；路径可用 `CLAUDE_BIN` 覆盖。
+5. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
 
 首次运行：
 
@@ -27,11 +28,11 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 ## 交互规则
 
 - 所有聊天统一具有工作区写权限，可让 Codex 在配置的工作区里完成任务；因此只应把 Agent 加入你信任的聊天。
-- 所有聊天共享同一个全局 Codex 线程，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
+- 所有聊天共享一个全局 runtime/session，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
 - 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn；已有 turn 时继续沿用即时 steer。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和其他暂不支持的消息不会触发回复。
-- 本机 slash 命令（私聊直接发 `/` 开头的消息；群聊需要 `@` 机器人再加命令）由 daemon 直接处理并回复，不经过模型：`/new`（开新会话）、`/help`（帮助与当前会话）、`/model [名称]`、`/effort [档位]`。命令名、模型名和 effort 档位都支持前缀匹配（如 `/h`、`/e h`）；`/model` 不带参数会列出可用模型；`/effort` 按当前模型支持的档位校验，不支持的档位会被拒绝。`/model` 下一轮生效且保留当前上下文；`/effort` 与 `/new` 会开启新会话。任何信任聊天里的成员都能执行这些命令，且作用于全局会话。
+- 本机 slash 命令（私聊直接发 `/` 开头的消息；群聊需要 `@` 机器人再加命令）由 daemon 直接处理并回复，不经过模型：`/new`、`/help`、`/model [名称]`、`/effort [档位]`。用 `/model claude:sonnet`、`claude:opus`、`claude:haiku` 或 `claude:fable` 切到 Claude；用 `/model codex:<模型 ID>` 切回指定 Codex 模型。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal，不会复活两份分叉上下文。隐藏思考和未落盘的非 Lark 工具输出无法继承。`/effort` 与 `/new` 会开启新会话。任何信任聊天里的成员都能执行这些命令，且作用于全局会话。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
 所有出站动作走专用 MCP 工具：`react_to_lark_message`（没有新增信息时用表情轻量回应）、`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`retract_lark_message`（撤回机器人自己的消息）。send/reply/react 还必须携带其所响应的最新 authenticated `decision_message_id`；sidecar 在执行副作用前读取 SQLite，若同一 chat/thread 已有更高序号的 accepted inbound 就 fail closed，让全局 Agent 根据已有 steer 重判。只读定位上下文用 `list_lark_chats`（解析群名）、`list_lark_chat_messages`（读单个 chat 最近消息，可 `as:"user"` 读机器人不在的会话）、`search_lark_messages`（user 身份跨会话搜索）、`list_lark_thread_messages`（按 thread 读完整话题）；user 身份读到的内容属于用户私有数据，只用于服务发起请求的用户。工具只接受完整 id；发送工具只接受纯文本和可选的可信 `mention_user_ids`，后者会生成真正的飞书 @。Codex 默认不通过 shell 调用 `lark-cli`；仅当用户明确要求、且对应可信工具尚未加载时，才按 system prompt 的 fallback 规则执行等价的单条命令（auth/config/admin 操作始终禁止）。
@@ -89,12 +90,12 @@ PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3
 
 ## 可靠性边界
 
-- 消息先写 SQLite（状态直接 DONE），再喂给常驻的 `codex app-server` 线程；空闲 `turn/start`，忙时 `turn/steer` 插话，steer 竞态失败会回退成 `turn/start`，消息不丢。
+- 消息先写 SQLite（状态直接 DONE），再喂给当前常驻 runtime。Codex 用 `turn/start` / `turn/steer`，Claude 用 persistent stream-json input。
 - 400ms 群聊窗口只做 transport batching，不创建 chat 专属的 Codex session、history 或 memory。进程在窗口内停止或崩溃，仍可能让已落库消息没来得及喂给 Codex；这版没有加入 durable replay 或 delivery ledger。
-- 这版也没有 command barrier。群消息进入 400ms 窗口后若马上执行 `/new` 或 `/effort`，它可能在全局 session 切换完成后才送入 Codex；命令与待处理消息的严格先后需要单独设计。
-- 单一全局线程 id 持久化于 meta 表并带 policyHash；重连时 `thread/resume`，policy（system prompt / model / workspace）变化则视为新线程；app-server 意外退出按指数退避（1s 起，30s 封顶）重连，期间投递入队。
+- slash command 和后续消息经过同一条全局 ingress barrier；runtime switch 先等旧 turn 空闲，再 preflight 目标进程，最后原子交接 session 与 Lark tool authority。目标启动失败时仍留在旧 runtime。
+- SQLite 只保留一个 active runtime/session。跨 runtime journal 记录 accepted inbound、Lark outbound/control 与 uncertain side effect；它不保存隐藏思考。journal 超过上限时 switch fail closed，先 `/new` 再切。
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
-- codex 通过 MCP 工具自己发送回复（带 lark-cli 幂等键、遵守 `LARK_DAEMON_DRY_RUN`）。没有 outbox 或回复重试；send/reply/react 只有一次本地 read-before-send freshness fence：只看同一 accepted chat/thread 的 inbound 序号，bot/filtered 消息和其他 thread 不会误挡，SQLite 读取失败时不发送。它能证明 `decision_message_id` 是 accepted inbound 且之后没有同 scope 新消息，不能证明它属于当前 app-server turn；后者需要把 MCP sidecar 改成持有 active-turn provenance 的 daemon bridge。SQLite 检查结束到飞书提交之间仍有一个无法由客户端消除的 TOCTOU 窗口；彻底关闭它需要飞书提供条件发送能力。
+- 两个 runtime 都通过 MCP 工具自己发送回复。sidecar 在副作用前校验 active-runtime fence 和 `decision_message_id` freshness，并先写 PENDING journal；成功后 COMMITTED，timeout/crash 保留为 UNCERTAIN。runtime token 是本机单用户进程内的 fencing nonce，不是远程凭证；能读取 daemon SQLite 或进程配置的本机用户，本来就已处于 daemon 的信任边界内。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。
 - Activity 账本保留脱敏后的短摘要（含收消息、turn 开始/结束、steer、agent 输出）；老记录由网页折叠，不因业务表的清理而消失。
 - 单个 turn 没有 watchdog，codex 若长时间不结束一轮，该轮会一直 active（后续消息仍会 steer 进来）。

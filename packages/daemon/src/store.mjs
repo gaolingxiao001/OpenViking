@@ -56,6 +56,24 @@ function rowToChatSource(row) {
   };
 }
 
+function rowToCognitionJournal(row) {
+  if (!row) return null;
+  return {
+    seq: number(row.seq),
+    epoch: number(row.epoch),
+    kind: row.kind,
+    status: row.status,
+    atMs: number(row.at_ms),
+    inboundSeq: row.inbound_seq === null ? null : number(row.inbound_seq),
+    chatId: row.chat_id,
+    threadId: row.thread_id,
+    messageId: row.message_id,
+    actor: row.actor,
+    text: row.text,
+    metadata: parseJsonObject(row.detail_json),
+  };
+}
+
 function parseJsonObject(value) {
   try {
     const parsed = JSON.parse(value || '{}');
@@ -300,6 +318,37 @@ export class Store {
 
       CREATE INDEX IF NOT EXISTS chat_sources_lookup
         ON chat_sources(chat_type, next_lookup_at_ms);
+
+      -- Canonical, daemon-owned observable cognition shared by every chat and
+      -- every model runtime. Runtime-native transcripts stay opaque; a hard
+      -- runtime switch starts one fresh target session and catches it up from
+      -- this ordered journal instead of reviving a stale per-runtime session.
+      CREATE TABLE IF NOT EXISTS cognition_journal (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        epoch INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'COMMITTED',
+        at_ms INTEGER NOT NULL,
+        inbound_seq INTEGER,
+        chat_id TEXT,
+        thread_id TEXT,
+        message_id TEXT,
+        actor TEXT,
+        text TEXT NOT NULL DEFAULT '',
+        runtime_token TEXT,
+        dedupe_key TEXT UNIQUE,
+        detail_json TEXT NOT NULL DEFAULT '{}'
+      );
+
+      CREATE INDEX IF NOT EXISTS cognition_journal_epoch_seq
+        ON cognition_journal(epoch, seq);
+      CREATE INDEX IF NOT EXISTS cognition_journal_runtime_token
+        ON cognition_journal(runtime_token, seq);
+
+      -- A prior sidecar may have died after Lark accepted an action but before
+      -- its local commit. Preserve that ambiguity for catch-up; never silently
+      -- treat it as failed and invite a duplicate send.
+      UPDATE cognition_journal SET status = 'UNCERTAIN' WHERE status = 'PENDING';
     `);
     const inboundColumns = new Set(
       this.db.prepare('PRAGMA table_info(inbound)').all().map((row) => row.name),
@@ -386,8 +435,18 @@ export class Store {
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `);
     this.deleteGlobalSessionStatement = this.db.prepare(
-      "DELETE FROM meta WHERE key IN ('global_session_id', 'global_policy_hash')",
+      `DELETE FROM meta WHERE key IN (
+        'global_session_id', 'global_policy_hash', 'global_session_runtime',
+        'global_session_epoch', 'global_session_synced_through_seq',
+        'global_session_ready'
+      )`,
     );
+    this.insertJournalStatement = this.db.prepare(`
+      INSERT OR IGNORE INTO cognition_journal(
+        epoch, kind, status, at_ms, inbound_seq, chat_id, thread_id,
+        message_id, actor, text, runtime_token, dedupe_key, detail_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
     this.insertActivityStatement = this.db.prepare(`
       INSERT OR IGNORE INTO activities(
         event_key, kind, category, severity, priority, title, summary,
@@ -922,6 +981,19 @@ export class Store {
       if (!row && event.eventId) row = this.getInboundByEvent.get(event.eventId);
       if (inserted) {
         const ignored = Boolean(filterReason);
+        if (!ignored) {
+          this.appendCognitionJournal({
+            kind: 'inbound',
+            atMs: event.createTimeMs || now,
+            inboundSeq: number(row.seq),
+            chatId: event.chatId,
+            threadId: event.threadId,
+            messageId: event.messageId,
+            actor: event.senderId || 'unknown',
+            text: event.content,
+            dedupeKey: `inbound:${event.messageId}`,
+          });
+        }
         this.recordActivity({
           eventKey: `inbound:${row.seq}:${ignored ? 'ignored' : 'received'}`,
           kind: ignored ? 'message.ignored' : 'message.received',
@@ -941,18 +1013,183 @@ export class Store {
     });
   }
 
-  // One Codex session is shared across every chat (cross-chat infinite context),
-  // stored in the meta KV table rather than per-conversation.
-  getGlobalSession() {
+  getCognitionState() {
+    const epoch = Number.parseInt(this.getMetaStatement.get('global_cognition_epoch')?.value ?? '1', 10);
     return {
-      sessionId: this.getMetaStatement.get('global_session_id')?.value ?? null,
-      policyHash: this.getMetaStatement.get('global_policy_hash')?.value ?? null,
+      runtime: this.getMetaStatement.get('active_runtime')?.value ?? 'codex',
+      epoch: Number.isSafeInteger(epoch) && epoch > 0 ? epoch : 1,
+      authorityToken: this.getMetaStatement.get('active_runtime_token')?.value ?? null,
     };
   }
 
-  setGlobalSession(sessionId, policyHash) {
-    this.setMetaStatement.run('global_session_id', sessionId);
-    this.setMetaStatement.run('global_policy_hash', policyHash);
+  initializeCognition(runtime, authorityToken) {
+    return this.transaction(() => {
+      const current = this.getCognitionState();
+      this.setMetaStatement.run('active_runtime', runtime);
+      this.setMetaStatement.run('active_runtime_token', authorityToken);
+      this.setMetaStatement.run('global_cognition_epoch', String(current.epoch));
+      return { runtime, epoch: current.epoch, authorityToken };
+    });
+  }
+
+  bumpCognitionEpoch(runtime, authorityToken) {
+    return this.transaction(() => {
+      const epoch = this.getCognitionState().epoch + 1;
+      this.deleteGlobalSessionStatement.run();
+      this.setMetaStatement.run('active_runtime', runtime);
+      this.setMetaStatement.run('active_runtime_token', authorityToken);
+      this.setMetaStatement.run('global_cognition_epoch', String(epoch));
+      return { runtime, epoch, authorityToken };
+    });
+  }
+
+  // Two-phase runtime commit. The target has already started under a
+  // non-authoritative token. sessionReady distinguishes a real native
+  // transcript from Claude's preassigned UUID before its first stdin turn.
+  commitRuntimeSwitch({
+    runtime,
+    authorityToken,
+    sessionId,
+    policyHash,
+    epoch,
+    syncedThroughSeq = 0,
+    sessionReady = true,
+    model = '',
+  }) {
+    return this.transaction(() => {
+      const current = this.getCognitionState();
+      if (current.epoch !== epoch) throw new Error('cognition epoch changed during runtime switch');
+      this.setMetaStatement.run('active_runtime', runtime);
+      this.setMetaStatement.run('active_runtime_token', authorityToken);
+      this.setMetaStatement.run('global_session_id', sessionId);
+      this.setMetaStatement.run('global_policy_hash', policyHash);
+      this.setMetaStatement.run('global_session_runtime', runtime);
+      this.setMetaStatement.run('global_session_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_synced_through_seq', String(syncedThroughSeq));
+      this.setMetaStatement.run('global_session_ready', sessionReady ? '1' : '0');
+      this.setMetaStatement.run(`setting:${runtime}_model`, String(model));
+      return { runtime, epoch, authorityToken };
+    });
+  }
+
+  appendCognitionJournal({
+    kind,
+    status = 'COMMITTED',
+    atMs = Date.now(),
+    inboundSeq = null,
+    chatId = null,
+    threadId = null,
+    messageId = null,
+    actor = null,
+    text = '',
+    runtimeToken = null,
+    dedupeKey = null,
+    metadata = {},
+    epoch = this.getCognitionState().epoch,
+  }) {
+    const result = this.insertJournalStatement.run(
+      epoch,
+      kind,
+      status,
+      atMs,
+      inboundSeq,
+      chatId,
+      threadId,
+      messageId,
+      actor,
+      text,
+      runtimeToken,
+      dedupeKey,
+      JSON.stringify(metadata ?? {}),
+    );
+    if (number(result.changes) === 0 && dedupeKey) {
+      return number(this.db.prepare('SELECT seq FROM cognition_journal WHERE dedupe_key = ?').get(dedupeKey)?.seq);
+    }
+    return number(this.db.prepare('SELECT last_insert_rowid() AS seq').get().seq);
+  }
+
+  cognitionJournal(
+    epoch = this.getCognitionState().epoch,
+    throughSeq = Number.MAX_SAFE_INTEGER,
+    afterSeq = 0,
+  ) {
+    return this.db.prepare(`
+      SELECT * FROM cognition_journal
+      WHERE epoch = ? AND seq > ? AND seq <= ?
+        AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
+      ORDER BY seq
+    `).all(epoch, afterSeq, throughSeq).map(rowToCognitionJournal);
+  }
+
+  cognitionJournalHead(epoch = this.getCognitionState().epoch) {
+    const row = this.db.prepare(`
+      SELECT MAX(seq) AS seq FROM cognition_journal
+      WHERE epoch = ? AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
+    `).get(epoch);
+    return number(row?.seq) || 0;
+  }
+
+  cognitionJournalBeforeInbound(inboundSeq, epoch = this.getCognitionState().epoch) {
+    if (inboundSeq === null || inboundSeq === undefined) return this.cognitionJournalHead(epoch);
+    const row = this.db.prepare(`
+      SELECT seq FROM cognition_journal
+      WHERE epoch = ? AND inbound_seq = ? AND kind = 'inbound'
+    `).get(epoch, inboundSeq);
+    return row ? Math.max(0, number(row.seq) - 1) : this.cognitionJournalHead(epoch);
+  }
+
+  cognitionJournalSeqForInbound(inboundSeq, epoch = this.getCognitionState().epoch) {
+    if (inboundSeq === null || inboundSeq === undefined) return 0;
+    const row = this.db.prepare(`
+      SELECT seq FROM cognition_journal
+      WHERE epoch = ? AND inbound_seq = ? AND kind = 'inbound'
+    `).get(epoch, inboundSeq);
+    return number(row?.seq) || 0;
+  }
+
+  // One active runtime session is shared across every chat. No per-runtime or
+  // per-conversation session cache exists: a hard switch replaces these fields.
+  getGlobalSession() {
+    const epoch = Number.parseInt(this.getMetaStatement.get('global_session_epoch')?.value ?? '0', 10);
+    const synced = Number.parseInt(
+      this.getMetaStatement.get('global_session_synced_through_seq')?.value ?? '0',
+      10,
+    );
+    return {
+      sessionId: this.getMetaStatement.get('global_session_id')?.value ?? null,
+      policyHash: this.getMetaStatement.get('global_policy_hash')?.value ?? null,
+      runtime: this.getMetaStatement.get('global_session_runtime')?.value ?? null,
+      epoch: Number.isSafeInteger(epoch) ? epoch : 0,
+      syncedThroughSeq: Number.isSafeInteger(synced) ? synced : 0,
+      sessionReady: Boolean(this.getMetaStatement.get('global_session_id')?.value)
+        && this.getMetaStatement.get('global_session_ready')?.value !== '0',
+    };
+  }
+
+  setGlobalSession(sessionId, policyHash, {
+    runtime = this.getCognitionState().runtime,
+    epoch = this.getCognitionState().epoch,
+    syncedThroughSeq = this.getGlobalSession().syncedThroughSeq,
+    sessionReady = true,
+  } = {}) {
+    return this.transaction(() => {
+      this.setMetaStatement.run('global_session_id', sessionId);
+      this.setMetaStatement.run('global_policy_hash', policyHash);
+      this.setMetaStatement.run('global_session_runtime', runtime);
+      this.setMetaStatement.run('global_session_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_synced_through_seq', String(syncedThroughSeq));
+      this.setMetaStatement.run('global_session_ready', sessionReady ? '1' : '0');
+    });
+  }
+
+  settleCognitionJournal(dedupeKey, status, { messageId = null, metadata = {} } = {}) {
+    if (!dedupeKey) return false;
+    const result = this.db.prepare(`
+      UPDATE cognition_journal
+      SET status = ?, message_id = COALESCE(?, message_id), detail_json = ?
+      WHERE dedupe_key = ?
+    `).run(status, messageId, JSON.stringify(metadata ?? {}), dedupeKey);
+    return number(result.changes) > 0;
   }
 
   inboundSeqForMessageId(messageId) {

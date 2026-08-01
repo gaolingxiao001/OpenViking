@@ -158,9 +158,23 @@ describe('Store', () => {
   });
 
   it('stores one global session shared across chats and clears it durably', () => {
-    assert.deepEqual(store.getGlobalSession(), { sessionId: null, policyHash: null });
+    assert.deepEqual(store.getGlobalSession(), {
+      sessionId: null,
+      policyHash: null,
+      runtime: null,
+      epoch: 0,
+      syncedThroughSeq: 0,
+      sessionReady: false,
+    });
     store.setGlobalSession('thread-abc', 'a'.repeat(64));
-    assert.deepEqual(store.getGlobalSession(), { sessionId: 'thread-abc', policyHash: 'a'.repeat(64) });
+    assert.deepEqual(store.getGlobalSession(), {
+      sessionId: 'thread-abc',
+      policyHash: 'a'.repeat(64),
+      runtime: 'codex',
+      epoch: 1,
+      syncedThroughSeq: 0,
+      sessionReady: true,
+    });
 
     const databasePath = path.join(directory, 'state.sqlite3');
     store.close();
@@ -168,6 +182,34 @@ describe('Store', () => {
     assert.equal(store.getGlobalSession().sessionId, 'thread-abc');
     store.clearGlobalSession();
     assert.equal(store.getGlobalSession().sessionId, null);
+  });
+
+  it('rolls back the complete global session tuple when a write fails', () => {
+    store.setGlobalSession('stable-session', 'stable-policy', {
+      runtime: 'claude',
+      epoch: 3,
+      syncedThroughSeq: 9,
+      sessionReady: true,
+    });
+    const before = store.getGlobalSession();
+    const statement = store.setMetaStatement;
+    let writes = 0;
+    store.setMetaStatement = {
+      run(...args) {
+        writes += 1;
+        if (writes === 3) throw new Error('injected session tuple failure');
+        return statement.run(...args);
+      },
+    };
+
+    assert.throws(() => store.setGlobalSession('phantom-session', 'phantom-policy', {
+      runtime: 'claude',
+      epoch: 4,
+      syncedThroughSeq: 0,
+      sessionReady: false,
+    }), /injected session tuple failure/);
+    store.setMetaStatement = statement;
+    assert.deepEqual(store.getGlobalSession(), before);
   });
 
   it('returns cross-chat DONE history tagged by chat, oldest first', () => {

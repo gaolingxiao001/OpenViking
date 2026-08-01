@@ -7,9 +7,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createMcpHandler, LARK_TOOLS, LarkToolService, parseServerArgs, runCommand } from '../src/lark-tools.mjs';
+import { Store } from '../src/store.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const DECISION_MESSAGE_ID = 'om_decision12345678';
+const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function ok(data) {
   return { code: 0, signal: null, stdout: JSON.stringify({ ok: true, data }), stderr: '', timedOut: false };
@@ -29,6 +31,89 @@ function options(overrides = {}) {
 }
 
 describe('Lark proactive IM tool service', () => {
+  it('fences retired runtimes and makes uncertain actions at-most-once', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-authority-'));
+    const databasePath = path.join(directory, 'state.sqlite3');
+    const store = new Store(databasePath, quietLogger);
+    store.initializeCognition('codex', 'token-old');
+    store.ingest({
+      type: 'im.message.receive_v1',
+      eventId: 'evt-authority',
+      messageId: DECISION_MESSAGE_ID,
+      conversationKey: 'profile:tenant:oc_authority123:main',
+      chatId: 'oc_authority123',
+      chatType: 'p2p',
+      messageType: 'text',
+      senderId: 'ou_sender123456',
+      senderType: 'user',
+      rootId: null,
+      parentId: null,
+      threadId: null,
+      threadRootId: null,
+      content: 'send it',
+      mentions: [],
+      createTimeMs: Date.now(),
+      raw: {},
+    });
+
+    let calls = 0;
+    let mode = 'timeout';
+    const service = new LarkToolService(options({
+      databasePath,
+      runtimeToken: 'token-old',
+      freshnessCheck: undefined,
+    }), async () => {
+      calls += 1;
+      if (mode === 'timeout') {
+        return { code: null, signal: 'SIGTERM', stdout: '', stderr: '', timedOut: true };
+      }
+      return ok({ message_id: 'om_sent12345678' });
+    });
+
+    const input = {
+      chat_id: 'oc_authority123',
+      text: 'one observable action',
+      decision_message_id: DECISION_MESSAGE_ID,
+    };
+    await assert.rejects(() => service.sendMessage(input), /timed out/);
+    assert.equal(calls, 1);
+    assert.equal(store.cognitionJournal().find((row) => row.kind === 'outbound')?.status, 'UNCERTAIN');
+
+    mode = 'ok';
+    await assert.rejects(() => service.sendMessage(input), /already attempted/);
+    assert.equal(calls, 1, 'identical uncertain action must not invoke lark-cli again');
+
+    const postSettle = new LarkToolService(options({
+      databasePath,
+      runtimeToken: 'token-old',
+      freshnessCheck: undefined,
+    }), async () => {
+      calls += 1;
+      postSettle.journalDb.close();
+      return ok({ message_id: 'om_sent87654321' });
+    });
+    const sent = await postSettle.sendMessage({ ...input, text: 'post-settle failure' });
+    assert.equal(sent.sent, true, 'post-send journal failure must not invite a retry');
+
+    store.commitRuntimeSwitch({
+      runtime: 'claude',
+      authorityToken: 'token-new',
+      sessionId: 'claude-session',
+      policyHash: 'claude-policy',
+      epoch: 1,
+      sessionReady: false,
+    });
+    const callsBeforeFence = calls;
+    await assert.rejects(() => service.listChats(), /no longer owns/);
+    await assert.rejects(() => service.sendMessage({ ...input, text: 'after switch' }), /no longer owns/);
+    assert.equal(calls, callsBeforeFence, 'retired runtime must lose read and write authority');
+
+    service.close();
+    postSettle.close();
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
   it('lists every joined-chat page, filters locally, and strips unsafe metadata', async () => {
     const calls = [];
     const pages = [
@@ -97,14 +182,15 @@ describe('Lark proactive IM tool service', () => {
       chat_id: 'oc_memorize123456',
       mention_user_ids: [],
       message_id: 'om_sent12345678',
-      idempotency_key: 'stable-send-1',
+      idempotency_key: result.idempotency_key,
     });
     assert.equal(call.command, '/fake/lark-cli');
     assert.deepEqual(call.args.slice(0, 3), ['--profile', 'fixed-profile', 'im']);
     assert.ok(call.args.includes('+messages-send'));
     assert.equal(call.args[call.args.indexOf('--chat-id') + 1], 'oc_memorize123456');
     assert.equal(call.args[call.args.indexOf('--text') + 1], 'hi');
-    assert.equal(call.args[call.args.indexOf('--idempotency-key') + 1], 'stable-send-1');
+    assert.match(result.idempotency_key, /^ld_[a-f0-9]{40}$/);
+    assert.equal(call.args[call.args.indexOf('--idempotency-key') + 1], result.idempotency_key);
   });
 
   it('neutralizes mass-mention markup before a proactive send', async () => {
@@ -473,12 +559,13 @@ describe('Lark proactive IM MCP protocol', () => {
 
   it('requires a fixed profile and validates numeric limits at startup', () => {
     assert.throws(() => parseServerArgs([]), /profile is required/);
-    assert.throws(() => parseServerArgs(['--profile', 'p', '--timeout-ms', '3']), /at least 1000/);
-    assert.throws(() => parseServerArgs(['--profile', 'p', '--dry-run', 'maybe']), /true or false/);
-    assert.equal(parseServerArgs(['--profile', 'p']).profile, 'p');
-    assert.equal(parseServerArgs(['--profile', 'p', '--dry-run', 'true']).dryRun, true);
+    const token = ['--runtime-token', 'runtime-test'];
+    assert.throws(() => parseServerArgs(['--profile', 'p', ...token, '--timeout-ms', '3']), /at least 1000/);
+    assert.throws(() => parseServerArgs(['--profile', 'p', ...token, '--dry-run', 'maybe']), /true or false/);
+    assert.equal(parseServerArgs(['--profile', 'p', ...token]).profile, 'p');
+    assert.equal(parseServerArgs(['--profile', 'p', ...token, '--dry-run', 'true']).dryRun, true);
     assert.equal(
-      parseServerArgs(['--profile', 'p', '--database-path', '/tmp/freshness.sqlite3']).databasePath,
+      parseServerArgs(['--profile', 'p', ...token, '--database-path', '/tmp/freshness.sqlite3']).databasePath,
       '/tmp/freshness.sqlite3',
     );
   });
@@ -501,6 +588,7 @@ describe('Lark proactive IM MCP protocol', () => {
       '--project-dir', directory,
       '--timeout-ms', '5000',
       '--max-text-chars', '1000',
+      '--runtime-token', 'runtime-test',
     ], { stdio: ['pipe', 'pipe', 'pipe'] });
     const responses = [];
     let buffer = '';
