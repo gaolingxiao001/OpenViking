@@ -6,13 +6,15 @@ import { cognitionHistoryPrefix } from './cognition.mjs';
 const SWITCH_JOURNAL_HEADROOM = 4_096;
 
 function parseTarget(value) {
-  if (value === 'claude') return { runtime: 'claude', model: '', canonical: 'claude' };
   if (value.startsWith('claude:')) {
-    return { runtime: 'claude', model: value.slice('claude:'.length), canonical: value };
+    const model = value.slice('claude:'.length);
+    return { runtime: 'claude', model, canonical: model || 'claude' };
   }
-  if (value === 'codex') return { runtime: 'codex', model: '', canonical: 'codex' };
   if (value.startsWith('codex:')) {
     return { runtime: 'codex', model: value.slice('codex:'.length), canonical: value.slice('codex:'.length) };
+  }
+  if (CLAUDE_MODELS.includes(value)) {
+    return { runtime: 'claude', model: value, canonical: value };
   }
   return { runtime: 'codex', model: value, canonical: value };
 }
@@ -43,7 +45,7 @@ export class AgentRuntime {
   get effort() { return this.backend?.effort ?? 'medium'; }
   get model() {
     const model = this.backend?.model ?? '';
-    if (this.runtime === 'claude') return model ? `claude:${model}` : 'claude';
+    if (this.runtime === 'claude') return model || 'claude';
     return model;
   }
   get state() {
@@ -93,8 +95,8 @@ export class AgentRuntime {
   async listModels() {
     const current = await this.backend?.listModels?.() ?? [];
     const models = this.runtime === 'codex'
-      ? [{ id: 'codex', efforts: current.flatMap((model) => model.efforts ?? []) }, ...current, ...CLAUDE_MODELS.map((id) => ({ id, efforts: CLAUDE_EFFORTS }))]
-      : [...current, { id: 'codex', efforts: [] }];
+      ? [...current, ...CLAUDE_MODELS.map((id) => ({ id, efforts: CLAUDE_EFFORTS }))]
+      : current;
     const seen = new Set();
     return models.filter((model) => {
       if (!model?.id || seen.has(model.id)) return false;

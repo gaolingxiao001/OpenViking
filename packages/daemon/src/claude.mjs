@@ -14,11 +14,10 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
 export const CLAUDE_MODELS = [
-  'claude',
-  'claude:fable',
-  'claude:opus',
-  'claude:sonnet',
-  'claude:haiku',
+  'sonnet',
+  'opus',
+  'haiku',
+  'fable',
 ];
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 

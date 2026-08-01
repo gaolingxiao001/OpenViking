@@ -101,7 +101,7 @@ class ScriptedBackend {
   async listModels() {
     return this.runtime === 'codex'
       ? [{ id: 'gpt-5.6-sol', efforts: ['medium'] }]
-      : [{ id: 'claude:sonnet', efforts: ['medium'] }];
+      : [{ id: 'sonnet', efforts: ['medium'] }];
   }
   async rotateSession() { this.threadId = `${this.runtime}-new`; return this.threadId; }
 }
@@ -127,7 +127,7 @@ export async function runClaudeRuntimeSimulation() {
   await runtime.start();
   const codexGenerationToken = store.cognition.authorityToken;
   const originalCodex = runtime.backend;
-  const switched = await runtime.setModel('claude:sonnet');
+  const switched = await runtime.setModel('sonnet');
   const claude = runtime.backend;
   assert.equal(switched.runtimeChanged, true);
   assert.equal(runtime.runtime, 'claude');
@@ -150,12 +150,12 @@ export async function runClaudeRuntimeSimulation() {
   await failing.start();
   const failingGenerationToken = failingStore.cognition.authorityToken;
   const stillCodex = failing.backend;
-  await assert.rejects(() => failing.setModel('claude:sonnet'), /unavailable/);
+  await assert.rejects(() => failing.setModel('sonnet'), /unavailable/);
   assert.equal(failing.runtime, 'codex');
   assert.equal(failing.backend, stillCodex);
   assert.equal(failingStore.cognition.authorityToken, failingGenerationToken);
 
-  await runtime.setModel('codex:gpt-5.6-sol');
+  await runtime.setModel('gpt-5.6-sol');
   assert.equal(runtime.runtime, 'codex');
   assert.notEqual(runtime.backend, originalCodex);
   assert.equal(store.getGlobalSession().runtime, 'codex');

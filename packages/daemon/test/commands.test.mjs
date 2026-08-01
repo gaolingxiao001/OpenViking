@@ -12,6 +12,7 @@ function fakeCodex(overrides = {}) {
   const calls = [];
   return {
     calls,
+    runtime: 'codex',
     threadId: 'th-live',
     model: '',
     effort: 'medium',
@@ -95,6 +96,8 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /th-42/);
     assert.match(outcome.text, /gpt-x/);
     assert.match(outcome.text, /high/);
+    assert.match(outcome.text, /sonnet、gpt-5\.6-sol/);
+    assert.doesNotMatch(outcome.text, /claude:|codex:/);
     assert.equal(codex.calls.length, 0);
   });
 
@@ -165,24 +168,63 @@ describe('executeCommand', () => {
     assert.equal(codex.calls.length, 1);
   });
 
-  it('allows an explicit Codex model while Claude is active', async () => {
+  it('accepts a direct Codex model while Claude is active', async () => {
     const codex = fakeCodex({
       runtime: 'claude',
-      model: 'claude:sonnet',
+      model: 'sonnet',
       listModels: async () => [
-        { id: 'claude:sonnet', efforts: ['medium'] },
-        { id: 'codex', efforts: [] },
+        { id: 'sonnet', efforts: ['medium'] },
+        { id: 'opus', efforts: ['medium'] },
       ],
       async setModel(model) {
         this.calls.push(['setModel', model]);
-        return { runtimeChanged: true, runtime: 'codex', syncedThroughSeq: 12 };
+        return { runtimeChanged: true, runtime: 'codex', model, syncedThroughSeq: 12 };
       },
     });
-    const outcome = await executeCommand({ name: 'model', arg: 'codex:gpt-5.6-sol' }, codex);
+    const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.6-sol' }, codex);
     assert.equal(outcome.ok, true);
-    assert.deepEqual(codex.calls, [['setModel', 'codex:gpt-5.6-sol']]);
-    assert.match(outcome.text, /已切到 codex · gpt-5\.6-sol/);
+    assert.deepEqual(codex.calls, [['setModel', 'gpt-5.6-sol']]);
+    assert.match(outcome.text, /已切到 gpt-5\.6-sol/);
+    assert.doesNotMatch(outcome.text, /codex:/);
     assert.doesNotMatch(outcome.text, /seq|hidden reasoning/);
+  });
+
+  it('keeps qualified model aliases compatible but hides prefixes in replies', async () => {
+    const codex = fakeCodex({
+      runtime: 'claude',
+      model: 'sonnet',
+      listModels: async () => [
+        { id: 'sonnet', efforts: ['medium'] },
+        { id: 'opus', efforts: ['medium'] },
+      ],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        const direct = model.replace(/^(?:claude|codex):/, '');
+        return { runtimeChanged: model.startsWith('codex:'), model: direct };
+      },
+    });
+
+    const claude = await executeCommand({ name: 'model', arg: 'claude:son' }, codex);
+    assert.equal(claude.ok, true);
+    assert.deepEqual(codex.calls[0], ['setModel', 'claude:sonnet']);
+    assert.match(claude.text, /已切换模型：sonnet/);
+    assert.doesNotMatch(claude.text, /claude:/);
+
+    const back = await executeCommand({ name: 'model', arg: 'codex:gpt-5.6-sol' }, codex);
+    assert.equal(back.ok, true);
+    assert.deepEqual(codex.calls[1], ['setModel', 'codex:gpt-5.6-sol']);
+    assert.match(back.text, /已切到 gpt-5\.6-sol/);
+    assert.doesNotMatch(back.text, /codex:/);
+
+    const invalid = await executeCommand({ name: 'model', arg: 'claude:' }, codex);
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.text, '无效的模型名');
+    assert.doesNotMatch(invalid.text, /claude:/);
+
+    const missing = await executeCommand({ name: 'model', arg: 'claude:missing' }, codex);
+    assert.equal(missing.ok, false);
+    assert.match(missing.text, /未找到模型：missing/);
+    assert.doesNotMatch(missing.text, /claude:/);
   });
 
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {

@@ -46,13 +46,64 @@ describe('global Codex/Claude hard switch', () => {
     assert.equal(result.failurePreservedOldRuntime, true);
   });
 
-  it('normalizes provider-qualified aliases without crossing opaque session ids', () => {
+  it('infers direct model providers while retaining hidden qualified aliases', () => {
+    assert.deepEqual(parseRuntimeModelTarget('sonnet'), {
+      runtime: 'claude', model: 'sonnet', canonical: 'sonnet',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('gpt-5.6-sol'), {
+      runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('claude'), {
+      runtime: 'codex', model: 'claude', canonical: 'claude',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('codex'), {
+      runtime: 'codex', model: 'codex', canonical: 'codex',
+    });
     assert.deepEqual(parseRuntimeModelTarget('claude:sonnet'), {
-      runtime: 'claude', model: 'sonnet', canonical: 'claude:sonnet',
+      runtime: 'claude', model: 'sonnet', canonical: 'sonnet',
     });
     assert.deepEqual(parseRuntimeModelTarget('codex:gpt-5.6-sol'), {
       runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol',
     });
+  });
+
+  it('live-validates a direct Codex name before switching from Claude', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-direct-model-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    store.initializeCognition('claude', 'old-token');
+    const stagedCodex = [];
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      claudeFactory: (options) => {
+        const instance = backend('claude', options);
+        instance.model = 'sonnet';
+        return instance;
+      },
+      codexFactory: (options) => {
+        const instance = backend('codex', options);
+        instance.listModels = async () => [{ id: 'gpt-5.6-sol', efforts: ['medium'] }];
+        stagedCodex.push(instance);
+        return instance;
+      },
+    });
+
+    try {
+      await runtime.start();
+      await assert.rejects(() => runtime.setModel('gpt-missing'), /unavailable/);
+      assert.equal(runtime.runtime, 'claude');
+      assert.equal(store.getCognitionState().runtime, 'claude');
+      assert.equal(stagedCodex[0].state.connected, false);
+
+      const result = await runtime.setModel('gpt-5.6-sol');
+      assert.equal(result.runtimeChanged, true);
+      assert.equal(result.model, 'gpt-5.6-sol');
+      assert.equal(runtime.runtime, 'codex');
+      assert.equal(runtime.model, 'gpt-5.6-sol');
+      assert.equal(store.getCognitionState().runtime, 'codex');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('rotates process authority on startup so a crash survivor loses read and write access', async () => {

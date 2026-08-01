@@ -3,6 +3,8 @@
 // reaches codex. Any unambiguous prefix of a command name works (/h → /help,
 // /m gpt-5.5 → /model gpt-5.5); effort levels match by prefix too.
 
+import { CLAUDE_MODELS } from './claude.mjs';
+
 // Static fallback only (offline); when connected, /effort validates against the
 // current model's supportedReasoningEfforts from model/list.
 export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
@@ -54,7 +56,7 @@ export function helpText(codex) {
     '可用命令（支持前缀匹配，如 /h、/m）：',
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
-    '/model [名称] — 查看或切换模型',
+    '/model [名称] — 查看或切换模型，如 sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
     '',
     `当前会话：${codex.threadId ?? '（未连接）'}`,
@@ -96,33 +98,45 @@ export async function executeCommand(command, codex) {
       lines.push('用法：/model <名称>（支持前缀匹配）');
       return { ok: true, text: lines.join('\n') };
     }
-    if (!MODEL_NAME.test(command.arg)) {
-      return { ok: false, text: `无效的模型名：${command.arg}` };
+    const legacy = /^(claude|codex):(.*)$/.exec(command.arg);
+    const providerHint = legacy?.[1] ?? null;
+    const lookupName = legacy?.[2] ?? command.arg;
+    if (!MODEL_NAME.test(command.arg) || (legacy && !lookupName)) {
+      return { ok: false, text: lookupName ? `无效的模型名：${lookupName}` : '无效的模型名' };
     }
     let target = command.arg;
     if (ids.length > 0) {
-      const matches = matchPrefix(command.arg, ids);
+      const candidates = providerHint === 'claude'
+        ? ids.filter((id) => CLAUDE_MODELS.includes(id))
+        : providerHint === 'codex'
+          ? ids.filter((id) => !CLAUDE_MODELS.includes(id))
+          : ids;
+      const matches = matchPrefix(lookupName, candidates);
       if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
       if (matches.length === 0) {
-        // Claude cannot enumerate Codex's live model list without starting a
-        // second runtime. An explicit codex:<id> is validated by staged Codex
-        // thread/start before the hard switch commits.
-        if (!(ids.includes('codex') && command.arg.startsWith('codex:'))) {
-          return { ok: false, text: `未找到模型：${command.arg}\n可选：${ids.join('、')}` };
+        // Claude cannot enumerate Codex models without starting a second
+        // runtime. Any non-Claude direct name is therefore staged as Codex;
+        // AgentRuntime validates its live model list before the switch commits.
+        const requestedRuntime = providerHint
+          ?? (CLAUDE_MODELS.includes(lookupName) ? 'claude' : 'codex');
+        if (!(codex.runtime === 'claude' && requestedRuntime === 'codex')) {
+          return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}` };
         }
       } else {
-        [target] = matches;
+        target = providerHint ? `${providerHint}:${matches[0]}` : matches[0];
       }
     }
     const applied = await codex.setModel(target);
+    const displayTarget = applied?.model
+      || target.replace(/^(?:claude|codex):/, '')
+      || target;
     if (applied?.runtimeChanged) {
-      const runtimeModel = target.includes(':') ? target.replace(':', ' · ') : target;
       return {
         ok: true,
-        text: `已切到 ${runtimeModel}。历史对话会接上；隐藏思考和未落盘的工具过程不会继承`,
+        text: `已切到 ${displayTarget}。历史对话会接上；隐藏思考和未落盘的工具过程不会继承`,
       };
     }
-    return { ok: true, text: `已切换模型：${target}（下一轮生效，同一 ${codex.runtime ?? 'codex'} session 保留）` };
+    return { ok: true, text: `已切换模型：${displayTarget}（下一轮生效，同一 ${codex.runtime ?? 'codex'} session 保留）` };
   }
 
   // effort: validate against what the current model actually supports — an
