@@ -3,11 +3,13 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createMcpHandler, LARK_TOOLS, LarkToolService, parseServerArgs, runCommand } from '../src/lark-tools.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
+const DECISION_MESSAGE_ID = 'om_decision12345678';
 
 function ok(data) {
   return { code: 0, signal: null, stdout: JSON.stringify({ ok: true, data }), stderr: '', timedOut: false };
@@ -21,6 +23,7 @@ function options(overrides = {}) {
     timeoutMs: 5_000,
     maxTextChars: 1_000,
     dryRun: false,
+    freshnessCheck: () => ({ status: 'DONE', has_newer: 0 }),
     ...overrides,
   };
 }
@@ -86,6 +89,7 @@ describe('Lark proactive IM tool service', () => {
       chat_id: 'oc_memorize123456',
       text: 'hi',
       idempotency_key: 'stable-send-1',
+      decision_message_id: DECISION_MESSAGE_ID,
     });
 
     assert.deepEqual(result, {
@@ -112,6 +116,7 @@ describe('Lark proactive IM tool service', () => {
     await service.sendMessage({
       chat_id: 'oc_memorize123456',
       text: 'hello <at user_id="all">all</at>',
+      decision_message_id: DECISION_MESSAGE_ID,
     });
     const sentText = args[args.indexOf('--text') + 1];
     assert.equal(sentText, 'hello 所有人');
@@ -129,11 +134,13 @@ describe('Lark proactive IM tool service', () => {
       chat_id: 'oc_memorize123456',
       text: 'please handle this',
       mention_user_ids: [mentionUserId, mentionUserId],
+      decision_message_id: DECISION_MESSAGE_ID,
     });
     const replied = await service.replyMessage({
       message_id: 'om_target1234567',
       text: 'please follow up',
       mention_user_ids: [mentionUserId],
+      decision_message_id: DECISION_MESSAGE_ID,
     });
 
     assert.deepEqual(sent.mention_user_ids, [mentionUserId]);
@@ -164,7 +171,7 @@ describe('Lark proactive IM tool service', () => {
     await assert.rejects(() => service.sendMessage({ chat_id: 'oc_memorize123456', text: ' ' }), /must not be empty/);
     await assert.rejects(() => service.sendMessage({ chat_id: 'oc_memorize123456', text: 'long' }), /character limit/);
     await assert.rejects(
-      () => service.sendMessage({ chat_id: 'oc_memorize123456', text: 'hey' }),
+      () => service.sendMessage({ chat_id: 'oc_memorize123456', text: 'hey', decision_message_id: DECISION_MESSAGE_ID }),
       (error) => /permission denied/.test(error.message) && !/secret-value/.test(error.message),
     );
   });
@@ -175,11 +182,91 @@ describe('Lark proactive IM tool service', () => {
       invoked = true;
       return ok({ message_id: 'must-not-exist' });
     });
-    const result = await service.sendMessage({ chat_id: 'oc_memorize123456', text: 'hi' });
+    const result = await service.sendMessage({ chat_id: 'oc_memorize123456', text: 'hi', decision_message_id: DECISION_MESSAGE_ID });
     assert.equal(invoked, false);
     assert.equal(result.sent, false);
     assert.equal(result.dry_run, true);
     assert.equal(result.message_id, null);
+  });
+
+  it('blocks stale actions in the exact accepted chat/thread and fails closed when state is unreadable', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-freshness-'));
+    const databasePath = path.join(directory, 'state.sqlite3');
+    const db = new DatabaseSync(databasePath);
+    db.exec(`
+      CREATE TABLE inbound(
+        seq INTEGER PRIMARY KEY,
+        message_id TEXT NOT NULL UNIQUE,
+        conv_key TEXT NOT NULL,
+        status TEXT NOT NULL
+      );
+      INSERT INTO inbound VALUES
+        (1, '${DECISION_MESSAGE_ID}', 'profile:tenant:oc_chat:main', 'DONE'),
+        (2, 'om_bot_filtered1234', 'profile:tenant:oc_chat:main', 'RULE_IGNORED'),
+        (3, 'om_other_thread1234', 'profile:tenant:oc_chat:thread:omt_other', 'DONE');
+    `);
+    let calls = 0;
+    const service = new LarkToolService(
+      options({ databasePath, freshnessCheck: undefined }),
+      async () => {
+        calls += 1;
+        return ok({ message_id: 'om_sent12345678' });
+      },
+    );
+    const unreadable = new LarkToolService(
+      options({ databasePath: path.join(directory, 'missing.sqlite3'), freshnessCheck: undefined }),
+      async () => { throw new Error('must not send'); },
+    );
+
+    try {
+      await service.sendMessage({
+        chat_id: 'oc_memorize123456',
+        text: 'still current',
+        decision_message_id: DECISION_MESSAGE_ID,
+      });
+      assert.equal(calls, 1, 'filtered bot events and another thread must not stale the action');
+      await assert.rejects(
+        service.sendMessage({
+          chat_id: 'oc_memorize123456',
+          text: 'bot-sourced draft',
+          decision_message_id: 'om_bot_filtered1234',
+        }),
+        /not an accepted daemon-authenticated inbound/,
+      );
+
+      db.exec("INSERT INTO inbound VALUES (4, 'om_newer_user12345', 'profile:tenant:oc_chat:main', 'DONE')");
+      await assert.rejects(
+        service.replyMessage({
+          message_id: 'om_target1234567',
+          text: 'old draft',
+          decision_message_id: DECISION_MESSAGE_ID,
+        }),
+        /newer authenticated message.*same chat\/thread/,
+      );
+      await assert.rejects(
+        service.reactToMessage({
+          message_id: 'om_target1234567',
+          emoji_type: 'OK',
+          decision_message_id: DECISION_MESSAGE_ID,
+        }),
+        /newer authenticated message/,
+      );
+      assert.equal(calls, 1, 'stale actions must stop before lark-cli');
+
+      await assert.rejects(
+        unreadable.sendMessage({
+          chat_id: 'oc_memorize123456',
+          text: 'blind send',
+          decision_message_id: DECISION_MESSAGE_ID,
+        }),
+        /freshness could not be verified/,
+      );
+    } finally {
+      service.close();
+      unreadable.close();
+      db.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('reacts with the fixed bot profile and structured reaction payload', async () => {
@@ -191,6 +278,7 @@ describe('Lark proactive IM tool service', () => {
     const result = await service.reactToMessage({
       message_id: 'om_target1234567',
       emoji_type: 'THUMBSUP',
+      decision_message_id: DECISION_MESSAGE_ID,
     });
 
     assert.deepEqual(result, {
@@ -205,7 +293,7 @@ describe('Lark proactive IM tool service', () => {
     assert.equal(call.args[call.args.indexOf('--data') + 1], '{"reaction_type":{"emoji_type":"THUMBSUP"}}');
     await assert.rejects(() => service.reactToMessage({ message_id: 'om_short', emoji_type: 'OK' }), /full om_/);
     await assert.rejects(() => service.reactToMessage({ message_id: 'om_target1234567', emoji_type: 'thumbs up' }), /valid Lark/);
-    const mixedCase = await service.reactToMessage({ message_id: 'om_target1234567', emoji_type: 'OnIt' });
+    const mixedCase = await service.reactToMessage({ message_id: 'om_target1234567', emoji_type: 'OnIt', decision_message_id: DECISION_MESSAGE_ID });
     assert.equal(mixedCase.emoji_type, 'OnIt');
   });
 
@@ -290,12 +378,12 @@ describe('Lark proactive IM MCP protocol', () => {
     assert.match(searched.result.content[0].text, /More results exist/);
     const threaded = await handle({ jsonrpc: '2.0', id: 41, method: 'tools/call', params: { name: 'list_lark_thread_messages', arguments: { thread_id: 'omt_topic1234567' } } });
     assert.match(threaded.result.content[0].text, /omt_topic1234567[\s\S]*thread reply/);
-    const sent = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', text: 'hi' } } });
+    const sent = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', text: 'hi', decision_message_id: DECISION_MESSAGE_ID } } });
     assert.equal(sent.result.structuredContent.sent, true);
-    const replied = await handle({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', text: 'hi', reply_in_thread: true } } });
+    const replied = await handle({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', text: 'hi', reply_in_thread: true, decision_message_id: DECISION_MESSAGE_ID } } });
     assert.equal(replied.result.structuredContent.sent, true);
     assert.match(replied.result.content[0].text, /om_target1234567/);
-    const reacted = await handle({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'react_to_lark_message', arguments: { message_id: 'om_target1234567', emoji_type: 'OK' } } });
+    const reacted = await handle({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'react_to_lark_message', arguments: { message_id: 'om_target1234567', emoji_type: 'OK', decision_message_id: DECISION_MESSAGE_ID } } });
     assert.equal(reacted.result.structuredContent.reacted, true);
     assert.match(reacted.result.content[0].text, /Reacted OK/);
     const retracted = await handle({ jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'retract_lark_message', arguments: { message_id: 'om_sent12345678' } } });
@@ -306,7 +394,7 @@ describe('Lark proactive IM MCP protocol', () => {
   it('lists recent messages and builds the retract lark-cli invocation', async () => {
     const calls = [];
     const service = new LarkToolService(
-      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false },
+      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false, freshnessCheck: () => ({ status: 'DONE', has_newer: 0 }) },
       async (_bin, args) => {
         calls.push(args);
         const data = args.includes('+chat-messages-list')
@@ -330,7 +418,7 @@ describe('Lark proactive IM MCP protocol', () => {
   it('builds search and thread lark-cli invocations with validated inputs', async () => {
     const calls = [];
     const service = new LarkToolService(
-      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false },
+      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false, freshnessCheck: () => ({ status: 'DONE', has_newer: 0 }) },
       async (_bin, args) => {
         calls.push(args);
         const data = { messages: [{ message_id: 'om_found1234567', chat_id: 'oc_elsewhere1234', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'deploy done' }], has_more: false };
@@ -356,7 +444,7 @@ describe('Lark proactive IM MCP protocol', () => {
   it('validates reply ids and builds the reply lark-cli invocation', async () => {
     const calls = [];
     const service = new LarkToolService(
-      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false },
+      { larkCliBin: '/fake/lark-cli', profile: 'p', projectDir: '/tmp', timeoutMs: 5_000, maxTextChars: 50, dryRun: false, freshnessCheck: () => ({ status: 'DONE', has_newer: 0 }) },
       async (_bin, args) => {
         calls.push(args);
         return { code: 0, signal: null, stdout: JSON.stringify({ ok: true, data: { message_id: 'om_new123456789' } }), stderr: '', timedOut: false };
@@ -364,7 +452,7 @@ describe('Lark proactive IM MCP protocol', () => {
     );
     await assert.rejects(service.replyMessage({ message_id: 'om_short', text: 'hi' }), /full om_/);
     await assert.rejects(service.replyMessage({ message_id: 'om_target1234567', text: '' }), /must not be empty/);
-    const result = await service.replyMessage({ message_id: 'om_target1234567', text: 'hello', reply_in_thread: true });
+    const result = await service.replyMessage({ message_id: 'om_target1234567', text: 'hello', reply_in_thread: true, decision_message_id: DECISION_MESSAGE_ID });
     assert.equal(result.sent, true);
     assert.equal(result.message_id, 'om_new123456789');
     const rendered = calls[0].join(' ');
@@ -389,6 +477,10 @@ describe('Lark proactive IM MCP protocol', () => {
     assert.throws(() => parseServerArgs(['--profile', 'p', '--dry-run', 'maybe']), /true or false/);
     assert.equal(parseServerArgs(['--profile', 'p']).profile, 'p');
     assert.equal(parseServerArgs(['--profile', 'p', '--dry-run', 'true']).dryRun, true);
+    assert.equal(
+      parseServerArgs(['--profile', 'p', '--database-path', '/tmp/freshness.sqlite3']).databasePath,
+      '/tmp/freshness.sqlite3',
+    );
   });
 
   it('serves newline-delimited JSON-RPC over stdio', async () => {

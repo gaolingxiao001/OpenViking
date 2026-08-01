@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import readline from 'node:readline';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
 
@@ -10,6 +11,7 @@ const SERVER_VERSION = '1.0.0';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 const MAX_CHAT_PAGES = 10;
 const MAX_STDIO_BYTES = 5_000_000;
+const DECISION_MESSAGE_PATTERN = /^om_[A-Za-z0-9_-]{8,}$/;
 
 function redactToolError(value) {
   return redactSensitive(value)
@@ -149,8 +151,9 @@ export const LARK_TOOLS = [
           description: 'Optional full open_ids to @mention before the message. Use only IDs from trusted metadata or tool results; never guess.',
         },
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
+        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The send is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['chat_id', 'text'],
+      required: ['chat_id', 'text', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -178,8 +181,9 @@ export const LARK_TOOLS = [
         },
         reply_in_thread: { type: 'boolean', default: false, description: 'Reply inside the message thread (continue or start one).' },
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
+        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The reply is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['message_id', 'text'],
+      required: ['message_id', 'text', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -198,8 +202,9 @@ export const LARK_TOOLS = [
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to react to. Never guess or reconstruct a shortened ID.' },
         emoji_type: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$', description: 'Exact Lark emoji_type, such as OK, THUMBSUP, DONE, THANKS, OnIt, or LGTM.' },
+        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The reaction is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['message_id', 'emoji_type'],
+      required: ['message_id', 'emoji_type', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -255,6 +260,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     larkCliBin: '/opt/homebrew/bin/lark-cli',
     profile: '',
     projectDir: process.cwd(),
+    databasePath: '',
     timeoutMs: 30_000,
     maxTextChars: 30_000,
     dryRun: false,
@@ -266,6 +272,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     if (flag === '--lark-cli-bin') options.larkCliBin = value;
     else if (flag === '--profile') options.profile = value;
     else if (flag === '--project-dir') options.projectDir = value;
+    else if (flag === '--database-path') options.databasePath = path.resolve(value);
     else if (flag === '--timeout-ms') options.timeoutMs = Number.parseInt(value, 10);
     else if (flag === '--max-text-chars') options.maxTextChars = Number.parseInt(value, 10);
     else if (flag === '--dry-run') {
@@ -416,6 +423,63 @@ export class LarkToolService {
   constructor(options, run = runCommand) {
     this.options = options;
     this.run = run;
+    this.freshnessCheck = typeof options.freshnessCheck === 'function'
+      ? options.freshnessCheck
+      : null;
+    this.freshnessDb = null;
+    this.freshnessStatement = null;
+  }
+
+  _storedFreshness(decisionMessageId) {
+    if (!this.options.databasePath) {
+      throw new Error('freshness state is unavailable');
+    }
+    if (!this.freshnessDb) {
+      this.freshnessDb = new DatabaseSync(this.options.databasePath, { readOnly: true });
+      this.freshnessDb.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 5000');
+      this.freshnessStatement = this.freshnessDb.prepare(`
+        SELECT inbound.status,
+          EXISTS(
+            SELECT 1 FROM inbound AS newer
+            WHERE newer.conv_key = inbound.conv_key
+              AND newer.status = 'DONE'
+              AND newer.seq > inbound.seq
+          ) AS has_newer
+        FROM inbound
+        WHERE inbound.message_id = ?
+      `);
+    }
+    return this.freshnessStatement.get(decisionMessageId);
+  }
+
+  _assertFreshDecision(value) {
+    const decisionMessageId = typeof value === 'string' ? value.trim() : '';
+    if (!DECISION_MESSAGE_PATTERN.test(decisionMessageId)) {
+      throw new Error('decision_message_id must be a full daemon-authenticated om_ Lark message ID');
+    }
+    let row;
+    try {
+      row = this.freshnessCheck
+        ? this.freshnessCheck(decisionMessageId)
+        : this._storedFreshness(decisionMessageId);
+    } catch {
+      // Read failure is fail-closed: sending an old draft is worse than asking
+      // the live turn to retry after its local state is readable again.
+      throw new Error('Delivery blocked: current-channel freshness could not be verified. No Lark action was taken.');
+    }
+    if (!row || row.status !== 'DONE') {
+      throw new Error('Delivery blocked: decision_message_id is not an accepted daemon-authenticated inbound. No Lark action was taken.');
+    }
+    if (Number(row.has_newer) !== 0) {
+      throw new Error('Delivery blocked: a newer authenticated message arrived in the same chat/thread. Reconsider with the new steered input, then use its msg= id if the action still fits.');
+    }
+    return decisionMessageId;
+  }
+
+  close() {
+    try { this.freshnessDb?.close(); } catch {}
+    this.freshnessDb = null;
+    this.freshnessStatement = null;
   }
 
   async runLark(args, operation) {
@@ -536,6 +600,7 @@ export class LarkToolService {
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
+    this._assertFreshDecision(input.decision_message_id);
     const idempotencyKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
       : randomUUID();
@@ -574,6 +639,7 @@ export class LarkToolService {
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
+    this._assertFreshDecision(input.decision_message_id);
     const idempotencyKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
       : randomUUID();
@@ -614,6 +680,7 @@ export class LarkToolService {
     if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(emojiType)) {
       throw new Error('emoji_type must be a valid Lark emoji identifier');
     }
+    this._assertFreshDecision(input.decision_message_id);
     if (this.options.dryRun) {
       return {
         reacted: false,
@@ -780,17 +847,21 @@ export async function serveMcp(options) {
   const service = new LarkToolService(options);
   const handle = createMcpHandler(service);
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (!line.trim()) continue;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } })}\n`);
-      continue;
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } })}\n`);
+        continue;
+      }
+      const response = await handle(message);
+      if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
     }
-    const response = await handle(message);
-    if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
+  } finally {
+    service.close();
   }
 }
 

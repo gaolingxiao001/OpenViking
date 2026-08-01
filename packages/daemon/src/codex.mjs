@@ -638,6 +638,7 @@ export class CodexAgent {
           '--lark-cli-bin', this.config.larkCliBin,
           '--profile', this.config.profile,
           '--project-dir', this.config.projectDir,
+          '--database-path', this.config.databasePath,
           '--timeout-ms', String(this.config.sendTimeoutMs),
           '--max-text-chars', String(this.config.maxReplyChars),
           '--dry-run', String(Boolean(this.config.dryRun)),

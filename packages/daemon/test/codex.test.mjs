@@ -20,6 +20,7 @@ const baseConfig = {
   codexModel: '',
   codexEffort: 'medium',
   workspace: '/tmp/lark-agent-workspace',
+  databasePath: '/tmp/lark-daemon-test.sqlite3',
   profile: 'test-profile',
   historyLimit: 30,
 };
@@ -189,6 +190,7 @@ describe('formatting helpers', () => {
     assert.match(rendered, /mcp_servers\.lark_daemon_im\.command/);
     assert.match(rendered, /lark-tools\.mjs/);
     assert.match(rendered, /test-profile/);
+    assert.match(rendered, /--database-path.*lark-daemon-test\.sqlite3/);
     assert.match(rendered, /--dry-run.*true/);
     assert.match(rendered, /mcp_servers\.lark_daemon_im\.tool_timeout_sec=10/);
     assert.match(rendered, /features\.plugins=false/);
