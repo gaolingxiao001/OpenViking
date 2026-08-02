@@ -1,3 +1,5 @@
+import { lookupMemberName } from './roster.mjs';
+
 const HISTORY_SEPARATOR = '--- history above, new messages below ---';
 
 export const COGNITION_CATCHUP_SENTINEL =
@@ -23,7 +25,7 @@ function isoMinute(ms) {
 function chatTag(chatId, threadId) {
   if (!threadId) return chatId || 'unknown';
   const short = /^([a-z]{1,4}_)(.+)$/.exec(threadId);
-  return `${chatId || 'unknown'}:${short ? short[1] + short[2].slice(0, 8) : threadId.slice(0, 11)}`;
+  return `${chatId || 'unknown'} thread=${short ? short[1] + short[2].slice(0, 8) : threadId.slice(0, 11)}`;
 }
 
 function shortId(id) {
@@ -34,8 +36,9 @@ function shortId(id) {
 
 export function formatCognitionJournalLine(item) {
   if (item.kind === 'inbound') {
+    const from = lookupMemberName(item.chatId, item.actor) ?? shortId(item.actor);
     return `[chat=${chatTag(item.chatId, item.threadId)} msg=${item.messageId}`
-      + ` time=${isoMinute(item.atMs)} from=${shortId(item.actor)}] ${oneLine(item.text)}`;
+      + ` time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
   }
   if (item.kind === 'outbound') {
     // PENDING means the external action may already have happened. Render it

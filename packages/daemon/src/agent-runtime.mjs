@@ -25,6 +25,7 @@ export class AgentRuntime {
     this.store = store;
     this.logger = logger;
     this.onTurnFailed = options.onTurnFailed ?? null;
+    this.onTurnSucceeded = options.onTurnSucceeded ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.factories = {
       codex: options.codexFactory ?? ((backendOptions) => new CodexAgent(
@@ -58,6 +59,7 @@ export class AgentRuntime {
     const cognition = this.store.getCognitionState();
     return {
       onTurnFailed: this.onTurnFailed,
+      onTurnSucceeded: this.onTurnSucceeded,
       onAvailable: this.onAvailable,
       authorityToken: cognition.authorityToken,
       cognitionEpoch: cognition.epoch,

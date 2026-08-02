@@ -9,6 +9,7 @@ import { AgentRuntime } from './agent-runtime.mjs';
 import { GroupBurstRouter } from './group-burst.mjs';
 import { commandCandidate, executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
+import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 
@@ -83,6 +84,7 @@ export class LarkDaemon {
     this.codex = null;
     this.groupBurst = null;
     this.lark = null;
+    this.roster = null;
     this.httpServer = null;
     this.startedAt = Date.now();
     this.ready = false;
@@ -93,6 +95,10 @@ export class LarkDaemon {
     this.activitySequence = 0;
     this.chatNameLookups = new Map();
     this.ingressBarrier = Promise.resolve();
+    // conversationKey -> error summary of the last delivered failure notice.
+    // Repeats of the same error stay muted until a turn for that conversation
+    // succeeds or the error changes (see notifyTurnFailure).
+    this.failureNoticeMutes = new Map();
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -129,6 +135,13 @@ export class LarkDaemon {
       this.runMaintenance();
 
       this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
+      // Best-effort member roster so inbound lines carry display names instead
+      // of id stubs. The formatters read it through the process-wide resolver.
+      this.roster = new ChatRoster({
+        fetchMembers: (chatId) => this.lark.listChatMembers(chatId),
+        logger: this.logger.child({ component: 'roster' }),
+      });
+      registerNameResolver((chatId, userId) => this.roster.nameForId(chatId, userId));
       const larkInfo = await this.lark.preflight();
       this.config.profile = larkInfo.profile;
       this.logger.info('cli_preflight_ok', { larkVersion: larkInfo.version });
@@ -140,6 +153,7 @@ export class LarkDaemon {
 
       this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => { void this.notifyTurnFailure(info); },
+        onTurnSucceeded: (info) => { this.handleTurnSuccess(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
       });
       this.groupBurst = new GroupBurstRouter({
@@ -280,7 +294,11 @@ export class LarkDaemon {
       conversationRef: opaqueRef(event.conversationKey),
       chatType: event.chatType,
     });
-    this.enqueueIngress(() => {
+    this.enqueueIngress(async () => {
+      // Bounded roster warm-up so formatInboundLine can resolve from= to a
+      // display name. warm() never rejects and races an internal timeout, so a
+      // slow or failing lark-cli only degrades the label back to the id stub.
+      await this.roster?.warm(event.chatId);
       this.groupBurst.route({
         conversationKey: event.conversationKey,
         chatType: event.chatType,
@@ -303,17 +321,50 @@ export class LarkDaemon {
     return run;
   }
 
+  // A successful turn clears the failure-notice mute for every conversation it
+  // consumed messages from: the next failure there is news again.
+  handleTurnSuccess({ inboundSeqs }) {
+    if (this.failureNoticeMutes.size === 0 || !this.store) return;
+    for (const seq of Array.isArray(inboundSeqs) ? inboundSeqs : []) {
+      let inbound = null;
+      try { inbound = this.store.inboundBySeq(seq); } catch { continue; }
+      if (inbound?.conversationKey) this.failureNoticeMutes.delete(inbound.conversationKey);
+    }
+  }
+
   // A failed codex turn consumes its messages without replying; tell the sender
   // programmatically so failures are never silent. Best effort: reply to the last
-  // inbound message of the failed turn.
+  // inbound message of the failed turn. Repeats of the same error in the same
+  // conversation are muted (activity only) until a turn succeeds or the error
+  // changes, so a persistent failure does not spam the chat.
   async notifyTurnFailure({ inboundSeqs, error }) {
     if (this.shuttingDown) return;
-    const seq = Array.isArray(inboundSeqs) ? inboundSeqs.at(-1) : null;
+    const seqs = Array.isArray(inboundSeqs) ? inboundSeqs : [];
+    const seq = seqs.at(-1) ?? null;
     const inbound = seq === null || seq === undefined ? null : this.store.inboundBySeq(seq);
+    const errorSummary = safeError(error);
+    // Mention bypass: like commandCandidate, the daemon does not know its own
+    // open_id, so any @-mention on any inbound of the failed turn counts as
+    // mentioning the bot and always gets the notice.
+    const mentioned = seqs.some((itemSeq) => {
+      const row = itemSeq === seq ? inbound : this.store.inboundBySeq(itemSeq);
+      return Array.isArray(row?.mentions) && row.mentions.length > 0;
+    });
+    if (inbound?.conversationKey && !mentioned
+      && this.failureNoticeMutes.get(inbound.conversationKey) === errorSummary) {
+      this.recordSystemActivity('agent.failure_notice', {
+        summary: errorSummary,
+        status: 'MUTED',
+        conversationKey: inbound.conversationKey,
+        inboundSeq: seq ?? undefined,
+        metadata: { reason: 'repeat_failure_muted' },
+      });
+      return;
+    }
     const notice = `⚠️ 这一轮处理失败，没有生成回复：${error}`.slice(0, 600)
       + '\n（消息不会自动重试；可再发一次，或用 /effort、/model 调整后重试）';
     this.recordSystemActivity('agent.failure_notice', {
-      summary: safeError(error),
+      summary: errorSummary,
       status: inbound?.messageId ? 'NOTIFYING' : 'NO_TARGET',
       conversationKey: inbound?.conversationKey,
       inboundSeq: seq ?? undefined,
@@ -362,6 +413,8 @@ export class LarkDaemon {
       });
       return;
     }
+    // Only a delivered notice arms the mute; a failed send stays eligible to retry.
+    if (inbound.conversationKey) this.failureNoticeMutes.set(inbound.conversationKey, errorSummary);
     if (journalReserved) {
       try {
         this.store.settleCognitionJournal(journalKey, 'COMMITTED', {
@@ -669,6 +722,7 @@ export class LarkDaemon {
       }, 'stopping');
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       this.maintenanceTimer = null;
+      registerNameResolver(null);
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
       this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }

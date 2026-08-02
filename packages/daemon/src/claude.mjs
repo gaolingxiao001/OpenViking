@@ -56,6 +56,7 @@ export class ClaudeAgent {
     this.logger = logger;
     this._spawn = options.spawn ?? nodeSpawn;
     this.onTurnFailed = options.onTurnFailed ?? null;
+    this.onTurnSucceeded = options.onTurnSucceeded ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
     this.startStabilityMs = options.startStabilityMs ?? START_STABILITY_MS;
@@ -167,7 +168,7 @@ export class ClaudeAgent {
     const help = await this._probe(['--help']);
     for (const flag of [
       '--input-format', '--output-format', '--resume', '--session-id', '--mcp-config',
-      '--strict-mcp-config', '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
+      '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
       '--append-system-prompt', '--no-chrome', '--model', '--print',
     ]) {
       if (!help.stdout.includes(flag)) {
@@ -274,8 +275,9 @@ export class ClaudeAgent {
         '--verbose',
         '--output-format', 'stream-json',
         '--input-format', 'stream-json',
+        // No --strict-mcp-config: user-scope and plugin MCP servers (e.g. the
+        // openviking-memory plugin's OV proxy) load alongside lark_daemon_im.
         '--mcp-config', mcpConfigPath,
-        '--strict-mcp-config',
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
         '--append-system-prompt', this.developerInstructionsText,
         '--effort', this.effort,
@@ -585,6 +587,9 @@ export class ClaudeAgent {
     });
     if (error && this.onTurnFailed) {
       try { this.onTurnFailed({ inboundSeqs: seqs, error: safe(error) }); } catch {}
+    }
+    if (!error && this.onTurnSucceeded) {
+      try { this.onTurnSucceeded({ inboundSeqs: seqs }); } catch {}
     }
     this._drain();
     this._notifyAvailable();

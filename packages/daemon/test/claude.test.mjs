@@ -51,7 +51,7 @@ class FakeChild extends EventEmitter {
 
 const helpFlags = [
   '--input-format', '--output-format', '--resume', '--session-id', '--mcp-config',
-  '--strict-mcp-config', '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
+  '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
   '--append-system-prompt', '--no-chrome', '--model', '--print',
 ].join('\n');
 
@@ -162,9 +162,11 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
 
     assert.equal(calls.length, 4);
     const args = calls.at(-1).args;
-    for (const value of ['--print', '--input-format', 'stream-json', '--output-format', '--strict-mcp-config']) {
+    for (const value of ['--print', '--input-format', 'stream-json', '--output-format', '--mcp-config']) {
       assert.ok(args.includes(value));
     }
+    // User-scope and plugin MCP servers must load alongside lark_daemon_im.
+    assert.ok(!args.includes('--strict-mcp-config'));
     assert.equal(args[args.indexOf('--model') + 1], 'sonnet');
     assert.equal(args[args.indexOf('--effort') + 1], 'medium');
     assert.ok(args.includes('--session-id'));

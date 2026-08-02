@@ -445,3 +445,85 @@ describe('daemon event path', { concurrency: false }, () => {
     ]);
   });
 });
+
+describe('failure notice mute', () => {
+  function makeDaemon(inboundRows) {
+    const daemon = new LarkDaemon(
+      { lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-mute.lock') },
+      createLogger('error', { test: 'failure-mute' }),
+    );
+    const replies = [];
+    const activities = [];
+    daemon.store = {
+      inboundBySeq: (seq) => inboundRows[seq] ?? null,
+      appendCognitionJournal() {},
+      settleCognitionJournal() {},
+      recordActivity(entry) { activities.push(entry); return true; },
+    };
+    daemon.lark = {
+      async replyMessage(messageId, text) { replies.push({ messageId, text }); },
+    };
+    return { daemon, replies, activities };
+  }
+
+  const inbound = (seq, overrides = {}) => ({
+    seq,
+    messageId: `om_failed_${seq}`,
+    chatId: 'oc_chat123456',
+    threadId: null,
+    conversationKey: 'profile:tenant:oc_chat123456:main',
+    mentions: [],
+    ...overrides,
+  });
+
+  it('mutes a repeat of the same error in the same conversation', async () => {
+    const { daemon, replies, activities } = makeDaemon({ 1: inbound(1), 2: inbound(2) });
+    await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
+    await daemon.notifyTurnFailure({ inboundSeqs: [2], error: 'model exploded' });
+    assert.equal(replies.length, 1);
+    assert.match(replies[0].text, /处理失败/);
+    const notices = activities.filter((entry) => entry.kind === 'agent.failure_notice');
+    assert.deepEqual(notices.map((entry) => entry.status), ['NOTIFYING', 'MUTED']);
+  });
+
+  it('notifies again when the error summary changes', async () => {
+    const { daemon, replies } = makeDaemon({ 1: inbound(1), 2: inbound(2), 3: inbound(3) });
+    await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
+    await daemon.notifyTurnFailure({ inboundSeqs: [2], error: 'quota exceeded' });
+    assert.equal(replies.length, 2);
+    assert.match(replies[1].text, /quota exceeded/);
+    // The stored summary was updated: repeating the new error is now muted.
+    await daemon.notifyTurnFailure({ inboundSeqs: [3], error: 'quota exceeded' });
+    assert.equal(replies.length, 2);
+  });
+
+  it('resets the mute after a successful turn for that conversation', async () => {
+    const { daemon, replies } = makeDaemon({ 1: inbound(1), 2: inbound(2), 3: inbound(3) });
+    await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
+    daemon.handleTurnSuccess({ inboundSeqs: [2] });
+    await daemon.notifyTurnFailure({ inboundSeqs: [3], error: 'model exploded' });
+    assert.equal(replies.length, 2);
+  });
+
+  it('keeps the mute when the successful turn belongs to another conversation', async () => {
+    const other = inbound(2, { conversationKey: 'profile:tenant:oc_other:main' });
+    const { daemon, replies } = makeDaemon({ 1: inbound(1), 2: other, 3: inbound(3) });
+    await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
+    daemon.handleTurnSuccess({ inboundSeqs: [2] });
+    await daemon.notifyTurnFailure({ inboundSeqs: [3], error: 'model exploded' });
+    assert.equal(replies.length, 1);
+  });
+
+  it('always notifies when an inbound message of the failed turn mentions the bot', async () => {
+    const rows = {
+      1: inbound(1),
+      2: inbound(2, { mentions: [{ key: '@_user_1', name: 'Zayn', id: 'ou_bot123456' }] }),
+    };
+    const { daemon, replies, activities } = makeDaemon(rows);
+    await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
+    await daemon.notifyTurnFailure({ inboundSeqs: [2], error: 'model exploded' });
+    assert.equal(replies.length, 2);
+    const notices = activities.filter((entry) => entry.kind === 'agent.failure_notice');
+    assert.deepEqual(notices.map((entry) => entry.status), ['NOTIFYING', 'NOTIFYING']);
+  });
+});

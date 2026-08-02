@@ -245,6 +245,112 @@ describe('Lark proactive IM tool service', () => {
     );
   });
 
+  it('resolves mention_names through the chat roster and caches the fetch', async () => {
+    let memberCalls = 0;
+    const calls = [];
+    const service = new LarkToolService(options(), async (_command, args) => {
+      calls.push(args);
+      if (args.includes('+chat-members-list')) {
+        memberCalls += 1;
+        assert.equal(args[args.indexOf('--chat-id') + 1], 'oc_memorize123456');
+        return ok({
+          users: [
+            { name: 'Zayn', open_id: 'ou_zayn12345678' },
+            { name: '张 三', open_id: 'ou_zhang1234567' },
+          ],
+          bots: [],
+        });
+      }
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    const sent = await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      text: 'please handle this',
+      mention_names: ['Zayn', '张_三'],
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.deepEqual(sent.mention_user_ids, ['ou_zayn12345678', 'ou_zhang1234567']);
+    const sendArgs = calls.find((args) => args.includes('+messages-send'));
+    assert.match(
+      sendArgs[sendArgs.indexOf('--text') + 1],
+      /^<at user_id="ou_zayn12345678"><\/at> <at user_id="ou_zhang1234567"><\/at> please handle this$/,
+    );
+    // Second send within the TTL reuses the cached roster.
+    await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      text: 'again',
+      mention_names: ['zayn'],
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.equal(memberCalls, 1);
+  });
+
+  it('resolves reply mention_names via the target chat and rejects unknown chats', async () => {
+    const service = new LarkToolService(
+      options({ dryRun: true, chatLookup: (messageId) => (messageId === 'om_target1234567' ? 'oc_memorize123456' : null) }),
+      async (_command, args) => {
+        assert.ok(args.includes('+chat-members-list'));
+        return ok({ users: [{ name: 'Zayn', open_id: 'ou_zayn12345678' }], bots: [] });
+      },
+    );
+    const replied = await service.replyMessage({
+      message_id: 'om_target1234567',
+      text: 'ping',
+      mention_names: ['Zayn'],
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.deepEqual(replied.mention_user_ids, ['ou_zayn12345678']);
+
+    const noChat = new LarkToolService(options({ dryRun: true, chatLookup: () => null }), async () => {
+      throw new Error('must not fetch a roster without a chat');
+    });
+    await assert.rejects(
+      () => noChat.replyMessage({
+        message_id: 'om_target1234567',
+        text: 'ping',
+        mention_names: ['Zayn'],
+        decision_message_id: DECISION_MESSAGE_ID,
+      }),
+      /target chat is unknown/,
+    );
+  });
+
+  it('rejects unknown and ambiguous mention_names with clear errors', async () => {
+    let memberCalls = 0;
+    const service = new LarkToolService(options({ dryRun: true }), async (_command, args) => {
+      assert.ok(args.includes('+chat-members-list'));
+      memberCalls += 1;
+      return ok({
+        users: [
+          { name: 'Alex', open_id: 'ou_alexone123456' },
+          { name: 'alex', open_id: 'ou_alextwo123456' },
+        ],
+        bots: [],
+      });
+    });
+    await assert.rejects(
+      () => service.sendMessage({
+        chat_id: 'oc_memorize123456',
+        text: 'hi',
+        mention_names: ['Ghost'],
+        decision_message_id: DECISION_MESSAGE_ID,
+      }),
+      /unknown member name.*Ghost.*exactly as it appears/s,
+    );
+    assert.equal(memberCalls, 2); // one forced refresh before failing
+    await assert.rejects(
+      () => service.sendMessage({
+        chat_id: 'oc_memorize123456',
+        text: 'hi',
+        mention_names: ['Alex'],
+        decision_message_id: DECISION_MESSAGE_ID,
+      }),
+      (error) => /ambiguous/.test(error.message)
+        && /ou_alexone123456/.test(error.message)
+        && /ou_alextwo123456/.test(error.message),
+    );
+  });
+
   it('rejects guessed IDs, empty text, oversized text, and CLI failures', async () => {
     const service = new LarkToolService(options({ maxTextChars: 3 }), async () => ({
       code: 2,

@@ -159,6 +159,33 @@ export class LarkClient {
     return { sent: true };
   }
 
+  // Chat member roster fetch (bot identity) for name<->open_id resolution.
+  // Returns the parsed lark-cli JSON payload; roster.mjs owns bucket parsing.
+  async listChatMembers(chatId) {
+    const result = await this.registry.run(this.config.larkCliBin, [
+      '--profile', this.profile,
+      'im', '+chat-members-list',
+      '--as', 'bot',
+      '--chat-id', chatId,
+      '--page-all',
+      '--format', 'json',
+    ], {
+      cwd: this.config.projectDir,
+      timeoutMs: 15_000,
+    });
+    if (result.timedOut) throw new Error('lark-cli chat member lookup timed out after 15000ms');
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim().slice(-2000) || `lark-cli chat member lookup exited ${result.code}`);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new Error('lark-cli chat member lookup returned invalid JSON');
+    }
+    return parsed?.data ?? parsed;
+  }
+
   async getChatName(chatId) {
     const result = await this.registry.run(this.config.larkCliBin, [
       '--profile', this.profile,

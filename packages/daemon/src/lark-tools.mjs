@@ -5,6 +5,7 @@ import readline from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
+import { ChatRoster } from './roster.mjs';
 
 const SERVER_NAME = 'lark-daemon-im';
 const SERVER_VERSION = '1.0.0';
@@ -39,6 +40,31 @@ function normalizeMentionUserIds(value) {
     }
   }
   return ids;
+}
+
+function normalizeMentionNames(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('mention_names must be an array');
+  if (value.length > 10) throw new Error('mention_names supports at most 10 names');
+  const names = [];
+  const seen = new Set();
+  for (const raw of value) {
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    if (!name) throw new Error('mention_names must contain non-empty member display names');
+    if (name.length > 100) throw new Error('mention_names entries must be at most 100 characters');
+    const key = name.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function mergeMentionIds(mentionUserIds, resolvedIds) {
+  const merged = [...new Set([...mentionUserIds, ...resolvedIds])];
+  if (merged.length > 10) throw new Error('mentions support at most 10 users in total');
+  return merged;
 }
 
 function renderMessageText(value, mentionUserIds) {
@@ -150,6 +176,13 @@ export const LARK_TOOLS = [
       properties: {
         chat_id: { type: 'string', pattern: '^oc_[A-Za-z0-9_-]{8,}$', description: 'Full Lark chat ID (oc_...). Never guess or reconstruct a shortened ID.' },
         text: { type: 'string', minLength: 1, description: 'Plain-text message body.' },
+        mention_names: {
+          type: 'array',
+          maxItems: 10,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 100 },
+          description: 'Optional member display names to @mention, written exactly as they appear in from= or [mentions: …] metadata. The daemon resolves them to real IDs via the chat roster; prefer this over mention_user_ids and never guess an ID.',
+        },
         mention_user_ids: {
           type: 'array',
           maxItems: 10,
@@ -179,6 +212,13 @@ export const LARK_TOOLS = [
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to reply to. Never guess or reconstruct a shortened ID.' },
         text: { type: 'string', minLength: 1, description: 'Plain-text reply body.' },
+        mention_names: {
+          type: 'array',
+          maxItems: 10,
+          uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 100 },
+          description: 'Optional member display names to @mention, written exactly as they appear in from= or [mentions: …] metadata. The daemon resolves them to real IDs via the chat roster; prefer this over mention_user_ids and never guess an ID.',
+        },
         mention_user_ids: {
           type: 'array',
           maxItems: 10,
@@ -436,6 +476,15 @@ export class LarkToolService {
     this.freshnessCheck = typeof options.freshnessCheck === 'function'
       ? options.freshnessCheck
       : null;
+    this.chatLookup = typeof options.chatLookup === 'function' ? options.chatLookup : null;
+    // Roster for mention_names -> open_id resolution, fetched as bot per target chat.
+    this.roster = options.roster ?? new ChatRoster({
+      fetchMembers: (chatId) => this.runLark([
+        '+chat-members-list', '--as', 'bot', '--chat-id', chatId,
+        '--page-all', '--format', 'json',
+      ], 'list chat members'),
+    });
+    this.chatScopeStatement = null;
     this.freshnessDb = null;
     this.freshnessStatement = null;
     this.authorityStatement = null;
@@ -578,11 +627,49 @@ export class LarkToolService {
     }
   }
 
+  // Resolve which chat a reply targets so mention_names can consult the right
+  // roster: the daemon-authenticated inbound rows already record chat_id for
+  // the target and decision message ids.
+  _chatIdForMessage(...messageIds) {
+    for (const messageId of messageIds) {
+      if (!messageId) continue;
+      if (this.chatLookup) {
+        const chatId = this.chatLookup(messageId);
+        if (chatId) return chatId;
+        continue;
+      }
+      if (!this.options.databasePath) continue;
+      try {
+        if (!this.freshnessDb) this._storedFreshness('__chat_scope_probe__');
+        if (!this.chatScopeStatement) {
+          this.chatScopeStatement = this.freshnessDb.prepare(
+            'SELECT chat_id FROM inbound WHERE message_id = ?',
+          );
+        }
+        const row = this.chatScopeStatement.get(messageId);
+        if (row?.chat_id) return row.chat_id;
+      } catch { /* fall through: caller reports a clear error */ }
+    }
+    return null;
+  }
+
+  async _resolveMentions(input, chatId) {
+    const mentionUserIds = normalizeMentionUserIds(input.mention_user_ids);
+    const mentionNames = normalizeMentionNames(input.mention_names);
+    if (mentionNames.length === 0) return mentionUserIds;
+    if (!chatId) {
+      throw new Error('mention_names could not be resolved: the target chat is unknown; use mention_user_ids with full ou_ IDs from trusted metadata');
+    }
+    const resolved = await this.roster.resolveNames(chatId, mentionNames);
+    return mergeMentionIds(mentionUserIds, resolved);
+  }
+
   close() {
     try { this.freshnessDb?.close(); } catch {}
     try { this.journalDb?.close(); } catch {}
     this.freshnessDb = null;
     this.freshnessStatement = null;
+    this.chatScopeStatement = null;
     this.authorityStatement = null;
     this.journalDb = null;
     this.insertJournalIntent = null;
@@ -706,9 +793,9 @@ export class LarkToolService {
 
   async sendMessage(input = {}) {
     const chatId = typeof input.chat_id === 'string' ? input.chat_id.trim() : '';
-    const mentionUserIds = normalizeMentionUserIds(input.mention_user_ids);
-    const text = renderMessageText(input.text, mentionUserIds);
     if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(chatId)) throw new Error('chat_id must be a full oc_ Lark chat ID');
+    const mentionUserIds = await this._resolveMentions(input, chatId);
+    const text = renderMessageText(input.text, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
@@ -772,10 +859,13 @@ export class LarkToolService {
 
   async replyMessage(input = {}) {
     const messageId = typeof input.message_id === 'string' ? input.message_id.trim() : '';
-    const mentionUserIds = normalizeMentionUserIds(input.mention_user_ids);
-    const text = renderMessageText(input.text, mentionUserIds);
     const replyInThread = input.reply_in_thread === true;
     if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId)) throw new Error('message_id must be a full om_ Lark message ID');
+    const mentionUserIds = await this._resolveMentions(
+      input,
+      this._chatIdForMessage(messageId, input.decision_message_id),
+    );
+    const text = renderMessageText(input.text, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }

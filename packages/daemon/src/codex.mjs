@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
+import { lookupMemberName } from './roster.mjs';
 
 function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
@@ -158,9 +159,22 @@ function isoMinute(ms) {
   return `${new Date(ms).toISOString().slice(0, 16)}Z`;
 }
 
-// Full chat id (codex needs it to send), short thread suffix for recognition.
+// from= label: the member's sanitized display name when the roster knows it
+// (resolver param first, then the process-wide roster), else the shortened stub.
+function fromLabel(chatId, senderId, resolveName = null) {
+  if (resolveName) {
+    try {
+      const resolved = resolveName(chatId, senderId);
+      if (resolved) return resolved;
+    } catch { /* fall through to the shared resolver / stub */ }
+  }
+  return lookupMemberName(chatId, senderId) ?? shortenId(senderId);
+}
+
+// Full chat id (codex needs it to send); thread membership rides as a separate
+// `thread=` bracket field so the audience boundary stays salient to the model.
 function chatTag(chatId, threadId) {
-  return threadId ? `${chatId}:${shortenId(threadId)}` : chatId;
+  return threadId ? `${chatId} thread=${shortenId(threadId)}` : chatId;
 }
 
 // One message must stay one physical line: the system prompt promises that only the
@@ -174,11 +188,11 @@ export function oneLine(text) {
 }
 
 // Compressed one-line-per-message format (see agent/system-prompt.md "Message format").
-// chat= and msg= carry the full id so codex can call lark-cli; from= and the thread
-// suffix stay shortened stubs.
-export function formatInboundLine(message) {
+// chat= and msg= carry the full id so codex can call lark-cli; from= and the thread=
+// field stay shortened stubs.
+export function formatInboundLine(message, resolveName = null) {
   let line = `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${shortenId(message.senderId)}] ${oneLine(message.content)}`;
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}] ${oneLine(message.content)}`;
   if (Array.isArray(message.mentions) && message.mentions.length > 0) {
     const names = message.mentions.map((m) => `@${oneLine(m.name) || shortenId(m.id)}`).join(' ');
     line += ` [mentions: ${names}]`;
@@ -186,8 +200,8 @@ export function formatInboundLine(message) {
   return line;
 }
 
-export function formatHistoryLine(item) {
-  const from = item.direction === 'outbound' ? 'me' : shortenId(item.actor);
+export function formatHistoryLine(item, resolveName = null) {
+  const from = item.direction === 'outbound' ? 'me' : fromLabel(item.chatId, item.actor, resolveName);
   return `[chat=${chatTag(item.chatId, item.threadId)} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
 }
 
@@ -207,6 +221,7 @@ export class CodexAgent {
     this.reconnectCapMs = options.reconnectCapMs ?? 30_000;
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
     this.onTurnFailed = options.onTurnFailed ?? null; // ({ inboundSeqs, error }) => void
+    this.onTurnSucceeded = options.onTurnSucceeded ?? null; // ({ inboundSeqs }) => void
     this.onAvailable = options.onAvailable ?? null;   // () => void
     const cognition = store.getCognitionState?.() ?? { runtime: 'codex', epoch: 1, authorityToken: null };
     this.runtime = 'codex';
@@ -548,6 +563,13 @@ export class CodexAgent {
         this.onTurnFailed({ inboundSeqs, error: errorText || '未知错误' });
       } catch (callbackError) {
         this.logger.warn('turn_failure_notify_failed', { error: safe(callbackError) });
+      }
+    }
+    if (!failed && !wasPrime && this.onTurnSucceeded) {
+      try {
+        this.onTurnSucceeded({ inboundSeqs });
+      } catch (callbackError) {
+        this.logger.warn('turn_success_notify_failed', { error: safe(callbackError) });
       }
     }
     this._drain();
