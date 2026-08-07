@@ -28,6 +28,9 @@ function safeChatLookupError(error) {
 
 const CHAT_NAME_REFRESH_MS = 24 * 60 * 60 * 1_000;
 const CHAT_NAME_RETRY_BASE_MS = 5 * 60 * 1_000;
+// A failure-notice mute only suppresses rapid repeats: a persistent failure
+// re-notifies after this window instead of staying silent forever.
+const FAILURE_NOTICE_MUTE_TTL_MS = 10 * 60 * 1_000;
 
 const SECURITY_HEADERS = Object.freeze({
   'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
@@ -95,9 +98,9 @@ export class LarkDaemon {
     this.activitySequence = 0;
     this.chatNameLookups = new Map();
     this.ingressBarrier = Promise.resolve();
-    // conversationKey -> error summary of the last delivered failure notice.
+    // conversationKey -> { summary, atMs } of the last delivered failure notice.
     // Repeats of the same error stay muted until a turn for that conversation
-    // succeeds or the error changes (see notifyTurnFailure).
+    // succeeds, the error changes, or the mute TTL expires (see notifyTurnFailure).
     this.failureNoticeMutes = new Map();
   }
 
@@ -350,8 +353,11 @@ export class LarkDaemon {
       const row = itemSeq === seq ? inbound : this.store.inboundBySeq(itemSeq);
       return Array.isArray(row?.mentions) && row.mentions.length > 0;
     });
-    if (inbound?.conversationKey && !mentioned
-      && this.failureNoticeMutes.get(inbound.conversationKey) === errorSummary) {
+    const mute = inbound?.conversationKey
+      ? this.failureNoticeMutes.get(inbound.conversationKey)
+      : null;
+    if (mute && !mentioned && mute.summary === errorSummary
+      && Date.now() - mute.atMs < FAILURE_NOTICE_MUTE_TTL_MS) {
       this.recordSystemActivity('agent.failure_notice', {
         summary: errorSummary,
         status: 'MUTED',
@@ -414,7 +420,9 @@ export class LarkDaemon {
       return;
     }
     // Only a delivered notice arms the mute; a failed send stays eligible to retry.
-    if (inbound.conversationKey) this.failureNoticeMutes.set(inbound.conversationKey, errorSummary);
+    if (inbound.conversationKey) {
+      this.failureNoticeMutes.set(inbound.conversationKey, { summary: errorSummary, atMs: Date.now() });
+    }
     if (journalReserved) {
       try {
         this.store.settleCognitionJournal(journalKey, 'COMMITTED', {

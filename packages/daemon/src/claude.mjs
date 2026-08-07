@@ -557,6 +557,12 @@ export class ClaudeAgent {
         const details = Array.isArray(message.errors) ? message.errors.filter(Boolean).join(' | ') : '';
         error = new Error(details || String(message.result || `Claude error: ${subtype}`));
       }
+      // Claude CLI reports some hard failures (usage/session limits, API
+      // errors) as subtype "success" with is_error=true. Treating them as
+      // completed turns silently swallowed every failure notice.
+      if (!error && message.is_error === true) {
+        error = new Error(String(message.result || 'Claude error result'));
+      }
       this.turnError = null;
       this._completeTurn(error);
     }

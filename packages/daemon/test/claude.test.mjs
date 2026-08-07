@@ -216,6 +216,37 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.stop();
   });
 
+  it('reports an is_error result with subtype success as a turn failure', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('please answer', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      result: "You've hit your session limit · resets 5:30pm (UTC)",
+    });
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].inboundSeqs, [7]);
+    assert.match(failures[0].error, /session limit/);
+    await agent.stop();
+  });
+
+  it('still completes a turn when a tool result carried is_error but the run succeeded', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('please answer', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({ type: 'result', subtype: 'success', is_error: false, result: 'done' });
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(failures.length, 0);
+    await agent.stop();
+  });
+
   it('does not resume a preassigned session that never created a Claude transcript', async () => {
     const store = makeStore({
       globalOverride: {

@@ -497,6 +497,18 @@ describe('failure notice mute', () => {
     assert.equal(replies.length, 2);
   });
 
+  it('re-notifies a persistent identical failure after the mute TTL expires', async () => {
+    const { daemon, replies } = makeDaemon({ 1: inbound(1), 2: inbound(2) });
+    await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
+    assert.equal(replies.length, 1);
+    // Age the delivered mute past the 10-minute TTL.
+    const key = 'profile:tenant:oc_chat123456:main';
+    const mute = daemon.failureNoticeMutes.get(key);
+    daemon.failureNoticeMutes.set(key, { ...mute, atMs: mute.atMs - 11 * 60 * 1_000 });
+    await daemon.notifyTurnFailure({ inboundSeqs: [2], error: 'model exploded' });
+    assert.equal(replies.length, 2);
+  });
+
   it('resets the mute after a successful turn for that conversation', async () => {
     const { daemon, replies } = makeDaemon({ 1: inbound(1), 2: inbound(2), 3: inbound(3) });
     await daemon.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
