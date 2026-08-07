@@ -102,6 +102,36 @@ describe('executeCommand', () => {
     assert.deepEqual(codex.calls, [['rotate', { resume: false }]]);
   });
 
+  it('restart reloads the kernel then rotates to a fresh session', async () => {
+    const codex = fakeCodex({
+      async reloadSystemPrompt() {
+        this.calls.push(['reload']);
+        return { outerSeeded: false, outerPath: '/data/kernel-outer.md' };
+      },
+    });
+    const outcome = await executeCommand({ name: 'restart', arg: '' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /已刷新内核并开启新会话：th-new/);
+    assert.doesNotMatch(outcome.text, /初始化/);
+    assert.deepEqual(codex.calls, [['reload'], ['rotate', { resume: false }]]);
+  });
+
+  it('restart mentions the outer kernel path when it was reseeded', async () => {
+    const codex = fakeCodex({
+      async reloadSystemPrompt() {
+        return { outerSeeded: true, outerPath: '/data/kernel-outer.md' };
+      },
+    });
+    const outcome = await executeCommand({ name: 'restart', arg: '' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /外层内核首次初始化：\/data\/kernel-outer\.md/);
+  });
+
+  it('resolves the /r prefix unambiguously to /restart', () => {
+    assert.deepEqual(parseCommand('/r'), { name: 'restart', arg: '' });
+    assert.deepEqual(parseCommand('/res'), { name: 'restart', arg: '' });
+  });
+
   it('new while disconnected still succeeds with a deferred message', async () => {
     const codex = fakeCodex({ rotateSession: async () => null });
     const outcome = await executeCommand({ name: 'new', arg: '' }, codex);

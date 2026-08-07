@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { redactSensitive } from './logger.mjs';
 import { terminateProcessTree } from './process-utils.mjs';
-import { loadSystemPrompt } from './config.mjs';
+import { loadSystemPrompt, loadSystemPromptDetail } from './config.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -710,6 +710,16 @@ export class ClaudeAgent {
     this.needsHistoryPrefix = false;
     await this._replaceProcess({ fresh: true });
     return this.sessionId;
+  }
+
+  // /restart: re-read the kernel from disk. --append-system-prompt rides on the
+  // child's spawn args, so the fresh text applies when the caller rotates to a
+  // fresh session (rotateSession respawns the process).
+  async reloadSystemPrompt() {
+    const detail = loadSystemPromptDetail(this.config);
+    this.systemPrompt = detail.text;
+    this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${this.config.profile}`;
+    return detail;
   }
 
   async setModel(model) {

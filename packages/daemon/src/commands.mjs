@@ -9,7 +9,7 @@ import { CLAUDE_MODELS } from './claude.mjs';
 // current model's supportedReasoningEfforts from model/list.
 export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 
-const COMMANDS = ['new', 'help', 'model', 'effort'];
+const COMMANDS = ['new', 'help', 'model', 'effort', 'restart'];
 
 const MODEL_NAME = /^[A-Za-z0-9._:\/-]{1,64}$/;
 
@@ -53,6 +53,7 @@ export function helpText(codex) {
     '/help — 显示帮助与当前状态',
     '/model [名称] — 查看或切换模型，如 sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
+    '/restart — 重新加载内核（外层 persona/团队上下文）并开启新会话',
     '',
     `当前会话：${codex.threadId ?? '（未连接）'}`,
     `Runtime：${codex.runtime ?? 'codex'}`,
@@ -80,6 +81,20 @@ export async function executeCommand(command, codex) {
       ok: true,
       text: threadId ? `已开启新会话：${threadId}` : '已清除会话，重连后将开启新会话',
     };
+  }
+
+  if (command.name === 'restart') {
+    // Reload the two-layer kernel (inner from the release, outer from the data
+    // dir) into the running backend, then rotate so the fresh prompt applies.
+    const detail = await codex.reloadSystemPrompt();
+    const threadId = await codex.rotateSession({ resume: false });
+    const lines = [
+      threadId ? `已刷新内核并开启新会话：${threadId}` : '已刷新内核并清除会话，重连后将开启新会话',
+    ];
+    if (detail?.outerSeeded && detail.outerPath) {
+      lines.push(`外层内核首次初始化：${detail.outerPath}`);
+    }
+    return { ok: true, text: lines.join('\n') };
   }
 
   let models = [];

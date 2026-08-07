@@ -5,10 +5,12 @@ import { describe, it } from 'node:test';
 import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
+const kernelInnerPath = fileURLToPath(new URL('../agent/kernel-inner.md', import.meta.url));
+const kernelOuterPath = fileURLToPath(new URL('../agent/kernel-outer.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
+  kernelInnerPath,
+  kernelOuterPath,
   claudeBin: 'claude',
   claudeModel: 'sonnet',
   claudeEffort: 'medium',

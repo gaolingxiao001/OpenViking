@@ -4,7 +4,7 @@ import { terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { lookupMemberName } from './roster.mjs';
-import { loadSystemPrompt } from './config.mjs';
+import { loadSystemPrompt, loadSystemPromptDetail } from './config.mjs';
 
 function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
@@ -917,6 +917,44 @@ export class CodexAgent {
     this._drain();
     this._notifyAvailable();
     return this.threadId;
+  }
+
+  // /restart: re-read the kernel from disk. developer_instructions ride on the
+  // app-server's spawn args, so the child must be replaced for the fresh prompt
+  // to apply. policyHash includes the prompt, so a changed kernel can never
+  // resume the stale thread; the caller rotates to an empty session afterwards.
+  async reloadSystemPrompt() {
+    const detail = loadSystemPromptDetail(this.config);
+    this.systemPrompt = detail.text;
+    this.developerInstructionsText = this.developerInstructions(this.config.profile);
+    const child = this.child;
+    if (child) {
+      // Detach first so the exit event does not trigger the reconnect loop.
+      this._handleExitDetached(child);
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      terminateProcessTree(child, 'SIGTERM');
+      await Promise.race([exited, delay(3_000)]);
+      terminateProcessTree(child, 'SIGKILL');
+      await this._handshake();
+    }
+    return detail;
+  }
+
+  // Clears connection state for a child we are intentionally replacing, without
+  // entering the reconnect loop (unlike _handleExit on an unexpected death).
+  _handleExitDetached(child) {
+    if (this.child !== child) return;
+    this.child = null;
+    this.threadId = null;
+    this.activeTurnId = null;
+    this.startingTurn = false;
+    this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
+    this.activeInboundSeqs = [];
+    for (const pending of this.pending.values()) {
+      try { pending.reject(new Error('codex connection replaced')); } catch { /* ignore */ }
+    }
+    this.pending.clear();
   }
 
   // Model/effort values ride on the next turn/start (see _startTurn). Command
