@@ -81,6 +81,16 @@ function pathsOverlap(left, right) {
   return !reverse.startsWith('..') && !path.isAbsolute(reverse);
 }
 
+// Reads the system prompt and substitutes {{PLACEHOLDER}} tokens. Currently only
+// {{TEAM_TASK_BOARD_URL}}: taken from config.teamTaskBoardUrl (falling back to the
+// TEAM_TASK_BOARD_URL env var so hand-built test configs still work); when unset,
+// the prompt degrades to a neutral "(configured task board)" reference.
+export function loadSystemPrompt(config) {
+  const text = fs.readFileSync(config.systemPromptPath, 'utf8');
+  const boardUrl = (config.teamTaskBoardUrl ?? process.env.TEAM_TASK_BOARD_URL ?? '').trim();
+  return text.replaceAll('{{TEAM_TASK_BOARD_URL}}', boardUrl || '(configured task board)');
+}
+
 export function getConfig() {
   const dataDir = path.resolve(
     process.env.LARK_DAEMON_DATA_DIR || path.join(os.homedir(), '.local', 'share', 'lark-daemon'),
@@ -111,6 +121,7 @@ export function getConfig() {
     tempDir: path.join(dataDir, 'tmp'),
     workspace,
     systemPromptPath: path.join(promptDir, 'system-prompt.md'),
+    teamTaskBoardUrl: process.env.TEAM_TASK_BOARD_URL || '',
     larkToolServerPath: path.join(sourceDir, 'lark-tools.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',

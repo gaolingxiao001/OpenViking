@@ -1,10 +1,10 @@
-import fs from 'node:fs';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { lookupMemberName } from './roster.mjs';
+import { loadSystemPrompt } from './config.mjs';
 
 function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
@@ -231,7 +231,7 @@ export class CodexAgent {
     this.allowResume = options.allowResume !== false;
     this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
 
-    this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
+    this.systemPrompt = loadSystemPrompt(config);
     this.developerInstructionsText = this.developerInstructions(config.profile);
     // Model/effort start from env config but can be switched at runtime via the
     // /model and /effort slash commands; overrides persist in the store's meta table.

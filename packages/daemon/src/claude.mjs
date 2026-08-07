@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { redactSensitive } from './logger.mjs';
 import { terminateProcessTree } from './process-utils.mjs';
+import { loadSystemPrompt } from './config.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -74,7 +75,7 @@ export class ClaudeAgent {
     this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
     this.deliveredThroughSeq = this.syncedThroughSeq;
 
-    this.systemPrompt = fs.readFileSync(config.systemPromptPath, 'utf8');
+    this.systemPrompt = loadSystemPrompt(config);
     this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${config.profile}`;
     this.model = options.model ?? store.getSetting?.('claude_model') ?? config.claudeModel ?? '';
     this.effort = store.getSetting?.('claude_effort') ?? config.claudeEffort ?? 'medium';
