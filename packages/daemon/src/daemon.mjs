@@ -31,6 +31,9 @@ const CHAT_NAME_RETRY_BASE_MS = 5 * 60 * 1_000;
 // A failure-notice mute only suppresses rapid repeats: a persistent failure
 // re-notifies after this window instead of staying silent forever.
 const FAILURE_NOTICE_MUTE_TTL_MS = 10 * 60 * 1_000;
+// After one automatic claude → codex fallback, no further automatic switch is
+// attempted within this window (prevents switch churn if the user moves back).
+const MODEL_FALLBACK_COOLDOWN_MS = 5 * 60 * 1_000;
 
 const SECURITY_HEADERS = Object.freeze({
   'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
@@ -102,6 +105,9 @@ export class LarkDaemon {
     // Repeats of the same error stay muted until a turn for that conversation
     // succeeds, the error changes, or the mute TTL expires (see notifyTurnFailure).
     this.failureNoticeMutes = new Map();
+    // Automatic claude → codex fallback state (see tryModelFallback).
+    this.fallbackInProgress = false;
+    this.lastFallbackAtMs = 0;
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -155,7 +161,7 @@ export class LarkDaemon {
       }, 'preflight-ok');
 
       this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
-        onTurnFailed: (info) => { void this.notifyTurnFailure(info); },
+        onTurnFailed: (info) => { void this.handleTurnFailure(info); },
         onTurnSucceeded: (info) => { this.handleTurnSuccess(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
       });
@@ -333,6 +339,117 @@ export class LarkDaemon {
       try { inbound = this.store.inboundBySeq(seq); } catch { continue; }
       if (inbound?.conversationKey) this.failureNoticeMutes.delete(inbound.conversationKey);
     }
+  }
+
+  // A failed turn first gets one shot at the automatic claude → codex fallback;
+  // when that is not applicable (or the switch itself fails) the normal failure
+  // notice goes out instead.
+  async handleTurnFailure(info) {
+    try {
+      if (await this.tryModelFallback(info)) return;
+    } catch (error) {
+      this.logger.warn('model_fallback_failed', { error: safeError(error) });
+    }
+    await this.notifyTurnFailure(info);
+  }
+
+  // Claude CLI/API errors auto-switch to the codex fallback model (hard switch)
+  // and retry the failed turn by redelivering its inbound rows. Loop guard: the
+  // retry runs on the codex runtime, so its failure can never fall back again;
+  // a cooldown blocks repeated automatic switches if the user moves back to
+  // claude while it is still broken. Returns true when the fallback owns the
+  // failure (no separate failure notice is sent).
+  async tryModelFallback({ inboundSeqs, error }) {
+    if (this.shuttingDown || this.codex?.runtime !== 'claude') return false;
+    if (this.fallbackInProgress) return false;
+    const now = Date.now();
+    if (now - this.lastFallbackAtMs < MODEL_FALLBACK_COOLDOWN_MS) return false;
+    const seqs = (Array.isArray(inboundSeqs) ? inboundSeqs : []).filter((seq) => seq != null);
+    const rows = [];
+    for (const seq of seqs) {
+      let row = null;
+      try { row = this.store.inboundBySeq(seq); } catch { /* ignore */ }
+      if (row?.messageId) rows.push(row);
+    }
+    if (rows.length === 0) return false; // nothing to retry on the fallback model
+    const model = this.config.fallbackModel || 'gpt-5.6-sol';
+    const errorSummary = safeError(error);
+    this.fallbackInProgress = true;
+    this.lastFallbackAtMs = now;
+    try {
+      await this.codex.setModel(model); // hard switch claude -> codex
+    } catch (switchError) {
+      this.recordSystemActivity('agent.fallback', {
+        summary: safeError(switchError),
+        status: 'FAILED',
+        conversationKey: rows.at(-1)?.conversationKey,
+        inboundSeq: seqs.at(-1),
+        metadata: { model, error: errorSummary },
+      });
+      this.logger.warn('model_fallback_switch_failed', { error: safeError(switchError) });
+      return false; // fall through to the normal failure notice
+    } finally {
+      this.fallbackInProgress = false;
+    }
+    this.recordSystemActivity('agent.fallback', {
+      summary: `claude 失败，已自动切换到 ${model} 重试`,
+      status: 'SWITCHED',
+      conversationKey: rows.at(-1)?.conversationKey,
+      inboundSeq: seqs.at(-1),
+      metadata: { model, error: errorSummary, inboundSeqs: seqs },
+    });
+    const last = rows.at(-1);
+    const notice = `⚠️ 因 ${errorSummary} 报错，已自动切换到 ${model} 重试`.slice(0, 600);
+    await this.journaledDaemonReply(last, notice, 'daemon_fallback_notice', `fallback-notice:${last.messageId}`);
+    // Redeliver the failed turn to the fallback runtime. A failure of the retry
+    // surfaces through the normal onTurnFailed path (runtime is codex now).
+    this.codex.deliverBatch(rows.map((row) => ({ text: formatInboundLine(row), seq: row.seq })));
+    return true;
+  }
+
+  // Reply to an inbound message with a daemon-authored notice, journaled so a
+  // later runtime catch-up knows the chat already saw it. Returns delivery.
+  async journaledDaemonReply(inbound, text, action, journalKey) {
+    let journalReserved = false;
+    try {
+      this.store.appendCognitionJournal({
+        kind: 'outbound',
+        status: 'PENDING',
+        chatId: inbound.chatId,
+        threadId: inbound.threadId,
+        messageId: inbound.messageId,
+        actor: 'me',
+        text,
+        dedupeKey: journalKey,
+        metadata: { action },
+      });
+      journalReserved = true;
+    } catch (error) {
+      this.logger.warn('daemon_reply_journal_reserve_failed', { action, error: safeError(error) });
+      return false;
+    }
+    try {
+      await this.lark.replyMessage(inbound.messageId, text);
+    } catch (sendError) {
+      try {
+        this.store.settleCognitionJournal(journalKey, 'UNCERTAIN', { metadata: { action } });
+      } catch (error) {
+        this.logger.warn('daemon_reply_journal_settle_failed', { action, error: safeError(error) });
+      }
+      this.logger.warn('daemon_reply_failed', {
+        action,
+        messageRef: opaqueRef(inbound.messageId),
+        error: safeChatLookupError(sendError),
+      });
+      return false;
+    }
+    try {
+      this.store.settleCognitionJournal(journalKey, 'COMMITTED', { metadata: { action } });
+    } catch (error) {
+      // The Lark reply already succeeded; only the post-send journal write failed.
+      this.logger.warn('daemon_reply_journal_settle_failed', { action, error: safeError(error) });
+    }
+    return true;
   }
 
   // A failed codex turn consumes its messages without replying; tell the sender

@@ -446,6 +446,115 @@ describe('daemon event path', { concurrency: false }, () => {
   });
 });
 
+describe('automatic claude fallback', () => {
+  function makeFallbackDaemon({ runtime = 'claude', setModelError = null, fallbackModel } = {}) {
+    const daemon = new LarkDaemon(
+      {
+        lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-fallback.lock'),
+        ...(fallbackModel === undefined ? { fallbackModel: 'gpt-5.6-sol' } : { fallbackModel }),
+      },
+      createLogger('error', { test: 'claude-fallback' }),
+    );
+    const calls = [];
+    const delivered = [];
+    const replies = [];
+    const activities = [];
+    daemon.codex = {
+      runtime,
+      async setModel(model) {
+        calls.push(['setModel', model]);
+        if (setModelError) throw setModelError;
+        this.runtime = 'codex';
+        return { runtimeChanged: true, runtime: 'codex', model };
+      },
+      deliverBatch(items) { delivered.push(items); return true; },
+    };
+    const inboundRows = {
+      1: {
+        seq: 1,
+        messageId: 'om_failed_123456',
+        chatId: 'oc_chat123456',
+        threadId: null,
+        conversationKey: 'profile:tenant:oc_chat123456:main',
+        senderId: 'ou_sender123456',
+        content: '帮我看下这个',
+        createTimeMs: Date.UTC(2026, 7, 7, 10, 0),
+        mentions: [],
+      },
+    };
+    daemon.store = {
+      inboundBySeq: (seq) => inboundRows[seq] ?? null,
+      appendCognitionJournal() {},
+      settleCognitionJournal() {},
+      recordActivity(entry) { activities.push(entry); return true; },
+    };
+    daemon.lark = {
+      async replyMessage(messageId, text) { replies.push({ messageId, text }); },
+    };
+    return { daemon, calls, delivered, replies, activities };
+  }
+
+  it('hard-switches to the fallback model, notifies the chat, and retries the failed turn', async () => {
+    const { daemon, calls, delivered, replies, activities } = makeFallbackDaemon();
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'Claude API exploded' });
+
+    assert.deepEqual(calls, [['setModel', 'gpt-5.6-sol']]);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].messageId, 'om_failed_123456');
+    assert.match(replies[0].text, /因 Claude API exploded 报错，已自动切换到 gpt-5\.6-sol 重试/);
+    assert.doesNotMatch(replies[0].text, /没有生成回复/); // no duplicate failure notice
+    assert.equal(delivered.length, 1);
+    assert.equal(delivered[0][0].seq, 1);
+    assert.match(delivered[0][0].text, /^\[chat=oc_chat123456 msg=om_failed_123456 .*\] 帮我看下这个$/);
+    const fallback = activities.find((entry) => entry.kind === 'agent.fallback');
+    assert.equal(fallback.status, 'SWITCHED');
+    assert.equal(fallback.metadata.model, 'gpt-5.6-sol');
+  });
+
+  it('honours FALLBACK_MODEL from config', async () => {
+    const { daemon, calls } = makeFallbackDaemon({ fallbackModel: 'gpt-6-luna' });
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom' });
+    assert.deepEqual(calls, [['setModel', 'gpt-6-luna']]);
+  });
+
+  it('never falls back from the codex runtime and sends the normal notice instead', async () => {
+    const { daemon, calls, replies } = makeFallbackDaemon({ runtime: 'codex' });
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'quota exceeded' });
+    assert.equal(calls.length, 0);
+    assert.equal(replies.length, 1);
+    assert.match(replies[0].text, /处理失败/);
+  });
+
+  it('attempts only one automatic fallback per cooldown window', async () => {
+    const { daemon, calls, replies } = makeFallbackDaemon();
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom' });
+    assert.equal(calls.length, 1);
+    // The user switched back to claude, which fails again inside the cooldown.
+    daemon.codex.runtime = 'claude';
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom again' });
+    assert.equal(calls.length, 1); // no second automatic switch
+    assert.equal(replies.length, 2);
+    assert.match(replies[1].text, /处理失败/);
+    // After the cooldown expires the fallback becomes available again.
+    daemon.lastFallbackAtMs = Date.now() - 6 * 60 * 1_000;
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom again' });
+    assert.equal(calls.length, 2);
+  });
+
+  it('falls through to the normal failure notice when the switch itself fails', async () => {
+    const { daemon, calls, delivered, replies, activities } = makeFallbackDaemon({
+      setModelError: new Error('codex is unavailable'),
+    });
+    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom' });
+    assert.equal(calls.length, 1);
+    assert.equal(delivered.length, 0);
+    assert.equal(replies.length, 1);
+    assert.match(replies[0].text, /处理失败/);
+    const fallback = activities.find((entry) => entry.kind === 'agent.fallback');
+    assert.equal(fallback.status, 'FAILED');
+  });
+});
+
 describe('failure notice mute', () => {
   function makeDaemon(inboundRows) {
     const daemon = new LarkDaemon(

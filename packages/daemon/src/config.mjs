@@ -182,6 +182,8 @@ export function getConfig() {
     codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
     claudeModel: process.env.LARK_DAEMON_CLAUDE_MODEL || '',
     claudeEffort: enumEnv('LARK_DAEMON_CLAUDE_EFFORT', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']),
+    // Codex model the daemon auto-switches to when a claude turn fails.
+    fallbackModel: process.env.FALLBACK_MODEL || 'gpt-5.6-sol',
     host,
     port: intEnv('LARK_DAEMON_PORT', 3738, { min: 1, max: 65535 }),
     httpEnabled: boolEnv('LARK_DAEMON_HTTP_ENABLED', true),
