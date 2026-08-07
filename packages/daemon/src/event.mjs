@@ -40,6 +40,12 @@ export function humanizeContent(messageType, rawContent) {
   }
   const parsed = parseJson(rawContent);
   if (typeof parsed === 'string') return parsed.trim();
+  // image_key is the resource pointer view_lark_image needs to fetch the image; it is
+  // scoped to this message and requires bot auth to resolve, so surfacing it here (unlike
+  // other *_key/*_url fields) is not a content leak.
+  if (messageType === 'image' && typeof parsed?.image_key === 'string' && parsed.image_key) {
+    return `[image image_key=${parsed.image_key}]`;
+  }
   const parts = [];
   collectText(parsed, parts);
   const unique = [...new Set(parts)];

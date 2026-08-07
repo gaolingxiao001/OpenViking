@@ -245,6 +245,7 @@ export class ClaudeAgent {
       '--profile', this.config.profile,
       '--project-dir', this.config.projectDir,
       '--database-path', this.config.databasePath,
+      '--temp-dir', this.config.tempDir,
       '--timeout-ms', String(this.config.sendTimeoutMs),
       '--max-text-chars', String(this.config.maxReplyChars),
       '--dry-run', String(Boolean(this.config.dryRun)),

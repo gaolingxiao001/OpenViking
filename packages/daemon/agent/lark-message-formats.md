@@ -14,6 +14,12 @@
 markdown: "**审核通过** 详情看 [PR #123](https://example.com/pr/123)"
 ```
 
+## 收图片(MCP 原生支持)
+
+收到的图片消息默认能过滤器(`allowedMessageTypes` 含 `image`),inbound 那一行里图片会显示成占位 `[image image_key=img_xxx]`,不含真实图片内容。要看图时调 `view_lark_image`,参数是那行里的 `message_id` 和 `image_key`(照抄,别猜),返回一个 MCP image content block,直接就能看到图,不用自己再下载/转 base64。
+
+file/video/audio 消息目前还在 `allowedMessageTypes` 之外,会被过滤器丢弃,还没做。
+
 ## 仍需 lark-cli fallback 的格式(MCP 未覆盖)
 
 按 policy,只有用户在当前对话里明确要求、且没有更合适的可信工具时才能走 shell fallback,且遵守：id 只用可信元数据里的、一次决策只发一次、带 idempotency key。

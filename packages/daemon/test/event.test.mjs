@@ -100,6 +100,20 @@ describe('normalizeEvent', () => {
     });
     assert.equal(event.content, '结论\n已经完成');
   });
+
+  it('surfaces the image_key so view_lark_image can fetch the picture', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-image',
+      chat_id: 'oc-image',
+      chat_type: 'p2p',
+      message_type: 'image',
+      content: JSON.stringify({ image_key: 'img_v3_abc123' }),
+      sender_id: 'ou-image',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '[image image_key=img_v3_abc123]');
+  });
 });
 
 describe('deterministicFilter', () => {

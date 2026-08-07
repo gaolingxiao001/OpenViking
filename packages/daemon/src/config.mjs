@@ -193,7 +193,7 @@ export function getConfig() {
     ignoredSenderIds: csvEnv('LARK_DAEMON_IGNORED_SENDER_IDS'),
     allowedMessageTypes: csvEnv('LARK_DAEMON_ALLOWED_MESSAGE_TYPES').size > 0
       ? csvEnv('LARK_DAEMON_ALLOWED_MESSAGE_TYPES')
-      : new Set(['text', 'post']),
+      : new Set(['text', 'post', 'image']),
     sendTimeoutMs: intEnv('LARK_DAEMON_SEND_TIMEOUT_MS', 30_000, { min: 1_000 }),
     shutdownTimeoutMs: intEnv('LARK_DAEMON_SHUTDOWN_TIMEOUT_MS', 20_000, { min: 5_000, max: 25_000 }),
     maxReplyChars: intEnv('LARK_DAEMON_MAX_REPLY_CHARS', 30_000, { min: 100, max: 100_000 }),
