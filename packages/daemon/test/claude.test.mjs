@@ -247,6 +247,28 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.stop();
   });
 
+  it('interruptTurn kills the in-flight turn and keeps queued messages for the next session', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('stuck request', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    assert.equal(agent.turnInProgress, true);
+
+    await agent.interruptTurn();
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(failures.length, 0); // intentional abandonment is not a failure
+
+    agent.deliver('queued while switching', 8); // disconnected: queued, not lost
+    const rotated = agent.rotateSession({ resume: false });
+    await waitFor(() => persistent.length === 2);
+    await rotated;
+    await waitFor(() => persistent[1].writes.length > 0);
+    const bodies = persistent[1].writes.map((line) => JSON.parse(line).message.content[0].text);
+    assert.ok(bodies.some((text) => text.includes('queued while switching')));
+    await agent.stop();
+  });
+
   it('does not resume a preassigned session that never created a Claude transcript', async () => {
     const store = makeStore({
       globalOverride: {

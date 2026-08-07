@@ -230,7 +230,7 @@ describe('executeCommand', () => {
     const claude = await executeCommand({ name: 'model', arg: 'claude:son' }, codex);
     assert.equal(claude.ok, true);
     assert.deepEqual(codex.calls[0], ['setModel', 'claude:sonnet']);
-    assert.match(claude.text, /已切换模型：sonnet/);
+    assert.match(claude.text, /已切到 sonnet，已开启新会话/);
     assert.doesNotMatch(claude.text, /claude:/);
 
     const back = await executeCommand({ name: 'model', arg: 'codex:gpt-5.6-sol' }, codex);
@@ -248,6 +248,19 @@ describe('executeCommand', () => {
     assert.equal(missing.ok, false);
     assert.match(missing.text, /未找到模型：missing/);
     assert.doesNotMatch(missing.text, /claude:/);
+  });
+
+  it('same-runtime model switch reports the fresh session id', async () => {
+    const codex = fakeCodex({
+      listModels: async () => [{ id: 'gpt-5.5', efforts: [] }],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        return { runtimeChanged: false, model, threadId: 'th-fresh' };
+      },
+    });
+    const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.5' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /已切到 gpt-5\.5，已开启新会话：th-fresh/);
   });
 
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {

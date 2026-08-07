@@ -558,8 +558,11 @@ export class LarkDaemon {
   async handleSlashCommand(command, event, inbound) {
     // Control/outbound journal rows must sit between completed model turns. If a
     // command were recorded during an active turn, a later steer could advance
-    // the runtime cursor past state that the model never observed.
-    await this.codex.whenIdle();
+    // the runtime cursor past state that the model never observed. Exception:
+    // /model interrupts the in-flight turn by design (immediate switch + fresh
+    // session), so no later steer can land on the old session — it must not
+    // block behind a stuck turn.
+    if (command.name !== 'model') await this.codex.whenIdle();
     if (this.shuttingDown) return;
     const label = command.name ? `/${command.name}` : String(event.content).trim().split(/\s+/)[0];
     this.store.appendCognitionJournal({

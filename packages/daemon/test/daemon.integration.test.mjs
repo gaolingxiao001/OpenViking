@@ -446,6 +446,51 @@ describe('daemon event path', { concurrency: false }, () => {
   });
 });
 
+describe('/model immediate switch', () => {
+  it('executes /model without waiting for the stuck active turn', async () => {
+    const daemon = new LarkDaemon(
+      { lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-model.lock') },
+      createLogger('error', { test: 'model-no-wait' }),
+    );
+    const order = [];
+    daemon.codex = {
+      runtime: 'codex',
+      threadId: 'th-stuck',
+      model: '',
+      effort: 'medium',
+      turnInProgress: true,
+      // A stuck turn: /model must never block behind this.
+      whenIdle() { order.push('wait-idle'); return new Promise(() => {}); },
+      async listModels() { return []; },
+      async setModel(model) {
+        order.push(`setModel:${model}`);
+        return { runtimeChanged: false, model, threadId: 'th-fresh' };
+      },
+    };
+    daemon.store = {
+      appendCognitionJournal() {},
+      settleCognitionJournal() {},
+      recordActivity() { return true; },
+    };
+    const replies = [];
+    daemon.lark = { async replyMessage(messageId, text) { replies.push({ messageId, text }); } };
+    const event = {
+      chatId: 'oc_model123456',
+      threadId: null,
+      messageId: 'om_model123456',
+      senderId: 'ou_sender123456',
+      content: '/model gpt-x',
+      conversationKey: 'profile:tenant:oc_model123456:main',
+      chatType: 'p2p',
+    };
+
+    await daemon.handleSlashCommand({ name: 'model', arg: 'gpt-x' }, event, { seq: 1 });
+    assert.deepEqual(order, ['setModel:gpt-x']);
+    assert.equal(replies.length, 1);
+    assert.match(replies[0].text, /已切到 gpt-x，已开启新会话：th-fresh/);
+  });
+});
+
 describe('automatic claude fallback', () => {
   function makeFallbackDaemon({ runtime = 'claude', setModelError = null, fallbackModel } = {}) {
     const daemon = new LarkDaemon(

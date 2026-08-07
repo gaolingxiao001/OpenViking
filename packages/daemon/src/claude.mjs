@@ -705,6 +705,20 @@ export class ClaudeAgent {
     this._notifyAvailable();
   }
 
+  // /m must not wait for a stuck turn: kill the in-flight turn's process. The
+  // abandoned items' inbound rows stay in the cognition journal; queued batches
+  // survive in this.queue and are written after the next respawn. Intentional
+  // abandonment, so onTurnFailed is not raised for the interrupted items.
+  async interruptTurn() {
+    if (!this.turnActive) return;
+    this.activeItems.splice(0);
+    this.turnActive = false;
+    this.turnError = null;
+    this.deliveredThroughSeq = this.syncedThroughSeq;
+    await this._terminateCurrent();
+    this._resolveIdleWaiters();
+  }
+
   async rotateSession({ resume = false } = {}) {
     if (this.turnActive) throw new Error('claude session rotation requires an idle runtime');
     if (resume) {

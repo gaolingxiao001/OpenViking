@@ -864,6 +864,32 @@ export class CodexAgent {
     this.needsHistoryPrefix = true;
   }
 
+  // /m must not wait for a stuck turn: best-effort turn/interrupt on the live
+  // turn, then abandon local turn state. The abandoned turn's inbound rows are
+  // already in the cognition journal and the queue keeps undelivered items, so
+  // no message is lost. Queued work is deliberately NOT flushed here — the
+  // caller rotates or switches sessions and drains onto the new one.
+  async interruptTurn() {
+    if (!this.turnInProgress) return;
+    if (this.activeTurnId && this.child && this.threadId) {
+      try {
+        await this._request('turn/interrupt', {
+          threadId: this.threadId,
+          turnId: this.activeTurnId,
+        });
+      } catch { /* best effort; the session is being replaced */ }
+    }
+    // ponytail: an in-flight turn/start (startingTurn) has no id to interrupt
+    // yet; like rotateSession, that turn runs out abandoned.
+    this.activeTurnId = null;
+    this.startingTurn = false;
+    this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
+    this.activeInboundSeqs = [];
+    const waiters = this.idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
   // Rebuild the codex thread without restarting the child (slash commands).
   // resume=true re-opens the current thread under the current model/effort params
   // (context kept, fresh-start fallback inside _startOrResumeThread); resume=false

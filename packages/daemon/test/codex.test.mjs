@@ -911,6 +911,27 @@ describe('CodexAgent session rotation (slash commands)', () => {
     assert.equal(child.ofMethod('turn/start').at(-1).params.input[0].text, 'after-new');
   });
 
+  it('interruptTurn abandons the active turn without waiting for turn/completed', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('long-running request', 1);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't1' } } });
+    assert.equal(agent.turnInProgress, true);
+
+    const interrupting = agent.interruptTurn();
+    await flush();
+    const interrupt = child.ofMethod('turn/interrupt').at(-1);
+    assert.equal(interrupt.params.threadId, 'th-1');
+    assert.equal(interrupt.params.turnId, 't1');
+    child.feed({ id: interrupt.id, result: {} });
+    await interrupting;
+
+    assert.equal(agent.turnInProgress, false);
+    await agent.whenIdle(); // resolves without any turn/completed event
+  });
+
   it('queues messages arriving mid-rotate and delivers them to the new thread', async () => {
     const store = makeStore();
     const { agent, children } = newAgent(store);

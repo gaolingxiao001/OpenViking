@@ -146,7 +146,15 @@ export async function executeCommand(command, codex) {
         text: `已切到 ${displayTarget}。历史对话会接上；隐藏思考和未落盘的工具过程不会继承`,
       };
     }
-    return { ok: true, text: `已切换模型：${displayTarget}（下一轮生效，同一 ${codex.runtime ?? 'codex'} session 保留）` };
+    // Same-runtime switch also opens a fresh session (owner request: /m 之后
+    // 直接 new session), so the reply reports the new thread instead of
+    // promising continuity.
+    return {
+      ok: true,
+      text: applied?.threadId
+        ? `已切到 ${displayTarget}，已开启新会话：${applied.threadId}`
+        : `已切到 ${displayTarget}，已开启新会话`,
+    };
   }
 
   // effort: validate against what the current model actually supports — an
