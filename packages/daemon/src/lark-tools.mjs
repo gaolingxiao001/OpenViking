@@ -74,6 +74,17 @@ function renderMessageText(value, mentionUserIds) {
   return prefix ? `${prefix} ${text}` : text;
 }
 
+// text and markdown share the same at-tag mention syntax and length limit; markdown
+// is auto-wrapped into Lark's post format by lark-cli, everything else stays the same.
+function resolveMessageBody(input) {
+  const hasText = typeof input.text === 'string' && input.text.trim() !== '';
+  const hasMarkdown = typeof input.markdown === 'string' && input.markdown.trim() !== '';
+  if (hasText && hasMarkdown) throw new Error('provide only one of text or markdown, not both');
+  if (hasMarkdown) return { flag: '--markdown', raw: input.markdown };
+  if (hasText) return { flag: '--text', raw: input.text };
+  throw new Error('text or markdown must not be empty');
+}
+
 function stableActionKey(...parts) {
   const digest = createHash('sha256')
     .update(JSON.stringify(parts))
@@ -169,13 +180,14 @@ export const LARK_TOOLS = [
   {
     name: 'send_lark_message',
     title: 'Send a Lark message',
-    description: 'Send a text message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
+    description: 'Send a message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. Provide exactly one of text or markdown: text for the plain short replies that cover most chat turns; markdown when you actually need bold/links/embedded images (auto-wrapped into a rich post). For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         chat_id: { type: 'string', pattern: '^oc_[A-Za-z0-9_-]{8,}$', description: 'Full Lark chat ID (oc_...). Never guess or reconstruct a shortened ID.' },
-        text: { type: 'string', minLength: 1, description: 'Plain-text message body.' },
+        text: { type: 'string', minLength: 1, description: 'Plain-text message body. Use this by default; mutually exclusive with markdown.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown message body (bold, links, embedded image URLs); sent as a rich post instead of plain text. Only when text formatting is actually needed. Mutually exclusive with text.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -193,7 +205,7 @@ export const LARK_TOOLS = [
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The send is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['chat_id', 'text', 'decision_message_id'],
+      required: ['chat_id', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -205,13 +217,14 @@ export const LARK_TOOLS = [
   {
     name: 'reply_lark_message',
     title: 'Reply to a Lark message',
-    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
+    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. Provide exactly one of text or markdown: text for the plain short replies that cover most chat turns; markdown when you actually need bold/links/embedded images (auto-wrapped into a rich post). For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to reply to. Never guess or reconstruct a shortened ID.' },
-        text: { type: 'string', minLength: 1, description: 'Plain-text reply body.' },
+        text: { type: 'string', minLength: 1, description: 'Plain-text reply body. Use this by default; mutually exclusive with markdown.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown reply body (bold, links, embedded image URLs); sent as a rich post instead of plain text. Only when text formatting is actually needed. Mutually exclusive with text.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -230,7 +243,7 @@ export const LARK_TOOLS = [
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The reply is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['message_id', 'text', 'decision_message_id'],
+      required: ['message_id', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -795,13 +808,14 @@ export class LarkToolService {
     const chatId = typeof input.chat_id === 'string' ? input.chat_id.trim() : '';
     if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(chatId)) throw new Error('chat_id must be a full oc_ Lark chat ID');
     const mentionUserIds = await this._resolveMentions(input, chatId);
-    const text = renderMessageText(input.text, mentionUserIds);
+    const body = resolveMessageBody(input);
+    const text = renderMessageText(body.raw, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
-    const actionKey = stableActionKey('send', input.decision_message_id, chatId, text);
+    const actionKey = stableActionKey('send', input.decision_message_id, chatId, body.flag, text);
     const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
       : '';
@@ -830,7 +844,7 @@ export class LarkToolService {
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       chatId,
-      text: input.text,
+      text: body.raw,
       metadata: { action: 'send', decisionMessageId: input.decision_message_id },
     });
     if (journal && !journal.claimed) {
@@ -840,7 +854,7 @@ export class LarkToolService {
     try {
       data = await this.runLark([
         '+messages-send', '--as', 'bot', '--chat-id', chatId,
-        '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
+        body.flag, text, '--idempotency-key', idempotencyKey, '--format', 'json',
       ], 'send Lark message');
     } catch (error) {
       this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'send' });
@@ -865,14 +879,15 @@ export class LarkToolService {
       input,
       this._chatIdForMessage(messageId, input.decision_message_id),
     );
-    const text = renderMessageText(input.text, mentionUserIds);
+    const body = resolveMessageBody(input);
+    const text = renderMessageText(body.raw, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
     const actionKey = stableActionKey(
-      'reply', input.decision_message_id, messageId, replyInThread, text,
+      'reply', input.decision_message_id, messageId, replyInThread, body.flag, text,
     );
     const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
@@ -899,13 +914,13 @@ export class LarkToolService {
     }
     const args = [
       '+messages-reply', '--as', 'bot', '--message-id', messageId,
-      '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
+      body.flag, text, '--idempotency-key', idempotencyKey, '--format', 'json',
     ];
     if (replyInThread) args.push('--reply-in-thread');
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       messageId,
-      text: input.text,
+      text: body.raw,
       metadata: {
         action: 'reply',
         decisionMessageId: input.decision_message_id,

@@ -193,6 +193,55 @@ describe('Lark proactive IM tool service', () => {
     assert.equal(call.args[call.args.indexOf('--idempotency-key') + 1], result.idempotency_key);
   });
 
+  it('sends markdown as a rich post instead of plain text', async () => {
+    let call;
+    const service = new LarkToolService(options(), async (command, args, runOptions) => {
+      call = { command, args, runOptions };
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      markdown: '**bold** [link](https://example.com)',
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.ok(call.args.includes('--markdown'));
+    assert.ok(!call.args.includes('--text'));
+    assert.equal(call.args[call.args.indexOf('--markdown') + 1], '**bold** [link](https://example.com)');
+  });
+
+  it('rejects sends that provide both text and markdown, or neither', async () => {
+    const service = new LarkToolService(options(), async () => ok({ message_id: 'om_sent12345678' }));
+    await assert.rejects(
+      () => service.sendMessage({
+        chat_id: 'oc_memorize123456',
+        text: 'hi',
+        markdown: '**hi**',
+        decision_message_id: DECISION_MESSAGE_ID,
+      }),
+      /only one of text or markdown/,
+    );
+    await assert.rejects(
+      () => service.sendMessage({ chat_id: 'oc_memorize123456', decision_message_id: DECISION_MESSAGE_ID }),
+      /text or markdown must not be empty/,
+    );
+  });
+
+  it('replies with markdown as a rich post instead of plain text', async () => {
+    let args;
+    const service = new LarkToolService(options(), async (_command, invokedArgs) => {
+      args = invokedArgs;
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    await service.replyMessage({
+      message_id: 'om_target1234567',
+      markdown: '- one\n- two',
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.ok(args.includes('--markdown'));
+    assert.ok(!args.includes('--text'));
+    assert.equal(args[args.indexOf('--markdown') + 1], '- one\n- two');
+  });
+
   it('neutralizes mass-mention markup before a proactive send', async () => {
     let args;
     const service = new LarkToolService(options(), async (_command, invokedArgs) => {
