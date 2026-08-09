@@ -1,9 +1,11 @@
+const os = require('node:os');
 const path = require('node:path');
 
 const projectDir = __dirname;
 const daemonDir = path.join(projectDir, 'packages', 'daemon');
 const webDir = path.join(projectDir, 'packages', 'web');
 const homebrewPath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+const ovConfig = path.join(os.homedir(), '.openviking', 'ovcli.conf.zayn');
 
 module.exports = {
   apps: [
@@ -23,10 +25,18 @@ module.exports = {
       listen_timeout: 30000,
       time: false,
       merge_logs: true,
+      filter_env: ['OPENVIKING_'],
       env: {
         NODE_ENV: 'production',
         LARK_DAEMON_HOST: '127.0.0.1',
         LARK_DAEMON_PORT: '3738',
+        OPENVIKING_CLI_CONFIG_FILE: ovConfig,
+        OPENVIKING_CREDENTIAL_SOURCE: 'cli',
+        OPENVIKING_MEMORY_ENABLED: '1',
+        OPENVIKING_AUTO_RECALL: '0',
+        OPENVIKING_AUTO_CAPTURE: '1',
+        OPENVIKING_AUTO_COMMIT_ON_COMPACT: '1',
+        OPENVIKING_RECALL_PEER_SCOPE: 'actor',
         PATH: `${homebrewPath}:${process.env.PATH || ''}`,
       },
     },
@@ -46,6 +56,7 @@ module.exports = {
       listen_timeout: 10000,
       time: false,
       merge_logs: true,
+      filter_env: ['OPENVIKING_'],
       env: {
         NODE_ENV: 'production',
         LARK_WEB_HOST: '127.0.0.1',

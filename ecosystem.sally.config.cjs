@@ -20,6 +20,7 @@ const daemonDir = path.join(release, 'packages', 'daemon');
 const webDir = path.join(release, 'packages', 'web');
 const dataDir = path.join(os.homedir(), '.local', 'share', `lark-daemon-${bot}`);
 const workspace = path.join(os.homedir(), 'Documents', `lark-daemon-${bot}-workspace`);
+const ovConfig = path.join(os.homedir(), '.openviking', 'ovcli.conf.sally');
 
 const common = {
   interpreter: process.execPath,
@@ -29,6 +30,7 @@ const common = {
   wait_ready: true,
   time: false,
   merge_logs: true,
+  filter_env: ['OPENVIKING_'],
   env: {
     NODE_ENV: 'production',
     PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ''}`,
@@ -56,6 +58,13 @@ module.exports = {
         LARK_DAEMON_DATA_DIR: dataDir,
         LARK_DAEMON_WORKSPACE: workspace,
         LARK_DAEMON_CODEX_MODEL: model,
+        OPENVIKING_CLI_CONFIG_FILE: ovConfig,
+        OPENVIKING_CREDENTIAL_SOURCE: 'cli',
+        OPENVIKING_MEMORY_ENABLED: '1',
+        OPENVIKING_AUTO_RECALL: '0',
+        OPENVIKING_AUTO_CAPTURE: '1',
+        OPENVIKING_AUTO_COMMIT_ON_COMPACT: '1',
+        OPENVIKING_RECALL_PEER_SCOPE: 'actor',
       },
     },
     {
