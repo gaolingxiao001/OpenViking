@@ -48,7 +48,7 @@ echo "running tests in $REL ..."
 # $BASE/current tracks the last known-good release for rollback.
 PREV="$(readlink "$BASE/current" 2>/dev/null || true)"
 
-pm2 delete lark-daemon lark-web >/dev/null 2>&1 || true
+pm2 delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
 pm2 start "$REL/ecosystem.config.cjs"
 pm2 save >/dev/null
 
@@ -63,6 +63,8 @@ for _ in $(seq 30); do
   done
   if [ "$ok" = 1 ]; then
     ln -sfn "$REL" "$BASE/current"
+    mkdir -p "$HOME/.local/bin"
+    ln -sfn "$BASE/current/packages/updater/bin/lark-daemon.mjs" "$HOME/.local/bin/lark-daemon"
     echo "deployed $REL"
     ls -1dt "$BASE"/releases/* | tail -n +4 | xargs rm -rf
     exit 0
@@ -71,7 +73,7 @@ done
 echo "daemon/web not ready after 30s — check: pm2 logs lark-daemon lark-web"
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   echo "rolling back to $PREV"
-  pm2 delete lark-daemon lark-web >/dev/null 2>&1 || true
+  pm2 delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
   pm2 start "$PREV/ecosystem.config.cjs"
   pm2 save >/dev/null
   echo "rolled back; failed release kept for inspection: $REL"

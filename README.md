@@ -1,6 +1,6 @@
 # lark-daemon
 
-一个单用户、本机常驻的飞书 AI Agent。项目拆成两个可独立迭代和重启的模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理。
+一个单用户、本机常驻的飞书 AI Agent。项目拆成三个可独立运行的模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理；`updater` 是 PM2 sibling，只把 allowlist 内的 daemon 切到当前 release。
 
 daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout；两边都通过同一套 Lark MCP 工具回复。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；思考中途来的纠正会即时进入当前会话。日常使用不需要 `@`。
 
@@ -66,15 +66,16 @@ npm run start:web      # 127.0.0.1:3737
 ## 日常运维
 
 ```bash
-pm2 status lark-daemon lark-web
+pm2 status lark-daemon lark-web lark-updater
 pm2 logs lark-daemon --lines 100
 curl http://127.0.0.1:3737/ready
-pm2 restart lark-daemon --update-env
-pm2 restart lark-web --update-env
 ./scripts/deploy.sh [git-ref]
+lark-daemon upgrade sally
 ```
 
-PM2 分别托管 `lark-daemon` 和 `lark-web`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 全局线程 id、消息去重记录和活动账本。
+`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取源码 checkout。它只接受 `zayn` / `sally` 两个 target，解析 `~/.local/lib/lark-daemon/current` 后用对应 ecosystem config 精确 `startOrReload` 一个 daemon；PM2 exec path 必须落在当前 release 内，且 `/ready` 通过后才保存 PM2 状态。它不接收 SHA、路径或 shell 命令。部署成功后会安装 `~/.local/bin/lark-daemon`，因此 `lark-daemon upgrade sally` 会把斯斯切到当前 release，同时不会重启 Zayn 或任一 Web。
+
+PM2 分别托管 `lark-daemon`、`lark-web` 和 `lark-updater`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 全局线程 id、消息去重记录和活动账本。
 
 ## Activity 页面
 

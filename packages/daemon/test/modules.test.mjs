@@ -19,21 +19,28 @@ describe('module boundaries', () => {
     assert.equal(daemonProjectDir, root);
   });
 
-  it('defines two independently runnable PM2 applications on separate ports', () => {
+  it('defines daemon, web, and an independent local updater PM2 application', () => {
     const require = createRequire(import.meta.url);
     const ecosystemPath = path.join(root, 'ecosystem.config.cjs');
     delete require.cache[require.resolve(ecosystemPath)];
     const ecosystem = require(ecosystemPath);
-    assert.deepEqual(ecosystem.apps.map((app) => app.name), ['lark-daemon', 'lark-web']);
+    assert.deepEqual(
+      ecosystem.apps.map((app) => app.name),
+      ['lark-daemon', 'lark-web', 'lark-updater'],
+    );
     const daemon = ecosystem.apps[0];
     const web = ecosystem.apps[1];
+    const updater = ecosystem.apps[2];
     assert.match(daemon.script, /packages\/daemon\/src\/main\.mjs$/);
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
     assert.equal(daemon.env.LARK_DAEMON_PORT, '3738');
     assert.equal(web.env.LARK_WEB_PORT, '3737');
     assert.equal(web.env.LARK_WEB_DAEMON_PORT, '3738');
+    assert.match(updater.script, /packages\/updater\/src\/main\.mjs$/);
+    assert.match(updater.env.LARK_UPDATER_SOCKET, /updater\.sock$/);
     assert.equal(daemon.wait_ready, true);
     assert.equal(web.wait_ready, true);
+    assert.equal(updater.wait_ready, true);
   });
 
   it('keeps the web module independent from SQLite and daemon source code', () => {
@@ -46,12 +53,17 @@ describe('module boundaries', () => {
     const daemonSource = sourceFiles(path.join(root, 'packages', 'daemon', 'src'))
       .map((file) => fs.readFileSync(file, 'utf8')).join('\n');
     assert.doesNotMatch(daemonSource, /packages\/web|web\/public|activity\.(?:css|js)/);
+
+    const updaterSource = sourceFiles(path.join(root, 'packages', 'updater', 'src'))
+      .map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+    assert.doesNotMatch(updaterSource, /packages\/daemon|store\.mjs|lark\.mjs/);
   });
 
-  it('runs both package test suites from the root command', () => {
+  it('runs all package test suites from the root command', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
     assert.match(manifest.scripts.test, /packages\/daemon\/test\/\*\.test\.mjs/);
     assert.match(manifest.scripts.test, /packages\/web\/test\/\*\.test\.mjs/);
+    assert.match(manifest.scripts.test, /packages\/updater\/test\/\*\.test\.mjs/);
   });
 
   it('serializes production deploys and validates the complete split release', () => {

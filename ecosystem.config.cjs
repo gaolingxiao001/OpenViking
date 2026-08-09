@@ -4,6 +4,7 @@ const path = require('node:path');
 const projectDir = __dirname;
 const daemonDir = path.join(projectDir, 'packages', 'daemon');
 const webDir = path.join(projectDir, 'packages', 'web');
+const updaterDir = path.join(projectDir, 'packages', 'updater');
 const homebrewPath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
 const ovConfig = path.join(os.homedir(), '.openviking', 'ovcli.conf.zayn');
 
@@ -63,6 +64,29 @@ module.exports = {
         LARK_WEB_PORT: '3737',
         LARK_WEB_DAEMON_HOST: '127.0.0.1',
         LARK_WEB_DAEMON_PORT: '3738',
+        PATH: `${homebrewPath}:${process.env.PATH || ''}`,
+      },
+    },
+    {
+      name: 'lark-updater',
+      script: path.join(updaterDir, 'src', 'main.mjs'),
+      cwd: updaterDir,
+      interpreter: '/opt/homebrew/bin/node',
+      exec_mode: 'fork',
+      instances: 1,
+      autorestart: true,
+      restart_delay: 1000,
+      min_uptime: '10s',
+      max_restarts: 10,
+      wait_ready: true,
+      kill_timeout: 5000,
+      listen_timeout: 10000,
+      time: false,
+      merge_logs: true,
+      env: {
+        NODE_ENV: 'production',
+        LARK_UPDATER_RELEASE_LINK: path.join(os.homedir(), '.local', 'lib', 'lark-daemon', 'current'),
+        LARK_UPDATER_SOCKET: path.join(os.homedir(), '.local', 'share', 'lark-daemon', 'updater.sock'),
         PATH: `${homebrewPath}:${process.env.PATH || ''}`,
       },
     },
