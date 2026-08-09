@@ -62,4 +62,16 @@ describe('module boundaries', () => {
     assert.match(deploy, /ln -sf "\$ENV_FILE" "\$REL\/\.env"/);
     assert.match(deploy, /PORTS="3737 3738"/);
   });
+
+  it('allows exact sibling operations without permitting self or broad PM2 control', () => {
+    const prompt = fs.readFileSync(
+      path.join(root, 'packages', 'daemon', 'agent', 'system-prompt.md'),
+      'utf8',
+    );
+    assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);
+    assert.match(prompt, /Self-updates must go through an allowlisted external updater\/supervisor/);
+    assert.match(prompt, /may manage an explicitly named sibling daemon\/web pair only after verifying/);
+    assert.match(prompt, /Never use broad PM2 selectors or touch unrelated applications/);
+    assert.doesNotMatch(prompt, /Never deploy, restart, stop, or reconfigure lark-daemon or lark-web yourself/);
+  });
 });
