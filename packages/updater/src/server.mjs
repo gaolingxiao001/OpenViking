@@ -191,10 +191,11 @@ async function removeStaleSocket(socketPath) {
 export async function createUpdaterServer({
   socketPath = process.env.LARK_UPDATER_SOCKET || defaultSocketPath(),
   upgrade = upgradeTarget,
+  requestBodyTimeoutMs = 5000,
 } = {}) {
   let activeTarget = null;
   const server = http.createServer(async (request, response) => {
-    request.setTimeout(5000, () => request.destroy(new Error('request body timed out')));
+    request.setTimeout(requestBodyTimeoutMs, () => request.destroy(new Error('request body timed out')));
     if (request.method === 'GET' && request.url === '/ready') {
       writeJson(response, 200, { status: 'ready', activeTarget });
       return;
@@ -211,6 +212,7 @@ export async function createUpdaterServer({
     let body;
     try {
       body = await readJsonBody(request);
+      request.setTimeout(0);
       getTarget(body.target);
     } catch (error) {
       writeJson(response, 400, { error: error.message });

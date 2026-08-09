@@ -191,6 +191,24 @@ test('server accepts one allowlisted upgrade over its private socket', async (t)
   assert.equal(response.body.status, 'ready');
 });
 
+test('request body timeout does not abort a long-running upgrade response', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-socket-test-'));
+  const socketPath = path.join(root, 'updater.sock');
+  const updater = await createUpdaterServer({
+    socketPath,
+    requestBodyTimeoutMs: 10,
+    upgrade: async (target) => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { target, app: 'lark-daemon-sally', release: '/release/current', status: 'ready' };
+    },
+  });
+  t.after(() => updater.close());
+
+  const response = await post(socketPath, { target: 'sally' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'ready');
+});
+
 test('server rejects a non-allowlisted target without calling upgrade', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-reject-test-'));
   const socketPath = path.join(root, 'updater.sock');
