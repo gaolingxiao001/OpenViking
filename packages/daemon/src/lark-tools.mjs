@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,6 +13,8 @@ const SERVER_VERSION = '1.0.0';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 const MAX_CHAT_PAGES = 10;
 const MAX_STDIO_BYTES = 5_000_000;
+const MAX_IMAGE_BYTES = 10_000_000;
+const IMAGE_MIME_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' };
 const DECISION_MESSAGE_PATTERN = /^om_[A-Za-z0-9_-]{8,}$/;
 
 function redactToolError(value) {
@@ -72,6 +75,17 @@ function renderMessageText(value, mentionUserIds) {
   if (!text) throw new Error('text must not be empty');
   const prefix = mentionUserIds.map((id) => `<at user_id="${id}"></at>`).join(' ');
   return prefix ? `${prefix} ${text}` : text;
+}
+
+// text and markdown share the same at-tag mention syntax and length limit; markdown
+// is auto-wrapped into Lark's post format by lark-cli, everything else stays the same.
+function resolveMessageBody(input) {
+  const hasText = typeof input.text === 'string' && input.text.trim() !== '';
+  const hasMarkdown = typeof input.markdown === 'string' && input.markdown.trim() !== '';
+  if (hasText && hasMarkdown) throw new Error('provide only one of text or markdown, not both');
+  if (hasMarkdown) return { flag: '--markdown', raw: input.markdown };
+  if (hasText) return { flag: '--text', raw: input.text };
+  throw new Error('text or markdown must not be empty');
 }
 
 function stableActionKey(...parts) {
@@ -169,13 +183,14 @@ export const LARK_TOOLS = [
   {
     name: 'send_lark_message',
     title: 'Send a Lark message',
-    description: 'Send a text message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
+    description: 'Send a message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. Provide exactly one of text or markdown: text for the plain short replies that cover most chat turns; markdown when you actually need bold/links/embedded images (auto-wrapped into a rich post). For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         chat_id: { type: 'string', pattern: '^oc_[A-Za-z0-9_-]{8,}$', description: 'Full Lark chat ID (oc_...). Never guess or reconstruct a shortened ID.' },
-        text: { type: 'string', minLength: 1, description: 'Plain-text message body.' },
+        text: { type: 'string', minLength: 1, description: 'Plain-text message body. Use this by default; mutually exclusive with markdown.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown message body (bold, links, embedded image URLs); sent as a rich post instead of plain text. Only when text formatting is actually needed. Mutually exclusive with text.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -193,7 +208,7 @@ export const LARK_TOOLS = [
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The send is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['chat_id', 'text', 'decision_message_id'],
+      required: ['chat_id', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -205,13 +220,14 @@ export const LARK_TOOLS = [
   {
     name: 'reply_lark_message',
     title: 'Reply to a Lark message',
-    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
+    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. Provide exactly one of text or markdown: text for the plain short replies that cover most chat turns; markdown when you actually need bold/links/embedded images (auto-wrapped into a rich post). For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to reply to. Never guess or reconstruct a shortened ID.' },
-        text: { type: 'string', minLength: 1, description: 'Plain-text reply body.' },
+        text: { type: 'string', minLength: 1, description: 'Plain-text reply body. Use this by default; mutually exclusive with markdown.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown reply body (bold, links, embedded image URLs); sent as a rich post instead of plain text. Only when text formatting is actually needed. Mutually exclusive with text.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -230,7 +246,7 @@ export const LARK_TOOLS = [
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The reply is blocked if a newer accepted message exists in that exact chat/thread.' },
       },
-      required: ['message_id', 'text', 'decision_message_id'],
+      required: ['message_id', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -279,6 +295,26 @@ export const LARK_TOOLS = [
       openWorldHint: true,
     },
   },
+  {
+    name: 'view_lark_image',
+    title: 'View a Lark image',
+    description: 'Fetch and view an image the bot already received in a Lark message. Use the message_id and image_key exactly as they appear in the inbound line placeholder "[image image_key=img_xxx]" — never guess a key. Read-only: this only fetches content already visible to the bot, no external side effect.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) the image was attached to.' },
+        image_key: { type: 'string', pattern: '^img_[A-Za-z0-9_-]{8,}$', description: 'The image_key from the "[image image_key=...]" placeholder in the inbound line.' },
+      },
+      required: ['message_id', 'image_key'],
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
 ];
 
 function appendBounded(current, chunk) {
@@ -312,6 +348,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     timeoutMs: 30_000,
     maxTextChars: 30_000,
     dryRun: false,
+    tempDir: '',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -321,6 +358,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     else if (flag === '--profile') options.profile = value;
     else if (flag === '--project-dir') options.projectDir = value;
     else if (flag === '--database-path') options.databasePath = path.resolve(value);
+    else if (flag === '--temp-dir') options.tempDir = path.resolve(value);
     else if (flag === '--runtime-token') options.runtimeToken = value;
     else if (flag === '--timeout-ms') options.timeoutMs = Number.parseInt(value, 10);
     else if (flag === '--max-text-chars') options.maxTextChars = Number.parseInt(value, 10);
@@ -795,13 +833,14 @@ export class LarkToolService {
     const chatId = typeof input.chat_id === 'string' ? input.chat_id.trim() : '';
     if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(chatId)) throw new Error('chat_id must be a full oc_ Lark chat ID');
     const mentionUserIds = await this._resolveMentions(input, chatId);
-    const text = renderMessageText(input.text, mentionUserIds);
+    const body = resolveMessageBody(input);
+    const text = renderMessageText(body.raw, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
-    const actionKey = stableActionKey('send', input.decision_message_id, chatId, text);
+    const actionKey = stableActionKey('send', input.decision_message_id, chatId, body.flag, text);
     const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
       : '';
@@ -830,7 +869,7 @@ export class LarkToolService {
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       chatId,
-      text: input.text,
+      text: body.raw,
       metadata: { action: 'send', decisionMessageId: input.decision_message_id },
     });
     if (journal && !journal.claimed) {
@@ -840,7 +879,7 @@ export class LarkToolService {
     try {
       data = await this.runLark([
         '+messages-send', '--as', 'bot', '--chat-id', chatId,
-        '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
+        body.flag, text, '--idempotency-key', idempotencyKey, '--format', 'json',
       ], 'send Lark message');
     } catch (error) {
       this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'send' });
@@ -865,14 +904,15 @@ export class LarkToolService {
       input,
       this._chatIdForMessage(messageId, input.decision_message_id),
     );
-    const text = renderMessageText(input.text, mentionUserIds);
+    const body = resolveMessageBody(input);
+    const text = renderMessageText(body.raw, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
     this._assertFreshDecision(input.decision_message_id);
     const actionKey = stableActionKey(
-      'reply', input.decision_message_id, messageId, replyInThread, text,
+      'reply', input.decision_message_id, messageId, replyInThread, body.flag, text,
     );
     const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
@@ -899,13 +939,13 @@ export class LarkToolService {
     }
     const args = [
       '+messages-reply', '--as', 'bot', '--message-id', messageId,
-      '--text', text, '--idempotency-key', idempotencyKey, '--format', 'json',
+      body.flag, text, '--idempotency-key', idempotencyKey, '--format', 'json',
     ];
     if (replyInThread) args.push('--reply-in-thread');
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       messageId,
-      text: input.text,
+      text: body.raw,
       metadata: {
         action: 'reply',
         decisionMessageId: input.decision_message_id,
@@ -1017,6 +1057,43 @@ export class LarkToolService {
     }
     this._settleOutbound(journal?.key, 'COMMITTED', null, { action: 'retract' });
     return { retracted: true, message_id: messageId };
+  }
+
+  async viewImage(input = {}) {
+    const messageId = typeof input.message_id === 'string' ? input.message_id.trim() : '';
+    const imageKey = typeof input.image_key === 'string' ? input.image_key.trim() : '';
+    if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId)) throw new Error('message_id must be a full om_ Lark message ID');
+    if (!/^img_[A-Za-z0-9_-]{8,}$/.test(imageKey)) throw new Error('image_key must be a full img_ Lark image key');
+    if (!this.options.tempDir) throw new Error('image download is not configured (missing temp dir)');
+    fs.mkdirSync(this.options.tempDir, { recursive: true });
+    const outputName = `img-${createHash('sha256').update(`${messageId}:${imageKey}`).digest('hex').slice(0, 24)}`;
+    const result = await this.run(
+      this.options.larkCliBin,
+      [
+        '--profile', this.options.profile, 'im', '+messages-resources-download',
+        '--as', 'bot', '--message-id', messageId, '--file-key', imageKey, '--type', 'image',
+        '--output', outputName, '--format', 'json',
+      ],
+      { cwd: this.options.tempDir, timeoutMs: this.options.timeoutMs },
+    );
+    const data = parseLarkResult(result, 'view Lark image');
+    const savedPath = typeof data?.saved_path === 'string' ? data.saved_path : path.join(this.options.tempDir, outputName);
+    let bytes;
+    try {
+      const stat = fs.statSync(savedPath);
+      if (stat.size > MAX_IMAGE_BYTES) throw new Error(`downloaded image exceeds the ${MAX_IMAGE_BYTES}-byte limit`);
+      bytes = fs.readFileSync(savedPath);
+    } finally {
+      fs.rmSync(savedPath, { force: true });
+    }
+    const mimeType = IMAGE_MIME_TYPES[path.extname(savedPath).toLowerCase()] ?? 'image/jpeg';
+    return {
+      message_id: messageId,
+      image_key: imageKey,
+      mime_type: mimeType,
+      byte_length: bytes.length,
+      base64: bytes.toString('base64'),
+    };
   }
 }
 
@@ -1131,6 +1208,16 @@ export function createMcpHandler(service) {
             return { jsonrpc: '2.0', id, result: textResult(data, `Dry run only: message_id=${data.message_id} was not retracted.`) };
           }
           return { jsonrpc: '2.0', id, result: textResult(data, `Retracted message_id=${data.message_id}.`) };
+        }
+        if (name === 'view_lark_image') {
+          const data = await service.viewImage(input);
+          return {
+            jsonrpc: '2.0', id,
+            result: {
+              content: [{ type: 'image', data: data.base64, mimeType: data.mime_type }],
+              structuredContent: { message_id: data.message_id, image_key: data.image_key, mime_type: data.mime_type, byte_length: data.byte_length },
+            },
+          };
         }
         throw new Error(`unknown tool: ${name}`);
       } catch (error) {

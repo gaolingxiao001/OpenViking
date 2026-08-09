@@ -57,24 +57,17 @@ describe('commandCandidate', () => {
     assert.equal(commandCandidate({ chatType: 'p2p', content: '普通消息', mentions: [] }), '普通消息');
   });
 
-  it('requires a mention in group chats', () => {
+  it('never accepts slash commands in group chats, mentioned or not', () => {
     assert.equal(commandCandidate({ chatType: 'group', content: '/help', mentions: [] }), null);
     assert.equal(commandCandidate({ chatType: 'group', content: '/help' }), null);
-  });
-
-  it('strips mention placeholders around the command in a group', () => {
     const mentions = [{ key: '@_user_1', name: 'Zayn', id: 'ou_bot12345678' }];
     assert.equal(
       commandCandidate({ chatType: 'group', content: '@_user_1 /new', mentions }),
-      '/new',
+      null,
     );
     assert.equal(
       commandCandidate({ chatType: 'group', content: '/model gpt-5.5 @_user_1', mentions }),
-      '/model gpt-5.5',
-    );
-    assert.equal(
-      commandCandidate({ chatType: 'group', content: '@_user_1 帮我看看', mentions }),
-      '帮我看看',
+      null,
     );
   });
 });
@@ -107,6 +100,36 @@ describe('executeCommand', () => {
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /th-new/);
     assert.deepEqual(codex.calls, [['rotate', { resume: false }]]);
+  });
+
+  it('restart reloads the kernel then rotates to a fresh session', async () => {
+    const codex = fakeCodex({
+      async reloadSystemPrompt() {
+        this.calls.push(['reload']);
+        return { outerSeeded: false, outerPath: '/data/kernel-outer.md' };
+      },
+    });
+    const outcome = await executeCommand({ name: 'restart', arg: '' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /已刷新内核并开启新会话：th-new/);
+    assert.doesNotMatch(outcome.text, /初始化/);
+    assert.deepEqual(codex.calls, [['reload'], ['rotate', { resume: false }]]);
+  });
+
+  it('restart mentions the outer kernel path when it was reseeded', async () => {
+    const codex = fakeCodex({
+      async reloadSystemPrompt() {
+        return { outerSeeded: true, outerPath: '/data/kernel-outer.md' };
+      },
+    });
+    const outcome = await executeCommand({ name: 'restart', arg: '' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /外层内核首次初始化：\/data\/kernel-outer\.md/);
+  });
+
+  it('resolves the /r prefix unambiguously to /restart', () => {
+    assert.deepEqual(parseCommand('/r'), { name: 'restart', arg: '' });
+    assert.deepEqual(parseCommand('/res'), { name: 'restart', arg: '' });
   });
 
   it('new while disconnected still succeeds with a deferred message', async () => {
@@ -207,7 +230,7 @@ describe('executeCommand', () => {
     const claude = await executeCommand({ name: 'model', arg: 'claude:son' }, codex);
     assert.equal(claude.ok, true);
     assert.deepEqual(codex.calls[0], ['setModel', 'claude:sonnet']);
-    assert.match(claude.text, /已切换模型：sonnet/);
+    assert.match(claude.text, /已切到 sonnet，已开启新会话/);
     assert.doesNotMatch(claude.text, /claude:/);
 
     const back = await executeCommand({ name: 'model', arg: 'codex:gpt-5.6-sol' }, codex);
@@ -225,6 +248,19 @@ describe('executeCommand', () => {
     assert.equal(missing.ok, false);
     assert.match(missing.text, /未找到模型：missing/);
     assert.doesNotMatch(missing.text, /claude:/);
+  });
+
+  it('same-runtime model switch reports the fresh session id', async () => {
+    const codex = fakeCodex({
+      listModels: async () => [{ id: 'gpt-5.5', efforts: [] }],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        return { runtimeChanged: false, model, threadId: 'th-fresh' };
+      },
+    });
+    const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.5' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /已切到 gpt-5\.5，已开启新会话：th-fresh/);
   });
 
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {

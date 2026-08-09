@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { redactSensitive } from './logger.mjs';
 import { terminateProcessTree } from './process-utils.mjs';
-import { loadSystemPrompt } from './config.mjs';
+import { loadSystemPrompt, loadSystemPromptDetail } from './config.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -245,6 +245,7 @@ export class ClaudeAgent {
       '--profile', this.config.profile,
       '--project-dir', this.config.projectDir,
       '--database-path', this.config.databasePath,
+      '--temp-dir', this.config.tempDir,
       '--timeout-ms', String(this.config.sendTimeoutMs),
       '--max-text-chars', String(this.config.maxReplyChars),
       '--dry-run', String(Boolean(this.config.dryRun)),
@@ -557,6 +558,12 @@ export class ClaudeAgent {
         const details = Array.isArray(message.errors) ? message.errors.filter(Boolean).join(' | ') : '';
         error = new Error(details || String(message.result || `Claude error: ${subtype}`));
       }
+      // Claude CLI reports some hard failures (usage/session limits, API
+      // errors) as subtype "success" with is_error=true. Treating them as
+      // completed turns silently swallowed every failure notice.
+      if (!error && message.is_error === true) {
+        error = new Error(String(message.result || 'Claude error result'));
+      }
       this.turnError = null;
       this._completeTurn(error);
     }
@@ -699,6 +706,20 @@ export class ClaudeAgent {
     this._notifyAvailable();
   }
 
+  // /m must not wait for a stuck turn: kill the in-flight turn's process. The
+  // abandoned items' inbound rows stay in the cognition journal; queued batches
+  // survive in this.queue and are written after the next respawn. Intentional
+  // abandonment, so onTurnFailed is not raised for the interrupted items.
+  async interruptTurn() {
+    if (!this.turnActive) return;
+    this.activeItems.splice(0);
+    this.turnActive = false;
+    this.turnError = null;
+    this.deliveredThroughSeq = this.syncedThroughSeq;
+    await this._terminateCurrent();
+    this._resolveIdleWaiters();
+  }
+
   async rotateSession({ resume = false } = {}) {
     if (this.turnActive) throw new Error('claude session rotation requires an idle runtime');
     if (resume) {
@@ -710,6 +731,16 @@ export class ClaudeAgent {
     this.needsHistoryPrefix = false;
     await this._replaceProcess({ fresh: true });
     return this.sessionId;
+  }
+
+  // /restart: re-read the kernel from disk. --append-system-prompt rides on the
+  // child's spawn args, so the fresh text applies when the caller rotates to a
+  // fresh session (rotateSession respawns the process).
+  async reloadSystemPrompt() {
+    const detail = loadSystemPromptDetail(this.config);
+    this.systemPrompt = detail.text;
+    this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${this.config.profile}`;
+    return detail;
   }
 
   async setModel(model) {

@@ -106,6 +106,90 @@ describe('global Codex/Claude hard switch', () => {
     }
   });
 
+  it('switches runtimes immediately by interrupting a stuck in-flight turn', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-stuck-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    let previous;
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      codexFactory: (options) => {
+        previous = backend('codex', options);
+        previous.calls = [];
+        previous.turnInProgress = true;
+        // A stuck turn: whenIdle would hang forever if the switch awaited it.
+        previous.whenIdle = function whenIdle() {
+          return this.turnInProgress ? new Promise(() => {}) : Promise.resolve();
+        };
+        previous.interruptTurn = async function interruptTurn() {
+          this.calls.push('interrupt');
+          this.turnInProgress = false;
+        };
+        return previous;
+      },
+      claudeFactory: (options) => {
+        const instance = backend('claude', options);
+        instance.model = options.model;
+        return instance;
+      },
+    });
+
+    try {
+      await runtime.start();
+      const result = await runtime.setModel('sonnet');
+      assert.equal(result.runtimeChanged, true);
+      assert.equal(runtime.runtime, 'claude');
+      assert.deepEqual(previous.calls, ['interrupt']);
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('interrupts and rotates to a fresh session on a same-runtime model change', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-samemodel-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    let instance;
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      codexFactory: (options) => {
+        instance = backend('codex', options);
+        instance.calls = [];
+        instance.turnInProgress = true;
+        instance.whenIdle = function whenIdle() {
+          return this.turnInProgress ? new Promise(() => {}) : Promise.resolve();
+        };
+        instance.interruptTurn = async function interruptTurn() {
+          this.calls.push('interrupt');
+          this.turnInProgress = false;
+        };
+        instance.setModel = async function setModel(model) {
+          this.calls.push(`setModel:${model}`);
+          this.model = model;
+        };
+        instance.rotateSession = async function rotateSession(options) {
+          this.calls.push(`rotate:${options.resume}`);
+          this.threadId = 'codex-fresh';
+          return this.threadId;
+        };
+        return instance;
+      },
+    });
+
+    try {
+      await runtime.start();
+      const epochBefore = store.getCognitionState().epoch;
+      const result = await runtime.setModel('gpt-5.6-sol');
+      assert.deepEqual(instance.calls, ['interrupt', 'setModel:gpt-5.6-sol', 'rotate:false']);
+      assert.equal(result.runtimeChanged, false);
+      assert.equal(result.threadId, 'codex-fresh');
+      // The fresh session starts a new cognition epoch, like /new.
+      assert.equal(store.getCognitionState().epoch, epochBefore + 1);
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rotates process authority on startup so a crash survivor loses read and write access', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-restart-'));
     const databasePath = path.join(directory, 'state.sqlite3');

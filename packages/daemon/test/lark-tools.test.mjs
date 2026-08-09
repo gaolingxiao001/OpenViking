@@ -193,6 +193,92 @@ describe('Lark proactive IM tool service', () => {
     assert.equal(call.args[call.args.indexOf('--idempotency-key') + 1], result.idempotency_key);
   });
 
+  it('sends markdown as a rich post instead of plain text', async () => {
+    let call;
+    const service = new LarkToolService(options(), async (command, args, runOptions) => {
+      call = { command, args, runOptions };
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      markdown: '**bold** [link](https://example.com)',
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.ok(call.args.includes('--markdown'));
+    assert.ok(!call.args.includes('--text'));
+    assert.equal(call.args[call.args.indexOf('--markdown') + 1], '**bold** [link](https://example.com)');
+  });
+
+  it('rejects sends that provide both text and markdown, or neither', async () => {
+    const service = new LarkToolService(options(), async () => ok({ message_id: 'om_sent12345678' }));
+    await assert.rejects(
+      () => service.sendMessage({
+        chat_id: 'oc_memorize123456',
+        text: 'hi',
+        markdown: '**hi**',
+        decision_message_id: DECISION_MESSAGE_ID,
+      }),
+      /only one of text or markdown/,
+    );
+    await assert.rejects(
+      () => service.sendMessage({ chat_id: 'oc_memorize123456', decision_message_id: DECISION_MESSAGE_ID }),
+      /text or markdown must not be empty/,
+    );
+  });
+
+  it('replies with markdown as a rich post instead of plain text', async () => {
+    let args;
+    const service = new LarkToolService(options(), async (_command, invokedArgs) => {
+      args = invokedArgs;
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    await service.replyMessage({
+      message_id: 'om_target1234567',
+      markdown: '- one\n- two',
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.ok(args.includes('--markdown'));
+    assert.ok(!args.includes('--text'));
+    assert.equal(args[args.indexOf('--markdown') + 1], '- one\n- two');
+  });
+
+  it('downloads, base64-encodes, and cleans up a viewed image', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-image-'));
+    try {
+      let call;
+      const service = new LarkToolService(options({ tempDir }), async (command, args, runOptions) => {
+        call = { command, args, runOptions };
+        const outputFlagIndex = args.indexOf('--output');
+        const savedPath = path.join(runOptions.cwd, `${args[outputFlagIndex + 1]}.jpg`);
+        fs.writeFileSync(savedPath, Buffer.from('fake-jpeg-bytes'));
+        return ok({ saved_path: savedPath, size_bytes: 15 });
+      });
+      const result = await service.viewImage({
+        message_id: 'om_target1234567',
+        image_key: 'img_v3_abc123456',
+      });
+      assert.equal(result.message_id, 'om_target1234567');
+      assert.equal(result.image_key, 'img_v3_abc123456');
+      assert.equal(result.mime_type, 'image/jpeg');
+      assert.equal(Buffer.from(result.base64, 'base64').toString(), 'fake-jpeg-bytes');
+      assert.ok(call.args.includes('+messages-resources-download'));
+      assert.equal(call.args[call.args.indexOf('--message-id') + 1], 'om_target1234567');
+      assert.equal(call.args[call.args.indexOf('--file-key') + 1], 'img_v3_abc123456');
+      assert.equal(call.runOptions.cwd, tempDir);
+      assert.equal(fs.readdirSync(tempDir).length, 0, 'the downloaded file must not be left on disk');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a viewImage call with a malformed image_key', async () => {
+    const service = new LarkToolService(options({ tempDir: '/tmp/unused' }), async () => ok({}));
+    await assert.rejects(
+      () => service.viewImage({ message_id: 'om_target1234567', image_key: 'not-a-key' }),
+      /full img_ Lark image key/,
+    );
+  });
+
   it('neutralizes mass-mention markup before a proactive send', async () => {
     let args;
     const service = new LarkToolService(options(), async (_command, invokedArgs) => {
@@ -558,7 +644,7 @@ describe('Lark proactive IM MCP protocol', () => {
     const initialized = await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(initialized.result.serverInfo.name, 'lark-daemon-im');
     const listed = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message'];
+    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), toolNames);
     assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), toolNames);
     const chats = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: { query: 'memo' } } });
@@ -674,6 +760,10 @@ describe('Lark proactive IM MCP protocol', () => {
       parseServerArgs(['--profile', 'p', ...token, '--database-path', '/tmp/freshness.sqlite3']).databasePath,
       '/tmp/freshness.sqlite3',
     );
+    assert.equal(
+      parseServerArgs(['--profile', 'p', ...token, '--temp-dir', '/tmp/lark-media']).tempDir,
+      '/tmp/lark-media',
+    );
   });
 
   it('serves newline-delimited JSON-RPC over stdio', async () => {
@@ -722,7 +812,7 @@ describe('Lark proactive IM MCP protocol', () => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: {} } })}\n`);
       await waitFor(3);
       assert.equal(responses[0].result.serverInfo.name, 'lark-daemon-im');
-      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message']);
+      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
       assert.match(responses[2].result.content[0].text, /Fixture Chat/);
     } finally {
       child.stdin.end();

@@ -5,10 +5,12 @@ import { describe, it } from 'node:test';
 import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
+const kernelInnerPath = fileURLToPath(new URL('../agent/kernel-inner.md', import.meta.url));
+const kernelOuterPath = fileURLToPath(new URL('../agent/kernel-outer.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
+  kernelInnerPath,
+  kernelOuterPath,
   claudeBin: 'claude',
   claudeModel: 'sonnet',
   claudeEffort: 'medium',
@@ -211,6 +213,59 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     child.feed({ type: 'result', subtype: 'success', result: 'corrected' });
     assert.equal(agent.turnInProgress, false);
     assert.equal(store.global().syncedThroughSeq, 4);
+    await agent.stop();
+  });
+
+  it('reports an is_error result with subtype success as a turn failure', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('please answer', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      result: "You've hit your session limit · resets 5:30pm (UTC)",
+    });
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].inboundSeqs, [7]);
+    assert.match(failures[0].error, /session limit/);
+    await agent.stop();
+  });
+
+  it('still completes a turn when a tool result carried is_error but the run succeeded', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('please answer', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({ type: 'result', subtype: 'success', is_error: false, result: 'done' });
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(failures.length, 0);
+    await agent.stop();
+  });
+
+  it('interruptTurn kills the in-flight turn and keeps queued messages for the next session', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('stuck request', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    assert.equal(agent.turnInProgress, true);
+
+    await agent.interruptTurn();
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(failures.length, 0); // intentional abandonment is not a failure
+
+    agent.deliver('queued while switching', 8); // disconnected: queued, not lost
+    const rotated = agent.rotateSession({ resume: false });
+    await waitFor(() => persistent.length === 2);
+    await rotated;
+    await waitFor(() => persistent[1].writes.length > 0);
+    const bodies = persistent[1].writes.map((line) => JSON.parse(line).message.content[0].text);
+    assert.ok(bodies.some((text) => text.includes('queued while switching')));
     await agent.stop();
   });
 

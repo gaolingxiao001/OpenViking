@@ -4,7 +4,7 @@ import { terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { lookupMemberName } from './roster.mjs';
-import { loadSystemPrompt } from './config.mjs';
+import { loadSystemPrompt, loadSystemPromptDetail } from './config.mjs';
 
 function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
@@ -760,6 +760,7 @@ export class CodexAgent {
           '--profile', this.config.profile,
           '--project-dir', this.config.projectDir,
           '--database-path', this.config.databasePath,
+          '--temp-dir', this.config.tempDir,
           '--timeout-ms', String(this.config.sendTimeoutMs),
           '--max-text-chars', String(this.config.maxReplyChars),
           '--dry-run', String(Boolean(this.config.dryRun)),
@@ -864,6 +865,32 @@ export class CodexAgent {
     this.needsHistoryPrefix = true;
   }
 
+  // /m must not wait for a stuck turn: best-effort turn/interrupt on the live
+  // turn, then abandon local turn state. The abandoned turn's inbound rows are
+  // already in the cognition journal and the queue keeps undelivered items, so
+  // no message is lost. Queued work is deliberately NOT flushed here — the
+  // caller rotates or switches sessions and drains onto the new one.
+  async interruptTurn() {
+    if (!this.turnInProgress) return;
+    if (this.activeTurnId && this.child && this.threadId) {
+      try {
+        await this._request('turn/interrupt', {
+          threadId: this.threadId,
+          turnId: this.activeTurnId,
+        });
+      } catch { /* best effort; the session is being replaced */ }
+    }
+    // ponytail: an in-flight turn/start (startingTurn) has no id to interrupt
+    // yet; like rotateSession, that turn runs out abandoned.
+    this.activeTurnId = null;
+    this.startingTurn = false;
+    this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
+    this.activeInboundSeqs = [];
+    const waiters = this.idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
   // Rebuild the codex thread without restarting the child (slash commands).
   // resume=true re-opens the current thread under the current model/effort params
   // (context kept, fresh-start fallback inside _startOrResumeThread); resume=false
@@ -917,6 +944,44 @@ export class CodexAgent {
     this._drain();
     this._notifyAvailable();
     return this.threadId;
+  }
+
+  // /restart: re-read the kernel from disk. developer_instructions ride on the
+  // app-server's spawn args, so the child must be replaced for the fresh prompt
+  // to apply. policyHash includes the prompt, so a changed kernel can never
+  // resume the stale thread; the caller rotates to an empty session afterwards.
+  async reloadSystemPrompt() {
+    const detail = loadSystemPromptDetail(this.config);
+    this.systemPrompt = detail.text;
+    this.developerInstructionsText = this.developerInstructions(this.config.profile);
+    const child = this.child;
+    if (child) {
+      // Detach first so the exit event does not trigger the reconnect loop.
+      this._handleExitDetached(child);
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      terminateProcessTree(child, 'SIGTERM');
+      await Promise.race([exited, delay(3_000)]);
+      terminateProcessTree(child, 'SIGKILL');
+      await this._handshake();
+    }
+    return detail;
+  }
+
+  // Clears connection state for a child we are intentionally replacing, without
+  // entering the reconnect loop (unlike _handleExit on an unexpected death).
+  _handleExitDetached(child) {
+    if (this.child !== child) return;
+    this.child = null;
+    this.threadId = null;
+    this.activeTurnId = null;
+    this.startingTurn = false;
+    this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
+    this.activeInboundSeqs = [];
+    for (const pending of this.pending.values()) {
+      try { pending.reject(new Error('codex connection replaced')); } catch { /* ignore */ }
+    }
+    this.pending.clear();
   }
 
   // Model/effort values ride on the next turn/start (see _startTurn). Command

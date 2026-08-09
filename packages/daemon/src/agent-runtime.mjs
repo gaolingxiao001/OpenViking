@@ -111,14 +111,19 @@ export class AgentRuntime {
     if (this.stopping) throw new Error('agent runtime is stopping');
     const target = parseTarget(value);
     if (target.runtime === this.runtime) {
+      // /m must not wait for a stuck turn, and every model change opens a
+      // fresh session: interrupt the in-flight turn (its inbound rows stay in
+      // the cognition journal, queued items survive), apply, then rotate.
+      await this.backend.interruptTurn?.();
       await this.backend.setModel(target.model);
       this.store.appendCognitionJournal({
         kind: 'control',
         actor: 'daemon',
-        text: `model changed within ${this.runtime} runtime to ${target.model || 'default'}; native session preserved`,
+        text: `model changed within ${this.runtime} runtime to ${target.model || 'default'}; fresh native session opened`,
         dedupeKey: `control:model:${randomUUID()}`,
       });
-      return { runtimeChanged: false, runtime: this.runtime, model: target.canonical };
+      const threadId = await this.rotateSession({ resume: false });
+      return { runtimeChanged: false, runtime: this.runtime, model: target.canonical, threadId };
     }
     return await this._hardSwitch(target);
   }
@@ -131,7 +136,10 @@ export class AgentRuntime {
     const previousRuntime = this.runtime;
     let staged = null;
     try {
-      await previous.whenIdle();
+      // Never wait for a stuck in-flight turn: interrupt/abandon it. Its
+      // inbound rows are already in the cognition journal, which the target
+      // replays as a catch-up prefix on its first real turn.
+      await previous.interruptTurn?.();
       if (this.stopping) throw new Error('agent runtime stopped during runtime switch');
       const cognition = this.store.getCognitionState();
       const journalThrough = this.store.cognitionJournalHead(cognition.epoch);
@@ -225,6 +233,13 @@ export class AgentRuntime {
   }
 
   setEffort(effort) { return this.backend.setEffort(effort); }
+
+  // /restart: re-read the two-layer kernel into the running backend. The caller
+  // rotates to a fresh session afterwards so the new prompt actually applies.
+  async reloadSystemPrompt() {
+    if (this.stopping) throw new Error('agent runtime is stopping');
+    return await this.backend.reloadSystemPrompt();
+  }
 
   async rotateSession({ resume = false } = {}) {
     if (resume) return this.backend.rotateSession({ resume: true });

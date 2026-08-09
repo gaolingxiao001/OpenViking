@@ -9,7 +9,7 @@ import { CLAUDE_MODELS } from './claude.mjs';
 // current model's supportedReasoningEfforts from model/list.
 export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 
-const COMMANDS = ['new', 'help', 'model', 'effort'];
+const COMMANDS = ['new', 'help', 'model', 'effort', 'restart'];
 
 const MODEL_NAME = /^[A-Za-z0-9._:\/-]{1,64}$/;
 
@@ -21,22 +21,17 @@ export function matchPrefix(token, candidates) {
   return candidates.filter((name) => name.startsWith(token));
 }
 
-// Lark inserts "@_user_N" / "@_all" placeholders into the text for mentions.
-const LEADING_MENTIONS = /^(?:@_(?:user_\d+|all)\s*)+/;
-const TRAILING_MENTIONS = /(?:\s*@_(?:user_\d+|all))+$/;
-
-// Where slash commands are accepted: a private chat takes bare /commands; a group
-// chat only when the message @-mentions the bot, with the mention placeholders
-// stripped before parsing. Returns the parse candidate text, or null when the
+// Where slash commands are accepted: a private chat takes bare /commands. Group
+// chats never do — the daemon has no reliable way to tell "@bot /cmd" apart from
+// "@someone-else /cmd" (it doesn't track its own open_id), so any mention in a
+// group used to be enough to trigger a command meant for a completely different
+// person. Group /command support can come back once mentions are resolved
+// against the bot's own id. Returns the parse candidate text, or null when the
 // message is not eligible (it then flows to codex as a normal message).
-// ponytail: any mention counts — the daemon does not know its own open_id, so
-// "@someone /cmd" in a trusted group also triggers; resolve the bot identity if
-// that ever bites.
 export function commandCandidate(event) {
   const text = String(event.content ?? '').trim();
   if ((event.chatType ?? 'p2p') === 'p2p') return text;
-  if (!Array.isArray(event.mentions) || event.mentions.length === 0) return null;
-  return text.replace(LEADING_MENTIONS, '').replace(TRAILING_MENTIONS, '').trim();
+  return null;
 }
 
 // null → not a command (does not start with '/'). Otherwise { name, arg } for a
@@ -58,6 +53,7 @@ export function helpText(codex) {
     '/help — 显示帮助与当前状态',
     '/model [名称] — 查看或切换模型，如 sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
+    '/restart — 重新加载内核（外层 persona/团队上下文）并开启新会话',
     '',
     `当前会话：${codex.threadId ?? '（未连接）'}`,
     `Runtime：${codex.runtime ?? 'codex'}`,
@@ -85,6 +81,20 @@ export async function executeCommand(command, codex) {
       ok: true,
       text: threadId ? `已开启新会话：${threadId}` : '已清除会话，重连后将开启新会话',
     };
+  }
+
+  if (command.name === 'restart') {
+    // Reload the two-layer kernel (inner from the release, outer from the data
+    // dir) into the running backend, then rotate so the fresh prompt applies.
+    const detail = await codex.reloadSystemPrompt();
+    const threadId = await codex.rotateSession({ resume: false });
+    const lines = [
+      threadId ? `已刷新内核并开启新会话：${threadId}` : '已刷新内核并清除会话，重连后将开启新会话',
+    ];
+    if (detail?.outerSeeded && detail.outerPath) {
+      lines.push(`外层内核首次初始化：${detail.outerPath}`);
+    }
+    return { ok: true, text: lines.join('\n') };
   }
 
   let models = [];
@@ -136,7 +146,15 @@ export async function executeCommand(command, codex) {
         text: `已切到 ${displayTarget}。历史对话会接上；隐藏思考和未落盘的工具过程不会继承`,
       };
     }
-    return { ok: true, text: `已切换模型：${displayTarget}（下一轮生效，同一 ${codex.runtime ?? 'codex'} session 保留）` };
+    // Same-runtime switch also opens a fresh session (owner request: /m 之后
+    // 直接 new session), so the reply reports the new thread instead of
+    // promising continuity.
+    return {
+      ok: true,
+      text: applied?.threadId
+        ? `已切到 ${displayTarget}，已开启新会话：${applied.threadId}`
+        : `已切到 ${displayTarget}，已开启新会话`,
+    };
   }
 
   // effort: validate against what the current model actually supports — an

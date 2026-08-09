@@ -40,6 +40,17 @@ export function humanizeContent(messageType, rawContent) {
   }
   const parsed = parseJson(rawContent);
   if (typeof parsed === 'string') return parsed.trim();
+  // image_key/file_key are resource pointers scoped to this message and requiring bot auth
+  // to resolve, so surfacing them here (unlike other *_key/*_url fields) is not a content
+  // leak — see packages/daemon/agent/lark-message-formats.md for how to fetch each type.
+  if (messageType === 'image' && typeof parsed?.image_key === 'string' && parsed.image_key) {
+    return `[image image_key=${parsed.image_key}]`;
+  }
+  if (['file', 'audio', 'media', 'video', 'sticker'].includes(messageType)
+    && typeof parsed?.file_key === 'string' && parsed.file_key) {
+    const name = typeof parsed.file_name === 'string' && parsed.file_name ? ` file_name=${parsed.file_name}` : '';
+    return `[${messageType} file_key=${parsed.file_key}${name}]`;
+  }
   const parts = [];
   collectText(parsed, parts);
   const unique = [...new Set(parts)];

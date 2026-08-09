@@ -100,6 +100,46 @@ describe('normalizeEvent', () => {
     });
     assert.equal(event.content, '结论\n已经完成');
   });
+
+  it('surfaces the image_key so view_lark_image can fetch the picture', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-image',
+      chat_id: 'oc-image',
+      chat_type: 'p2p',
+      message_type: 'image',
+      content: JSON.stringify({ image_key: 'img_v3_abc123' }),
+      sender_id: 'ou-image',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '[image image_key=img_v3_abc123]');
+  });
+
+  it('surfaces the file_key for file/audio/video/sticker messages', () => {
+    const fileEvent = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-file',
+      chat_id: 'oc-file',
+      chat_type: 'p2p',
+      message_type: 'file',
+      content: JSON.stringify({ file_key: 'file_v3_abc123', file_name: 'report.pdf' }),
+      sender_id: 'ou-file',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(fileEvent.content, '[file file_key=file_v3_abc123 file_name=report.pdf]');
+
+    const audioEvent = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-audio',
+      chat_id: 'oc-audio',
+      chat_type: 'p2p',
+      message_type: 'audio',
+      content: JSON.stringify({ file_key: 'file_v3_def456', duration: 1200 }),
+      sender_id: 'ou-audio',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(audioEvent.content, '[audio file_key=file_v3_def456]');
+  });
 });
 
 describe('deterministicFilter', () => {
