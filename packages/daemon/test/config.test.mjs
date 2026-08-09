@@ -3,7 +3,7 @@ import { afterEach, describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getConfig, loadSystemPrompt, loadSystemPromptDetail, projectDir } from '../src/config.mjs';
+import { getConfig, loadSystemPrompt, projectDir } from '../src/config.mjs';
 
 const saved = new Map();
 
@@ -45,74 +45,26 @@ describe('configuration safety', { concurrency: false }, () => {
   });
 });
 
-describe('two-layer kernel system prompt', () => {
-  function kernelFixture() {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-kernel-'));
-    const releaseDir = path.join(directory, 'release');
-    const dataDir = path.join(directory, 'data');
-    fs.mkdirSync(releaseDir, { recursive: true });
-    fs.writeFileSync(path.join(releaseDir, 'kernel-inner.md'), '# Policy\n\ninner core\n');
-    fs.writeFileSync(path.join(releaseDir, 'kernel-outer.md'), '## Team task board\n\n{{TEAM_TASK_BOARD_URL}}\n\n## Persona\n\nouter voice\n');
-    return {
-      directory,
-      config: {
-        kernelInnerPath: path.join(releaseDir, 'kernel-inner.md'),
-        kernelOuterPath: path.join(releaseDir, 'kernel-outer.md'),
-        kernelOuterDataPath: path.join(dataDir, 'kernel-outer.md'),
-        systemPromptPath: path.join(releaseDir, 'system-prompt.md'),
+describe('release-owned system prompt', () => {
+  it('loads the single prompt file and substitutes release configuration', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
+    const systemPromptPath = path.join(directory, 'system-prompt.md');
+    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\npersona\n');
+    try {
+      assert.equal(loadSystemPrompt({
+        systemPromptPath,
         teamTaskBoardUrl: 'https://board.example',
-      },
-    };
-  }
-
-  it('assembles inner + outer, seeds the mutable outer copy once, and substitutes tokens', () => {
-    const { directory, config } = kernelFixture();
-    try {
-      const first = loadSystemPromptDetail(config);
-      assert.equal(first.source, 'kernel');
-      assert.equal(first.outerSeeded, true);
-      assert.equal(first.outerPath, config.kernelOuterDataPath);
-      assert.match(first.text, /^# Policy\n\ninner core\n\n## Team task board/);
-      assert.match(first.text, /https:\/\/board\.example/);
-      assert.ok(fs.existsSync(config.kernelOuterDataPath));
-
-      // Workspace edits to the data-dir copy win over the release copy.
-      fs.writeFileSync(config.kernelOuterDataPath, '## Persona\n\nedited persona\n');
-      const second = loadSystemPromptDetail(config);
-      assert.equal(second.outerSeeded, false);
-      assert.match(second.text, /edited persona/);
-      assert.doesNotMatch(second.text, /outer voice/);
-      // The inner security core always comes from the release.
-      assert.match(second.text, /inner core/);
+      }), 'policy\n\nhttps://board.example\n\npersona\n');
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it('uses the release outer kernel without seeding when no data copy path is configured', () => {
-    const { directory, config } = kernelFixture();
-    try {
-      delete config.kernelOuterDataPath;
-      const detail = loadSystemPromptDetail(config);
-      assert.equal(detail.outerSeeded, false);
-      assert.match(detail.text, /outer voice/);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('falls back to a legacy single-file system-prompt.md when kernel files are absent', () => {
-    const { directory, config } = kernelFixture();
-    try {
-      fs.rmSync(config.kernelInnerPath);
-      fs.writeFileSync(config.systemPromptPath, 'legacy prompt {{TEAM_TASK_BOARD_URL}}\n');
-      const detail = loadSystemPromptDetail(config);
-      assert.equal(detail.source, 'legacy');
-      assert.equal(detail.text, 'legacy prompt https://board.example\n');
-      assert.equal(loadSystemPrompt(config), detail.text);
-      assert.ok(!fs.existsSync(config.kernelOuterDataPath));
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
+  it('configures one release prompt with no mutable kernel paths', () => {
+    const config = getConfig();
+    assert.match(config.systemPromptPath, /agent\/system-prompt\.md$/);
+    assert.equal('kernelInnerPath' in config, false);
+    assert.equal('kernelOuterPath' in config, false);
+    assert.equal('kernelOuterDataPath' in config, false);
   });
 });

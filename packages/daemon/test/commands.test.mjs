@@ -94,6 +94,7 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /high/);
     assert.match(outcome.text, /sonnet、gpt-5\.6-sol/);
     assert.doesNotMatch(outcome.text, /claude:|codex:/);
+    assert.doesNotMatch(outcome.text, /restart/);
     assert.equal(codex.calls.length, 0);
   });
 
@@ -105,34 +106,13 @@ describe('executeCommand', () => {
     assert.deepEqual(codex.calls, [['interrupt'], ['rotate', { resume: false }]]);
   });
 
-  it('restart reloads the kernel then rotates to a fresh session', async () => {
-    const codex = fakeCodex({
-      async reloadSystemPrompt() {
-        this.calls.push(['reload']);
-        return { outerSeeded: false, outerPath: '/data/kernel-outer.md' };
-      },
+  it('treats the removed /restart command as unknown', () => {
+    assert.deepEqual(parseCommand('/restart'), {
+      name: null,
+      arg: '',
+      token: 'restart',
+      matches: [],
     });
-    const outcome = await executeCommand({ name: 'restart', arg: '' }, codex);
-    assert.equal(outcome.ok, true);
-    assert.match(outcome.text, /已刷新内核并开启新会话：th-new/);
-    assert.doesNotMatch(outcome.text, /初始化/);
-    assert.deepEqual(codex.calls, [['interrupt'], ['reload'], ['rotate', { resume: false }]]);
-  });
-
-  it('restart mentions the outer kernel path when it was reseeded', async () => {
-    const codex = fakeCodex({
-      async reloadSystemPrompt() {
-        return { outerSeeded: true, outerPath: '/data/kernel-outer.md' };
-      },
-    });
-    const outcome = await executeCommand({ name: 'restart', arg: '' }, codex);
-    assert.equal(outcome.ok, true);
-    assert.match(outcome.text, /外层内核首次初始化：\/data\/kernel-outer\.md/);
-  });
-
-  it('resolves the /r prefix unambiguously to /restart', () => {
-    assert.deepEqual(parseCommand('/r'), { name: 'restart', arg: '' });
-    assert.deepEqual(parseCommand('/res'), { name: 'restart', arg: '' });
   });
 
   it('new while disconnected still succeeds with a deferred message', async () => {

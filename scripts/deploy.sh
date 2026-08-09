@@ -73,9 +73,9 @@ ln -sfn "$REL" "$BASE/current"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$CLI_TARGET" "$CLI_LINK"
 
-# A running process can still need files from an older release (for example
-# `/restart` reloads its prompt), so publish never prunes releases underneath
-# PM2. Cleanup belongs after an observed successful `upgrade all`.
+# Running processes still execute files from their current release, so publish
+# never prunes releases underneath PM2. Cleanup belongs after an observed
+# successful `upgrade all`.
 echo "published $REL"
 echo "bootstrap/refresh the updater with: ./scripts/bootstrap-updater.sh"
 echo "then roll out with: lark-daemon upgrade zayn|sally|all"

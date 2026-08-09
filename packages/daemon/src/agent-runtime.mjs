@@ -252,13 +252,6 @@ export class AgentRuntime {
 
   setEffort(effort) { return this.backend.setEffort(effort); }
 
-  // /restart: re-read the two-layer kernel into the running backend. The caller
-  // rotates to a fresh session afterwards so the new prompt actually applies.
-  async reloadSystemPrompt() {
-    if (this.stopping) throw new Error('agent runtime is stopping');
-    return await this.backend.reloadSystemPrompt();
-  }
-
   async rotateSession({ resume = false } = {}) {
     if (resume) return this.backend.rotateSession({ resume: true });
     await this.backend.whenIdle();

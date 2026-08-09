@@ -102,7 +102,7 @@ describe('module boundaries', () => {
 
   it('allows exact sibling operations without permitting self or broad PM2 control', () => {
     const prompt = fs.readFileSync(
-      path.join(root, 'packages', 'daemon', 'agent', 'kernel-inner.md'),
+      path.join(root, 'packages', 'daemon', 'agent', 'system-prompt.md'),
       'utf8',
     );
     assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);

@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import {
@@ -16,12 +13,10 @@ import { GroupBurstRouter } from '../src/group-burst.mjs';
 import { registerNameResolver } from '../src/roster.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const kernelInnerPath = fileURLToPath(new URL('../agent/kernel-inner.md', import.meta.url));
-const kernelOuterPath = fileURLToPath(new URL('../agent/kernel-outer.md', import.meta.url));
+const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  kernelInnerPath,
-  kernelOuterPath,
+  systemPromptPath,
   codexBin: 'codex',
   codexModel: '',
   codexEffort: 'medium',
@@ -841,60 +836,6 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(delivery.metadata.toolLabel, '飞书表态');
     assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
     assert.deepEqual(deliveries, [{ inboundSeqs: [55], mode: 'reaction' }]);
-  });
-});
-
-describe('CodexAgent kernel reload (/restart)', () => {
-  it('re-reads the kernel, replaces the app-server, and never resumes the stale thread', async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-codex-kernel-'));
-    fs.writeFileSync(path.join(directory, 'kernel-inner.md'), 'inner core v1\n');
-    fs.writeFileSync(path.join(directory, 'kernel-outer.md'), 'outer persona v1\n');
-    const config = {
-      ...baseConfig,
-      kernelInnerPath: path.join(directory, 'kernel-inner.md'),
-      kernelOuterPath: path.join(directory, 'kernel-outer.md'),
-    };
-    const store = makeStore();
-    const children = [];
-    const spawnArgs = [];
-    const spawn = (_bin, args) => {
-      const child = new FakeChild();
-      children.push(child);
-      spawnArgs.push(args);
-      return child;
-    };
-    const agent = new CodexAgent(config, store, quietLogger, {
-      spawn, handshakeTimeoutMs: 1_000, reconnectBaseMs: 5, reconnectCapMs: 20,
-    });
-    try {
-      const child = await handshake(agent, children);
-      const hashBefore = agent.policyHash;
-      assert.equal(store.getGlobalSession().sessionId, 'th-1');
-      assert.match(agent.developerInstructionsText, /outer persona v1/);
-
-      fs.writeFileSync(path.join(directory, 'kernel-outer.md'), 'outer persona v2\n');
-      const reloading = agent.reloadSystemPrompt();
-      await flush();
-      child.simulateExit(0);
-      await flush();
-      const replacement = children[1];
-      replacement.feed({ id: 1, result: {} });
-      await flush();
-      // The stored session carries the old policyHash: the changed prompt must
-      // start a fresh thread instead of resuming the stale one.
-      assert.equal(replacement.ofMethod('thread/resume').length, 0);
-      const start = replacement.ofMethod('thread/start').at(-1);
-      replacement.feed({ id: start.id, result: { thread: { id: 'th-2' } } });
-      const detail = await reloading;
-
-      assert.notEqual(agent.policyHash, hashBefore);
-      assert.match(agent.systemPrompt, /outer persona v2/);
-      assert.match(spawnArgs.at(-1).join('\n'), /outer persona v2/);
-      assert.equal(agent.threadId, 'th-2');
-      assert.equal(detail.source, 'kernel');
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
   });
 });
 

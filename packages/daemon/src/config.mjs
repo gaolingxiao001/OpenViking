@@ -81,63 +81,12 @@ function pathsOverlap(left, right) {
   return !reverse.startsWith('..') && !path.isAbsolute(reverse);
 }
 
-// Substitutes {{PLACEHOLDER}} tokens. Currently only {{TEAM_TASK_BOARD_URL}}:
-// taken from config.teamTaskBoardUrl (falling back to the TEAM_TASK_BOARD_URL
-// env var so hand-built test configs still work); when unset, the prompt
-// degrades to a neutral "(configured task board)" reference.
-function substitutePromptTokens(text, config) {
+// The prompt ships with each release. Updater rollout replaces the daemon when
+// policy or persona changes; /new only opens a clean model session.
+export function loadSystemPrompt(config) {
+  const text = fs.readFileSync(config.systemPromptPath, 'utf8');
   const boardUrl = (config.teamTaskBoardUrl ?? process.env.TEAM_TASK_BOARD_URL ?? '').trim();
   return text.replaceAll('{{TEAM_TASK_BOARD_URL}}', boardUrl || '(configured task board)');
-}
-
-// The system prompt is two layers. The inner kernel (agent/kernel-inner.md) is
-// the security/policy core and always comes from the release, so the agent can
-// never edit it at runtime. The outer kernel (persona + team context) lives as
-// a mutable copy in the data dir, seeded once from the release's
-// agent/kernel-outer.md; workspace edits to that copy take effect on /restart.
-// Legacy fallback: a deployed release that still ships agent/system-prompt.md
-// (and no kernel files) keeps working unchanged.
-export function loadSystemPromptDetail(config) {
-  const innerPath = config.kernelInnerPath;
-  if (innerPath && fs.existsSync(innerPath)) {
-    const inner = fs.readFileSync(innerPath, 'utf8');
-    let outer = '';
-    let outerSeeded = false;
-    const dataOuterPath = config.kernelOuterDataPath ?? null;
-    if (dataOuterPath && fs.existsSync(dataOuterPath)) {
-      outer = fs.readFileSync(dataOuterPath, 'utf8');
-    } else if (config.kernelOuterPath && fs.existsSync(config.kernelOuterPath)) {
-      outer = fs.readFileSync(config.kernelOuterPath, 'utf8');
-      if (dataOuterPath) {
-        // First load on this data dir: seed the mutable copy. Best effort — a
-        // failed seed still runs on the release copy, never a partial prompt.
-        try {
-          fs.mkdirSync(path.dirname(dataOuterPath), { recursive: true, mode: 0o700 });
-          fs.writeFileSync(dataOuterPath, outer, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-          outerSeeded = true;
-        } catch { /* concurrent seed or read-only data dir */ }
-      }
-    }
-    const text = outer
-      ? `${inner.trimEnd()}\n\n${outer.trim()}\n`
-      : inner;
-    return {
-      text: substitutePromptTokens(text, config),
-      outerSeeded,
-      outerPath: dataOuterPath,
-      source: 'kernel',
-    };
-  }
-  return {
-    text: substitutePromptTokens(fs.readFileSync(config.systemPromptPath, 'utf8'), config),
-    outerSeeded: false,
-    outerPath: null,
-    source: 'legacy',
-  };
-}
-
-export function loadSystemPrompt(config) {
-  return loadSystemPromptDetail(config).text;
 }
 
 export function getConfig() {
@@ -169,10 +118,7 @@ export function getConfig() {
     lockPath: path.join(dataDir, 'daemon.lock'),
     tempDir: path.join(dataDir, 'tmp'),
     workspace,
-    systemPromptPath: path.join(promptDir, 'system-prompt.md'), // legacy single-file fallback
-    kernelInnerPath: path.join(promptDir, 'kernel-inner.md'),
-    kernelOuterPath: path.join(promptDir, 'kernel-outer.md'),
-    kernelOuterDataPath: path.join(dataDir, 'kernel-outer.md'),
+    systemPromptPath: path.join(promptDir, 'system-prompt.md'),
     teamTaskBoardUrl: process.env.TEAM_TASK_BOARD_URL || '',
     larkToolServerPath: path.join(sourceDir, 'lark-tools.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
