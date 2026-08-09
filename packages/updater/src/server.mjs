@@ -8,6 +8,24 @@ import { defaultReleaseLink, defaultSocketPath, getTarget } from './targets.mjs'
 
 const execFile = promisify(execFileCallback);
 const MAX_BODY_BYTES = 4096;
+const PM2_CONTROL_ENV_KEYS = Object.freeze([
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'PATH',
+  'PM2_HOME',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TMPDIR',
+  'XDG_RUNTIME_DIR',
+]);
+
+export function cleanPm2ControlEnv(source = process.env) {
+  return Object.fromEntries(PM2_CONTROL_ENV_KEYS
+    .filter((key) => typeof source[key] === 'string' && source[key] !== '')
+    .map((key) => [key, source[key]]));
+}
 
 function writeJson(response, statusCode, body) {
   const text = JSON.stringify(body);
@@ -58,8 +76,11 @@ function isInside(parent, child) {
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
-export async function verifyPm2App({ app, release, pm2Bin, execFileImpl }) {
-  const result = await execFileImpl(pm2Bin, ['jlist'], { timeout: 30_000 });
+export async function verifyPm2App({ app, release, pm2Bin, execFileImpl, pm2Env }) {
+  const result = await execFileImpl(pm2Bin, ['jlist'], {
+    timeout: 30_000,
+    env: pm2Env || cleanPm2ControlEnv(),
+  });
   let processes;
   try {
     processes = JSON.parse(result?.stdout || '[]');
@@ -93,6 +114,7 @@ export async function upgradeTarget(target, {
   execFileImpl = execFile,
   fetchImpl = globalThis.fetch,
   readyOptions,
+  pm2Env = cleanPm2ControlEnv(),
 } = {}) {
   const spec = getTarget(target);
   const deployLock = path.join(path.dirname(path.resolve(releaseLink)), 'deploy.lock');
@@ -113,10 +135,10 @@ export async function upgradeTarget(target, {
       '--only',
       spec.app,
       '--update-env',
-    ], { timeout: 60_000 });
-    await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl });
+    ], { timeout: 60_000, env: pm2Env });
+    await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env });
     await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
-    await execFileImpl(pm2Bin, ['save'], { timeout: 30_000 });
+    await execFileImpl(pm2Bin, ['save'], { timeout: 30_000, env: pm2Env });
 
     return { target, app: spec.app, release, status: 'ready' };
   } finally {

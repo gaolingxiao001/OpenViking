@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createUpdaterServer, upgradeTarget } from '../src/server.mjs';
+import { cleanPm2ControlEnv, createUpdaterServer, upgradeTarget } from '../src/server.mjs';
 
 async function fixtureRelease() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-test-'));
@@ -49,8 +49,8 @@ test('upgradeTarget only runs the allowlisted Sally app from current release', a
   const result = await upgradeTarget('sally', {
     releaseLink: fixture.releaseLink,
     pm2Bin: '/fake/pm2',
-    execFileImpl: async (command, args) => {
-      calls.push({ command, args });
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
       if (args[0] === 'jlist') {
         return {
           stdout: JSON.stringify([{
@@ -63,6 +63,7 @@ test('upgradeTarget only runs the allowlisted Sally app from current release', a
     },
     fetchImpl: async () => ({ ok: true }),
     readyOptions: { attempts: 1, intervalMs: 0 },
+    pm2Env: { HOME: '/safe-home', PATH: '/safe-bin' },
   });
 
   assert.equal(result.app, 'lark-daemon-sally');
@@ -77,10 +78,47 @@ test('upgradeTarget only runs the allowlisted Sally app from current release', a
         'lark-daemon-sally',
         '--update-env',
       ],
+      options: {
+        timeout: 60_000,
+        env: { HOME: '/safe-home', PATH: '/safe-bin' },
+      },
     },
-    { command: '/fake/pm2', args: ['jlist'] },
-    { command: '/fake/pm2', args: ['save'] },
+    {
+      command: '/fake/pm2',
+      args: ['jlist'],
+      options: {
+        timeout: 30_000,
+        env: { HOME: '/safe-home', PATH: '/safe-bin' },
+      },
+    },
+    {
+      command: '/fake/pm2',
+      args: ['save'],
+      options: {
+        timeout: 30_000,
+        env: { HOME: '/safe-home', PATH: '/safe-bin' },
+      },
+    },
   ]);
+});
+
+test('PM2 control commands discard metadata inherited from a managed caller', () => {
+  assert.deepEqual(cleanPm2ControlEnv({
+    HOME: '/safe-home',
+    PATH: '/safe-bin',
+    PM2_HOME: '/safe-pm2',
+    LANG: 'C.UTF-8',
+    name: 'lark-daemon',
+    pm_id: '28',
+    pm_exec_path: '/old/release/main.mjs',
+    cwd: '/old/release',
+    LARK_DAEMON_PROFILE: 'secret-profile',
+  }), {
+    HOME: '/safe-home',
+    PATH: '/safe-bin',
+    PM2_HOME: '/safe-pm2',
+    LANG: 'C.UTF-8',
+  });
 });
 
 test('upgradeTarget rejects an online app that still points at an old release', async () => {

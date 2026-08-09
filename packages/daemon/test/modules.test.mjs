@@ -75,6 +75,9 @@ describe('module boundaries', () => {
     assert.match(deploy, /PORTS="3737 3738"/);
     assert.match(deploy, /refusing to replace foreign CLI symlink/);
     assert.match(deploy, /refusing to replace existing CLI path/);
+    assert.match(deploy, /pm2_control\(\)/);
+    assert.match(deploy, /env -i/);
+    assert.doesNotMatch(deploy, /^\s*pm2 (?:delete|start|save)/m);
   });
 
   it('allows exact sibling operations without permitting self or broad PM2 control', () => {

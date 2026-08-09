@@ -13,6 +13,21 @@ DEPLOY_LOCK="$BASE/deploy.lock"
 CLI_LINK="$HOME/.local/bin/lark-daemon"
 CLI_TARGET="$BASE/current/packages/updater/bin/lark-daemon.mjs"
 
+# PM2 injects process metadata such as name/pm_id/cwd into every managed app.
+# A deploy launched by the daemon inherits those values; passing them back to
+# `pm2 start` makes PM2 update the caller instead of creating the named apps.
+# Run control-plane commands with a minimal operator environment.
+pm2_control() {
+  env -i \
+    HOME="$HOME" \
+    USER="${USER:-}" \
+    LOGNAME="${LOGNAME:-${USER:-}}" \
+    PATH="$PATH" \
+    PM2_HOME="${PM2_HOME:-$HOME/.pm2}" \
+    LANG="${LANG:-C.UTF-8}" \
+    pm2 "$@"
+}
+
 if [ -L "$CLI_LINK" ]; then
   EXISTING_TARGET="$(readlink "$CLI_LINK")"
   case "$EXISTING_TARGET" in
@@ -61,9 +76,9 @@ echo "running tests in $REL ..."
 # $BASE/current tracks the last known-good release for rollback.
 PREV="$(readlink "$BASE/current" 2>/dev/null || true)"
 
-pm2 delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
-pm2 start "$REL/ecosystem.config.cjs"
-pm2 save >/dev/null
+pm2_control delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
+pm2_control start "$REL/ecosystem.config.cjs"
+pm2_control save >/dev/null
 
 PORTS=3737
 grep -q "lark-web" "$REL/ecosystem.config.cjs" && PORTS="3737 3738"
@@ -86,9 +101,9 @@ done
 echo "daemon/web not ready after 30s — check: pm2 logs lark-daemon lark-web"
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
   echo "rolling back to $PREV"
-  pm2 delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
-  pm2 start "$PREV/ecosystem.config.cjs"
-  pm2 save >/dev/null
+  pm2_control delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
+  pm2_control start "$PREV/ecosystem.config.cjs"
+  pm2_control save >/dev/null
   echo "rolled back; failed release kept for inspection: $REL"
 fi
 exit 1
