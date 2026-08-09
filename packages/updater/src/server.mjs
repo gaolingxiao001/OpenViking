@@ -117,6 +117,44 @@ async function pm2Processes({ pm2Bin, execFileImpl, pm2Env }) {
   }
 }
 
+async function previousConfigForProcess(processInfo, release) {
+  const execPath = processInfo?.pm2_env?.pm_exec_path;
+  if (!execPath) throw new Error(`${processInfo?.name || 'PM2 app'} has no executable path`);
+
+  const baseDir = path.dirname(path.dirname(release));
+  const releasesRoot = path.join(baseDir, 'releases');
+  const currentLink = path.join(baseDir, 'current');
+  let previousRelease;
+
+  // PM2 preserves the literal script path it was first given. If that path
+  // uses `current`, resolving it after publication points at the new release,
+  // not the code the live process actually loaded. The publisher's rollback
+  // link is the only trustworthy previous release in that case.
+  if (isInside(currentLink, path.resolve(execPath))) {
+    previousRelease = await realpath(path.join(baseDir, 'rollback')).catch(() => {
+      throw new Error(`cannot safely determine the previous release for ${processInfo.name}`);
+    });
+  } else {
+    const resolvedExec = await realpath(execPath).catch(() => {
+      throw new Error(`cannot resolve the previous executable for ${processInfo.name}`);
+    });
+    if (!isInside(releasesRoot, resolvedExec)) {
+      throw new Error(`${processInfo.name} is running outside the managed releases directory`);
+    }
+    const [releaseName] = path.relative(releasesRoot, resolvedExec).split(path.sep);
+    previousRelease = await realpath(path.join(releasesRoot, releaseName));
+  }
+
+  if (!isInside(releasesRoot, previousRelease)) {
+    throw new Error(`previous release for ${processInfo.name} is outside the managed releases directory`);
+  }
+  const previousConfig = await realpath(path.join(previousRelease, 'ecosystem.config.cjs'));
+  if (!isInside(previousRelease, previousConfig)) {
+    throw new Error(`previous ecosystem config for ${processInfo.name} resolves outside its release`);
+  }
+  return previousConfig;
+}
+
 async function upgradeApp(spec, {
   release,
   configPath,
@@ -126,20 +164,25 @@ async function upgradeApp(spec, {
   readyOptions,
   pm2Env,
 }) {
-  let legacy = null;
-  let legacyWasOnline = false;
-  if (spec.legacyApp) {
-    const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env });
-    legacy = processes.find((processInfo) => processInfo?.name === spec.legacyApp) || null;
-    legacyWasOnline = legacy?.pm2_env?.status === 'online';
-    if (legacyWasOnline) {
-      await execFileImpl(pm2Bin, ['stop', spec.legacyApp], { timeout: 30_000, env: pm2Env });
-    }
+  const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env });
+  const previous = processes.find((processInfo) => processInfo?.name === spec.app) || null;
+  const previousWasOnline = previous?.pm2_env?.status === 'online';
+  const previousConfig = previous ? await previousConfigForProcess(previous, release) : null;
+  const legacy = spec.legacyApp
+    ? processes.find((processInfo) => processInfo?.name === spec.legacyApp) || null
+    : null;
+  const legacyWasOnline = legacy?.pm2_env?.status === 'online';
+
+  if (legacyWasOnline) {
+    await execFileImpl(pm2Bin, ['stop', spec.legacyApp], { timeout: 30_000, env: pm2Env });
+  }
+  if (previous) {
+    await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: pm2Env });
   }
 
   try {
     await execFileImpl(pm2Bin, [
-      'startOrReload',
+      'start',
       configPath,
       '--only',
       spec.app,
@@ -148,11 +191,25 @@ async function upgradeApp(spec, {
     await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env });
     await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
   } catch (error) {
+    await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: pm2Env }).catch(() => {});
+    if (previousConfig) {
+      await execFileImpl(pm2Bin, [
+        'start',
+        previousConfig,
+        '--only',
+        spec.app,
+        '--update-env',
+      ], { timeout: 60_000, env: pm2Env }).catch(() => {});
+      if (previousWasOnline) {
+        await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions).catch(() => {});
+      } else {
+        await execFileImpl(pm2Bin, ['stop', spec.app], { timeout: 30_000, env: pm2Env }).catch(() => {});
+      }
+    }
     if (legacyWasOnline) {
       // The one-time Zayn process rename cannot bind the same port until the
       // legacy app is stopped. Restore it if the replacement fails to become
       // ready, so a naming migration never strands the bot offline.
-      await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: pm2Env }).catch(() => {});
       await execFileImpl(pm2Bin, ['restart', spec.legacyApp], { timeout: 60_000, env: pm2Env }).catch(() => {});
       await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions).catch(() => {});
     }

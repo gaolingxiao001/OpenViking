@@ -34,6 +34,161 @@ function useFixtureRelease(fixture) {
   });
 }
 
+async function fixtureAppRelease(fixture, name, entryRelative) {
+  const release = path.join(path.dirname(fixture.release), name);
+  const entry = path.join(release, entryRelative);
+  await mkdir(path.dirname(entry), { recursive: true });
+  await writeFile(entry, '');
+  await writeFile(path.join(release, 'ecosystem.config.cjs'), 'module.exports = {};\n');
+  return { release, entry, config: path.join(release, 'ecosystem.config.cjs') };
+}
+
+function replacePm2Harness({ app, initialEntry, entriesByConfig }) {
+  let activeEntry = initialEntry;
+  const events = [];
+
+  return {
+    events,
+    get activeEntry() { return activeEntry; },
+    execFileImpl: async (_command, args) => {
+      events.push(['pm2', ...args]);
+      const [operation] = args;
+      if (operation === 'jlist') {
+        return {
+          stdout: JSON.stringify(activeEntry ? [{
+            name: app,
+            pm2_env: { status: 'online', pm_exec_path: activeEntry },
+          }] : []),
+        };
+      }
+      if (operation === 'delete') {
+        assert.equal(args[1], app);
+        activeEntry = null;
+        return { stdout: '' };
+      }
+      if (operation === 'start' || operation === 'startOrReload') {
+        const nextEntry = entriesByConfig.get(args[1]);
+        assert.ok(nextEntry, `unexpected ecosystem config: ${args[1]}`);
+        assert.deepEqual(args.slice(2), ['--only', app, '--update-env']);
+        // Model PM2's problematic behavior: startOrReload preserves the old
+        // pm_exec_path when an app with the same name already exists.
+        if (operation === 'start' || !activeEntry) activeEntry = nextEntry;
+        return { stdout: '' };
+      }
+      if (operation === 'save') return { stdout: '' };
+      throw new Error(`unexpected PM2 operation: ${operation}`);
+    },
+  };
+}
+
+async function fixtureBootstrapUpdater({ failCurrentReady = false } = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-bootstrap-test-'));
+  const home = path.join(root, 'home');
+  const fakeBin = path.join(root, 'bin');
+  const base = path.join(home, '.local', 'lib', 'lark-daemon');
+  const oldRelease = path.join(base, 'releases', '0.4.0-old');
+  const currentRelease = path.join(base, 'releases', '0.4.0-current');
+  const updaterRelative = path.join('packages', 'updater', 'src', 'main.mjs');
+  const oldEntry = path.join(oldRelease, updaterRelative);
+  const currentEntry = path.join(currentRelease, updaterRelative);
+  for (const [release, entry] of [[oldRelease, oldEntry], [currentRelease, currentEntry]]) {
+    await mkdir(path.dirname(entry), { recursive: true });
+    await writeFile(entry, '');
+    await writeFile(path.join(release, 'ecosystem.config.cjs'), 'module.exports = {};\n');
+  }
+  await mkdir(fakeBin, { recursive: true });
+  await symlink(currentRelease, path.join(base, 'current'));
+  await writeFile(path.join(home, 'pm2-state.json'), JSON.stringify([{
+    name: 'lark-updater',
+    pm2_env: { status: 'online', pm_exec_path: oldEntry },
+  }]));
+  if (failCurrentReady) await writeFile(path.join(home, 'fail-current-ready'), '1\n');
+
+  await writeFile(path.join(fakeBin, 'pm2'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const home = process.env.HOME;
+const statePath = path.join(home, 'pm2-state.json');
+const eventsPath = path.join(home, 'events.jsonl');
+const [operation, ...args] = process.argv.slice(2);
+const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
+const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
+fs.appendFileSync(eventsPath, JSON.stringify(['pm2', operation, ...args]) + '\\n');
+if (operation === 'jlist') {
+  process.stdout.write(JSON.stringify(readState()));
+} else if (operation === 'delete') {
+  writeState(readState().filter((row) => row.name !== args[0]));
+} else if (operation === 'start' || operation === 'startOrReload') {
+  const config = fs.realpathSync(args[0]);
+  const app = args[args.indexOf('--only') + 1];
+  const nextEntry = path.join(path.dirname(config), 'packages', 'updater', 'src', 'main.mjs');
+  const state = readState();
+  const existing = state.find((row) => row.name === app);
+  if (operation === 'start' || !existing) {
+    writeState([
+      ...state.filter((row) => row.name !== app),
+      { name: app, pm2_env: { status: 'online', pm_exec_path: nextEntry } },
+    ]);
+  }
+} else if (operation !== 'save') {
+  process.stderr.write('unexpected fake pm2 operation: ' + operation + '\\n');
+  process.exitCode = 2;
+}
+`, { mode: 0o755 });
+
+  await writeFile(path.join(fakeBin, 'curl'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const home = process.env.HOME;
+const state = JSON.parse(fs.readFileSync(path.join(home, 'pm2-state.json'), 'utf8'));
+const row = state.find((item) => item.name === 'lark-updater');
+const entry = row?.pm2_env?.pm_exec_path || '';
+fs.appendFileSync(path.join(home, 'events.jsonl'), JSON.stringify(['ready', entry]) + '\\n');
+if (!entry) process.exit(22);
+const current = fs.realpathSync(path.join(home, '.local', 'lib', 'lark-daemon', 'current'));
+const activeRelease = entry.slice(0, -${JSON.stringify(`/${updaterRelative}`)}.length);
+if (fs.existsSync(path.join(home, 'fail-current-ready')) && activeRelease === current) process.exit(22);
+`, { mode: 0o755 });
+  await writeFile(path.join(fakeBin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+
+  return {
+    home,
+    oldRelease,
+    currentRelease,
+    oldEntry,
+    currentEntry,
+    async run() {
+      const script = fileURLToPath(new URL('../../../scripts/bootstrap-updater.sh', import.meta.url));
+      const child = spawn('/bin/bash', [script], {
+        env: {
+          HOME: home,
+          USER: 'test',
+          LOGNAME: 'test',
+          LANG: 'C.UTF-8',
+          PATH: `${fakeBin}:/usr/bin:/bin`,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stdout = [];
+      const stderr = [];
+      child.stdout.on('data', (chunk) => stdout.push(chunk));
+      child.stderr.on('data', (chunk) => stderr.push(chunk));
+      const code = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', resolve);
+      });
+      const eventsText = await readFile(path.join(home, 'events.jsonl'), 'utf8');
+      return {
+        code,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        events: eventsText.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)),
+        state: JSON.parse(await readFile(path.join(home, 'pm2-state.json'), 'utf8')),
+      };
+    },
+  };
+}
+
 function post(socketPath, body) {
   const payload = JSON.stringify(body);
   return new Promise((resolve, reject) => {
@@ -55,9 +210,10 @@ function post(socketPath, body) {
   });
 }
 
-test('upgradeTarget only runs the allowlisted Sally app from current release', async () => {
+test('upgradeTarget cold-starts only the allowlisted Sally app from current release', async () => {
   const fixture = await fixtureRelease();
   const calls = [];
+  let jlistCalls = 0;
   const daemonEntry = path.join(fixture.release, 'packages', 'daemon', 'src', 'main.mjs');
   await mkdir(path.dirname(daemonEntry), { recursive: true });
   await writeFile(daemonEntry, '');
@@ -68,8 +224,9 @@ test('upgradeTarget only runs the allowlisted Sally app from current release', a
     execFileImpl: async (command, args, options) => {
       calls.push({ command, args, options });
       if (args[0] === 'jlist') {
+        jlistCalls += 1;
         return {
-          stdout: JSON.stringify([{
+          stdout: JSON.stringify(jlistCalls === 1 ? [] : [{
             name: 'lark-daemon-sally',
             pm2_env: { status: 'online', pm_exec_path: daemonEntry },
           }]),
@@ -87,8 +244,16 @@ test('upgradeTarget only runs the allowlisted Sally app from current release', a
   assert.deepEqual(calls, [
     {
       command: '/fake/pm2',
+      args: ['jlist'],
+      options: {
+        timeout: 30_000,
+        env: { HOME: '/safe-home', PATH: '/safe-bin' },
+      },
+    },
+    {
+      command: '/fake/pm2',
       args: [
-        'startOrReload',
+        'start',
         path.join(fixture.release, 'ecosystem.config.cjs'),
         '--only',
         'lark-daemon-sally',
@@ -148,13 +313,17 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
 
   assert.deepEqual(result.apps, ['lark-daemon-zayn', 'lark-daemon-sally', 'lark-web']);
   assert.deepEqual(
-    calls.filter((args) => args[0] === 'startOrReload').map((args) => [args[1], args[3]]),
+    calls.filter((args) => args[0] === 'start').map((args) => [args[1], args[3]]),
     [
       [path.join(fixture.release, 'ecosystem.config.cjs'), 'lark-daemon-zayn'],
       [path.join(fixture.release, 'ecosystem.config.cjs'), 'lark-daemon-sally'],
       [path.join(fixture.release, 'ecosystem.config.cjs'), 'lark-web'],
     ],
   );
+  assert.ok(!calls.some((args) => args[0] === 'startOrReload'));
+  for (const app of ['lark-daemon-zayn', 'lark-daemon-sally', 'lark-web']) {
+    assert.ok(calls.some((args) => args[0] === 'delete' && args[1] === app));
+  }
   assert.ok(calls.some((args) => args[0] === 'delete' && args[1] === 'lark-web-sally'));
   assert.deepEqual(fetches, [
     'http://127.0.0.1:3738/ready',
@@ -187,7 +356,7 @@ test('first Zayn upgrade replaces the exact legacy PM2 name', async () => {
   });
 
   assert.deepEqual(calls.map((args) => args[0]), [
-    'jlist', 'stop', 'startOrReload', 'jlist', 'delete', 'save',
+    'jlist', 'stop', 'start', 'jlist', 'delete', 'save',
   ]);
   assert.deepEqual(calls[1], ['stop', 'lark-daemon']);
   assert.deepEqual(calls[4], ['delete', 'lark-daemon']);
@@ -240,28 +409,139 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
   });
 });
 
-test('upgradeTarget rejects an online app that still points at an old release', async () => {
+test('upgradeTarget replaces an app whose PM2 exec path belongs to an old release', async () => {
   const fixture = await fixtureRelease();
-  const oldEntry = path.join(fixture.root, 'old-release', 'packages', 'daemon', 'src', 'main.mjs');
-  await mkdir(path.dirname(oldEntry), { recursive: true });
-  await writeFile(oldEntry, '');
+  const entryRelative = path.join('packages', 'daemon', 'src', 'main.mjs');
+  const previous = await fixtureAppRelease(fixture, '0.4.0-previous', entryRelative);
+  const currentEntry = path.join(fixture.release, entryRelative);
+  await mkdir(path.dirname(currentEntry), { recursive: true });
+  await writeFile(currentEntry, '');
+  const currentConfig = path.join(fixture.release, 'ecosystem.config.cjs');
+  const pm2 = replacePm2Harness({
+    app: 'lark-daemon-sally',
+    initialEntry: previous.entry,
+    entriesByConfig: new Map([
+      [currentConfig, currentEntry],
+      [previous.config, previous.entry],
+    ]),
+  });
 
-  await assert.rejects(
-    upgradeTarget('zayn', {
-      releaseLink: fixture.releaseLink,
-      publishReleaseImpl: useFixtureRelease(fixture),
-      execFileImpl: async (_command, args) => ({
-        stdout: args[0] === 'jlist'
-          ? JSON.stringify([{
-            name: 'lark-daemon-zayn',
-            pm2_env: { status: 'online', pm_exec_path: oldEntry },
-          }])
-          : '',
-      }),
-      fetchImpl: async () => ({ ok: true }),
-      readyOptions: { attempts: 1, intervalMs: 0 },
-    }),
-    /outside the current release/,
+  const result = await upgradeTarget('sally', {
+    releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
+    execFileImpl: pm2.execFileImpl,
+    fetchImpl: async (url) => {
+      pm2.events.push(['ready', url, pm2.activeEntry]);
+      return { ok: true };
+    },
+    readyOptions: { attempts: 1, intervalMs: 0 },
+  });
+
+  assert.equal(result.status, 'ready');
+  assert.equal(pm2.activeEntry, currentEntry);
+  assert.deepEqual(pm2.events, [
+    ['pm2', 'jlist'],
+    ['pm2', 'delete', 'lark-daemon-sally'],
+    ['pm2', 'start', currentConfig, '--only', 'lark-daemon-sally', '--update-env'],
+    ['pm2', 'jlist'],
+    ['ready', 'http://127.0.0.1:3740/ready', currentEntry],
+    ['pm2', 'save'],
+  ]);
+});
+
+test('failed replacement restores the app from the release that owned its old exec path', async () => {
+  const fixture = await fixtureRelease();
+  const entryRelative = path.join('packages', 'daemon', 'src', 'main.mjs');
+  const previous = await fixtureAppRelease(fixture, '0.4.0-previous', entryRelative);
+  const currentEntry = path.join(fixture.release, entryRelative);
+  await mkdir(path.dirname(currentEntry), { recursive: true });
+  await writeFile(currentEntry, '');
+  const currentConfig = path.join(fixture.release, 'ecosystem.config.cjs');
+  const pm2 = replacePm2Harness({
+    app: 'lark-daemon-sally',
+    initialEntry: previous.entry,
+    entriesByConfig: new Map([
+      [currentConfig, currentEntry],
+      [previous.config, previous.entry],
+    ]),
+  });
+
+  await assert.rejects(upgradeTarget('sally', {
+    releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
+    execFileImpl: pm2.execFileImpl,
+    fetchImpl: async (url) => {
+      pm2.events.push(['ready', url, pm2.activeEntry]);
+      return { ok: pm2.activeEntry === previous.entry, status: 503 };
+    },
+    readyOptions: { attempts: 1, intervalMs: 0 },
+  }), /did not become ready/);
+
+  assert.equal(pm2.activeEntry, previous.entry);
+  assert.deepEqual(pm2.events.filter((event) => event[1] !== 'save'), [
+    ['pm2', 'jlist'],
+    ['pm2', 'delete', 'lark-daemon-sally'],
+    ['pm2', 'start', currentConfig, '--only', 'lark-daemon-sally', '--update-env'],
+    ['pm2', 'jlist'],
+    ['ready', 'http://127.0.0.1:3740/ready', currentEntry],
+    ['pm2', 'delete', 'lark-daemon-sally'],
+    ['pm2', 'start', previous.config, '--only', 'lark-daemon-sally', '--update-env'],
+    ['ready', 'http://127.0.0.1:3740/ready', previous.entry],
+  ]);
+});
+
+test('bootstrap replaces the updater from the exact current release config and verifies readiness', async () => {
+  const fixture = await fixtureBootstrapUpdater();
+  const result = await fixture.run();
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.deepEqual(result.state, [{
+    name: 'lark-updater',
+    pm2_env: { status: 'online', pm_exec_path: fixture.currentEntry },
+  }]);
+
+  const pm2Events = result.events.filter((event) => event[0] === 'pm2');
+  assert.deepEqual(pm2Events.map((event) => event[1]), [
+    'jlist', 'delete', 'start', 'jlist', 'save',
+  ]);
+  assert.deepEqual(pm2Events[1], ['pm2', 'delete', 'lark-updater']);
+  assert.deepEqual(pm2Events[2], [
+    'pm2',
+    'start',
+    path.join(fixture.currentRelease, 'ecosystem.config.cjs'),
+    '--only',
+    'lark-updater',
+    '--update-env',
+  ]);
+  const readyIndexes = result.events
+    .map((event, index) => [event, index])
+    .filter(([event]) => event[0] === 'ready')
+    .map(([, index]) => index);
+  assert.ok(readyIndexes.length > 0);
+  assert.ok(readyIndexes.every((index) => result.events[index][1] === fixture.currentEntry));
+  assert.ok(!pm2Events.some((event) => event[1] === 'startOrReload'));
+});
+
+test('failed bootstrap restores and verifies the updater from its old exec release', async () => {
+  const fixture = await fixtureBootstrapUpdater({ failCurrentReady: true });
+  const result = await fixture.run();
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(result.state, [{
+    name: 'lark-updater',
+    pm2_env: { status: 'online', pm_exec_path: fixture.oldEntry },
+  }]);
+
+  const pm2Events = result.events.filter((event) => event[0] === 'pm2');
+  assert.ok(!pm2Events.some((event) => event[1] === 'startOrReload'));
+  assert.deepEqual(
+    pm2Events.filter((event) => event[1] === 'delete').map((event) => event[2]),
+    ['lark-updater', 'lark-updater'],
+  );
+  assert.deepEqual(
+    pm2Events.filter((event) => event[1] === 'start').map((event) => event[2]),
+    [
+      path.join(fixture.currentRelease, 'ecosystem.config.cjs'),
+      path.join(fixture.oldRelease, 'ecosystem.config.cjs'),
+    ],
   );
 });
 

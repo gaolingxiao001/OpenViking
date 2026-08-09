@@ -93,7 +93,9 @@ describe('module boundaries', () => {
     const bootstrap = fs.readFileSync(path.join(root, 'scripts', 'bootstrap-updater.sh'), 'utf8');
     assert.match(bootstrap, /pm2_control\(\)/);
     assert.match(bootstrap, /env -i/);
-    assert.match(bootstrap, /startOrReload "\$CONFIG" --only lark-updater --update-env/);
+    assert.match(bootstrap, /delete lark-updater/);
+    assert.match(bootstrap, /start "\$CONFIG" --only lark-updater --update-env/);
+    assert.doesNotMatch(bootstrap, /startOrReload/);
     assert.match(bootstrap, /--unix-socket "\$SOCKET" http:\/\/localhost\/ready/);
     assert.match(bootstrap, /"\$BASE"\/releases\/\*\/packages\/updater\/src\/main\.mjs/);
     assert.match(bootstrap, /restoring \$PREVIOUS_RELEASE/);
