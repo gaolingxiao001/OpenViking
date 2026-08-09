@@ -207,7 +207,7 @@ export const LARK_TOOLS = [
         },
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the send is blocked if anything newer has arrived.' },
-        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional inbound msg= id whose one final delivery this send fulfills. Defaults to decision_message_id. Set it to an older still-pending question when a newer steered question was answered first; it must be in the same chat/thread and no newer than decision_message_id.' },
+        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. This is attribution only, not routing or priority; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
       required: ['chat_id', 'decision_message_id'],
     },
@@ -246,7 +246,7 @@ export const LARK_TOOLS = [
         reply_in_thread: { type: 'boolean', default: false, description: 'Reply inside the message thread (continue or start one).' },
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the reply is blocked if anything newer has arrived.' },
-        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional inbound msg= id whose one final delivery this reply fulfills. Defaults to decision_message_id. Set it to an older still-pending question when a newer steered question was answered first; it must be in the same chat/thread and no newer than decision_message_id.' },
+        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. This is attribution only, not routing or priority; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
       required: ['message_id', 'decision_message_id'],
     },
@@ -268,7 +268,7 @@ export const LARK_TOOLS = [
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to react to. Never guess or reconstruct a shortened ID.' },
         emoji_type: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$', description: 'Exact Lark emoji_type, such as OK, THUMBSUP, DONE, THANKS, OnIt, or LGTM.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the reaction is blocked if anything newer has arrived.' },
-        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional inbound msg= id whose one final delivery this reaction fulfills. Defaults to decision_message_id. Set it only for an older still-pending decision in the same chat/thread.' },
+        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. This is attribution only, not routing or priority; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
       required: ['message_id', 'emoji_type', 'decision_message_id'],
     },
@@ -589,9 +589,9 @@ export class LarkToolService {
     return { messageId: decisionMessageId, row };
   }
 
-  // Freshness and attribution are deliberately separate. A steered quick question B
-  // can be answered while long-running A remains open; the later A delivery still
-  // uses B as its freshness fence, while response_to_message_id attributes it to A.
+  // Freshness and attribution are deliberately separate. The newest observed
+  // inbound fences stale side effects; response_to_message_id only attributes
+  // the delivery to the work it actually completes.
   // An implicit reply/reaction target is used only when its scope can be proven;
   // otherwise backwards-compatible attribution falls back to the freshness fence.
   _resolveResponseDecision(value, fresh, implicitTarget = null) {

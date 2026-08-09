@@ -33,7 +33,7 @@ function options(overrides = {}) {
 }
 
 describe('Lark proactive IM tool service', () => {
-  it('answers a steered quick question before an older task without weakening freshness', async () => {
+  it('separates response attribution from the latest freshness fence', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-steered-delivery-'));
     const databasePath = path.join(directory, 'state.sqlite3');
     const store = new Store(databasePath, quietLogger);
