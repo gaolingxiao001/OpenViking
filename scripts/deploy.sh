@@ -10,6 +10,19 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BASE="$HOME/.local/lib/lark-daemon"
 ENV_FILE="$BASE/env"
 DEPLOY_LOCK="$BASE/deploy.lock"
+CLI_LINK="$HOME/.local/bin/lark-daemon"
+CLI_TARGET="$BASE/current/packages/updater/bin/lark-daemon.mjs"
+
+if [ -L "$CLI_LINK" ]; then
+  EXISTING_TARGET="$(readlink "$CLI_LINK")"
+  case "$EXISTING_TARGET" in
+    "$BASE"/*) ;;
+    *) echo "refusing to replace foreign CLI symlink: $CLI_LINK -> $EXISTING_TARGET"; exit 1 ;;
+  esac
+elif [ -e "$CLI_LINK" ]; then
+  echo "refusing to replace existing CLI path: $CLI_LINK"
+  exit 1
+fi
 
 mkdir -p "$BASE/releases"
 if ! mkdir "$DEPLOY_LOCK" 2>/dev/null; then
@@ -64,7 +77,7 @@ for _ in $(seq 30); do
   if [ "$ok" = 1 ]; then
     ln -sfn "$REL" "$BASE/current"
     mkdir -p "$HOME/.local/bin"
-    ln -sfn "$BASE/current/packages/updater/bin/lark-daemon.mjs" "$HOME/.local/bin/lark-daemon"
+    ln -sfn "$CLI_TARGET" "$CLI_LINK"
     echo "deployed $REL"
     ls -1dt "$BASE"/releases/* | tail -n +4 | xargs rm -rf
     exit 0

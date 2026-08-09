@@ -73,6 +73,8 @@ describe('module boundaries', () => {
     assert.match(deploy, /npm test[^\n]*npm run check/);
     assert.match(deploy, /ln -sf "\$ENV_FILE" "\$REL\/\.env"/);
     assert.match(deploy, /PORTS="3737 3738"/);
+    assert.match(deploy, /refusing to replace foreign CLI symlink/);
+    assert.match(deploy, /refusing to replace existing CLI path/);
   });
 
   it('allows exact sibling operations without permitting self or broad PM2 control', () => {
