@@ -8,7 +8,7 @@
       content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     >
     <meta name="color-scheme" content="light dark">
-    <title>Zayn Activity</title>
+    <title>Agent Activity</title>
     <link rel="stylesheet" href="/activity.css">
     <script src="/activity.js" defer></script>
   </head>
@@ -18,7 +18,12 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="identity">
-          <h1>Zayn</h1>
+          <label class="instance-picker" for="instance-select">
+            <span class="visually-hidden">选择 Agent</span>
+            <select id="instance-select" aria-label="选择 Agent" disabled>
+              <option>正在读取</option>
+            </select>
+          </label>
           <span id="service-status" class="service-status" role="status" aria-live="polite">
             <span class="status-dot" aria-hidden="true"></span>
             <span id="service-status-text">正在连接</span>

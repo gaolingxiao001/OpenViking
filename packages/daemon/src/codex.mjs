@@ -243,6 +243,9 @@ export class CodexAgent {
     this.storedThreadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;      // turn/start sent, turn/started not yet observed
+    this.turnStartedAtMs = null;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.startingItems = [];         // inbound items waiting for turn/started
     this.startingJournalThroughSeq = 0; // promoted only after turn completion
     this.activeInboundSeqs = [];     // inbound rows associated with the live app-server turn
@@ -417,6 +420,9 @@ export class CodexAgent {
       }
       this.needsHistoryPrefix = false;
     }
+    this.turnStartedAtMs = Date.now();
+    this.modelWorking = true;
+    this.modelStartedAtMs = this.turnStartedAtMs;
     this.startingTurn = true;
     this.startingItems = items.map((item) => ({ text: item.text, seq: item.seq }));
     this.startingJournalThroughSeq = journalThroughSeq;
@@ -430,6 +436,9 @@ export class CodexAgent {
       ...(this.model ? { model: this.model } : {}),
     }).catch((error) => {
       this.startingTurn = false;
+      this.turnStartedAtMs = null;
+      this.modelWorking = false;
+      this.modelStartedAtMs = null;
       this.startingItems = [];
       this.startingJournalThroughSeq = 0;
       if (hadPrefix) this.needsHistoryPrefix = true;
@@ -520,6 +529,9 @@ export class CodexAgent {
     const inboundSeqs = this._associatedInboundSeqs();
     this.activeTurnId = null;
     this.startingTurn = false;
+    this.turnStartedAtMs = null;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     const failed = status === 'failed';
     const errorText = error ? turnErrorText(error) : '';
     this._recordActivity('agent.turn_completed', {
@@ -668,8 +680,19 @@ export class CodexAgent {
           params.turn?.id ?? params.turnId ?? null,
         );
         break;
+      case 'item/started': {
+        const type = params.item?.type;
+        const modelOutput = ['reasoning', 'agentMessage', 'agent_message'].includes(type);
+        this.modelWorking = modelOutput;
+        this.modelStartedAtMs = modelOutput ? Date.now() : null;
+        break;
+      }
       case 'item/completed': {
         const item = params.item;
+        if (['reasoning', 'agentMessage', 'agent_message'].includes(item?.type)) {
+          this.modelWorking = false;
+          this.modelStartedAtMs = null;
+        }
         const text = item?.text ?? item?.message?.text;
         const associatedInboundSeqs = this._associatedInboundSeqs();
         if ((item?.type === 'agentMessage' || item?.type === 'agent_message') && text) {
@@ -788,6 +811,8 @@ export class CodexAgent {
       this.threadId = null;
       this.activeTurnId = null;
       this.startingTurn = false;
+      this.modelWorking = false;
+      this.modelStartedAtMs = null;
       this.stdoutBuffer = '';
       this.pending.clear();
       this.nextId = 0;
@@ -884,6 +909,8 @@ export class CodexAgent {
     // yet; like rotateSession, that turn runs out abandoned.
     this.activeTurnId = null;
     this.startingTurn = false;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
@@ -915,6 +942,8 @@ export class CodexAgent {
     // id yet; its turn runs out on the abandoned thread. Window is one RPC ack.
     this.activeTurnId = null;
     this.startingTurn = false;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
@@ -975,6 +1004,8 @@ export class CodexAgent {
     this.threadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
@@ -1024,6 +1055,8 @@ export class CodexAgent {
     this.threadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];

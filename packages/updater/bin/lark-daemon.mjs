@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { defaultSocketPath, getTarget } from '../src/targets.mjs';
+import { assertUpgradeTarget, defaultSocketPath } from '../src/targets.mjs';
 
 function usage() {
-  process.stderr.write('usage: lark-daemon upgrade <zayn|sally>\n');
+  process.stderr.write('usage: lark-daemon upgrade <zayn|sally|all>\n');
 }
 
 function requestUpgrade(socketPath, target) {
@@ -47,12 +47,15 @@ if (command !== 'upgrade' || !target || extra.length > 0) {
   process.exitCode = 2;
 } else {
   try {
-    getTarget(target);
+    assertUpgradeTarget(target);
     const result = await requestUpgrade(
       process.env.LARK_UPDATER_SOCKET || defaultSocketPath(),
       target,
     );
-    process.stdout.write(`${result.app} is ready on ${result.release}\n`);
+    const apps = Array.isArray(result.apps) && result.apps.length > 0
+      ? result.apps
+      : [result.app].filter(Boolean);
+    process.stdout.write(`${apps.join(', ')} ${apps.length === 1 ? 'is' : 'are'} ready on ${result.release}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

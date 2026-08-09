@@ -16,6 +16,9 @@ function fakeCodex(overrides = {}) {
     threadId: 'th-live',
     model: '',
     effort: 'medium',
+    state: { connected: true, activeTurn: 0, queued: 0 },
+    turnInProgress: false,
+    async interruptTurn() { calls.push(['interrupt']); },
     async rotateSession(options) { calls.push(['rotate', options]); return 'th-new'; },
     async setModel(model) { calls.push(['setModel', model]); return 'th-new'; },
     async setEffort(effort) { calls.push(['setEffort', effort]); return 'th-new'; },
@@ -99,7 +102,7 @@ describe('executeCommand', () => {
     const outcome = await executeCommand({ name: 'new', arg: '' }, codex);
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /th-new/);
-    assert.deepEqual(codex.calls, [['rotate', { resume: false }]]);
+    assert.deepEqual(codex.calls, [['interrupt'], ['rotate', { resume: false }]]);
   });
 
   it('restart reloads the kernel then rotates to a fresh session', async () => {
@@ -113,7 +116,7 @@ describe('executeCommand', () => {
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /已刷新内核并开启新会话：th-new/);
     assert.doesNotMatch(outcome.text, /初始化/);
-    assert.deepEqual(codex.calls, [['reload'], ['rotate', { resume: false }]]);
+    assert.deepEqual(codex.calls, [['interrupt'], ['reload'], ['rotate', { resume: false }]]);
   });
 
   it('restart mentions the outer kernel path when it was reseeded', async () => {
@@ -137,6 +140,25 @@ describe('executeCommand', () => {
     const outcome = await executeCommand({ name: 'new', arg: '' }, codex);
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /重连/);
+  });
+
+  it('status reports active duration without consulting subagents', async () => {
+    const codex = fakeCodex({
+      runtime: 'codex',
+      model: 'gpt-5.6-sol',
+      workStatus: {
+        working: true,
+        startedAtMs: Date.now() - 125_000,
+        connected: true,
+        queued: 2,
+        switching: false,
+      },
+    });
+    const outcome = await executeCommand({ name: 'status', arg: '' }, codex);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /模型工作中，已持续 2 分/);
+    assert.match(outcome.text, /排队消息：2/);
+    assert.equal(codex.calls.length, 0);
   });
 
   it('model without an arg reports the current model and the available options', async () => {
@@ -269,6 +291,7 @@ describe('executeCommand', () => {
     assert.equal(high.ok, true);
     assert.match(high.text, /已开启新会话/);
     assert.deepEqual(codex.calls, [
+      ['interrupt'],
       ['setEffort', 'high'],
       ['rotate', { resume: false }],
     ]);
@@ -279,7 +302,7 @@ describe('executeCommand', () => {
 
     const unknown = await executeCommand({ name: 'effort', arg: 'turbo' }, codex);
     assert.equal(unknown.ok, false);
-    assert.equal(codex.calls.length, 2);
+    assert.equal(codex.calls.length, 3);
   });
 
   it('effort validates against the current model and rejects unsupported levels', async () => {
@@ -299,7 +322,8 @@ describe('executeCommand', () => {
 
     const none = await executeCommand({ name: 'effort', arg: 'n' }, codex);
     assert.equal(none.ok, true);
-    assert.deepEqual(codex.calls[0], ['setEffort', 'none']);
+    assert.deepEqual(codex.calls[0], ['interrupt']);
+    assert.deepEqual(codex.calls[1], ['setEffort', 'none']);
 
     const listing = await executeCommand({ name: 'effort', arg: '' }, codex);
     assert.match(listing.text, /可选：none、low、medium、high、xhigh/);

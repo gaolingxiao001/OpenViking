@@ -108,6 +108,7 @@ export class LarkDaemon {
     // Automatic claude → codex fallback state (see tryModelFallback).
     this.fallbackInProgress = false;
     this.lastFallbackAtMs = 0;
+    this.lastModelActivityAtMs = Date.now();
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -304,6 +305,7 @@ export class LarkDaemon {
       chatType: event.chatType,
     });
     this.enqueueIngress(async () => {
+      await this.maybeAcknowledgeAfterIdle(event, result.inbound);
       // Bounded roster warm-up so formatInboundLine can resolve from= to a
       // display name. warm() never rejects and races an internal timeout, so a
       // slow or failing lark-cli only degrades the label back to the id stub.
@@ -315,6 +317,66 @@ export class LarkDaemon {
         seq: result.inbound.seq,
       });
     });
+  }
+
+  async maybeAcknowledgeAfterIdle(event, inbound) {
+    const now = Date.now();
+    const threshold = this.config.idleReactionAfterMs ?? 600_000;
+    const direct = (event.chatType ?? 'p2p') === 'p2p'
+      || (Array.isArray(event.mentions) && event.mentions.length > 0);
+    const shouldReact = threshold > 0
+      && direct
+      && !this.codex?.turnInProgress
+      && now - this.lastModelActivityAtMs >= threshold;
+    // Every accepted user message proves there is fresh work. Move the window
+    // immediately so a burst after a long idle gets at most one reaction.
+    this.lastModelActivityAtMs = now;
+    if (!shouldReact || this.shuttingDown) return false;
+
+    const journalKey = `idle-liveness-reaction:${event.messageId}`;
+    const action = 'daemon_idle_liveness_reaction';
+    try {
+      this.store.appendCognitionJournal({
+        kind: 'outbound',
+        status: 'PENDING',
+        chatId: event.chatId,
+        threadId: event.threadId,
+        messageId: event.messageId,
+        actor: 'me',
+        text: '[reaction OnIt]',
+        dedupeKey: journalKey,
+        metadata: { action, emojiType: 'OnIt' },
+      });
+    } catch (error) {
+      this.logger.warn('idle_liveness_journal_reserve_failed', { error: safeError(error) });
+      return false;
+    }
+    try {
+      await this.lark.reactMessage(event.messageId, 'OnIt');
+    } catch (error) {
+      try {
+        this.store.settleCognitionJournal(journalKey, 'UNCERTAIN', { metadata: { action } });
+      } catch (settleError) {
+        this.logger.warn('idle_liveness_journal_settle_failed', { error: safeError(settleError) });
+      }
+      this.logger.warn('idle_liveness_reaction_failed', {
+        messageRef: opaqueRef(event.messageId),
+        error: safeChatLookupError(error),
+      });
+      return false;
+    }
+    try {
+      this.store.settleCognitionJournal(journalKey, 'COMMITTED', { metadata: { action } });
+    } catch (error) {
+      this.logger.warn('idle_liveness_journal_settle_failed', { error: safeError(error) });
+    }
+    this.recordSystemActivity('system.liveness_ack', {
+      summary: '长时间空闲后已先用 reaction 确认在线',
+      status: 'SENT',
+      conversationKey: event.conversationKey,
+      inboundSeq: inbound?.seq,
+    });
+    return true;
   }
 
   // A slash command and every later accepted message share one global order.
@@ -333,6 +395,7 @@ export class LarkDaemon {
   // A successful turn clears the failure-notice mute for every conversation it
   // consumed messages from: the next failure there is news again.
   handleTurnSuccess({ inboundSeqs }) {
+    this.lastModelActivityAtMs = Date.now();
     if (this.failureNoticeMutes.size === 0 || !this.store) return;
     for (const seq of Array.isArray(inboundSeqs) ? inboundSeqs : []) {
       let inbound = null;
@@ -345,6 +408,7 @@ export class LarkDaemon {
   // when that is not applicable (or the switch itself fails) the normal failure
   // notice goes out instead.
   async handleTurnFailure(info) {
+    this.lastModelActivityAtMs = Date.now();
     try {
       if (await this.tryModelFallback(info)) return;
     } catch (error) {
@@ -556,14 +620,11 @@ export class LarkDaemon {
   // Slash commands never touch the model: execute deterministically against the
   // codex agent's connection state, then reply straight back through lark-cli.
   async handleSlashCommand(command, event, inbound) {
-    // Control/outbound journal rows must sit between completed model turns. If a
-    // command were recorded during an active turn, a later steer could advance
-    // the runtime cursor past state that the model never observed. Exception:
-    // /model interrupts the in-flight turn by design (immediate switch + fresh
-    // session), so no later steer can land on the old session — it must not
-    // block behind a stuck turn.
-    if (command.name !== 'model') await this.codex.whenIdle();
+    // Local commands are a priority control plane. Read-only commands such as
+    // /help and /status answer alongside an active turn; session-mutating
+    // commands interrupt that turn inside executeCommand before rotating.
     if (this.shuttingDown) return;
+    this.lastModelActivityAtMs = Date.now();
     const label = command.name ? `/${command.name}` : String(event.content).trim().split(/\s+/)[0];
     this.store.appendCognitionJournal({
       kind: 'control',

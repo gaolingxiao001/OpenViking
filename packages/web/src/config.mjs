@@ -30,6 +30,55 @@ function assertLoopbackHost(name, host) {
   }
 }
 
+function parseInstances(raw, fallbackHost, fallbackPort) {
+  if (!raw) {
+    return Object.freeze([Object.freeze({
+      id: 'zayn',
+      label: 'Zayn',
+      host: fallbackHost,
+      port: fallbackPort,
+    })]);
+  }
+  if (Buffer.byteLength(raw, 'utf8') > 8_192) {
+    throw new Error('LARK_WEB_INSTANCES is too large');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('LARK_WEB_INSTANCES must be valid JSON');
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 16) {
+    throw new Error('LARK_WEB_INSTANCES must contain between 1 and 16 instances');
+  }
+  const ids = new Set();
+  const ports = new Set();
+  return Object.freeze(parsed.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`LARK_WEB_INSTANCES[${index}] must be an object`);
+    }
+    const id = value.id;
+    const label = value.label;
+    const host = value.host;
+    const port = value.port;
+    if (typeof id !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(id)) {
+      throw new Error(`LARK_WEB_INSTANCES[${index}].id is invalid`);
+    }
+    if (ids.has(id)) throw new Error(`duplicate LARK_WEB_INSTANCES id: ${id}`);
+    ids.add(id);
+    if (typeof label !== 'string' || label.trim() === '' || label.length > 40) {
+      throw new Error(`LARK_WEB_INSTANCES[${index}].label is invalid`);
+    }
+    assertLoopbackHost(`LARK_WEB_INSTANCES[${index}].host`, host);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`LARK_WEB_INSTANCES[${index}].port must be an integer between 1 and 65535`);
+    }
+    if (ports.has(port)) throw new Error(`duplicate LARK_WEB_INSTANCES port: ${port}`);
+    ports.add(port);
+    return Object.freeze({ id, label: label.trim(), host, port });
+  }));
+}
+
 export function getConfig() {
   const host = process.env.LARK_WEB_HOST || '127.0.0.1';
   const port = intEnv('LARK_WEB_PORT', 3737, { min: 1, max: 65535 });
@@ -37,15 +86,20 @@ export function getConfig() {
   const daemonPort = intEnv('LARK_WEB_DAEMON_PORT', 3738, { min: 1, max: 65535 });
   assertLoopbackHost('LARK_WEB_HOST', host);
   assertLoopbackHost('LARK_WEB_DAEMON_HOST', daemonHost);
-  if (port === daemonPort) {
-    throw new Error('LARK_WEB_PORT and LARK_WEB_DAEMON_PORT must be different');
+  const instances = parseInstances(process.env.LARK_WEB_INSTANCES, daemonHost, daemonPort);
+  const defaultInstance = process.env.LARK_WEB_DEFAULT_INSTANCE || instances[0].id;
+  if (!instances.some((instance) => instance.id === defaultInstance)) {
+    throw new Error('LARK_WEB_DEFAULT_INSTANCE must name an entry in LARK_WEB_INSTANCES');
+  }
+  if (instances.some((instance) => instance.port === port)) {
+    throw new Error('LARK_WEB_PORT must be different from every daemon port');
   }
 
   return {
     host,
     port,
-    daemonHost,
-    daemonPort,
+    instances,
+    defaultInstance,
     publicDir,
     upstreamTimeoutMs: intEnv('LARK_WEB_DAEMON_TIMEOUT_MS', 3_000, { min: 100, max: 30_000 }),
     shutdownTimeoutMs: intEnv('LARK_WEB_SHUTDOWN_TIMEOUT_MS', 5_000, { min: 1_000, max: 30_000 }),
@@ -57,8 +111,8 @@ export function publicConfig(config) {
   return {
     host: config.host,
     port: config.port,
-    daemonHost: config.daemonHost,
-    daemonPort: config.daemonPort,
+    instances: config.instances.map(({ id, label, port }) => ({ id, label, port })),
+    defaultInstance: config.defaultInstance,
     upstreamTimeoutMs: config.upstreamTimeoutMs,
   };
 }

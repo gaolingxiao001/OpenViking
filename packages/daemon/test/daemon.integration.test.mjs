@@ -387,25 +387,19 @@ describe('daemon event path', { concurrency: false }, () => {
     }
   });
 
-  it('waits for an active turn before journaling /help and releasing following ingress', async () => {
+  it('answers /help immediately while a model turn is active', async () => {
     const daemon = new LarkDaemon(
       { lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
       createLogger('error', { test: 'command-idle-barrier' }),
     );
     const order = [];
-    let releaseIdle;
-    const idle = new Promise((resolve) => { releaseIdle = resolve; });
     daemon.codex = {
       runtime: 'codex',
       threadId: 'thread-active',
       model: 'gpt-5.6-sol',
       effort: 'medium',
       turnInProgress: true,
-      async whenIdle() {
-        order.push('wait-idle');
-        await idle;
-        this.turnInProgress = false;
-      },
+      async whenIdle() { throw new Error('/help must not wait for the model'); },
       deliver() { order.push('following-inbound'); },
     };
     daemon.store = {
@@ -430,19 +424,62 @@ describe('daemon event path', { concurrency: false }, () => {
       () => daemon.handleSlashCommand({ name: 'help', arg: '' }, event, { seq: 1 }),
     );
     const following = daemon.enqueueIngress(() => daemon.codex.deliver('next', 2));
-    await Promise.resolve();
-    assert.deepEqual(order, ['wait-idle']);
-
-    releaseIdle();
     await Promise.all([command, following]);
     assert.deepEqual(order, [
-      'wait-idle',
       'journal:control',
       'journal:outbound',
       'command-reply',
       'journal:settled',
       'following-inbound',
     ]);
+  });
+
+  it('reacts once before model work after a long idle window', async () => {
+    const daemon = new LarkDaemon(
+      {
+        lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-idle-reaction.lock'),
+        idleReactionAfterMs: 600_000,
+      },
+      createLogger('error', { test: 'idle-reaction' }),
+    );
+    const journal = [];
+    const reactions = [];
+    daemon.store = {
+      appendCognitionJournal(entry) { journal.push(entry); },
+      settleCognitionJournal(key, status) { journal.push({ key, status }); },
+      recordActivity() { return true; },
+    };
+    daemon.codex = { turnInProgress: false };
+    daemon.lark = {
+      async reactMessage(messageId, emojiType) { reactions.push({ messageId, emojiType }); },
+    };
+    daemon.lastModelActivityAtMs = Date.now() - 601_000;
+    const event = {
+      chatId: 'oc_idle12345678',
+      threadId: null,
+      messageId: 'om_idle12345678',
+      chatType: 'p2p',
+      conversationKey: 'profile:tenant:oc_idle12345678:main',
+    };
+
+    assert.equal(await daemon.maybeAcknowledgeAfterIdle(event, { seq: 7 }), true);
+    assert.deepEqual(reactions, [{ messageId: 'om_idle12345678', emojiType: 'OnIt' }]);
+    assert.equal(journal[0].status, 'PENDING');
+    assert.equal(journal[1].status, 'COMMITTED');
+
+    assert.equal(await daemon.maybeAcknowledgeAfterIdle({ ...event, messageId: 'om_idle23456789' }, { seq: 8 }), false);
+    daemon.lastModelActivityAtMs = Date.now() - 601_000;
+    daemon.codex.turnInProgress = true;
+    assert.equal(await daemon.maybeAcknowledgeAfterIdle({ ...event, messageId: 'om_idle34567890' }, { seq: 9 }), false);
+    daemon.codex.turnInProgress = false;
+    daemon.lastModelActivityAtMs = Date.now() - 601_000;
+    assert.equal(await daemon.maybeAcknowledgeAfterIdle({
+      ...event,
+      messageId: 'om_idle45678901',
+      chatType: 'group',
+      mentions: [],
+    }, { seq: 10 }), false);
+    assert.equal(reactions.length, 1);
   });
 });
 

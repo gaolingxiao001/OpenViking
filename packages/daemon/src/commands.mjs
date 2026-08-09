@@ -9,7 +9,7 @@ import { CLAUDE_MODELS } from './claude.mjs';
 // current model's supportedReasoningEfforts from model/list.
 export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 
-const COMMANDS = ['new', 'help', 'model', 'effort', 'restart'];
+const COMMANDS = ['new', 'help', 'status', 'model', 'effort', 'restart'];
 
 const MODEL_NAME = /^[A-Za-z0-9._:\/-]{1,64}$/;
 
@@ -51,6 +51,7 @@ export function helpText(codex) {
     '可用命令（支持前缀匹配，如 /h、/m）：',
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
+    '/status — 查看模型是否在工作以及持续时间',
     '/model [名称] — 查看或切换模型，如 sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
     '/restart — 重新加载内核（外层 persona/团队上下文）并开启新会话',
@@ -60,6 +61,41 @@ export function helpText(codex) {
     `模型：${codex.model || '（默认）'}`,
     `推理档位：${codex.effort}`,
   ].join('\n');
+}
+
+function durationText(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRemainder = minutes % 60;
+  return minuteRemainder ? `${hours} 小时 ${minuteRemainder} 分` : `${hours} 小时`;
+}
+
+export function statusText(agent, nowMs = Date.now()) {
+  const status = agent.workStatus ?? {
+    working: Boolean(agent.turnInProgress),
+    startedAtMs: null,
+    connected: Boolean(agent.state?.connected ?? true),
+    queued: agent.state?.queued ?? 0,
+    switching: false,
+  };
+  let headline = '状态：空闲';
+  if (status.switching) headline = '状态：正在切换 Runtime';
+  else if (status.working) {
+    headline = status.startedAtMs
+      ? `状态：模型工作中，已持续 ${durationText(nowMs - status.startedAtMs)}`
+      : '状态：模型工作中';
+  } else if (!status.connected) headline = '状态：Runtime 未连接';
+  const lines = [
+    headline,
+    `Runtime：${agent.runtime ?? 'codex'}`,
+    `模型：${agent.model || '（默认）'}`,
+  ];
+  if ((status.queued ?? 0) > 0) lines.push(`排队消息：${status.queued}`);
+  return lines.join('\n');
 }
 
 // Executes one parsed command against the codex agent. Returns { ok, text }; the
@@ -75,7 +111,10 @@ export async function executeCommand(command, codex) {
 
   if (command.name === 'help') return { ok: true, text: helpText(codex) };
 
+  if (command.name === 'status') return { ok: true, text: statusText(codex) };
+
   if (command.name === 'new') {
+    await codex.interruptTurn?.();
     const threadId = await codex.rotateSession({ resume: false });
     return {
       ok: true,
@@ -86,6 +125,7 @@ export async function executeCommand(command, codex) {
   if (command.name === 'restart') {
     // Reload the two-layer kernel (inner from the release, outer from the data
     // dir) into the running backend, then rotate so the fresh prompt applies.
+    await codex.interruptTurn?.();
     const detail = await codex.reloadSystemPrompt();
     const threadId = await codex.rotateSession({ resume: false });
     const lines = [
@@ -175,6 +215,7 @@ export async function executeCommand(command, codex) {
       : `不支持的档位：${command.arg}`;
     return { ok: false, text: `${head}\n可选：${supported.join('、')}` };
   }
+  await codex.interruptTurn?.();
   codex.setEffort(levels[0]);
   const threadId = await codex.rotateSession({ resume: false });
   return {

@@ -32,7 +32,8 @@ body {
 }
 
 button,
-input { color: inherit; font: inherit; }
+input,
+select { color: inherit; font: inherit; }
 button { cursor: pointer; }
 [hidden] { display: none !important; }
 summary { list-style: none; }
@@ -40,6 +41,7 @@ summary::-webkit-details-marker { display: none; }
 
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 summary:focus-visible,
 a:focus-visible {
   outline: 3px solid rgb(36 107 219 / 26%);
@@ -98,7 +100,32 @@ a:focus-visible {
 }
 .identity { gap: 11px; }
 .topbar-actions { gap: 7px; }
-h1 { margin: 0; font-size: 19px; line-height: 1.2; letter-spacing: -.025em; }
+.instance-picker { position: relative; }
+.instance-picker::after {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  transform: translateY(-70%) rotate(45deg);
+  border-right: 1px solid var(--muted);
+  border-bottom: 1px solid var(--muted);
+  content: "";
+  pointer-events: none;
+}
+.instance-picker select {
+  max-width: 150px;
+  padding: 2px 18px 2px 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -.025em;
+  cursor: pointer;
+}
+.instance-picker select:disabled { cursor: default; opacity: .7; }
 
 .service-status {
   display: inline-flex;

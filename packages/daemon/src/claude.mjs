@@ -87,6 +87,9 @@ export class ClaudeAgent {
     this.child = null;
     this.connected = false;
     this.turnActive = false;
+    this.turnStartedAtMs = null;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.turnError = null;
     this.activeItems = [];
     this.queue = [];
@@ -458,6 +461,11 @@ export class ClaudeAgent {
     this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, prepared.deliveredThroughSeq);
     this.activeItems.push(...items);
     this.turnActive = true;
+    if (!wasActive) this.turnStartedAtMs = Date.now();
+    if (!wasActive) {
+      this.modelWorking = true;
+      this.modelStartedAtMs = this.turnStartedAtMs;
+    }
     this._recordActivity(wasActive ? 'agent.steered' : 'agent.turn_started', {
       inboundSeq: prepared.seqs.at(-1) ?? null,
       metadata: { runtime: 'claude', inboundSeqs: prepared.seqs },
@@ -513,6 +521,10 @@ export class ClaudeAgent {
       const blocks = Array.isArray(message.message?.content) ? message.message.content : [];
       for (const block of blocks) {
         if (!block || typeof block !== 'object') continue;
+        if (['thinking', 'text'].includes(block.type) && !this.modelWorking) {
+          this.modelWorking = true;
+          this.modelStartedAtMs = Date.now();
+        }
         if (block.type === 'thinking') {
           // Hidden thinking is intentionally not persisted into the daemon journal.
           this._recordActivity('agent.thinking', {
@@ -527,6 +539,8 @@ export class ClaudeAgent {
             metadata: { runtime: 'claude', delivery: 'telemetry_only' },
           });
         } else if (block.type === 'tool_use') {
+          this.modelWorking = false;
+          this.modelStartedAtMs = null;
           this._recordActivity('agent.tool_called', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
             summary: String(block.name ?? 'unknown tool'),
@@ -547,6 +561,10 @@ export class ClaudeAgent {
           summary: block.is_error === true ? 'Claude tool failed' : 'Claude tool completed',
           metadata: { runtime: 'claude', toolId: block.tool_use_id },
         });
+      }
+      if (blocks.some((block) => block?.type === 'tool_result')) {
+        this.modelWorking = true;
+        this.modelStartedAtMs = Date.now();
       }
       return;
     }
@@ -579,6 +597,9 @@ export class ClaudeAgent {
     const items = this.activeItems.splice(0);
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
     this.turnActive = false;
+    this.turnStartedAtMs = null;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     if (!error) {
       this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.deliveredThroughSeq);
       this._persistSession();
@@ -648,6 +669,9 @@ export class ClaudeAgent {
     const wasActive = this.turnActive;
     const items = this.activeItems.splice(0);
     this.turnActive = false;
+    this.turnStartedAtMs = null;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this.needsHistoryPrefix = !this.sessionInitialized;
     if (!this.sessionInitialized && !this.stopping && this.startedOk && this.autoReconnect) {
@@ -714,6 +738,9 @@ export class ClaudeAgent {
     if (!this.turnActive) return;
     this.activeItems.splice(0);
     this.turnActive = false;
+    this.turnStartedAtMs = null;
+    this.modelWorking = false;
+    this.modelStartedAtMs = null;
     this.turnError = null;
     this.deliveredThroughSeq = this.syncedThroughSeq;
     await this._terminateCurrent();

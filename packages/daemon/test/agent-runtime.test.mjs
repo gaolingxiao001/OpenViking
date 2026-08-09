@@ -67,6 +67,25 @@ describe('global Codex/Claude hard switch', () => {
     });
   });
 
+  it('reports the root model idle while only an external tool or subagent is running', () => {
+    const runtime = new AgentRuntime({}, {}, quietLogger);
+    runtime.backend = backend('codex');
+    runtime.backend.turnInProgress = true;
+    runtime.backend.modelWorking = false;
+    runtime.backend.modelStartedAtMs = null;
+    assert.equal(runtime.workStatus.working, false);
+
+    runtime.backend.modelWorking = true;
+    runtime.backend.modelStartedAtMs = 1234;
+    assert.deepEqual(runtime.workStatus, {
+      working: true,
+      startedAtMs: 1234,
+      connected: false,
+      queued: 0,
+      switching: false,
+    });
+  });
+
   it('live-validates a direct Codex name before switching from Claude', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-direct-model-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);

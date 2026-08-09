@@ -54,6 +54,16 @@ export class AgentRuntime {
     return { ...state, connected: state.connected && !this.switching };
   }
   get turnInProgress() { return this.switching || Boolean(this.backend?.turnInProgress); }
+  get workStatus() {
+    const working = this.switching || Boolean(this.backend?.modelWorking);
+    return {
+      working,
+      startedAtMs: working ? (this.backend?.modelStartedAtMs ?? null) : null,
+      connected: Boolean(this.state.connected),
+      queued: this.state.queued ?? 0,
+      switching: this.switching,
+    };
+  }
 
   _backendOptions(overrides = {}) {
     const cognition = this.store.getCognitionState();
@@ -93,6 +103,7 @@ export class AgentRuntime {
   }
 
   whenIdle() { return this.backend?.whenIdle?.() ?? Promise.resolve(); }
+  interruptTurn() { return this.backend?.interruptTurn?.() ?? Promise.resolve(); }
 
   async listModels() {
     const current = await this.backend?.listModels?.() ?? [];

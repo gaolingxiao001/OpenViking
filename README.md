@@ -23,7 +23,7 @@ npm test && npm run check
 npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 ```
 
-正式上线跑 `./scripts/deploy.sh`（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次部署时从仓库 `.env` 播种，之后直接编辑该文件并 `pm2 restart` 生效，不随 release 覆盖。健康检查失败会自动回滚到上一个 release（`~/.local/lib/lark-daemon/current` 指向当前生效版本）。
+正式上线先用 `./scripts/deploy.sh` 发布 release，再用 `lark-daemon upgrade all` 滚动两个 Agent 和共享 Web（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次发布时从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向待滚动版本，`rollback` 保留上一个发布版本。
 
 ## 交互规则
 
@@ -32,7 +32,8 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 - 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn；已有 turn 时继续沿用即时 steer。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和其他暂不支持的消息不会触发回复。
-- 本机 slash 命令（私聊直接发 `/` 开头的消息；群聊需要 `@` 机器人再加命令）由 daemon 直接处理并回复，不经过模型：`/new`、`/help`、`/model [名称]`、`/effort [档位]`。用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`，切换提交前会用 Codex 的实时模型列表校验。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal，不会复活两份分叉上下文。隐藏思考和未落盘的非 Lark 工具输出无法继承。`/effort` 与 `/new` 会开启新会话。任何信任聊天里的成员都能执行这些命令，且作用于全局会话。
+- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`、`/restart`。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。
+- 主模型连续空闲 10 分钟后，下一条私聊消息（或群里明确 @ 的消息）会先收到一个 daemon 直发的 `OnIt` reaction，随后照常进入模型。该窗口内的后续消息不重复 reaction；可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
 所有出站动作走专用 MCP 工具：`react_to_lark_message`（没有新增信息时用表情轻量回应）、`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`retract_lark_message`（撤回机器人自己的消息）。send/reply/react 还必须携带其所响应的最新 authenticated `decision_message_id`；sidecar 在执行副作用前读取 SQLite，若同一 chat/thread 已有更高序号的 accepted inbound 就 fail closed，让全局 Agent 根据已有 steer 重判。只读定位上下文用 `list_lark_chats`（解析群名）、`list_lark_chat_messages`（读单个 chat 最近消息，可 `as:"user"` 读机器人不在的会话）、`search_lark_messages`（user 身份跨会话搜索）、`list_lark_thread_messages`（按 thread 读完整话题）；user 身份读到的内容属于用户私有数据，只用于服务发起请求的用户。工具只接受完整 id；发送工具只接受纯文本和可选的可信 `mention_user_ids`，后者会生成真正的飞书 @。Codex 默认不通过 shell 调用 `lark-cli`；仅当用户明确要求、且对应可信工具尚未加载时，才按 system prompt 的 fallback 规则执行等价的单条命令（auth/config/admin 操作始终禁止）。
@@ -66,16 +67,18 @@ npm run start:web      # 127.0.0.1:3737
 ## 日常运维
 
 ```bash
-pm2 status lark-daemon lark-web lark-updater
-pm2 logs lark-daemon --lines 100
+pm2 status lark-daemon-zayn lark-daemon-sally lark-web lark-updater
+pm2 logs lark-daemon-zayn --lines 100
 curl http://127.0.0.1:3737/ready
 ./scripts/deploy.sh [git-ref]
-lark-daemon upgrade sally
+lark-daemon upgrade all
 ```
 
-`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取源码 checkout。它只接受 `zayn` / `sally` 两个 target，解析 `~/.local/lib/lark-daemon/current` 后用对应 ecosystem config 精确 `startOrReload` 一个 daemon；PM2 exec path 必须落在当前 release 内，且 `/ready` 通过后才保存 PM2 状态。它和 `deploy.sh` 共用 deploy lock，不会并发切换。它不接收 SHA、路径或 shell 命令。部署成功后会安装 `~/.local/bin/lark-daemon`，因此 `lark-daemon upgrade sally` 会把斯斯切到当前 release，同时不会重启 Zayn 或任一 Web。`upgrade zayn` 留给宿主终端调用；Zayn 自己在 active turn 里调用会中断当前回复。
+`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取源码 checkout。它只接受 `zayn` / `sally` / `all`，解析 `~/.local/lib/lark-daemon/current` 后从同一份 ecosystem config 精确滚动 allowlist 内的进程并校验 `/ready`；`all` 会依次升级两个 daemon 和共享 Web。它和 `deploy.sh` 共用 deploy lock，不接收 SHA、路径或 shell 命令。
 
-PM2 分别托管 `lark-daemon`、`lark-web` 和 `lark-updater`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 全局线程 id、消息去重记录和活动账本。
+PM2 的固定拓扑是 `lark-daemon-zayn`、`lark-daemon-sally`、共享 `lark-web`、共享 `lark-updater`。两个 daemon 来自同一模板，只替换 profile、dataDir、workspace、model、端口和 OV config。Web 入口保持为 `127.0.0.1:3737`，通过固定 loopback allowlist 在两个 daemon 间切换，不接受客户端传入任意 upstream。
+
+当 release 修改了 updater 协议或 target（包括这次从旧拓扑迁移）时，发布后先运行一次 `./scripts/bootstrap-updater.sh`，再执行 `lark-daemon upgrade all`。普通后续升级只需 `deploy.sh` 加 `upgrade all`。
 
 ## Activity 页面
 
@@ -93,7 +96,7 @@ PM2 分别托管 `lark-daemon`、`lark-web` 和 `lark-updater`。Web 入口保�
 
 - 消息先写 SQLite（状态直接 DONE），再喂给当前常驻 runtime。Codex 用 `turn/start` / `turn/steer`，Claude 用 persistent stream-json input。
 - 400ms 群聊窗口只做 transport batching，不创建 chat 专属的 Codex session、history 或 memory。进程在窗口内停止或崩溃，仍可能让已落库消息没来得及喂给 Codex；这版没有加入 durable replay 或 delivery ledger。
-- slash command 和后续消息经过同一条全局 ingress barrier；runtime switch 先等旧 turn 空闲，再 preflight 目标进程，最后原子交接 session 与 Lark tool authority。目标启动失败时仍留在旧 runtime。
+- slash command 和后续消息经过同一条全局 ingress barrier，但命令本身不等待模型；只读命令并行回答，会话变更命令先中断旧 turn。runtime switch preflight 目标进程后再原子交接 session 与 Lark tool authority，目标启动失败时仍留在旧 runtime。
 - SQLite 只保留一个 active runtime/session。跨 runtime journal 记录 accepted inbound、Lark outbound/control 与 uncertain side effect；它不保存隐藏思考。journal 超过上限时 switch fail closed，先 `/new` 再切。
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
 - 两个 runtime 都通过 MCP 工具自己发送回复。sidecar 在副作用前校验 active-runtime fence 和 `decision_message_id` freshness，并先写 PENDING journal；成功后 COMMITTED，timeout/crash 保留为 UNCERTAIN。runtime token 是本机单用户进程内的 fencing nonce，不是远程凭证；能读取 daemon SQLite 或进程配置的本机用户，本来就已处于 daemon 的信任边界内。

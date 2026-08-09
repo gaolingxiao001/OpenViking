@@ -1,4 +1,5 @@
 const API = '/api/activity';
+const INSTANCES_API = '/api/instances';
 const LIMIT = 100;
 const ACTIVE = new Set(['QUEUED', 'RUNNING', 'OUTBOX_PENDING', 'PENDING', 'SENDING', 'RETRY']);
 const REPLIED = new Set(['SENT', 'DRY_RUN']);
@@ -71,10 +72,14 @@ const state = {
   query: '',
   hideText: false,
   fetchedAt: 0,
+  instance: '',
+  instanceLabel: 'Agent',
+  instanceGeneration: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
 const dom = {
+  instance: $('#instance-select'),
   service: $('#service-status'),
   serviceText: $('#service-status-text'),
   updated: $('#last-updated'),
@@ -620,7 +625,7 @@ function render() {
     dom.empty.querySelector('h2').textContent = narrowed ? '没有匹配的活动' : '还没有活动';
     dom.empty.querySelector('p').textContent = narrowed
       ? '换个关键词，或切回“全部”查看。'
-      : '给 Zayn 发一条飞书消息，它会出现在这里。';
+      : `给 ${state.instanceLabel} 发一条飞书消息，它会出现在这里。`;
   }
   dom.loadOlder.hidden = !state.nextCursor;
   updateCurrentState(allStories);
@@ -660,6 +665,7 @@ function serviceDisplay(offline = false) {
 
 async function request(before) {
   const url = new URL(API, location.origin);
+  url.searchParams.set('instance', state.instance);
   url.searchParams.set('limit', LIMIT);
   if (before) url.searchParams.set('before', before);
   const response = await fetch(url, {
@@ -670,6 +676,60 @@ async function request(before) {
   const payload = await response.json();
   if (!Array.isArray(payload.activities)) throw new Error('活动接口格式不正确');
   return { ...payload, activities: payload.activities.map(activity).filter(Boolean) };
+}
+
+async function loadInstances() {
+  const response = await fetch(INSTANCES_API, {
+    headers: { accept: 'application/json' },
+    cache: 'no-store',
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!Array.isArray(payload.instances) || payload.instances.length === 0) {
+    throw new Error('实例接口格式不正确');
+  }
+  const instances = payload.instances.filter((instance) => (
+    instance
+    && typeof instance.id === 'string'
+    && typeof instance.label === 'string'
+  ));
+  if (instances.length !== payload.instances.length) throw new Error('实例接口格式不正确');
+
+  const requested = new URL(location.href).searchParams.get('instance');
+  const selected = instances.find((instance) => instance.id === requested)
+    || instances.find((instance) => instance.id === payload.defaultInstance)
+    || instances[0];
+  dom.instance.replaceChildren();
+  for (const instance of instances) {
+    const option = document.createElement('option');
+    option.value = instance.id;
+    option.textContent = instance.label;
+    dom.instance.append(option);
+  }
+  dom.instance.disabled = instances.length < 2;
+  dom.instance.value = selected.id;
+  state.instance = selected.id;
+  state.instanceLabel = selected.label;
+  document.title = `${selected.label} Activity`;
+}
+
+function resetForInstance(instance) {
+  state.instance = instance.id;
+  state.instanceLabel = instance.label;
+  state.instanceGeneration += 1;
+  state.rows.clear();
+  state.service = {};
+  state.overview = {};
+  state.nextCursor = null;
+  state.initialized = false;
+  state.loading = false;
+  state.loadingOlder = false;
+  state.fetchedAt = 0;
+  document.title = `${instance.label} Activity`;
+  const url = new URL(location.href);
+  url.searchParams.set('instance', instance.id);
+  history.replaceState(null, '', url);
+  render();
 }
 
 function applyPayload(payload) {
@@ -683,8 +743,10 @@ function applyPayload(payload) {
 async function refresh(initial = false) {
   if (state.loading || document.hidden) return;
   state.loading = true;
+  const generation = state.instanceGeneration;
   try {
     const payload = await request();
+    if (generation !== state.instanceGeneration) return;
     applyPayload(payload);
     let changed = initial;
     for (const row of payload.activities) {
@@ -696,13 +758,14 @@ async function refresh(initial = false) {
     state.initialized = true;
     if (changed) render();
   } catch (error) {
+    if (generation !== state.instanceGeneration) return;
     dom.notice.textContent = `页面暂时连不上 lark-daemon：${error.message}`;
     dom.notice.hidden = false;
     serviceDisplay(true);
     state.initialized = true;
     render();
   } finally {
-    state.loading = false;
+    if (generation === state.instanceGeneration) state.loading = false;
   }
 }
 
@@ -750,10 +813,28 @@ dom.privacy.addEventListener('click', () => {
   render();
 });
 dom.loadOlder.addEventListener('click', loadOlder);
+dom.instance.addEventListener('change', () => {
+  const option = dom.instance.selectedOptions[0];
+  if (!option || option.value === state.instance) return;
+  resetForInstance({ id: option.value, label: option.textContent });
+  refresh(true);
+});
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refresh();
 });
 setInterval(() => {
   if (!document.hidden) refresh();
 }, 5_000);
-refresh(true);
+
+async function initialize() {
+  try {
+    await loadInstances();
+    await refresh(true);
+  } catch (error) {
+    dom.notice.textContent = `页面暂时无法读取 Agent 列表：${error.message}`;
+    dom.notice.hidden = false;
+    serviceDisplay(true);
+  }
+}
+
+initialize();

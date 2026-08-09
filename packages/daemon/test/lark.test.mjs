@@ -5,6 +5,32 @@ import { LarkClient } from '../src/lark.mjs';
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
 describe('Lark chat lookup', () => {
+  it('adds the daemon liveness reaction directly through lark-cli', async () => {
+    const calls = [];
+    const registry = {
+      async run(command, args, options) {
+        calls.push({ command, args, options });
+        return { code: 0, timedOut: false, stdout: JSON.stringify({ ok: true }), stderr: '' };
+      },
+    };
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: '/fake/lark-cli',
+      projectDir: '/tmp',
+      sendTimeoutMs: 30_000,
+      dryRun: false,
+    }, registry, quietLogger);
+
+    assert.deepEqual(await client.reactMessage('om_message123456', 'OnIt'), { reacted: true });
+    assert.deepEqual(calls[0].args, [
+      '--profile', 'test-profile',
+      'im', 'reactions', 'create', '--as', 'bot',
+      '--params', '{"message_id":"om_message123456"}',
+      '--data', '{"reaction_type":{"emoji_type":"OnIt"}}',
+      '--format', 'json',
+    ]);
+  });
+
   it('gets a group name with the schema-verified bot chat command', async () => {
     const calls = [];
     const registry = {

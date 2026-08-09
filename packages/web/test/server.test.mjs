@@ -53,8 +53,8 @@ function config(daemonPort, overrides = {}) {
   return {
     host: '127.0.0.1',
     port: 0,
-    daemonHost: '127.0.0.1',
-    daemonPort,
+    instances: [{ id: 'zayn', label: 'Zayn', host: '127.0.0.1', port: daemonPort }],
+    defaultInstance: 'zayn',
     publicDir,
     upstreamTimeoutMs: 250,
     shutdownTimeoutMs: 1_000,
@@ -64,13 +64,16 @@ function config(daemonPort, overrides = {}) {
 
 describe('independent activity web server', { concurrency: false }, () => {
   let daemon;
+  let secondDaemon;
   let web;
 
   afterEach(async () => {
     await web?.stop();
     await closeHttpServer(daemon);
+    await closeHttpServer(secondDaemon);
     web = null;
     daemon = null;
+    secondDaemon = null;
   });
 
   it('serves only fixed static files even when the daemon is unavailable', async () => {
@@ -85,12 +88,21 @@ describe('independent activity web server', { concurrency: false }, () => {
     const page = await request(port, '/');
     assert.equal(page.status, 200);
     assert.match(page.headers['content-type'], /^text\/html/);
-    assert.match(page.body, /Zayn/);
+    assert.match(page.body, /instance-select/);
     assert.equal((await request(port, '/activity')).status, 200);
+    assert.equal((await request(port, '/?instance=zayn')).status, 200);
+    assert.equal((await request(port, '/?instance=missing')).status, 404);
     assert.match((await request(port, '/activity.css')).headers['content-type'], /^text\/css/);
     assert.match((await request(port, '/activity.js')).headers['content-type'], /^text\/javascript/);
     assert.equal((await request(port, '/package.json')).status, 404);
     assert.equal((await request(port, '/activity.css?cache=1')).status, 404);
+
+    const instances = await request(port, '/api/instances');
+    assert.equal(instances.status, 200);
+    assert.deepEqual(JSON.parse(instances.body), {
+      defaultInstance: 'zayn',
+      instances: [{ id: 'zayn', label: 'Zayn' }],
+    });
 
     const api = await request(port, '/api/activity');
     assert.equal(api.status, 502);
@@ -141,6 +153,44 @@ describe('independent activity web server', { concurrency: false }, () => {
     assert.equal((await request(port, '/health')).status, 200);
     assert.equal((await request(port, '/ready?probe=1')).status, 404);
     assert.equal((await request(port, '/api/private')).status, 404);
+  });
+
+  it('routes only allowlisted instance ids and never accepts a caller-supplied upstream', async () => {
+    daemon = await startHttpServer((incoming, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ instance: 'zayn', path: incoming.url }));
+    });
+    secondDaemon = await startHttpServer((incoming, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ instance: 'sally', path: incoming.url }));
+    });
+    web = new ActivityWebServer(config(daemon.address().port, {
+      instances: [
+        { id: 'zayn', label: 'Zayn', host: '127.0.0.1', port: daemon.address().port },
+        { id: 'sally', label: '斯斯', host: '127.0.0.1', port: secondDaemon.address().port },
+      ],
+    }));
+    await web.start();
+    const port = web.address().port;
+
+    assert.deepEqual(
+      JSON.parse((await request(port, '/api/activity?instance=sally&limit=7')).body),
+      { instance: 'sally', path: '/api/activity?limit=7' },
+    );
+    assert.deepEqual(
+      JSON.parse((await request(port, '/api/activity?limit=7')).body),
+      { instance: 'zayn', path: '/api/activity?limit=7' },
+    );
+    assert.deepEqual(
+      JSON.parse((await request(port, '/api/instances')).body),
+      {
+        defaultInstance: 'zayn',
+        instances: [{ id: 'zayn', label: 'Zayn' }, { id: 'sally', label: '斯斯' }],
+      },
+    );
+    assert.equal((await request(port, '/api/activity?instance=missing')).status, 404);
+    assert.equal((await request(port, '/api/activity?instance=zayn&instance=sally')).status, 400);
+    assert.equal((await request(port, '/api/activity?instance=http://127.0.0.1:1')).status, 404);
   });
 
   it('rejects unsafe hosts, origins, methods, and request targets before proxying', async () => {

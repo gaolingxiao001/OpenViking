@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Deploy the committed (HEAD) state to a versioned release under
-# ~/.local/lib/lark-daemon/releases and point pm2 at it.
+# Publish the committed (HEAD) state as a versioned release under
+# ~/.local/lib/lark-daemon/releases and move the current release pointer.
 # The working tree is never deployed — commit first, then run this.
 # Config lives in one shared file (~/.local/lib/lark-daemon/env); every
-# release symlinks its .env to it, so edits there survive deploys.
+# release symlinks its .env to it, so edits there survive publishes.
+#
+# This script deliberately does not touch PM2. Runtime rollout is a separate
+# operation through the updater: `lark-daemon upgrade zayn|sally|all`.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,21 +15,6 @@ ENV_FILE="$BASE/env"
 DEPLOY_LOCK="$BASE/deploy.lock"
 CLI_LINK="$HOME/.local/bin/lark-daemon"
 CLI_TARGET="$BASE/current/packages/updater/bin/lark-daemon.mjs"
-
-# PM2 injects process metadata such as name/pm_id/cwd into every managed app.
-# A deploy launched by the daemon inherits those values; passing them back to
-# `pm2 start` makes PM2 update the caller instead of creating the named apps.
-# Run control-plane commands with a minimal operator environment.
-pm2_control() {
-  env -i \
-    HOME="$HOME" \
-    USER="${USER:-}" \
-    LOGNAME="${LOGNAME:-${USER:-}}" \
-    PATH="$PATH" \
-    PM2_HOME="${PM2_HOME:-$HOME/.pm2}" \
-    LANG="${LANG:-C.UTF-8}" \
-    pm2 "$@"
-}
 
 if [ -L "$CLI_LINK" ]; then
   EXISTING_TARGET="$(readlink "$CLI_LINK")"
@@ -73,37 +61,19 @@ ln -sf "$ENV_FILE" "$REL/.env"
 echo "running tests in $REL ..."
 (cd "$REL" && npm test >/dev/null && npm run check >/dev/null) || { echo "tests failed — aborting deploy"; exit 1; }
 
-# $BASE/current tracks the last known-good release for rollback.
+# Keep the previously published release addressable. Runtime processes are not
+# changed here, so publishing can be retried without interrupting either bot.
 PREV="$(readlink "$BASE/current" 2>/dev/null || true)"
-
-pm2_control delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
-pm2_control start "$REL/ecosystem.config.cjs"
-pm2_control save >/dev/null
-
-PORTS=3737
-grep -q "lark-web" "$REL/ecosystem.config.cjs" && PORTS="3737 3738"
-
-for _ in $(seq 30); do
-  sleep 1
-  ok=1
-  for port in $PORTS; do
-    curl -sf "http://127.0.0.1:$port/ready" >/dev/null 2>&1 || ok=0
-  done
-  if [ "$ok" = 1 ]; then
-    ln -sfn "$REL" "$BASE/current"
-    mkdir -p "$HOME/.local/bin"
-    ln -sfn "$CLI_TARGET" "$CLI_LINK"
-    echo "deployed $REL"
-    ls -1dt "$BASE"/releases/* | tail -n +4 | xargs rm -rf
-    exit 0
-  fi
-done
-echo "daemon/web not ready after 30s — check: pm2 logs lark-daemon lark-web"
 if [ -n "$PREV" ] && [ -d "$PREV" ]; then
-  echo "rolling back to $PREV"
-  pm2_control delete lark-daemon lark-web lark-updater >/dev/null 2>&1 || true
-  pm2_control start "$PREV/ecosystem.config.cjs"
-  pm2_control save >/dev/null
-  echo "rolled back; failed release kept for inspection: $REL"
+  ln -sfn "$PREV" "$BASE/rollback"
 fi
-exit 1
+ln -sfn "$REL" "$BASE/current"
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$CLI_TARGET" "$CLI_LINK"
+
+# A running process can still need files from an older release (for example
+# `/restart` reloads its prompt), so publish never prunes releases underneath
+# PM2. Cleanup belongs after an observed successful `upgrade all`.
+echo "published $REL"
+echo "if this release changes updater targets, bootstrap once: ./scripts/bootstrap-updater.sh"
+echo "roll out with: lark-daemon upgrade zayn|sally|all"

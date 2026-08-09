@@ -21,6 +21,16 @@ test('activity UI exposes the five compact filters without action-oriented failu
   assert.match(js, /if \(story\.tone === 'ignore'\) return '忽略';/);
 });
 
+test('activity UI switches one shared dashboard between allowlisted daemon instances', () => {
+  assert.match(html, /id="instance-select"/);
+  assert.match(js, /const INSTANCES_API = '\/api\/instances'/);
+  assert.match(js, /url\.searchParams\.set\('instance', state\.instance\)/);
+  assert.match(js, /dom\.instance\.addEventListener\('change'/);
+  assert.match(js, /state\.rows\.clear\(\)/);
+  assert.match(js, /history\.replaceState/);
+  assert.match(css, /\.instance-picker select/);
+});
+
 test('activity UI renders one transcript and labels only incoming messages with their source', () => {
   assert.match(js, /raw\.sourceRef/);
   assert.match(js, /sourceName: raw\.sourceName/);

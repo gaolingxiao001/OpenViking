@@ -23,6 +23,7 @@ const STATIC_FILES = Object.freeze({
 });
 
 const PROXY_PATHS = new Set(['/api/activity', '/health', '/ready']);
+const INSTANCE_QUERY_KEY = 'instance';
 
 function noop() {}
 
@@ -160,6 +161,7 @@ export class ActivityWebServer {
   constructor(config, logger = NULL_LOGGER) {
     this.config = config;
     this.logger = logger;
+    this.instances = new Map(config.instances.map((instance) => [instance.id, instance]));
     this.httpServer = null;
     this.staticFiles = null;
     this.stopPromise = null;
@@ -189,7 +191,7 @@ export class ActivityWebServer {
     await listen(this.httpServer, this.config.port, this.config.host);
     this.logger.info('web_ready', {
       address: `http://${this.config.host}:${this.address().port}`,
-      daemon: `http://${this.config.daemonHost}:${this.config.daemonPort}`,
+      instances: [...this.instances.keys()],
     });
   }
 
@@ -217,24 +219,56 @@ export class ActivityWebServer {
     const { url } = target;
 
     const staticAsset = this.staticFiles.get(url.pathname);
-    if (staticAsset && url.search === '') {
+    if (staticAsset && this.isSafePageQuery(url)) {
       sendBuffer(response, 200, staticAsset.contentType, staticAsset.body);
       return;
     }
 
+    if (url.pathname === '/api/instances' && url.search === '') {
+      sendJson(response, 200, {
+        defaultInstance: this.config.defaultInstance,
+        instances: [...this.instances.values()].map(({ id, label }) => ({ id, label })),
+      });
+      return;
+    }
+
     if (PROXY_PATHS.has(url.pathname)) {
+      const selected = this.selectInstance(url);
+      if (selected.error) {
+        sendJson(response, selected.status, { error: selected.error });
+        return;
+      }
       if (url.pathname !== '/api/activity' && url.search !== '') {
         sendJson(response, 404, { error: 'not_found' });
         return;
       }
-      await this.proxy(request, response);
+      await this.proxy(request, response, selected.instance, `${url.pathname}${url.search}`);
       return;
     }
 
     sendJson(response, 404, { error: 'not_found' });
   }
 
-  proxy(clientRequest, clientResponse) {
+  isSafePageQuery(url) {
+    if (url.search === '') return true;
+    if (url.pathname !== '/' && url.pathname !== '/activity') return false;
+    const values = url.searchParams.getAll(INSTANCE_QUERY_KEY);
+    return values.length === 1
+      && [...url.searchParams.keys()].every((key) => key === INSTANCE_QUERY_KEY)
+      && this.instances.has(values[0]);
+  }
+
+  selectInstance(url) {
+    const values = url.searchParams.getAll(INSTANCE_QUERY_KEY);
+    if (values.length > 1) return { error: 'invalid_instance', status: 400 };
+    const id = values[0] || this.config.defaultInstance;
+    const instance = this.instances.get(id);
+    if (!instance) return { error: 'unknown_instance', status: 404 };
+    url.searchParams.delete(INSTANCE_QUERY_KEY);
+    return { instance };
+  }
+
+  proxy(clientRequest, clientResponse, instance, upstreamPath) {
     return new Promise((resolve) => {
       let completed = false;
       let timedOut = false;
@@ -250,10 +284,10 @@ export class ActivityWebServer {
       };
 
       const upstream = http.request({
-        hostname: this.config.daemonHost,
-        port: this.config.daemonPort,
+        hostname: instance.host,
+        port: instance.port,
         method: 'GET',
-        path: clientRequest.url,
+        path: upstreamPath,
         headers: {
           accept: 'application/json',
           connection: 'close',

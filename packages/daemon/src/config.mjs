@@ -199,6 +199,10 @@ export function getConfig() {
     maxReplyChars: intEnv('LARK_DAEMON_MAX_REPLY_CHARS', 30_000, { min: 100, max: 100_000 }),
     maxEventBytes: intEnv('LARK_DAEMON_MAX_EVENT_BYTES', 1_000_000, { min: 1_024, max: 10_000_000 }),
     maxEventAgeMs: intEnv('LARK_DAEMON_MAX_EVENT_AGE_MS', 86_400_000, { min: 60_000 }),
+    idleReactionAfterMs: intEnv('LARK_DAEMON_IDLE_REACTION_AFTER_MS', 600_000, {
+      min: 0,
+      max: 604_800_000,
+    }),
     historyLimit: intEnv('LARK_DAEMON_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
     cognitionMaxChars: intEnv('LARK_DAEMON_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
     retentionMs: intEnv('LARK_DAEMON_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),

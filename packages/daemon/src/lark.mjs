@@ -159,6 +159,32 @@ export class LarkClient {
     return { sent: true };
   }
 
+  // Daemon-authored liveness acknowledgement. This is deliberately separate
+  // from the model MCP delivery path: after a long idle period it gives the
+  // sender immediate proof that the local subscriber is alive, while the
+  // original message still continues to the model normally.
+  async reactMessage(messageId, emojiType = 'OnIt') {
+    if (this.config.dryRun) return { reacted: false, dryRun: true };
+    const result = await this.registry.run(this.config.larkCliBin, [
+      '--profile', this.profile,
+      'im', 'reactions', 'create', '--as', 'bot',
+      '--params', JSON.stringify({ message_id: messageId }),
+      '--data', JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
+      '--format', 'json',
+    ], {
+      cwd: this.config.projectDir,
+      timeoutMs: this.config.sendTimeoutMs,
+    });
+    if (result.timedOut) throw new Error(`lark-cli reaction timed out after ${this.config.sendTimeoutMs}ms`);
+    let parsed = null;
+    try { parsed = JSON.parse(result.stdout); } catch {}
+    if (result.code !== 0 || parsed?.ok === false) {
+      const detail = parsed?.error?.message || result.stderr.trim() || `exit ${result.code}`;
+      throw new Error(`lark-cli reaction failed: ${detail.slice(-2000)}`);
+    }
+    return { reacted: true };
+  }
+
   // Chat member roster fetch (bot identity) for name<->open_id resolution.
   // Returns the parsed lark-cli JSON payload; roster.mjs owns bucket parsing.
   async listChatMembers(chatId) {
