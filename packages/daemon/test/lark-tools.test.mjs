@@ -700,6 +700,100 @@ describe('Lark proactive IM tool service', () => {
     assert.equal(mixedCase.emoji_type, 'OnIt');
   });
 
+  it('keeps temporary OnIt in sidecar memory and clears it on the next final delivery in the same scope', async () => {
+    const scopeA = 'profile:tenant:oc_scopeA123456:main';
+    const scopeB = 'profile:tenant:oc_scopeB123456:main';
+    const rows = new Map([
+      ['om_scopeAdecision123', { status: 'DONE', has_newer: 0, seq: 1, conv_key: scopeA }],
+      ['om_scopeBdecision123', { status: 'DONE', has_newer: 0, seq: 1, conv_key: scopeB }],
+    ]);
+    const calls = [];
+    let reactionCount = 0;
+    const service = new LarkToolService(options({
+      freshnessCheck: (messageId) => rows.get(messageId),
+    }), async (_command, args) => {
+      calls.push(args);
+      if (args.includes('create') && args.includes('reactions')) {
+        reactionCount += 1;
+        return ok({ reaction_id: `reaction_${reactionCount}` });
+      }
+      if (args.includes('+messages-send')) return ok({ message_id: 'om_sentFinal123456' });
+      return ok({});
+    });
+
+    const temporary = await service.reactToMessage({
+      message_id: 'om_scopeAtarget1234',
+      emoji_type: 'OnIt',
+      temporary: true,
+      decision_message_id: 'om_scopeAdecision123',
+    });
+    assert.equal(temporary.tracked, true);
+    assert.equal(service.temporaryReactions.size, 1);
+
+    // A final delivery in another chat/thread must not clear scope A.
+    await service.sendMessage({
+      chat_id: 'oc_scopeB12345678',
+      text: 'other scope',
+      decision_message_id: 'om_scopeBdecision123',
+    });
+    assert.equal(service.temporaryReactions.size, 1);
+    assert.equal(calls.filter((args) => args.includes('delete')).length, 0);
+
+    // A final reaction is still a final delivery, so it removes the working one.
+    await service.reactToMessage({
+      message_id: 'om_scopeAfinal1234',
+      emoji_type: 'OK',
+      decision_message_id: 'om_scopeAdecision123',
+    });
+    assert.equal(service.temporaryReactions.size, 0);
+    const deletion = calls.find((args) => args.includes('delete'));
+    assert.ok(deletion);
+    assert.equal(deletion[deletion.indexOf('--message-id') + 1], 'om_scopeAtarget1234');
+    assert.equal(deletion[deletion.indexOf('--reaction-id') + 1], 'reaction_1');
+
+    await assert.rejects(
+      service.reactToMessage({
+        message_id: 'om_scopeAtarget5678',
+        emoji_type: 'OK',
+        temporary: true,
+        decision_message_id: 'om_scopeAdecision123',
+      }),
+      /must use the OnIt emoji/,
+    );
+    await service.close();
+  });
+
+  it('does not turn successful final delivery into a failure when temporary reaction cleanup fails', async () => {
+    const scope = 'profile:tenant:oc_cleanup123456:main';
+    const calls = [];
+    const service = new LarkToolService(options({
+      freshnessCheck: () => ({ status: 'DONE', has_newer: 0, seq: 1, conv_key: scope }),
+    }), async (_command, args) => {
+      calls.push(args);
+      if (args.includes('delete')) {
+        return { code: 1, signal: null, stdout: '', stderr: 'cleanup failed', timedOut: false };
+      }
+      if (args.includes('create')) return ok({ reaction_id: 'reaction_cleanup' });
+      return ok({ message_id: 'om_sentCleanup1234' });
+    });
+
+    await service.reactToMessage({
+      message_id: 'om_cleanupTarget123',
+      emoji_type: 'OnIt',
+      temporary: true,
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    const sent = await service.sendMessage({
+      chat_id: 'oc_cleanup12345678',
+      text: 'finished',
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.equal(sent.sent, true);
+    assert.equal(service.temporaryReactions.size, 0);
+    assert.equal(calls.filter((args) => args.includes('delete')).length, 1);
+    await service.close();
+  });
+
   it('terminates the whole lark-cli process group on timeout', { skip: process.platform === 'win32' }, async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-tools-timeout-'));
     const wrapper = path.join(directory, 'wrapper.mjs');
@@ -778,6 +872,11 @@ describe('Lark proactive IM MCP protocol', () => {
       assert.ok(tool.inputSchema.required.includes('decision_message_id'));
       assert.ok(!tool.inputSchema.required.includes('response_to_message_id'));
     }
+    assert.equal(
+      listed.result.tools.find((candidate) => candidate.name === 'react_to_lark_message')
+        .inputSchema.properties.temporary.type,
+      'boolean',
+    );
     const chats = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: { query: 'memo' } } });
     assert.match(chats.result.content[0].text, /Memorize.*oc_memorize123456/);
     const messages = await handle({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_lark_chat_messages', arguments: { chat_id: 'oc_memorize123456' } } });

@@ -411,8 +411,7 @@ describe('daemon event path', { concurrency: false }, () => {
       async replyMessage() { order.push('command-reply'); },
     };
     daemon.liveness = {
-      touch() {},
-      async cleanupAll(reason) { order.push(`liveness:${reason}`); },
+      touch() { order.push('liveness:touch'); },
     };
     const event = {
       chatId: 'oc_command123456',
@@ -434,7 +433,7 @@ describe('daemon event path', { concurrency: false }, () => {
       'journal:outbound',
       'command-reply',
       'journal:settled',
-      'liveness:command_reply',
+      'liveness:touch',
       'following-inbound',
     ]);
   });

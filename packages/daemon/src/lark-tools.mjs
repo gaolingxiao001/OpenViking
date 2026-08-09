@@ -260,13 +260,14 @@ export const LARK_TOOLS = [
   {
     name: 'react_to_lark_message',
     title: 'React to a Lark message',
-    description: 'Add one emoji reaction as the bot to a specific Lark message. Prefer this over a short text reply when acknowledgement is useful but you have no new information to add. Use the full msg id from the bracketed inbound line. This is an external side effect: react at most once per decision, and do not also send a text reply for the same decision.',
+    description: 'Add one emoji reaction as the bot to a specific Lark message. Prefer this over a short text reply when acknowledgement is useful but you have no new information to add. Use the full msg id from the bracketed inbound line. Normally this is the final delivery for that decision. Set temporary=true only when authenticated idle= metadata explicitly permits a working indicator, you have independently decided the message needs a response, and the work will take long enough to benefit from OnIt; the sidecar removes that temporary reaction after the next successful final delivery in the same chat/thread.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to react to. Never guess or reconstruct a shortened ID.' },
         emoji_type: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$', description: 'Exact Lark emoji_type, such as OK, THUMBSUP, DONE, THANKS, OnIt, or LGTM.' },
+        temporary: { type: 'boolean', default: false, description: 'Transient working indicator, not a final response. Use only under the authenticated idle= hint; it is cleared by the next successful final delivery in the same chat/thread.' },
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the reaction is blocked if anything newer has arrived.' },
         response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. This is attribution only, not routing or priority; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
@@ -532,6 +533,9 @@ export class LarkToolService {
     this.journalDb = null;
     this.insertJournalIntent = null;
     this.settleJournalIntent = null;
+    // One optional working indicator per daemon-authenticated chat/thread.
+    // Tokens are exact Lark reaction ids; no database scan or polling is used.
+    this.temporaryReactions = new Map();
   }
 
   _storedFreshness(decisionMessageId) {
@@ -748,7 +752,12 @@ export class LarkToolService {
     return mergeMentionIds(mentionUserIds, resolved);
   }
 
-  close() {
+  async close() {
+    const tokens = [...this.temporaryReactions.values()];
+    this.temporaryReactions.clear();
+    if (tokens.length > 0) {
+      await Promise.allSettled(tokens.map((token) => this._deleteTemporaryReaction(token, 'sidecar_close')));
+    }
     try { this.freshnessDb?.close(); } catch {}
     try { this.journalDb?.close(); } catch {}
     this.freshnessDb = null;
@@ -759,6 +768,45 @@ export class LarkToolService {
     this.insertJournalIntent = null;
     this.settleJournalIntent = null;
     this.getJournalIntent = null;
+  }
+
+  _deliveryScope(fresh) {
+    const scope = fresh?.row?.conv_key;
+    return typeof scope === 'string' && scope ? scope : null;
+  }
+
+  async _deleteTemporaryReaction(token, reason) {
+    try {
+      await this.runLark([
+        'reactions', 'delete', '--as', 'bot',
+        '--message-id', token.messageId,
+        '--reaction-id', token.reactionId,
+        '--format', 'json',
+      ], 'clear temporary Lark reaction');
+    } catch {
+      // The final delivery already succeeded. Cleanup is deliberately
+      // best-effort so a delete failure can never invite a duplicate reply.
+      return false;
+    }
+    this._settleOutbound(token.journalKey, 'CANCELLED', null, {
+      ...token.metadata,
+      cleanupReason: reason,
+    });
+    return true;
+  }
+
+  async _clearTemporaryReaction(scope, reason = 'final_delivery') {
+    if (!scope) return false;
+    const token = this.temporaryReactions.get(scope);
+    if (!token) return false;
+    this.temporaryReactions.delete(scope); // claim once before the async delete
+    return await this._deleteTemporaryReaction(token, reason);
+  }
+
+  async _rememberTemporaryReaction(scope, token) {
+    const previous = this.temporaryReactions.get(scope) ?? null;
+    this.temporaryReactions.set(scope, token);
+    if (previous) await this._deleteTemporaryReaction(previous, 'replaced');
   }
 
   async runLark(args, operation) {
@@ -941,6 +989,7 @@ export class LarkToolService {
     }
     const remoteMessageId = findMessageId(data);
     this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, deliveryMetadata);
+    await this._clearTemporaryReaction(this._deliveryScope(fresh));
     return {
       sent: true,
       chat_id: chatId,
@@ -1024,6 +1073,7 @@ export class LarkToolService {
     }
     const remoteMessageId = findMessageId(data);
     this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, deliveryMetadata);
+    await this._clearTemporaryReaction(this._deliveryScope(fresh));
     return {
       sent: true,
       reply_to_message_id: messageId,
@@ -1041,8 +1091,19 @@ export class LarkToolService {
     if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(emojiType)) {
       throw new Error('emoji_type must be a valid Lark emoji identifier');
     }
+    if (input.temporary !== undefined && typeof input.temporary !== 'boolean') {
+      throw new Error('temporary must be a boolean');
+    }
+    const temporary = input.temporary === true;
+    if (temporary && emojiType !== 'OnIt') {
+      throw new Error('temporary reactions must use the OnIt emoji');
+    }
     this._assertAuthority();
     const fresh = this._assertFreshDecision(input.decision_message_id);
+    const scope = this._deliveryScope(fresh);
+    if (temporary && !scope) {
+      throw new Error('temporary reaction scope could not be verified');
+    }
     const responseToMessageId = this._resolveResponseDecision(
       input.response_to_message_id, fresh, messageId,
     );
@@ -1053,10 +1114,11 @@ export class LarkToolService {
         message_id: messageId,
         emoji_type: emojiType,
         reaction_id: null,
+        ...(temporary ? { temporary: true, tracked: false } : {}),
       };
     }
     const actionKey = stableActionKey(
-      'reaction', fresh.messageId, responseToMessageId, messageId, emojiType,
+      'reaction', fresh.messageId, responseToMessageId, messageId, emojiType, temporary,
     );
     const deliveryMetadata = {
       action: 'reaction',
@@ -1064,6 +1126,7 @@ export class LarkToolService {
       responseToMessageId,
       targetMessageId: messageId,
       emojiType,
+      temporary,
     };
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
@@ -1087,11 +1150,25 @@ export class LarkToolService {
       throw error;
     }
     this._settleOutbound(journal?.key, 'COMMITTED', null, deliveryMetadata);
+    const reactionId = typeof data?.reaction_id === 'string' && data.reaction_id
+      ? data.reaction_id
+      : null;
+    if (temporary && reactionId) {
+      await this._rememberTemporaryReaction(scope, {
+        messageId,
+        reactionId,
+        journalKey: journal?.key ?? null,
+        metadata: deliveryMetadata,
+      });
+    } else if (!temporary) {
+      await this._clearTemporaryReaction(scope);
+    }
     return {
       reacted: true,
       message_id: messageId,
       emoji_type: emojiType,
-      reaction_id: typeof data?.reaction_id === 'string' ? data.reaction_id : null,
+      reaction_id: reactionId,
+      ...(temporary ? { temporary: true, tracked: Boolean(reactionId) } : {}),
     };
   }
 
@@ -1316,7 +1393,7 @@ export async function serveMcp(options) {
       if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
     }
   } finally {
-    service.close();
+    await service.close();
   }
 }
 

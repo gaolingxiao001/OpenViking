@@ -125,6 +125,23 @@ describe('formatting helpers', () => {
     );
   });
 
+  it('puts the optional idle hint inside daemon-authenticated metadata', () => {
+    const line = formatInboundLine({
+      chatId: 'oc_chat1234abcd',
+      threadId: null,
+      messageId: 'om_msg1234abcd',
+      senderId: 'ou_user1234abcd',
+      createTimeMs: Date.UTC(2026, 0, 2, 3, 4, 5),
+      mentions: [],
+      content: 'ambient group traffic',
+    }, null, { idleForMs: 601_999 });
+    assert.equal(
+      line,
+      '[chat=oc_chat1234abcd msg=om_msg1234abcd time=2026-01-02T03:04Z'
+        + ' from=ou_user1234 idle=601s] ambient group traffic',
+    );
+  });
+
   it('renders roster display names for from= and falls back to stubs when unknown', () => {
     try {
       registerNameResolver((chatId, userId) => (

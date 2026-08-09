@@ -190,9 +190,13 @@ export function oneLine(text) {
 // Compressed one-line-per-message format (see agent/system-prompt.md "Message format").
 // chat= and msg= carry the full id so codex can call lark-cli; from= and the thread=
 // field stay shortened stubs.
-export function formatInboundLine(message, resolveName = null) {
+export function formatInboundLine(message, resolveName = null, authenticated = {}) {
+  const idleForMs = Number(authenticated?.idleForMs);
+  const idleTag = Number.isFinite(idleForMs) && idleForMs >= 0
+    ? ` idle=${Math.max(1, Math.floor(idleForMs / 1_000))}s`
+    : '';
   let line = `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}] ${oneLine(message.content)}`;
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}${idleTag}] ${oneLine(message.content)}`;
   if (Array.isArray(message.mentions) && message.mentions.length > 0) {
     const names = message.mentions.map((m) => `@${oneLine(m.name) || shortenId(m.id)}`).join(' ');
     line += ` [mentions: ${names}]`;

@@ -165,30 +165,19 @@ export class LarkDaemon {
       this.liveness = new IdleLivenessExtension({
         thresholdMs: this.config.idleReactionAfterMs ?? 600_000,
         enabled: !this.config.dryRun,
-        lark: this.lark,
-        store: this.store,
-        logger: this.logger.child({ component: 'idle-liveness' }),
-        recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
       });
 
       this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           void this.handleTurnFailure(info)
-            .then((fallbackContinues) => {
-              if (!fallbackContinues) return this.liveness?.onTurnSettled(info);
-              return undefined;
-            })
             .catch((error) => {
               this.logger.warn('turn_failure_handler_failed', { error: safeError(error) });
-              return this.liveness?.onTurnSettled(info);
             });
         },
         onTurnSucceeded: (info) => {
           this.handleTurnSuccess(info);
-          void this.liveness?.onTurnSettled(info);
         },
         onDeliverySucceeded: (info) => { void this.liveness?.onDeliverySucceeded(info); },
-        onTurnAbandoned: (info) => { void this.liveness?.onTurnSettled(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
       });
       this.groupBurst = new GroupBurstRouter({
@@ -330,7 +319,7 @@ export class LarkDaemon {
       chatType: event.chatType,
     });
     this.enqueueIngress(async () => {
-      await this.liveness?.beforeInbound(event, result.inbound, {
+      const idleHint = this.liveness?.beforeInbound(event, result.inbound, {
         modelBusy: this.codex?.turnInProgress,
       });
       // Bounded roster warm-up so formatInboundLine can resolve from= to a
@@ -340,7 +329,7 @@ export class LarkDaemon {
       this.groupBurst.route({
         conversationKey: event.conversationKey,
         chatType: event.chatType,
-        text: formatInboundLine(event),
+        text: formatInboundLine(event, null, idleHint ?? undefined),
         seq: result.inbound.seq,
       });
     });
@@ -374,7 +363,6 @@ export class LarkDaemon {
   // when that is not applicable (or the switch itself fails) the normal failure
   // notice goes out instead.
   async handleTurnFailure(info) {
-    this.liveness?.touch();
     try {
       if (await this.tryModelFallback(info)) return true;
     } catch (error) {
@@ -480,6 +468,7 @@ export class LarkDaemon {
       // The Lark reply already succeeded; only the post-send journal write failed.
       this.logger.warn('daemon_reply_journal_settle_failed', { action, error: safeError(error) });
     }
+    this.liveness?.touch();
     return true;
   }
 
@@ -582,6 +571,7 @@ export class LarkDaemon {
         this.logger.warn('turn_failure_notice_journal_settle_failed', { error: safeError(error) });
       }
     }
+    this.liveness?.touch();
   }
 
   // Slash commands never touch the model: execute deterministically against the
@@ -591,7 +581,6 @@ export class LarkDaemon {
     // /help and /status answer alongside an active turn; session-mutating
     // commands interrupt that turn inside executeCommand before rotating.
     if (this.shuttingDown) return;
-    this.liveness?.touch();
     const label = command.name ? `/${command.name}` : String(event.content).trim().split(/\s+/)[0];
     this.store.appendCognitionJournal({
       kind: 'control',
@@ -667,9 +656,9 @@ export class LarkDaemon {
         this.logger.warn('command_reply_journal_settle_failed', { error: safeError(error) });
       }
     }
-    // A direct control reply is already visible proof of life. Clear any
-    // temporary ack left by the model turn it inspected or interrupted.
-    void this.liveness?.cleanupAll('command_reply');
+    // A successful direct control reply is visible activity too. It does not
+    // need to inspect MCP-side temporary reaction state.
+    this.liveness?.touch();
   }
 
   runMaintenance() {
@@ -882,7 +871,6 @@ export class LarkDaemon {
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       this.maintenanceTimer = null;
       registerNameResolver(null);
-      try { await this.liveness?.stop(); } catch (error) { this.logger.warn('liveness_stop_failed', { error }); }
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
       this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }

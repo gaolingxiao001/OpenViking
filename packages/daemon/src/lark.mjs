@@ -20,26 +20,6 @@ function findChatName(value, depth = 0) {
   return null;
 }
 
-function findReactionId(value, depth = 0) {
-  if (depth > 8 || value === null || value === undefined) return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findReactionId(item, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (typeof value !== 'object') return null;
-  if (typeof value.reaction_id === 'string' && value.reaction_id.trim()) {
-    return value.reaction_id.trim();
-  }
-  for (const child of Object.values(value)) {
-    const found = findReactionId(child, depth + 1);
-    if (found) return found;
-  }
-  return null;
-}
-
 export class LarkClient {
   constructor(config, registry, logger) {
     this.config = config;
@@ -177,63 +157,6 @@ export class LarkClient {
       throw new Error(`lark-cli reply failed: ${detail.slice(-2000)}`);
     }
     return { sent: true };
-  }
-
-  // Daemon-authored liveness acknowledgement. This is deliberately separate
-  // from the model MCP delivery path: after a long idle period it gives the
-  // sender immediate proof that the local subscriber is alive, while the
-  // original message still continues to the model normally.
-  async reactMessage(messageId, emojiType = 'OnIt') {
-    if (this.config.dryRun) return { reacted: false, dryRun: true, reactionId: null };
-    const result = await this.registry.run(this.config.larkCliBin, [
-      '--profile', this.profile,
-      'im', 'reactions', 'create', '--as', 'bot',
-      '--params', JSON.stringify({ message_id: messageId }),
-      '--data', JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
-      '--format', 'json',
-    ], {
-      cwd: this.config.projectDir,
-      timeoutMs: this.config.sendTimeoutMs,
-    });
-    if (result.timedOut) throw new Error(`lark-cli reaction timed out after ${this.config.sendTimeoutMs}ms`);
-    let parsed = null;
-    try { parsed = JSON.parse(result.stdout); } catch {}
-    if (result.code !== 0 || parsed?.ok === false) {
-      const detail = parsed?.error?.message || result.stderr.trim() || `exit ${result.code}`;
-      throw new Error(`lark-cli reaction failed: ${detail.slice(-2000)}`);
-    }
-    const reactionId = findReactionId(parsed?.data ?? parsed);
-    if (!reactionId) {
-      throw new Error('lark-cli reaction succeeded without a reaction_id; temporary reaction cannot be tracked');
-    }
-    return { reacted: true, reactionId };
-  }
-
-  // Remove only the exact reaction created by reactMessage. reaction_id is an
-  // opaque Lark token; it must never be reconstructed from emoji or message.
-  async deleteReaction(messageId, reactionId) {
-    if (this.config.dryRun) return { deleted: false, dryRun: true };
-    if (typeof reactionId !== 'string' || !reactionId.trim() || reactionId.length > 512) {
-      throw new Error('reaction_id must be the opaque ID returned by Lark');
-    }
-    const result = await this.registry.run(this.config.larkCliBin, [
-      '--profile', this.profile,
-      'im', 'reactions', 'delete', '--as', 'bot',
-      '--message-id', messageId,
-      '--reaction-id', reactionId,
-      '--format', 'json',
-    ], {
-      cwd: this.config.projectDir,
-      timeoutMs: this.config.sendTimeoutMs,
-    });
-    if (result.timedOut) throw new Error(`lark-cli reaction delete timed out after ${this.config.sendTimeoutMs}ms`);
-    let parsed = null;
-    try { parsed = JSON.parse(result.stdout); } catch {}
-    if (result.code !== 0 || parsed?.ok === false) {
-      const detail = parsed?.error?.message || result.stderr.trim() || `exit ${result.code}`;
-      throw new Error(`lark-cli reaction delete failed: ${detail.slice(-2000)}`);
-    }
-    return { deleted: true };
   }
 
   // Chat member roster fetch (bot identity) for name<->open_id resolution.
