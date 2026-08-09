@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, lstat, mkdir, realpath, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, realpath, rm, rmdir } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
@@ -95,22 +95,35 @@ export async function upgradeTarget(target, {
   readyOptions,
 } = {}) {
   const spec = getTarget(target);
-  const release = await resolveRelease(releaseLink);
-  const configPath = await realpath(path.join(release, spec.config));
-  if (!isInside(release, configPath)) throw new Error('ecosystem config resolves outside the release');
+  const deployLock = path.join(path.dirname(path.resolve(releaseLink)), 'deploy.lock');
+  try {
+    await mkdir(deployLock, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code === 'EEXIST') throw new Error('another lark-daemon deploy or upgrade is running');
+    throw error;
+  }
+  try {
+    const release = await resolveRelease(releaseLink);
+    const configPath = await realpath(path.join(release, spec.config));
+    if (!isInside(release, configPath)) throw new Error('ecosystem config resolves outside the release');
 
-  await execFileImpl(pm2Bin, [
-    'startOrReload',
-    configPath,
-    '--only',
-    spec.app,
-    '--update-env',
-  ], { timeout: 60_000 });
-  await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl });
-  await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
-  await execFileImpl(pm2Bin, ['save'], { timeout: 30_000 });
+    await execFileImpl(pm2Bin, [
+      'startOrReload',
+      configPath,
+      '--only',
+      spec.app,
+      '--update-env',
+    ], { timeout: 60_000 });
+    await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl });
+    await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
+    await execFileImpl(pm2Bin, ['save'], { timeout: 30_000 });
 
-  return { target, app: spec.app, release, status: 'ready' };
+    return { target, app: spec.app, release, status: 'ready' };
+  } finally {
+    await rmdir(deployLock).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
+  }
 }
 
 async function removeStaleSocket(socketPath) {

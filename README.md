@@ -73,7 +73,7 @@ curl http://127.0.0.1:3737/ready
 lark-daemon upgrade sally
 ```
 
-`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取源码 checkout。它只接受 `zayn` / `sally` 两个 target，解析 `~/.local/lib/lark-daemon/current` 后用对应 ecosystem config 精确 `startOrReload` 一个 daemon；PM2 exec path 必须落在当前 release 内，且 `/ready` 通过后才保存 PM2 状态。它不接收 SHA、路径或 shell 命令。部署成功后会安装 `~/.local/bin/lark-daemon`，因此 `lark-daemon upgrade sally` 会把斯斯切到当前 release，同时不会重启 Zayn 或任一 Web。
+`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取源码 checkout。它只接受 `zayn` / `sally` 两个 target，解析 `~/.local/lib/lark-daemon/current` 后用对应 ecosystem config 精确 `startOrReload` 一个 daemon；PM2 exec path 必须落在当前 release 内，且 `/ready` 通过后才保存 PM2 状态。它和 `deploy.sh` 共用 deploy lock，不会并发切换。它不接收 SHA、路径或 shell 命令。部署成功后会安装 `~/.local/bin/lark-daemon`，因此 `lark-daemon upgrade sally` 会把斯斯切到当前 release，同时不会重启 Zayn 或任一 Web。`upgrade zayn` 留给宿主终端调用；Zayn 自己在 active turn 里调用会中断当前回复。
 
 PM2 分别托管 `lark-daemon`、`lark-web` 和 `lark-updater`。Web 入口保持为 `127.0.0.1:3737`，并只把 `/api/activity`、`/health`、`/ready` 代理到 `127.0.0.1:3738`；它不读取 SQLite 或 daemon 配置。停止或重启 Web 不会影响飞书监听与回复。部署脚本只发布已提交的 ref，并用本机原子锁避免两个 task 同时切换 PM2。daemon 自身保证单实例，运行状态默认存放在 `~/.local/share/lark-daemon/`，包括 SQLite 全局线程 id、消息去重记录和活动账本。
 

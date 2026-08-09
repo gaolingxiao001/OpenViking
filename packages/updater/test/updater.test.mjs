@@ -120,6 +120,20 @@ test('upgradeTarget rejects inherited object property names as targets', async (
   await assert.rejects(upgradeTarget('toString'), /target must be one of/);
 });
 
+test('upgradeTarget shares the deploy lock with deploy.sh', async () => {
+  const fixture = await fixtureRelease();
+  await mkdir(path.join(path.dirname(fixture.releaseLink), 'deploy.lock'));
+  let called = false;
+  await assert.rejects(
+    upgradeTarget('sally', {
+      releaseLink: fixture.releaseLink,
+      execFileImpl: async () => { called = true; },
+    }),
+    /another lark-daemon deploy or upgrade is running/,
+  );
+  assert.equal(called, false);
+});
+
 test('server accepts one allowlisted upgrade over its private socket', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-socket-test-'));
   const socketPath = path.join(root, 'updater.sock');
