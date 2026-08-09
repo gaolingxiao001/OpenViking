@@ -11,6 +11,8 @@ import { Store } from '../src/store.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const DECISION_MESSAGE_ID = 'om_decision12345678';
+const OLDER_DECISION_MESSAGE_ID = 'om_olderDecision1234';
+const LATEST_DECISION_MESSAGE_ID = 'om_latestDecision123';
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function ok(data) {
@@ -31,6 +33,104 @@ function options(overrides = {}) {
 }
 
 describe('Lark proactive IM tool service', () => {
+  it('answers a steered quick question before an older task without weakening freshness', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-steered-delivery-'));
+    const databasePath = path.join(directory, 'state.sqlite3');
+    const store = new Store(databasePath, quietLogger);
+    store.initializeCognition('codex', 'token-steer');
+    const ingest = (messageId, eventId, conversationKey, chatId, content) => store.ingest({
+      type: 'im.message.receive_v1',
+      eventId,
+      messageId,
+      conversationKey,
+      chatId,
+      chatType: 'p2p',
+      messageType: 'text',
+      senderId: 'ou_sender123456',
+      senderType: 'user',
+      rootId: null,
+      parentId: null,
+      threadId: null,
+      threadRootId: null,
+      content,
+      mentions: [],
+      createTimeMs: Date.now(),
+      raw: {},
+    });
+    const conversationKey = 'profile:tenant:oc_steer123456:main';
+    ingest(OLDER_DECISION_MESSAGE_ID, 'evt-steer-a', conversationKey, 'oc_steer123456', 'long task A');
+    ingest('om_otherOlder123456', 'evt-steer-a2', conversationKey, 'oc_steer123456', 'older question A2');
+    ingest(LATEST_DECISION_MESSAGE_ID, 'evt-steer-b', conversationKey, 'oc_steer123456', 'quick question B');
+    ingest('om_otherScope123456', 'evt-steer-other', 'profile:tenant:oc_other123456:main', 'oc_other123456', 'other chat');
+
+    const calls = [];
+    const service = new LarkToolService(options({
+      databasePath,
+      runtimeToken: 'token-steer',
+      freshnessCheck: undefined,
+    }), async (_command, args) => {
+      calls.push(args);
+      return ok({ message_id: `om_sentSteer${calls.length}1234` });
+    });
+
+    try {
+      await service.sendMessage({
+        chat_id: 'oc_steer123456',
+        text: 'fast answer B',
+        decision_message_id: LATEST_DECISION_MESSAGE_ID,
+      });
+      await service.sendMessage({
+        chat_id: 'oc_steer123456',
+        text: 'finished answer A',
+        decision_message_id: LATEST_DECISION_MESSAGE_ID,
+        response_to_message_id: OLDER_DECISION_MESSAGE_ID,
+      });
+      await service.replyMessage({
+        message_id: 'om_otherOlder123456',
+        text: 'answer A2',
+        decision_message_id: LATEST_DECISION_MESSAGE_ID,
+      });
+
+      assert.equal(calls.length, 3);
+      assert.equal(calls[0][calls[0].indexOf('--text') + 1], 'fast answer B');
+      assert.equal(calls[1][calls[1].indexOf('--text') + 1], 'finished answer A');
+      const outbound = store.cognitionJournal().filter((row) => row.kind === 'outbound');
+      assert.deepEqual(outbound.map((row) => row.metadata.decisionMessageId), [
+        LATEST_DECISION_MESSAGE_ID,
+        LATEST_DECISION_MESSAGE_ID,
+        LATEST_DECISION_MESSAGE_ID,
+      ]);
+      assert.deepEqual(outbound.map((row) => row.metadata.responseToMessageId), [
+        LATEST_DECISION_MESSAGE_ID,
+        OLDER_DECISION_MESSAGE_ID,
+        'om_otherOlder123456',
+      ]);
+
+      await assert.rejects(
+        service.sendMessage({
+          chat_id: 'oc_steer123456',
+          text: 'cross-scope stale answer',
+          decision_message_id: LATEST_DECISION_MESSAGE_ID,
+          response_to_message_id: 'om_otherScope123456',
+        }),
+        /same chat\/thread and no newer/,
+      );
+      await assert.rejects(
+        service.sendMessage({
+          chat_id: 'oc_steer123456',
+          text: 'old freshness fence',
+          decision_message_id: OLDER_DECISION_MESSAGE_ID,
+        }),
+        /newer authenticated message/,
+      );
+      assert.equal(calls.length, 3, 'invalid attribution and stale fences must stop before lark-cli');
+    } finally {
+      service.close();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('fences retired runtimes and makes uncertain actions at-most-once', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-authority-'));
     const databasePath = path.join(directory, 'state.sqlite3');
@@ -112,6 +212,31 @@ describe('Lark proactive IM tool service', () => {
     postSettle.close();
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('rejects response attribution newer than its freshness fence', async () => {
+    let calls = 0;
+    const rows = new Map([
+      ['om_fence12345678', { status: 'DONE', has_newer: 0, seq: 2, conv_key: 'profile:tenant:oc_chat:main' }],
+      ['om_future1234567', { status: 'DONE', has_newer: 0, seq: 3, conv_key: 'profile:tenant:oc_chat:main' }],
+    ]);
+    const service = new LarkToolService(options({
+      freshnessCheck: (messageId) => rows.get(messageId),
+    }), async () => {
+      calls += 1;
+      return ok({ message_id: 'om_mustNotSend1234' });
+    });
+
+    await assert.rejects(
+      service.sendMessage({
+        chat_id: 'oc_memorize123456',
+        text: 'future response',
+        decision_message_id: 'om_fence12345678',
+        response_to_message_id: 'om_future1234567',
+      }),
+      /same chat\/thread and no newer/,
+    );
+    assert.equal(calls, 0);
   });
 
   it('lists every joined-chat page, filters locally, and strips unsafe metadata', async () => {
@@ -647,6 +772,12 @@ describe('Lark proactive IM MCP protocol', () => {
     const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), toolNames);
     assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), toolNames);
+    for (const name of ['send_lark_message', 'reply_lark_message', 'react_to_lark_message']) {
+      const tool = listed.result.tools.find((candidate) => candidate.name === name);
+      assert.ok(tool.inputSchema.properties.response_to_message_id);
+      assert.ok(tool.inputSchema.required.includes('decision_message_id'));
+      assert.ok(!tool.inputSchema.required.includes('response_to_message_id'));
+    }
     const chats = await handle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: { query: 'memo' } } });
     assert.match(chats.result.content[0].text, /Memorize.*oc_memorize123456/);
     const messages = await handle({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_lark_chat_messages', arguments: { chat_id: 'oc_memorize123456' } } });

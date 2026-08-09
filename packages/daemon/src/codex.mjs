@@ -222,6 +222,8 @@ export class CodexAgent {
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
     this.onTurnFailed = options.onTurnFailed ?? null; // ({ inboundSeqs, error }) => void
     this.onTurnSucceeded = options.onTurnSucceeded ?? null; // ({ inboundSeqs }) => void
+    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null; // ({ inboundSeqs, mode }) => void
+    this.onTurnAbandoned = options.onTurnAbandoned ?? null; // ({ inboundSeqs }) => void
     this.onAvailable = options.onAvailable ?? null;   // () => void
     const cognition = store.getCognitionState?.() ?? { runtime: 'codex', epoch: 1, authorityToken: null };
     this.runtime = 'codex';
@@ -706,13 +708,17 @@ export class CodexAgent {
         }
         const tool = completedToolActivity(item);
         if (tool) {
-          const replyMessageId = item?.type === 'mcpToolCall'
+          const larkDelivery = item?.type === 'mcpToolCall'
             && item.server === 'lark_daemon_im'
-            && ['react_to_lark_message', 'reply_lark_message'].includes(item.tool)
-            ? item.arguments?.message_id
+            && tool.metadata?.deliveryMode;
+          const responseMessageId = larkDelivery
+            ? item.arguments?.response_to_message_id
+              ?? (['react_to_lark_message', 'reply_lark_message'].includes(item.tool)
+                ? item.arguments?.message_id
+                : item.arguments?.decision_message_id)
             : null;
-          const resolvedSeq = replyMessageId
-            ? this.store.inboundSeqForMessageId?.(replyMessageId)
+          const resolvedSeq = responseMessageId
+            ? this.store.inboundSeqForMessageId?.(responseMessageId)
             : null;
           const inboundSeq = resolvedSeq ?? associatedInboundSeqs.at(-1) ?? null;
           const inboundSeqs = [...associatedInboundSeqs];
@@ -726,6 +732,21 @@ export class CodexAgent {
             status: tool.status,
             metadata: { ...tool.metadata, inboundSeqs },
           });
+          if (tool.status === 'SENT' && tool.metadata?.deliveryMode && this.onDeliverySucceeded) {
+            try {
+              this.onDeliverySucceeded({
+                // response_to_message_id separates attribution from the latest
+                // freshness fence. Fall back to the whole live turn only for
+                // legacy tools (notably retract) that carry no decision id.
+                inboundSeqs: resolvedSeq === null || resolvedSeq === undefined
+                  ? associatedInboundSeqs
+                  : [resolvedSeq],
+                mode: tool.metadata.deliveryMode,
+              });
+            } catch (callbackError) {
+              this.logger.warn('delivery_success_notify_failed', { error: safe(callbackError) });
+            }
+          }
         }
         break;
       }
@@ -897,6 +918,7 @@ export class CodexAgent {
   // caller rotates or switches sessions and drains onto the new one.
   async interruptTurn() {
     if (!this.turnInProgress) return;
+    const inboundSeqs = this._associatedInboundSeqs();
     if (this.activeTurnId && this.child && this.threadId) {
       try {
         await this._request('turn/interrupt', {
@@ -914,6 +936,11 @@ export class CodexAgent {
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
+    if (inboundSeqs.length > 0 && this.onTurnAbandoned) {
+      try { this.onTurnAbandoned({ inboundSeqs }); } catch (error) {
+        this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });
+      }
+    }
     const waiters = this.idleWaiters.splice(0);
     for (const resolve of waiters) resolve();
   }

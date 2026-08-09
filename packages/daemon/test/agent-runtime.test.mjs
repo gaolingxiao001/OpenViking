@@ -76,7 +76,8 @@ describe('global Codex/Claude hard switch', () => {
     assert.equal(runtime.workStatus.working, false);
 
     runtime.backend.modelWorking = true;
-    runtime.backend.modelStartedAtMs = 1234;
+    runtime.backend.modelStartedAtMs = 5678;
+    runtime.backend.turnStartedAtMs = 1234;
     assert.deepEqual(runtime.workStatus, {
       working: true,
       startedAtMs: 1234,

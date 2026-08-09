@@ -26,6 +26,8 @@ export class AgentRuntime {
     this.logger = logger;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
+    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
+    this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.factories = {
       codex: options.codexFactory ?? ((backendOptions) => new CodexAgent(
@@ -58,7 +60,10 @@ export class AgentRuntime {
     const working = this.switching || Boolean(this.backend?.modelWorking);
     return {
       working,
-      startedAtMs: working ? (this.backend?.modelStartedAtMs ?? null) : null,
+      // A turn may pause for tools and resume sampling several times. Keep the
+      // user-facing clock anchored to the root turn instead of resetting it for
+      // every reasoning/message item.
+      startedAtMs: working ? (this.backend?.turnStartedAtMs ?? null) : null,
       connected: Boolean(this.state.connected),
       queued: this.state.queued ?? 0,
       switching: this.switching,
@@ -70,6 +75,8 @@ export class AgentRuntime {
     return {
       onTurnFailed: this.onTurnFailed,
       onTurnSucceeded: this.onTurnSucceeded,
+      onDeliverySucceeded: this.onDeliverySucceeded,
+      onTurnAbandoned: this.onTurnAbandoned,
       onAvailable: this.onAvailable,
       authorityToken: cognition.authorityToken,
       cognitionEpoch: cognition.epoch,

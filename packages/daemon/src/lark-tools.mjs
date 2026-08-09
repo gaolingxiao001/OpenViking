@@ -206,7 +206,8 @@ export const LARK_TOOLS = [
           description: 'Optional full open_ids to @mention before the message. Use only IDs from trusted metadata or tool results; never guess.',
         },
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
-        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The send is blocked if a newer accepted message exists in that exact chat/thread.' },
+        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the send is blocked if anything newer has arrived.' },
+        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional inbound msg= id whose one final delivery this send fulfills. Defaults to decision_message_id. Set it to an older still-pending question when a newer steered question was answered first; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
       required: ['chat_id', 'decision_message_id'],
     },
@@ -244,7 +245,8 @@ export const LARK_TOOLS = [
         },
         reply_in_thread: { type: 'boolean', default: false, description: 'Reply inside the message thread (continue or start one).' },
         idempotency_key: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'Optional stable key to reuse if intentionally retrying the same send.' },
-        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The reply is blocked if a newer accepted message exists in that exact chat/thread.' },
+        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the reply is blocked if anything newer has arrived.' },
+        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional inbound msg= id whose one final delivery this reply fulfills. Defaults to decision_message_id. Set it to an older still-pending question when a newer steered question was answered first; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
       required: ['message_id', 'decision_message_id'],
     },
@@ -265,7 +267,8 @@ export const LARK_TOOLS = [
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to react to. Never guess or reconstruct a shortened ID.' },
         emoji_type: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$', description: 'Exact Lark emoji_type, such as OK, THUMBSUP, DONE, THANKS, OnIt, or LGTM.' },
-        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id this decision responds to. The reaction is blocked if a newer accepted message exists in that exact chat/thread.' },
+        decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the reaction is blocked if anything newer has arrived.' },
+        response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional inbound msg= id whose one final delivery this reaction fulfills. Defaults to decision_message_id. Set it only for an older still-pending decision in the same chat/thread.' },
       },
       required: ['message_id', 'emoji_type', 'decision_message_id'],
     },
@@ -539,7 +542,7 @@ export class LarkToolService {
       this.freshnessDb = new DatabaseSync(this.options.databasePath, { readOnly: true });
       this.freshnessDb.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 5000');
       this.freshnessStatement = this.freshnessDb.prepare(`
-        SELECT inbound.status,
+        SELECT inbound.status, inbound.seq, inbound.conv_key,
           EXISTS(
             SELECT 1 FROM inbound AS newer
             WHERE newer.conv_key = inbound.conv_key
@@ -558,6 +561,12 @@ export class LarkToolService {
     return this.freshnessStatement.get(decisionMessageId);
   }
 
+  _decisionRow(messageId) {
+    return this.freshnessCheck
+      ? this.freshnessCheck(messageId)
+      : this._storedFreshness(messageId);
+  }
+
   _assertFreshDecision(value) {
     const decisionMessageId = typeof value === 'string' ? value.trim() : '';
     if (!DECISION_MESSAGE_PATTERN.test(decisionMessageId)) {
@@ -565,9 +574,7 @@ export class LarkToolService {
     }
     let row;
     try {
-      row = this.freshnessCheck
-        ? this.freshnessCheck(decisionMessageId)
-        : this._storedFreshness(decisionMessageId);
+      row = this._decisionRow(decisionMessageId);
     } catch {
       // Read failure is fail-closed: sending an old draft is worse than asking
       // the live turn to retry after its local state is readable again.
@@ -579,7 +586,46 @@ export class LarkToolService {
     if (Number(row.has_newer) !== 0) {
       throw new Error('Delivery blocked: a newer authenticated message arrived in the same chat/thread. Reconsider with the new steered input, then use its msg= id if the action still fits.');
     }
-    return decisionMessageId;
+    return { messageId: decisionMessageId, row };
+  }
+
+  // Freshness and attribution are deliberately separate. A steered quick question B
+  // can be answered while long-running A remains open; the later A delivery still
+  // uses B as its freshness fence, while response_to_message_id attributes it to A.
+  // An implicit reply/reaction target is used only when its scope can be proven;
+  // otherwise backwards-compatible attribution falls back to the freshness fence.
+  _resolveResponseDecision(value, fresh, implicitTarget = null) {
+    const explicit = typeof value === 'string' && value.trim() !== '';
+    const candidate = explicit ? value.trim() : implicitTarget;
+    if (!candidate || candidate === fresh.messageId) return fresh.messageId;
+    if (!DECISION_MESSAGE_PATTERN.test(candidate)) {
+      if (!explicit) return fresh.messageId;
+      throw new Error('response_to_message_id must be a full daemon-authenticated om_ Lark message ID');
+    }
+    let row;
+    try {
+      row = this._decisionRow(candidate);
+    } catch {
+      if (!explicit) return fresh.messageId;
+      throw new Error('Delivery blocked: response_to_message_id scope could not be verified. No Lark action was taken.');
+    }
+    if (!row || row.status !== 'DONE') {
+      if (!explicit) return fresh.messageId;
+      throw new Error('Delivery blocked: response_to_message_id is not an accepted daemon-authenticated inbound. No Lark action was taken.');
+    }
+    const freshSeq = Number(fresh.row?.seq);
+    const responseSeq = Number(row.seq);
+    const sameScope = typeof fresh.row?.conv_key === 'string'
+      && fresh.row.conv_key !== ''
+      && row.conv_key === fresh.row.conv_key;
+    const ordered = Number.isFinite(freshSeq)
+      && Number.isFinite(responseSeq)
+      && responseSeq <= freshSeq;
+    if (!sameScope || !ordered) {
+      if (!explicit) return fresh.messageId;
+      throw new Error('Delivery blocked: response_to_message_id must be in the same chat/thread and no newer than decision_message_id. No Lark action was taken.');
+    }
+    return candidate;
   }
 
   _assertAuthority() {
@@ -839,8 +885,11 @@ export class LarkToolService {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
-    this._assertFreshDecision(input.decision_message_id);
-    const actionKey = stableActionKey('send', input.decision_message_id, chatId, body.flag, text);
+    const fresh = this._assertFreshDecision(input.decision_message_id);
+    const responseToMessageId = this._resolveResponseDecision(input.response_to_message_id, fresh);
+    const actionKey = stableActionKey(
+      'send', fresh.messageId, responseToMessageId, chatId, body.flag, text,
+    );
     const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
       : '';
@@ -866,11 +915,16 @@ export class LarkToolService {
         idempotency_key: idempotencyKey,
       };
     }
+    const deliveryMetadata = {
+      action: 'send',
+      decisionMessageId: fresh.messageId,
+      responseToMessageId,
+    };
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       chatId,
       text: body.raw,
-      metadata: { action: 'send', decisionMessageId: input.decision_message_id },
+      metadata: deliveryMetadata,
     });
     if (journal && !journal.claimed) {
       throw new Error(`Delivery blocked: this identical send was already attempted (${journal.status}). No new Lark action was taken.`);
@@ -882,11 +936,11 @@ export class LarkToolService {
         body.flag, text, '--idempotency-key', idempotencyKey, '--format', 'json',
       ], 'send Lark message');
     } catch (error) {
-      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'send' });
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, deliveryMetadata);
       throw error;
     }
     const remoteMessageId = findMessageId(data);
-    this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, { action: 'send' });
+    this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, deliveryMetadata);
     return {
       sent: true,
       chat_id: chatId,
@@ -910,9 +964,12 @@ export class LarkToolService {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
-    this._assertFreshDecision(input.decision_message_id);
+    const fresh = this._assertFreshDecision(input.decision_message_id);
+    const responseToMessageId = this._resolveResponseDecision(
+      input.response_to_message_id, fresh, messageId,
+    );
     const actionKey = stableActionKey(
-      'reply', input.decision_message_id, messageId, replyInThread, body.flag, text,
+      'reply', fresh.messageId, responseToMessageId, messageId, replyInThread, body.flag, text,
     );
     const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
       ? input.idempotency_key
@@ -942,16 +999,18 @@ export class LarkToolService {
       body.flag, text, '--idempotency-key', idempotencyKey, '--format', 'json',
     ];
     if (replyInThread) args.push('--reply-in-thread');
+    const deliveryMetadata = {
+      action: 'reply',
+      decisionMessageId: fresh.messageId,
+      responseToMessageId,
+      targetMessageId: messageId,
+      replyInThread,
+    };
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       messageId,
       text: body.raw,
-      metadata: {
-        action: 'reply',
-        decisionMessageId: input.decision_message_id,
-        targetMessageId: messageId,
-        replyInThread,
-      },
+      metadata: deliveryMetadata,
     });
     if (journal && !journal.claimed) {
       throw new Error(`Delivery blocked: this identical reply was already attempted (${journal.status}). No new Lark action was taken.`);
@@ -960,11 +1019,11 @@ export class LarkToolService {
     try {
       data = await this.runLark(args, 'reply to Lark message');
     } catch (error) {
-      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'reply', replyInThread });
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, deliveryMetadata);
       throw error;
     }
     const remoteMessageId = findMessageId(data);
-    this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, { action: 'reply', replyInThread });
+    this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, deliveryMetadata);
     return {
       sent: true,
       reply_to_message_id: messageId,
@@ -983,7 +1042,10 @@ export class LarkToolService {
       throw new Error('emoji_type must be a valid Lark emoji identifier');
     }
     this._assertAuthority();
-    this._assertFreshDecision(input.decision_message_id);
+    const fresh = this._assertFreshDecision(input.decision_message_id);
+    const responseToMessageId = this._resolveResponseDecision(
+      input.response_to_message_id, fresh, messageId,
+    );
     if (this.options.dryRun) {
       return {
         reacted: false,
@@ -993,17 +1055,21 @@ export class LarkToolService {
         reaction_id: null,
       };
     }
-    const actionKey = stableActionKey('reaction', input.decision_message_id, messageId, emojiType);
+    const actionKey = stableActionKey(
+      'reaction', fresh.messageId, responseToMessageId, messageId, emojiType,
+    );
+    const deliveryMetadata = {
+      action: 'reaction',
+      decisionMessageId: fresh.messageId,
+      responseToMessageId,
+      targetMessageId: messageId,
+      emojiType,
+    };
     const journal = this._reserveOutbound({
       dedupeKey: `delivery:${actionKey}`,
       messageId,
       text: `[reaction ${emojiType}]`,
-      metadata: {
-        action: 'reaction',
-        decisionMessageId: input.decision_message_id,
-        targetMessageId: messageId,
-        emojiType,
-      },
+      metadata: deliveryMetadata,
     });
     if (journal && !journal.claimed) {
       throw new Error(`Delivery blocked: this identical reaction was already attempted (${journal.status}). No new Lark action was taken.`);
@@ -1017,10 +1083,10 @@ export class LarkToolService {
         '--format', 'json',
       ], 'react to Lark message');
     } catch (error) {
-      this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'reaction', emojiType });
+      this._settleOutbound(journal?.key, 'UNCERTAIN', null, deliveryMetadata);
       throw error;
     }
-    this._settleOutbound(journal?.key, 'COMMITTED', null, { action: 'reaction', emojiType });
+    this._settleOutbound(journal?.key, 'COMMITTED', null, deliveryMetadata);
     return {
       reacted: true,
       message_id: messageId,

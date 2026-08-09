@@ -33,6 +33,7 @@ const DEFINITIONS = Object.freeze({
   'system.subscriber_started': { category: 'system', severity: 'success', priority: 30, title: '飞书监听已启动' },
   'system.ready': { category: 'system', severity: 'success', priority: 40, title: '守护进程就绪' },
   'system.liveness_ack': { category: 'system', severity: 'success', priority: 45, title: '空闲唤醒确认' },
+  'system.liveness_cleared': { category: 'system', severity: 'info', priority: 18, title: '空闲确认已收起' },
   'system.recovery': { category: 'system', severity: 'warn', priority: 72, title: '恢复未完成任务' },
   'system.event_dropped': { category: 'system', severity: 'warn', priority: 65, title: '事件未处理' },
   'system.persist_failed': { category: 'system', severity: 'error', priority: 100, title: '事件落库失败' },

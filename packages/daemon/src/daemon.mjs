@@ -12,6 +12,7 @@ import { LarkClient } from './lark.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
+import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -90,6 +91,7 @@ export class LarkDaemon {
     this.codex = null;
     this.groupBurst = null;
     this.lark = null;
+    this.liveness = null;
     this.roster = null;
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -108,7 +110,6 @@ export class LarkDaemon {
     // Automatic claude → codex fallback state (see tryModelFallback).
     this.fallbackInProgress = false;
     this.lastFallbackAtMs = 0;
-    this.lastModelActivityAtMs = Date.now();
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -161,9 +162,33 @@ export class LarkDaemon {
         metadata: { larkVersion: larkInfo.version },
       }, 'preflight-ok');
 
+      this.liveness = new IdleLivenessExtension({
+        thresholdMs: this.config.idleReactionAfterMs ?? 600_000,
+        enabled: !this.config.dryRun,
+        lark: this.lark,
+        store: this.store,
+        logger: this.logger.child({ component: 'idle-liveness' }),
+        recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
+      });
+
       this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
-        onTurnFailed: (info) => { void this.handleTurnFailure(info); },
-        onTurnSucceeded: (info) => { this.handleTurnSuccess(info); },
+        onTurnFailed: (info) => {
+          void this.handleTurnFailure(info)
+            .then((fallbackContinues) => {
+              if (!fallbackContinues) return this.liveness?.onTurnSettled(info);
+              return undefined;
+            })
+            .catch((error) => {
+              this.logger.warn('turn_failure_handler_failed', { error: safeError(error) });
+              return this.liveness?.onTurnSettled(info);
+            });
+        },
+        onTurnSucceeded: (info) => {
+          this.handleTurnSuccess(info);
+          void this.liveness?.onTurnSettled(info);
+        },
+        onDeliverySucceeded: (info) => { void this.liveness?.onDeliverySucceeded(info); },
+        onTurnAbandoned: (info) => { void this.liveness?.onTurnSettled(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
       });
       this.groupBurst = new GroupBurstRouter({
@@ -305,7 +330,9 @@ export class LarkDaemon {
       chatType: event.chatType,
     });
     this.enqueueIngress(async () => {
-      await this.maybeAcknowledgeAfterIdle(event, result.inbound);
+      await this.liveness?.beforeInbound(event, result.inbound, {
+        modelBusy: this.codex?.turnInProgress,
+      });
       // Bounded roster warm-up so formatInboundLine can resolve from= to a
       // display name. warm() never rejects and races an internal timeout, so a
       // slow or failing lark-cli only degrades the label back to the id stub.
@@ -317,66 +344,6 @@ export class LarkDaemon {
         seq: result.inbound.seq,
       });
     });
-  }
-
-  async maybeAcknowledgeAfterIdle(event, inbound) {
-    const now = Date.now();
-    const threshold = this.config.idleReactionAfterMs ?? 600_000;
-    const direct = (event.chatType ?? 'p2p') === 'p2p'
-      || (Array.isArray(event.mentions) && event.mentions.length > 0);
-    const shouldReact = threshold > 0
-      && direct
-      && !this.codex?.turnInProgress
-      && now - this.lastModelActivityAtMs >= threshold;
-    // Every accepted user message proves there is fresh work. Move the window
-    // immediately so a burst after a long idle gets at most one reaction.
-    this.lastModelActivityAtMs = now;
-    if (!shouldReact || this.shuttingDown) return false;
-
-    const journalKey = `idle-liveness-reaction:${event.messageId}`;
-    const action = 'daemon_idle_liveness_reaction';
-    try {
-      this.store.appendCognitionJournal({
-        kind: 'outbound',
-        status: 'PENDING',
-        chatId: event.chatId,
-        threadId: event.threadId,
-        messageId: event.messageId,
-        actor: 'me',
-        text: '[reaction OnIt]',
-        dedupeKey: journalKey,
-        metadata: { action, emojiType: 'OnIt' },
-      });
-    } catch (error) {
-      this.logger.warn('idle_liveness_journal_reserve_failed', { error: safeError(error) });
-      return false;
-    }
-    try {
-      await this.lark.reactMessage(event.messageId, 'OnIt');
-    } catch (error) {
-      try {
-        this.store.settleCognitionJournal(journalKey, 'UNCERTAIN', { metadata: { action } });
-      } catch (settleError) {
-        this.logger.warn('idle_liveness_journal_settle_failed', { error: safeError(settleError) });
-      }
-      this.logger.warn('idle_liveness_reaction_failed', {
-        messageRef: opaqueRef(event.messageId),
-        error: safeChatLookupError(error),
-      });
-      return false;
-    }
-    try {
-      this.store.settleCognitionJournal(journalKey, 'COMMITTED', { metadata: { action } });
-    } catch (error) {
-      this.logger.warn('idle_liveness_journal_settle_failed', { error: safeError(error) });
-    }
-    this.recordSystemActivity('system.liveness_ack', {
-      summary: '长时间空闲后已先用 reaction 确认在线',
-      status: 'SENT',
-      conversationKey: event.conversationKey,
-      inboundSeq: inbound?.seq,
-    });
-    return true;
   }
 
   // A slash command and every later accepted message share one global order.
@@ -395,7 +362,6 @@ export class LarkDaemon {
   // A successful turn clears the failure-notice mute for every conversation it
   // consumed messages from: the next failure there is news again.
   handleTurnSuccess({ inboundSeqs }) {
-    this.lastModelActivityAtMs = Date.now();
     if (this.failureNoticeMutes.size === 0 || !this.store) return;
     for (const seq of Array.isArray(inboundSeqs) ? inboundSeqs : []) {
       let inbound = null;
@@ -408,13 +374,14 @@ export class LarkDaemon {
   // when that is not applicable (or the switch itself fails) the normal failure
   // notice goes out instead.
   async handleTurnFailure(info) {
-    this.lastModelActivityAtMs = Date.now();
+    this.liveness?.touch();
     try {
-      if (await this.tryModelFallback(info)) return;
+      if (await this.tryModelFallback(info)) return true;
     } catch (error) {
       this.logger.warn('model_fallback_failed', { error: safeError(error) });
     }
     await this.notifyTurnFailure(info);
+    return false;
   }
 
   // Claude CLI/API errors auto-switch to the codex fallback model (hard switch)
@@ -624,7 +591,7 @@ export class LarkDaemon {
     // /help and /status answer alongside an active turn; session-mutating
     // commands interrupt that turn inside executeCommand before rotating.
     if (this.shuttingDown) return;
-    this.lastModelActivityAtMs = Date.now();
+    this.liveness?.touch();
     const label = command.name ? `/${command.name}` : String(event.content).trim().split(/\s+/)[0];
     this.store.appendCognitionJournal({
       kind: 'control',
@@ -700,6 +667,9 @@ export class LarkDaemon {
         this.logger.warn('command_reply_journal_settle_failed', { error: safeError(error) });
       }
     }
+    // A direct control reply is already visible proof of life. Clear any
+    // temporary ack left by the model turn it inspected or interrupted.
+    void this.liveness?.cleanupAll('command_reply');
   }
 
   runMaintenance() {
@@ -912,6 +882,7 @@ export class LarkDaemon {
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       this.maintenanceTimer = null;
       registerNameResolver(null);
+      try { await this.liveness?.stop(); } catch (error) { this.logger.warn('liveness_stop_failed', { error }); }
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
       this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }

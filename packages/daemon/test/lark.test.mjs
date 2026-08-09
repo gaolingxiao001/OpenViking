@@ -10,6 +10,40 @@ describe('Lark chat lookup', () => {
     const registry = {
       async run(command, args, options) {
         calls.push({ command, args, options });
+        return {
+          code: 0,
+          timedOut: false,
+          stdout: JSON.stringify({ ok: true, data: { reaction_id: 'opaque-reaction-id' } }),
+          stderr: '',
+        };
+      },
+    };
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: '/fake/lark-cli',
+      projectDir: '/tmp',
+      sendTimeoutMs: 30_000,
+      dryRun: false,
+    }, registry, quietLogger);
+
+    assert.deepEqual(await client.reactMessage('om_message123456', 'OnIt'), {
+      reacted: true,
+      reactionId: 'opaque-reaction-id',
+    });
+    assert.deepEqual(calls[0].args, [
+      '--profile', 'test-profile',
+      'im', 'reactions', 'create', '--as', 'bot',
+      '--params', '{"message_id":"om_message123456"}',
+      '--data', '{"reaction_type":{"emoji_type":"OnIt"}}',
+      '--format', 'json',
+    ]);
+  });
+
+  it('deletes the exact reaction token returned by Lark', async () => {
+    const calls = [];
+    const registry = {
+      async run(command, args, options) {
+        calls.push({ command, args, options });
         return { code: 0, timedOut: false, stdout: JSON.stringify({ ok: true }), stderr: '' };
       },
     };
@@ -21,14 +55,36 @@ describe('Lark chat lookup', () => {
       dryRun: false,
     }, registry, quietLogger);
 
-    assert.deepEqual(await client.reactMessage('om_message123456', 'OnIt'), { reacted: true });
+    assert.deepEqual(
+      await client.deleteReaction('om_message123456', 'opaque-reaction-id'),
+      { deleted: true },
+    );
     assert.deepEqual(calls[0].args, [
       '--profile', 'test-profile',
-      'im', 'reactions', 'create', '--as', 'bot',
-      '--params', '{"message_id":"om_message123456"}',
-      '--data', '{"reaction_type":{"emoji_type":"OnIt"}}',
+      'im', 'reactions', 'delete', '--as', 'bot',
+      '--message-id', 'om_message123456',
+      '--reaction-id', 'opaque-reaction-id',
       '--format', 'json',
     ]);
+  });
+
+  it('surfaces reaction delete failures without guessing remote state', async () => {
+    const registry = {
+      async run() {
+        return { code: 1, timedOut: false, stdout: '', stderr: 'invalid reaction_id' };
+      },
+    };
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: '/fake/lark-cli',
+      projectDir: '/tmp',
+      sendTimeoutMs: 30_000,
+      dryRun: false,
+    }, registry, quietLogger);
+    await assert.rejects(
+      () => client.deleteReaction('om_message123456', 'opaque-reaction-id'),
+      /invalid reaction_id/,
+    );
   });
 
   it('gets a group name with the schema-verified bot chat command', async () => {

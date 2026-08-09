@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
+import { ClaudeAgent, isLarkDeliveryToolName, sanitizeClaudeEnv } from '../src/claude.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const kernelInnerPath = fileURLToPath(new URL('../agent/kernel-inner.md', import.meta.url));
@@ -158,6 +158,13 @@ function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {
 }
 
 describe('ClaudeAgent persistent stream-json runtime', () => {
+  it('recognises only delivery tools from the trusted Lark MCP server', () => {
+    assert.equal(isLarkDeliveryToolName('mcp__lark_daemon_im__send_lark_message'), true);
+    assert.equal(isLarkDeliveryToolName('lark_daemon_im__react_to_lark_message'), true);
+    assert.equal(isLarkDeliveryToolName('mcp__other__send_lark_message'), false);
+    assert.equal(isLarkDeliveryToolName('mcp__lark_daemon_im__view_lark_image'), false);
+  });
+
   it('preflights, starts persistent stream-json, and prefixes the first real turn', async () => {
     const { agent, calls, persistent, store } = harness();
     await agent.start();
@@ -247,8 +254,43 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.stop();
   });
 
+  it('notifies the outer lifecycle when a Lark delivery tool succeeds', async () => {
+    const deliveries = [];
+    const { agent, persistent } = harness({
+      agentOptions: { onDeliverySucceeded: (delivery) => deliveries.push(delivery) },
+    });
+    await agent.start();
+    const child = persistent[0];
+    agent.deliver('please react', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({
+      type: 'assistant',
+      message: { content: [{
+        type: 'tool_use',
+        id: 'tool-delivery-1',
+        name: 'mcp__lark_daemon_im__react_to_lark_message',
+        input: {},
+      }] },
+    });
+    child.feed({
+      type: 'user',
+      message: { content: [{
+        type: 'tool_result',
+        tool_use_id: 'tool-delivery-1',
+        is_error: false,
+        content: 'ok',
+      }] },
+    });
+    assert.deepEqual(deliveries, [{ inboundSeqs: [7], mode: 'lark' }]);
+    child.feed({ type: 'result', subtype: 'success', result: 'done' });
+    await agent.stop();
+  });
+
   it('interruptTurn kills the in-flight turn and keeps queued messages for the next session', async () => {
-    const { agent, persistent, failures } = harness();
+    const abandoned = [];
+    const { agent, persistent, failures } = harness({
+      agentOptions: { onTurnAbandoned: (info) => abandoned.push(info) },
+    });
     await agent.start();
     const child = persistent[0];
     agent.deliver('stuck request', 7);
@@ -258,6 +300,7 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.interruptTurn();
     assert.equal(agent.turnInProgress, false);
     assert.equal(failures.length, 0); // intentional abandonment is not a failure
+    assert.deepEqual(abandoned, [{ inboundSeqs: [7] }]);
 
     agent.deliver('queued while switching', 8); // disconnected: queued, not lost
     const rotated = agent.rotateSession({ resume: false });

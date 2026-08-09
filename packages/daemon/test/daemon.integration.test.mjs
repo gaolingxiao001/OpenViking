@@ -410,6 +410,10 @@ describe('daemon event path', { concurrency: false }, () => {
     daemon.lark = {
       async replyMessage() { order.push('command-reply'); },
     };
+    daemon.liveness = {
+      touch() {},
+      async cleanupAll(reason) { order.push(`liveness:${reason}`); },
+    };
     const event = {
       chatId: 'oc_command123456',
       threadId: null,
@@ -430,57 +434,11 @@ describe('daemon event path', { concurrency: false }, () => {
       'journal:outbound',
       'command-reply',
       'journal:settled',
+      'liveness:command_reply',
       'following-inbound',
     ]);
   });
 
-  it('reacts once before model work after a long idle window', async () => {
-    const daemon = new LarkDaemon(
-      {
-        lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-idle-reaction.lock'),
-        idleReactionAfterMs: 600_000,
-      },
-      createLogger('error', { test: 'idle-reaction' }),
-    );
-    const journal = [];
-    const reactions = [];
-    daemon.store = {
-      appendCognitionJournal(entry) { journal.push(entry); },
-      settleCognitionJournal(key, status) { journal.push({ key, status }); },
-      recordActivity() { return true; },
-    };
-    daemon.codex = { turnInProgress: false };
-    daemon.lark = {
-      async reactMessage(messageId, emojiType) { reactions.push({ messageId, emojiType }); },
-    };
-    daemon.lastModelActivityAtMs = Date.now() - 601_000;
-    const event = {
-      chatId: 'oc_idle12345678',
-      threadId: null,
-      messageId: 'om_idle12345678',
-      chatType: 'p2p',
-      conversationKey: 'profile:tenant:oc_idle12345678:main',
-    };
-
-    assert.equal(await daemon.maybeAcknowledgeAfterIdle(event, { seq: 7 }), true);
-    assert.deepEqual(reactions, [{ messageId: 'om_idle12345678', emojiType: 'OnIt' }]);
-    assert.equal(journal[0].status, 'PENDING');
-    assert.equal(journal[1].status, 'COMMITTED');
-
-    assert.equal(await daemon.maybeAcknowledgeAfterIdle({ ...event, messageId: 'om_idle23456789' }, { seq: 8 }), false);
-    daemon.lastModelActivityAtMs = Date.now() - 601_000;
-    daemon.codex.turnInProgress = true;
-    assert.equal(await daemon.maybeAcknowledgeAfterIdle({ ...event, messageId: 'om_idle34567890' }, { seq: 9 }), false);
-    daemon.codex.turnInProgress = false;
-    daemon.lastModelActivityAtMs = Date.now() - 601_000;
-    assert.equal(await daemon.maybeAcknowledgeAfterIdle({
-      ...event,
-      messageId: 'om_idle45678901',
-      chatType: 'group',
-      mentions: [],
-    }, { seq: 10 }), false);
-    assert.equal(reactions.length, 1);
-  });
 });
 
 describe('/model immediate switch', () => {
@@ -578,7 +536,10 @@ describe('automatic claude fallback', () => {
 
   it('hard-switches to the fallback model, notifies the chat, and retries the failed turn', async () => {
     const { daemon, calls, delivered, replies, activities } = makeFallbackDaemon();
-    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'Claude API exploded' });
+    assert.equal(
+      await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'Claude API exploded' }),
+      true,
+    );
 
     assert.deepEqual(calls, [['setModel', 'gpt-5.6-sol']]);
     assert.equal(replies.length, 1);
@@ -601,7 +562,10 @@ describe('automatic claude fallback', () => {
 
   it('never falls back from the codex runtime and sends the normal notice instead', async () => {
     const { daemon, calls, replies } = makeFallbackDaemon({ runtime: 'codex' });
-    await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'quota exceeded' });
+    assert.equal(
+      await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'quota exceeded' }),
+      false,
+    );
     assert.equal(calls.length, 0);
     assert.equal(replies.length, 1);
     assert.match(replies[0].text, /处理失败/);

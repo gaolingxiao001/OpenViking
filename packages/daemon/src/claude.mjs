@@ -30,6 +30,22 @@ function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
 }
 
+const LARK_DELIVERY_TOOLS = new Set([
+  'react_to_lark_message',
+  'retract_lark_message',
+  'reply_lark_message',
+  'send_lark_message',
+]);
+
+export function larkDeliveryToolName(value) {
+  const match = /^(?:mcp__)?lark_daemon_im__(.+)$/.exec(String(value ?? ''));
+  return match && LARK_DELIVERY_TOOLS.has(match[1]) ? match[1] : null;
+}
+
+export function isLarkDeliveryToolName(value) {
+  return Boolean(larkDeliveryToolName(value));
+}
+
 function appendBounded(current, chunk, label) {
   const next = current + chunk;
   if (Buffer.byteLength(next, 'utf8') > MAX_LINE_BYTES) {
@@ -58,6 +74,8 @@ export class ClaudeAgent {
     this._spawn = options.spawn ?? nodeSpawn;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
+    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
+    this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
     this.startStabilityMs = options.startStabilityMs ?? START_STABILITY_MS;
@@ -101,6 +119,7 @@ export class ClaudeAgent {
     this.backoffMs = this.reconnectBaseMs;
     this.activitySeq = 0;
     this.idleWaiters = [];
+    this.deliveryTools = new Map();
     this.mcpTempDir = null;
   }
 
@@ -541,6 +560,13 @@ export class ClaudeAgent {
         } else if (block.type === 'tool_use') {
           this.modelWorking = false;
           this.modelStartedAtMs = null;
+          const deliveryTool = larkDeliveryToolName(block.name);
+          if (deliveryTool && typeof block.id === 'string') {
+            this.deliveryTools.set(block.id, {
+              tool: deliveryTool,
+              input: block.input && typeof block.input === 'object' ? block.input : {},
+            });
+          }
           this._recordActivity('agent.tool_called', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
             summary: String(block.name ?? 'unknown tool'),
@@ -555,12 +581,33 @@ export class ClaudeAgent {
       const blocks = Array.isArray(message.message?.content) ? message.message.content : [];
       for (const block of blocks) {
         if (block?.type !== 'tool_result') continue;
+        const delivery = this.deliveryTools.get(block.tool_use_id) ?? null;
+        this.deliveryTools.delete(block.tool_use_id);
         this._recordActivity('agent.tool_completed', {
           inboundSeq: this._activeSeqs().at(-1) ?? null,
           status: block.is_error === true ? 'FAILED' : 'COMPLETED',
           summary: block.is_error === true ? 'Claude tool failed' : 'Claude tool completed',
           metadata: { runtime: 'claude', toolId: block.tool_use_id },
         });
+        if (delivery && block.is_error !== true && this.onDeliverySucceeded) {
+          const responseMessageId = delivery.input.response_to_message_id
+            ?? (['react_to_lark_message', 'reply_lark_message'].includes(delivery.tool)
+              ? delivery.input.message_id
+              : delivery.input.decision_message_id);
+          const resolvedSeq = responseMessageId
+            ? this.store.inboundSeqForMessageId?.(responseMessageId)
+            : null;
+          try {
+            this.onDeliverySucceeded({
+              inboundSeqs: resolvedSeq === null || resolvedSeq === undefined
+                ? this._activeSeqs()
+                : [resolvedSeq],
+              mode: 'lark',
+            });
+          } catch (error) {
+            this.logger.warn('delivery_success_notify_failed', { error: safe(error) });
+          }
+        }
       }
       if (blocks.some((block) => block?.type === 'tool_result')) {
         this.modelWorking = true;
@@ -600,6 +647,7 @@ export class ClaudeAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
+    this.deliveryTools.clear();
     if (!error) {
       this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.deliveredThroughSeq);
       this._persistSession();
@@ -672,6 +720,7 @@ export class ClaudeAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
+    this.deliveryTools.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this.needsHistoryPrefix = !this.sessionInitialized;
     if (!this.sessionInitialized && !this.stopping && this.startedOk && this.autoReconnect) {
@@ -736,11 +785,18 @@ export class ClaudeAgent {
   // abandonment, so onTurnFailed is not raised for the interrupted items.
   async interruptTurn() {
     if (!this.turnActive) return;
+    const inboundSeqs = this._activeSeqs();
     this.activeItems.splice(0);
     this.turnActive = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
+    this.deliveryTools.clear();
+    if (inboundSeqs.length > 0 && this.onTurnAbandoned) {
+      try { this.onTurnAbandoned({ inboundSeqs }); } catch (error) {
+        this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });
+      }
+    }
     this.turnError = null;
     this.deliveredThroughSeq = this.syncedThroughSeq;
     await this._terminateCurrent();

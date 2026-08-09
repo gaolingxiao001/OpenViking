@@ -786,10 +786,13 @@ describe('CodexAgent turn/steer state machine', () => {
 
   it('records a Lark reaction as a delivery associated with its inbound message', async () => {
     const activities = [];
+    const deliveries = [];
     const store = makeStore();
     store.recordActivity = (activity) => activities.push(activity);
     store.inboundSeqForMessageId = (messageId) => messageId === 'om_target12345678' ? 55 : null;
-    const { agent, children } = newAgent(store);
+    const { agent, children } = newAgent(store, {
+      onDeliverySucceeded: (delivery) => deliveries.push(delivery),
+    });
     const child = await handshake(agent, children);
 
     agent.deliver('acknowledge this', 41);
@@ -820,6 +823,7 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(delivery.metadata.deliveryMode, 'reaction');
     assert.equal(delivery.metadata.toolLabel, '飞书表态');
     assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
+    assert.deepEqual(deliveries, [{ inboundSeqs: [55], mode: 'reaction' }]);
   });
 });
 
@@ -913,7 +917,10 @@ describe('CodexAgent session rotation (slash commands)', () => {
 
   it('interruptTurn abandons the active turn without waiting for turn/completed', async () => {
     const store = makeStore();
-    const { agent, children } = newAgent(store);
+    const abandoned = [];
+    const { agent, children } = newAgent(store, {
+      onTurnAbandoned: (info) => abandoned.push(info),
+    });
     const child = await handshake(agent, children);
 
     agent.deliver('long-running request', 1);
@@ -929,6 +936,7 @@ describe('CodexAgent session rotation (slash commands)', () => {
     await interrupting;
 
     assert.equal(agent.turnInProgress, false);
+    assert.deepEqual(abandoned, [{ inboundSeqs: [1] }]);
     await agent.whenIdle(); // resolves without any turn/completed event
   });
 
