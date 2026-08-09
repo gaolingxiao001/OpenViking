@@ -35,7 +35,7 @@ function requestUpgrade(socketPath, target) {
         resolve(payload);
       });
     });
-    request.setTimeout(120_000, () => request.destroy(new Error('updater request timed out')));
+    request.setTimeout(600_000, () => request.destroy(new Error('updater request timed out')));
     request.once('error', reject);
     request.end(body);
   });
@@ -55,7 +55,9 @@ if (command !== 'upgrade' || !target || extra.length > 0) {
     const apps = Array.isArray(result.apps) && result.apps.length > 0
       ? result.apps
       : [result.app].filter(Boolean);
-    process.stdout.write(`${apps.join(', ')} ${apps.length === 1 ? 'is' : 'are'} ready on ${result.release}\n`);
+    const commit = typeof result.commit === 'string' ? ` at ${result.commit.slice(0, 12)}` : '';
+    const publication = result.published ? 'published and ' : '';
+    process.stdout.write(`${publication}${apps.join(', ')} ${apps.length === 1 ? 'is' : 'are'} ready${commit} (${result.release})\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

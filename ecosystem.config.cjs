@@ -121,6 +121,9 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         LARK_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
+        LARK_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),
+        LARK_UPDATER_REMOTE_URL: 'https://github.com/ZaynJarvis/lark-daemon.git',
+        LARK_UPDATER_REMOTE_BRANCH: 'main',
         LARK_UPDATER_SOCKET: path.join(shareDir, 'lark-daemon', 'updater.sock'),
         PATH: `${executablePath}:${inheritedPath}`,
       },

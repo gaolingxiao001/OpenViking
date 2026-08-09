@@ -11,6 +11,7 @@ import {
   defaultSocketPath,
   getUpgradeTargets,
 } from './targets.mjs';
+import { publishLatestRelease } from './publisher.mjs';
 
 const execFile = promisify(execFileCallback);
 const MAX_BODY_BYTES = 4096;
@@ -191,6 +192,8 @@ export async function upgradeTarget(target, {
   fetchImpl = globalThis.fetch,
   readyOptions,
   pm2Env = cleanPm2ControlEnv(),
+  publishReleaseImpl = publishLatestRelease,
+  publishOptions = {},
 } = {}) {
   assertUpgradeTarget(target);
   const deployLock = path.join(path.dirname(path.resolve(releaseLink)), 'deploy.lock');
@@ -201,7 +204,13 @@ export async function upgradeTarget(target, {
     throw error;
   }
   try {
+    const publication = await publishReleaseImpl({
+      baseDir: path.dirname(path.resolve(releaseLink)),
+      ...publishOptions,
+    });
     const release = await resolveRelease(releaseLink);
+    const publishedRelease = await realpath(publication.release);
+    if (publishedRelease !== release) throw new Error('publisher did not activate the returned release');
     const configPath = await realpath(path.join(release, 'ecosystem.config.cjs'));
     if (!isInside(release, configPath)) throw new Error('ecosystem config resolves outside the release');
 
@@ -241,6 +250,8 @@ export async function upgradeTarget(target, {
       ...(upgradedApps.length === 1 ? { app: upgradedApps[0] } : {}),
       apps: upgradedApps,
       release,
+      commit: publication.commit,
+      published: publication.published === true,
       status: 'ready',
     };
   } finally {

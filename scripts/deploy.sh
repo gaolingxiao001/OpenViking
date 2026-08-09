@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Publish the committed (HEAD) state as a versioned release under
+# Bootstrap or repair the updater control plane by publishing a committed
+# local ref as a versioned release under
 # ~/.local/lib/lark-daemon/releases and move the current release pointer.
 # The working tree is never deployed — commit first, then run this.
 # Config lives in one shared file (~/.local/lib/lark-daemon/env); every
 # release symlinks its .env to it, so edits there survive publishes.
 #
-# This script deliberately does not touch PM2. Runtime rollout is a separate
-# operation through the updater: `lark-daemon upgrade zayn|sally|all`.
+# This script deliberately does not touch PM2. After the initial bootstrap,
+# normal updates use only `lark-daemon upgrade zayn|sally|all`; the updater
+# fetches trusted upstream main and publishes the release itself.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -75,5 +77,5 @@ ln -sfn "$CLI_TARGET" "$CLI_LINK"
 # `/restart` reloads its prompt), so publish never prunes releases underneath
 # PM2. Cleanup belongs after an observed successful `upgrade all`.
 echo "published $REL"
-echo "if this release changes updater targets, bootstrap once: ./scripts/bootstrap-updater.sh"
-echo "roll out with: lark-daemon upgrade zayn|sally|all"
+echo "bootstrap/refresh the updater with: ./scripts/bootstrap-updater.sh"
+echo "then roll out with: lark-daemon upgrade zayn|sally|all"

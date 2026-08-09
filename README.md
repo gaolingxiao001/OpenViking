@@ -1,6 +1,6 @@
 # lark-daemon
 
-一个单用户、本机常驻的飞书 AI Agent。项目拆成三个可独立运行的模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理；`updater` 是 PM2 sibling，只把 allowlist 内的 daemon 切到当前 release。
+一个单用户、本机常驻的飞书 AI Agent。项目拆成三个可独立运行的模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
 
 daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout；两边都通过同一套 Lark MCP 工具回复。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；思考中途来的纠正会即时进入当前会话。日常使用不需要 `@`。
 
@@ -23,7 +23,7 @@ npm test && npm run check
 npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 ```
 
-正式上线先用 `./scripts/deploy.sh` 发布 release，再用 `lark-daemon upgrade all` 滚动两个 Agent 和共享 Web（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次发布时从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向待滚动版本，`rollback` 保留上一个发布版本。
+首次上线用 `./scripts/deploy.sh` 发布 bootstrap release，再启动 updater。此后代码合入并 push 到 upstream `main` 后，只需 `lark-daemon upgrade zayn|sally|all`：updater 会自行 fetch、打包、跑测试、发布并滚动目标，不再手动执行 deploy（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次发布时从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
 
 ## 交互规则
 
@@ -71,14 +71,17 @@ pm2 status lark-daemon-zayn lark-daemon-sally lark-web lark-updater
 pm2 logs lark-daemon-zayn --lines 100
 curl http://127.0.0.1:3737/ready
 ./scripts/deploy.sh [git-ref]
+lark-daemon upgrade sally
 lark-daemon upgrade all
 ```
 
-`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取源码 checkout。它只接受 `zayn` / `sally` / `all`，解析 `~/.local/lib/lark-daemon/current` 后从同一份 ecosystem config 精确滚动 allowlist 内的进程并校验 `/ready`；`all` 会依次升级两个 daemon 和共享 Web。它和 `deploy.sh` 共用 deploy lock，不接收 SHA、路径或 shell 命令。
+`deploy.sh` 是首次安装或 updater 控制面协议变更时的 bootstrap 工具，不是日常升级步骤。
+
+`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取任一 Agent 的源码 checkout。它只接受 `zayn` / `sally` / `all`，从固定的 `https://github.com/ZaynJarvis/lark-daemon.git`、`main` 分支 fetch 到 updater 自有的 bare mirror；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先从 Git archive 打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 精确滚动目标并校验 `/ready`；`all` 会依次升级两个 daemon 和共享 Web。相同 commit 的第二次请求直接复用已验证 release。整个发布与滚动过程持有同一把 deploy lock。
 
 PM2 的固定拓扑是 `lark-daemon-zayn`、`lark-daemon-sally`、共享 `lark-web`、共享 `lark-updater`。两个 daemon 来自同一模板，只替换 profile、dataDir、workspace、model、端口和 OV config。Web 入口保持为 `127.0.0.1:3737`，通过固定 loopback allowlist 在两个 daemon 间切换，不接受客户端传入任意 upstream。
 
-当 release 修改了 updater 协议或 target（包括这次从旧拓扑迁移）时，发布后先运行一次 `./scripts/bootstrap-updater.sh`，再执行 `lark-daemon upgrade all`。普通后续升级只需 `deploy.sh` 加 `upgrade all`。
+首次安装，或 release 修改了 updater 自身的协议 / target allowlist 时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再由任一 Agent 调用 `lark-daemon upgrade zayn|sally|all`。升级 sibling 可以同步验收；升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应由另一个 Agent 或 `/status` 验收。
 
 ## Activity 页面
 

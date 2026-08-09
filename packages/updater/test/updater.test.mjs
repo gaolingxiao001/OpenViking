@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { publishLatestRelease } from '../src/publisher.mjs';
 import { cleanPm2ControlEnv, createUpdaterServer, upgradeTarget } from '../src/server.mjs';
 
 async function fixtureRelease() {
@@ -16,6 +24,14 @@ async function fixtureRelease() {
   await writeFile(path.join(release, 'ecosystem.config.cjs'), 'module.exports = {};\n');
   await symlink(release, path.join(base, 'current'));
   return { root, release, releaseLink: path.join(base, 'current') };
+}
+
+function useFixtureRelease(fixture) {
+  return async () => ({
+    release: fixture.release,
+    commit: '1111111111111111111111111111111111111111',
+    published: false,
+  });
 }
 
 function post(socketPath, body) {
@@ -47,6 +63,7 @@ test('upgradeTarget only runs the allowlisted Sally app from current release', a
   await writeFile(daemonEntry, '');
   const result = await upgradeTarget('sally', {
     releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
     pm2Bin: '/fake/pm2',
     execFileImpl: async (command, args, options) => {
       calls.push({ command, args, options });
@@ -119,6 +136,7 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
   ];
   const result = await upgradeTarget('all', {
     releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
     pm2Bin: '/fake/pm2',
     execFileImpl: async (_command, args) => {
       calls.push(args);
@@ -155,6 +173,7 @@ test('first Zayn upgrade replaces the exact legacy PM2 name', async () => {
   const calls = [];
   await upgradeTarget('zayn', {
     releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
     execFileImpl: async (_command, args) => {
       calls.push(args);
       if (args[0] !== 'jlist') return { stdout: '' };
@@ -184,6 +203,7 @@ test('failed first Zayn upgrade restores the stopped legacy process', async () =
   const calls = [];
   await assert.rejects(upgradeTarget('zayn', {
     releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
     execFileImpl: async (_command, args) => {
       calls.push(args);
       if (args[0] !== 'jlist') return { stdout: '' };
@@ -229,6 +249,7 @@ test('upgradeTarget rejects an online app that still points at an old release', 
   await assert.rejects(
     upgradeTarget('zayn', {
       releaseLink: fixture.releaseLink,
+      publishReleaseImpl: useFixtureRelease(fixture),
       execFileImpl: async (_command, args) => ({
         stdout: args[0] === 'jlist'
           ? JSON.stringify([{
@@ -271,6 +292,148 @@ test('upgradeTarget shares the deploy lock with deploy.sh', async () => {
   assert.equal(called, false);
 });
 
+test('upgradeTarget publishes upstream before rolling the target', async () => {
+  const fixture = await fixtureRelease();
+  const daemonEntry = path.join(fixture.release, 'packages', 'daemon', 'src', 'main.mjs');
+  await mkdir(path.dirname(daemonEntry), { recursive: true });
+  await writeFile(daemonEntry, '');
+  const order = [];
+  const result = await upgradeTarget('sally', {
+    releaseLink: fixture.releaseLink,
+    publishReleaseImpl: async ({ baseDir }) => {
+      order.push(['publish', baseDir]);
+      return {
+        release: fixture.release,
+        commit: '2222222222222222222222222222222222222222',
+        published: true,
+      };
+    },
+    execFileImpl: async (_command, args) => {
+      order.push(['pm2', args[0]]);
+      return {
+        stdout: args[0] === 'jlist'
+          ? JSON.stringify([{
+            name: 'lark-daemon-sally',
+            pm2_env: { status: 'online', pm_exec_path: daemonEntry },
+          }])
+          : '',
+      };
+    },
+    fetchImpl: async () => ({ ok: true }),
+    readyOptions: { attempts: 1, intervalMs: 0 },
+  });
+
+  assert.deepEqual(order[0], ['publish', path.dirname(fixture.releaseLink)]);
+  assert.equal(order[1][0], 'pm2');
+  assert.equal(result.commit, '2222222222222222222222222222222222222222');
+  assert.equal(result.published, true);
+});
+
+test('publisher fetches trusted main, validates once, and reuses the same commit', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-publisher-test-'));
+  const source = path.join(root, 'source');
+  const remote = path.join(root, 'remote.git');
+  const baseDir = path.join(root, 'installed');
+  await mkdir(source, { recursive: true });
+  await writeFile(path.join(source, 'package.json'), '{"name":"fixture","version":"1.2.3"}\n');
+  await writeFile(path.join(source, 'ecosystem.config.cjs'), 'module.exports = {};\n');
+  const git = async (...args) => new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd: source, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    child.once('error', reject);
+    child.once('exit', (code) => {
+      if (code === 0) resolve(Buffer.concat(stdout).toString('utf8').trim());
+      else reject(new Error(Buffer.concat(stderr).toString('utf8')));
+    });
+  });
+  await git('init', '-b', 'main');
+  await git('config', 'user.email', 'test@example.com');
+  await git('config', 'user.name', 'Test');
+  await git('add', '.');
+  await git('commit', '-m', 'initial');
+  await git('clone', '--bare', source, remote);
+  await mkdir(baseDir, { recursive: true });
+  await writeFile(path.join(baseDir, 'env'), 'LARK_DAEMON_TEST=1\n', { mode: 0o600 });
+  let validations = 0;
+  const options = {
+    baseDir,
+    remoteUrl: remote,
+    remoteBranch: 'main',
+    now: () => new Date('2026-08-09T20:00:00Z'),
+    validateReleaseImpl: async (release) => {
+      validations += 1;
+      assert.equal(await readFile(path.join(release, 'ecosystem.config.cjs'), 'utf8'), 'module.exports = {};\n');
+      assert.equal(await realpath(path.join(release, '.env')), path.join(baseDir, 'env'));
+    },
+  };
+
+  const first = await publishLatestRelease(options);
+  const second = await publishLatestRelease(options);
+  assert.equal(first.published, true);
+  assert.equal(second.published, false);
+  assert.equal(second.release, first.release);
+  assert.equal(second.commit, first.commit);
+  assert.equal(validations, 1);
+  assert.equal(await realpath(path.join(baseDir, 'current')), first.release);
+  const metadata = JSON.parse(await readFile(path.join(first.release, '.lark-release.json'), 'utf8'));
+  assert.equal(metadata.commit, first.commit);
+  assert.equal(metadata.remoteUrl, remote);
+});
+
+test('publisher advances current and keeps the prior release as rollback', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-publisher-rollback-test-'));
+  const source = path.join(root, 'source');
+  const remote = path.join(root, 'remote.git');
+  const baseDir = path.join(root, 'installed');
+  await mkdir(source, { recursive: true });
+  await writeFile(path.join(source, 'package.json'), '{"name":"fixture","version":"1.2.3"}\n');
+  await writeFile(path.join(source, 'ecosystem.config.cjs'), 'module.exports = {};\n');
+  const runGit = (cwd, args) => new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stderr = [];
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    child.once('error', reject);
+    child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString('utf8')))));
+  });
+  await runGit(source, ['init', '-b', 'main']);
+  await runGit(source, ['config', 'user.email', 'test@example.com']);
+  await runGit(source, ['config', 'user.name', 'Test']);
+  await runGit(source, ['add', '.']);
+  await runGit(source, ['commit', '-m', 'initial']);
+  await runGit(root, ['clone', '--bare', source, remote]);
+  await mkdir(baseDir, { recursive: true });
+  await writeFile(path.join(baseDir, 'env'), 'LARK_DAEMON_TEST=1\n');
+  let tick = 0;
+  let failValidation = false;
+  const options = {
+    baseDir,
+    remoteUrl: remote,
+    validateReleaseImpl: async () => {
+      if (failValidation) throw new Error('fixture validation failed');
+    },
+    now: () => new Date(tick === 0 ? '2026-08-09T20:00:00Z' : '2026-08-09T20:01:00Z'),
+  };
+  const first = await publishLatestRelease(options);
+  tick += 1;
+  await writeFile(path.join(source, 'change.txt'), 'next\n');
+  await runGit(source, ['add', '.']);
+  await runGit(source, ['commit', '-m', 'next']);
+  await runGit(source, ['push', remote, 'main']);
+  failValidation = true;
+  await assert.rejects(publishLatestRelease(options), /fixture validation failed/);
+  assert.equal(await realpath(path.join(baseDir, 'current')), first.release);
+  failValidation = false;
+  const second = await publishLatestRelease(options);
+
+  assert.equal(second.published, true);
+  assert.notEqual(second.commit, first.commit);
+  assert.equal(await realpath(path.join(baseDir, 'current')), second.release);
+  assert.equal(await realpath(path.join(baseDir, 'rollback')), first.release);
+});
+
 test('server accepts one allowlisted upgrade over its private socket', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-socket-test-'));
   const socketPath = path.join(root, 'updater.sock');
@@ -306,6 +469,42 @@ test('request body timeout does not abort a long-running upgrade response', asyn
   const response = await post(socketPath, { target: 'sally' });
   assert.equal(response.status, 200);
   assert.equal(response.body.status, 'ready');
+});
+
+test('client disconnect does not cancel an upgrade already owned by the updater', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-disconnect-test-'));
+  const socketPath = path.join(root, 'updater.sock');
+  let markStarted;
+  let finishUpgrade;
+  let markCompleted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const finish = new Promise((resolve) => { finishUpgrade = resolve; });
+  const completed = new Promise((resolve) => { markCompleted = resolve; });
+  const updater = await createUpdaterServer({
+    socketPath,
+    upgrade: async (target) => {
+      markStarted();
+      await finish;
+      markCompleted(target);
+      return { target, app: 'lark-daemon-zayn', release: '/release/current', status: 'ready' };
+    },
+  });
+  t.after(() => updater.close());
+
+  const payload = JSON.stringify({ target: 'zayn' });
+  const request = http.request({
+    socketPath,
+    path: '/v1/upgrade',
+    method: 'POST',
+    headers: { 'content-length': Buffer.byteLength(payload) },
+  });
+  request.once('error', () => {});
+  request.end(payload);
+  await started;
+  request.destroy();
+  finishUpgrade();
+
+  assert.equal(await completed, 'zayn');
 });
 
 test('server rejects a non-allowlisted target without calling upgrade', async (t) => {
@@ -393,6 +592,6 @@ test('CLI upgrade command reaches the updater over the Unix socket', async (t) =
   assert.equal(exitCode, 0, Buffer.concat(stderr).toString('utf8'));
   assert.equal(
     Buffer.concat(stdout).toString('utf8'),
-    'lark-daemon-sally is ready on /release/current\n',
+    'lark-daemon-sally is ready (/release/current)\n',
   );
 });

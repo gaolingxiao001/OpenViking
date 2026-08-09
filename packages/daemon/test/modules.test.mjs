@@ -107,6 +107,8 @@ describe('module boundaries', () => {
     );
     assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);
     assert.match(prompt, /Self-updates must go through an allowlisted external updater\/supervisor/);
+    assert.match(prompt, /lark-daemon upgrade zayn\|sally\|all/);
+    assert.match(prompt, /without running `deploy\.sh`/);
     assert.match(prompt, /may manage an explicitly named sibling daemon\/web pair only after verifying/);
     assert.match(prompt, /Never use broad PM2 selectors or touch unrelated applications/);
     assert.doesNotMatch(prompt, /Never deploy, restart, stop, or reconfigure lark-daemon or lark-web yourself/);
