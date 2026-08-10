@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { cognitionHistoryPrefix } from '../src/cognition.mjs';
-import { MeetingAdapter, normalizeMeetingEvent } from '../src/meeting.mjs';
+import {
+  MeetingAdapter,
+  MeetingInboxNotifier,
+  meetingContextLines,
+  normalizeMeetingEvent,
+} from '../src/meeting.mjs';
 import { Store } from '../src/store.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
@@ -46,7 +51,7 @@ describe('TAT meeting adapter', () => {
     assert.equal(parsed.meetingId, '734000000000000001');
   });
 
-  it('auto-joins once and batches transcripts into the journal without a model turn', async () => {
+  it('auto-joins once and batches transcripts into the durable inbox, never the journal', async () => {
     const joins = [];
     const lark = {
       async joinMeeting(input) {
@@ -55,11 +60,13 @@ describe('TAT meeting adapter', () => {
       },
       async listMeetingEvents() { throw new Error('pull is recovery-only'); },
     };
+    const inboxBatches = [];
     const adapter = new MeetingAdapter({
       store,
       lark,
       logger: quietLogger,
       batchDelayMs: 60_000,
+      onInboxReady: (batch) => inboxBatches.push(batch),
     });
     const invite = envelope('vc.bot.meeting_invited_v1', 'evt-invite', {
       meeting: { id: '734000000000000001', meeting_no: '123456789' },
@@ -117,14 +124,18 @@ describe('TAT meeting adapter', () => {
     assert.equal(store.stats().meetingEvents, 2);
     assert.equal(store.cognitionJournal().filter((row) => row.kind === 'meeting_context').length, 0);
     await adapter.flushMeeting('734000000000000001');
-    const batches = store.cognitionJournal().filter((row) => row.kind === 'meeting_context');
-    assert.equal(batches.length, 1);
-    assert.match(batches[0].text, /Alice: 第一句/);
-    assert.doesNotMatch(batches[0].text, /partial/);
-    assert.match(batches[0].text, /Bob: 第二句/);
+    assert.equal(store.cognitionJournal().filter((row) => row.kind === 'meeting_context').length, 0);
+    assert.equal(inboxBatches.length, 1);
+    assert.equal(inboxBatches[0].pendingCount, 2);
+    const read = store.readMeetingInbox();
+    assert.equal(read.items.length, 2);
+    assert.equal(read.remaining, 0);
+    const rendered = read.items.flatMap((row) => meetingContextLines(row.payload, row.activityType)).join('\n');
+    assert.match(rendered, /Alice: 第一句/);
+    assert.doesNotMatch(rendered, /partial/);
+    assert.match(rendered, /Bob: 第二句/);
 
-    // A meeting batch becomes catch-up context only when the next real IM message
-    // starts a turn; the adapter itself has no runtime/delivery dependency.
+    // The next real IM turn must not receive transcript payload via cognition catch-up.
     const inbound = store.ingest({
       eventId: 'evt-im',
       messageId: 'om-im',
@@ -144,8 +155,8 @@ describe('TAT meeting adapter', () => {
     }).inbound;
     const through = store.cognitionJournalBeforeInbound(inbound.seq);
     const prefix = cognitionHistoryPrefix(store, store.getCognitionState().epoch, through).text;
-    assert.match(prefix, /kind=meeting_context/);
-    assert.match(prefix, /第一句/);
+    assert.doesNotMatch(prefix, /kind=meeting_context/);
+    assert.doesNotMatch(prefix, /第一句|第二句/);
     await adapter.stop();
   });
 
@@ -197,14 +208,11 @@ describe('TAT meeting adapter', () => {
     assert.equal(pulls[0].pageToken, 'cursor-before');
     await adapter.stop();
     assert.equal(store.meetingSessionById('734000000000000099').pageToken, 'cursor-after');
-    assert.match(
-      store.cognitionJournal().find((row) => row.kind === 'meeting_context').text,
-      /恢复内容/,
-    );
-    assert.equal(
-      store.cognitionJournal().find((row) => row.kind === 'meeting_context').atMs,
-      Date.parse('2026-08-10T12:00:00Z'),
-    );
+    assert.equal(store.cognitionJournal().filter((row) => row.kind === 'meeting_context').length, 0);
+    const read = store.readMeetingInbox();
+    assert.equal(read.items.length, 1);
+    assert.equal(read.items[0].occurredAtMs, Date.parse('2026-08-10T12:00:00Z'));
+    assert.match(JSON.stringify(read.items[0].payload), /恢复内容/);
   });
 
   it('merges an activity-created placeholder when join completion arrives', () => {
@@ -231,5 +239,42 @@ describe('TAT meeting adapter', () => {
     assert.equal(joined.sessionKey, 'call:race');
     assert.equal(joined.pageToken, 'cursor-from-push');
     assert.equal(store.activeMeetingSessions().length, 1);
+  });
+
+  it('coalesces simultaneous inbox generations and wakes or steers the runtime', () => {
+    const deliveries = [];
+    const notified = [];
+    const timers = [];
+    const runtime = {
+      turnInProgress: true,
+      deliver(text, seq) { deliveries.push({ text, seq, active: this.turnInProgress }); return true; },
+    };
+    const notifier = new MeetingInboxNotifier({
+      store: {
+        unreadMeetingInboxCount: () => 7,
+        markMeetingInboxBatchesNotified: (ids) => notified.push(ids),
+      },
+      runtime,
+      logger: quietLogger,
+      setTimer(callback) { timers.push(callback); return { unref() {} }; },
+      clearTimer() {},
+    });
+    notifier.signal({ batchId: 10 });
+    notifier.signal({ batchId: 10 });
+    notifier.signal({ batchId: 11 });
+    assert.equal(timers.length, 1);
+    timers.shift()();
+    assert.deepEqual(deliveries, [{
+      text: '7 pending meeting messages; use read_meeting_inbox to read.',
+      seq: null,
+      active: true,
+    }]);
+    assert.deepEqual(notified, [[10, 11]]);
+
+    notifier.signal({ batchId: 12 });
+    assert.equal(timers.length, 1);
+    timers.shift()();
+    assert.equal(deliveries.length, 2);
+    assert.deepEqual(notified[1], [12]);
   });
 });

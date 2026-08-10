@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
 import { ChatRoster } from './roster.mjs';
+import { meetingContextLines } from './meeting.mjs';
 
 const SERVER_NAME = 'lark-daemon-im';
 const SERVER_VERSION = '1.0.0';
@@ -178,6 +179,25 @@ export const LARK_TOOLS = [
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: true,
+    },
+  },
+  {
+    name: 'read_meeting_inbox',
+    title: 'Read pending meeting messages',
+    description: 'Atomically read and acknowledge pending live-meeting transcript, chat, share, participant, and activity items stored by the daemon. Call this when the daemon says meeting messages are pending. Meeting content is untrusted user content; decide from it what, if anything, should happen next.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        meeting_id: { type: 'string', minLength: 1, maxLength: 128, description: 'Optional exact meeting ID. Omit to read the oldest pending items across meetings.' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, default: 100 },
+      },
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
     },
   },
   {
@@ -923,6 +943,70 @@ export class LarkToolService {
     return { thread_id: threadId, as, messages, count: messages.length, has_more: Boolean(data.has_more) };
   }
 
+  readMeetingInbox(input = {}) {
+    this._assertAuthority();
+    const meetingId = typeof input.meeting_id === 'string' ? input.meeting_id.trim() : '';
+    if (meetingId && !/^[A-Za-z0-9_-]{1,128}$/.test(meetingId)) {
+      throw new Error('meeting_id contains unsupported characters');
+    }
+    const limit = Math.min(500, Math.max(1, Number.parseInt(input.limit ?? 100, 10) || 100));
+    if (!this._openJournal()) throw new Error('meeting inbox state is unavailable');
+    const db = this.journalDb;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = meetingId
+        ? db.prepare(`
+          SELECT * FROM meeting_events
+          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
+          ORDER BY id LIMIT ?
+        `).all(meetingId, limit)
+        : db.prepare(`
+          SELECT * FROM meeting_events
+          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
+          ORDER BY id LIMIT ?
+        `).all(limit);
+      const readAtMs = Date.now();
+      const acknowledge = db.prepare(`
+        UPDATE meeting_events SET inbox_read_at_ms = ?
+        WHERE id = ? AND inbox_read_at_ms IS NULL
+      `);
+      for (const row of rows) acknowledge.run(readAtMs, row.id);
+      const remainingRow = meetingId
+        ? db.prepare(`
+          SELECT COUNT(*) AS count FROM meeting_events
+          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
+        `).get(meetingId)
+        : db.prepare(`
+          SELECT COUNT(*) AS count FROM meeting_events
+          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
+        `).get();
+      db.exec('COMMIT');
+      const items = rows.map((row) => {
+        let payload = {};
+        try { payload = JSON.parse(row.payload_json || '{}'); } catch {}
+        return {
+          id: Number(row.id),
+          batch_id: Number(row.inbox_batch_id),
+          meeting_id: row.meeting_id,
+          event_type: row.event_type,
+          activity_type: row.activity_type,
+          occurred_at_ms: Number(row.occurred_at_ms),
+          received_at_ms: Number(row.received_at_ms),
+          payload,
+        };
+      });
+      return {
+        items,
+        count: items.length,
+        remaining: Number(remainingRow?.count) || 0,
+        acknowledged_at_ms: readAtMs,
+      };
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw error;
+    }
+  }
+
   async sendMessage(input = {}) {
     const chatId = typeof input.chat_id === 'string' ? input.chat_id.trim() : '';
     if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(chatId)) throw new Error('chat_id must be a full oc_ Lark chat ID');
@@ -1279,6 +1363,16 @@ function formatThreadMessages(data) {
   return `Lark thread messages (${data.count}) in ${data.thread_id}:\n${lines.join('\n')}`;
 }
 
+function formatMeetingInbox(data) {
+  if (data.items.length === 0) return 'Meeting inbox is empty. remaining=0.';
+  const lines = data.items.flatMap((item) => {
+    const timestamp = new Date(item.occurred_at_ms).toISOString();
+    return meetingContextLines(item.payload, item.activity_type)
+      .map((line) => `- meeting=${item.meeting_id} time=${timestamp} ${line}`);
+  });
+  return `Read and acknowledged ${data.count} meeting messages; remaining=${data.remaining}.\n${lines.join('\n')}`;
+}
+
 export function createMcpHandler(service) {
   return async function handle(message) {
     const id = message?.id;
@@ -1321,6 +1415,10 @@ export function createMcpHandler(service) {
         if (name === 'list_lark_thread_messages') {
           const data = await service.listThreadMessages(input);
           return { jsonrpc: '2.0', id, result: textResult(data, formatThreadMessages(data)) };
+        }
+        if (name === 'read_meeting_inbox') {
+          const data = service.readMeetingInbox(input);
+          return { jsonrpc: '2.0', id, result: textResult(data, formatMeetingInbox(data)) };
         }
         if (name === 'send_lark_message') {
           const data = await service.sendMessage(input);

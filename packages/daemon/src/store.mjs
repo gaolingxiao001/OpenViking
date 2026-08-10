@@ -105,6 +105,12 @@ function rowToMeetingEvent(row) {
     receivedAtMs: number(row.received_at_ms),
     payload: parseJsonObject(row.payload_json),
     journalSeq: row.journal_seq === null ? null : number(row.journal_seq),
+    inboxBatchId: row.inbox_batch_id === null || row.inbox_batch_id === undefined
+      ? null
+      : number(row.inbox_batch_id),
+    inboxReadAtMs: row.inbox_read_at_ms === null || row.inbox_read_at_ms === undefined
+      ? null
+      : number(row.inbox_read_at_ms),
   };
 }
 
@@ -382,13 +388,24 @@ export class Store {
         occurred_at_ms INTEGER NOT NULL,
         received_at_ms INTEGER NOT NULL,
         payload_json TEXT NOT NULL,
-        journal_seq INTEGER
+        journal_seq INTEGER,
+        inbox_batch_id INTEGER,
+        inbox_read_at_ms INTEGER
       );
 
-      CREATE INDEX IF NOT EXISTS meeting_events_pending
-        ON meeting_events(meeting_id, journal_seq, id);
       CREATE INDEX IF NOT EXISTS meeting_events_received
         ON meeting_events(received_at_ms);
+
+      CREATE TABLE IF NOT EXISTS meeting_inbox_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id TEXT NOT NULL,
+        first_event_id INTEGER NOT NULL,
+        last_event_id INTEGER NOT NULL,
+        event_count INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        notified_at_ms INTEGER,
+        UNIQUE(meeting_id, first_event_id, last_event_id)
+      );
 
       -- Canonical, daemon-owned observable cognition shared by every chat and
       -- every model runtime. Runtime-native transcripts stay opaque; a hard
@@ -427,6 +444,37 @@ export class Store {
     if (!inboundColumns.has('thread_id')) {
       this.db.exec('ALTER TABLE inbound ADD COLUMN thread_id TEXT');
     }
+    const meetingEventColumns = new Set(
+      this.db.prepare('PRAGMA table_info(meeting_events)').all().map((row) => row.name),
+    );
+    if (!meetingEventColumns.has('inbox_batch_id') || !meetingEventColumns.has('inbox_read_at_ms')) {
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        if (!meetingEventColumns.has('inbox_batch_id')) {
+          this.db.exec('ALTER TABLE meeting_events ADD COLUMN inbox_batch_id INTEGER');
+        }
+        if (!meetingEventColumns.has('inbox_read_at_ms')) {
+          this.db.exec('ALTER TABLE meeting_events ADD COLUMN inbox_read_at_ms INTEGER');
+        }
+        // Rows journaled by the previous release have already been exposed to
+        // the model. Mark them read so an upgrade never replays old transcripts.
+        this.db.exec(`
+          UPDATE meeting_events
+          SET inbox_read_at_ms = COALESCE(inbox_read_at_ms, received_at_ms)
+          WHERE journal_seq IS NOT NULL
+        `);
+        this.db.exec('COMMIT');
+      } catch (error) {
+        try { this.db.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS meeting_events_pending_v2
+        ON meeting_events(meeting_id, inbox_batch_id, id);
+      CREATE INDEX IF NOT EXISTS meeting_events_inbox
+        ON meeting_events(inbox_read_at_ms, inbox_batch_id, id)
+    `);
     const outboxColumns = new Set(
       this.db.prepare('PRAGMA table_info(outbox)').all().map((row) => row.name),
     );
@@ -1216,17 +1264,17 @@ export class Store {
   }) {
     const payloadJson = JSON.stringify(payload ?? {});
     const existing = this.db.prepare(`
-      SELECT id, payload_json, journal_seq FROM meeting_events WHERE event_key = ?
+      SELECT id, payload_json, inbox_batch_id FROM meeting_events WHERE event_key = ?
     `).get(eventKey);
     // Live transcript pushes revise the same sentence_id as speech recognition
-    // stabilizes. Before the 15s journal batch closes, retain the newest text.
+    // stabilizes. Before the 15s inbox batch closes, retain the newest text.
     if (existing) {
-      if (existing.journal_seq !== null || existing.payload_json === payloadJson) return false;
+      if (existing.inbox_batch_id !== null || existing.payload_json === payloadJson) return false;
       return number(this.db.prepare(`
         UPDATE meeting_events
         SET event_type = ?, activity_type = ?, occurred_at_ms = ?,
             received_at_ms = ?, payload_json = ?
-        WHERE id = ? AND journal_seq IS NULL
+        WHERE id = ? AND inbox_batch_id IS NULL
       `).run(
         eventType,
         activityType,
@@ -1293,7 +1341,7 @@ export class Store {
     const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
     return this.db.prepare(`
       SELECT * FROM meeting_events
-      WHERE meeting_id = ? AND journal_seq IS NULL
+      WHERE meeting_id = ? AND inbox_batch_id IS NULL AND inbox_read_at_ms IS NULL
       ORDER BY id LIMIT ?
     `).all(meetingId, safeLimit).map(rowToMeetingEvent);
   }
@@ -1301,28 +1349,97 @@ export class Store {
   pendingMeetingIds() {
     return this.db.prepare(`
       SELECT DISTINCT meeting_id FROM meeting_events
-      WHERE meeting_id IS NOT NULL AND journal_seq IS NULL
+      WHERE meeting_id IS NOT NULL AND inbox_batch_id IS NULL AND inbox_read_at_ms IS NULL
       ORDER BY meeting_id
     `).all().map((row) => row.meeting_id);
   }
 
-  commitMeetingContextBatch(meetingId, rows, text, atMs = Date.now(), { dedupeKey } = {}) {
+  commitMeetingInboxBatch(meetingId, rows, atMs = Date.now()) {
     if (!Array.isArray(rows) || rows.length === 0) return null;
     return this.transaction(() => {
-      const journalSeq = this.appendCognitionJournal({
-        kind: 'meeting_context',
-        atMs,
-        actor: 'meeting',
-        text,
-        dedupeKey,
-        metadata: { meetingId, eventCount: rows.length },
+      const eligible = rows.filter((row) => {
+        const current = this.db.prepare(`
+          SELECT inbox_batch_id, inbox_read_at_ms FROM meeting_events WHERE id = ?
+        `).get(row.id);
+        return current && current.inbox_batch_id === null && current.inbox_read_at_ms === null;
       });
+      if (eligible.length === 0) return null;
+      const first = eligible[0];
+      const last = eligible.at(-1);
+      const inserted = this.db.prepare(`
+        INSERT OR IGNORE INTO meeting_inbox_batches(
+          meeting_id, first_event_id, last_event_id, event_count, created_at_ms
+        ) VALUES (?, ?, ?, ?, ?)
+      `).run(meetingId, first.id, last.id, eligible.length, atMs);
+      const batch = this.db.prepare(`
+        SELECT * FROM meeting_inbox_batches
+        WHERE meeting_id = ? AND first_event_id = ? AND last_event_id = ?
+      `).get(meetingId, first.id, last.id);
+      if (!batch || number(inserted.changes) === 0) return null;
       const update = this.db.prepare(`
-        UPDATE meeting_events SET journal_seq = ? WHERE id = ? AND journal_seq IS NULL
+        UPDATE meeting_events SET inbox_batch_id = ?
+        WHERE id = ? AND inbox_batch_id IS NULL AND inbox_read_at_ms IS NULL
       `);
-      for (const row of rows) update.run(journalSeq, row.id);
-      return journalSeq;
+      let committed = 0;
+      for (const row of eligible) committed += number(update.run(batch.id, row.id).changes);
+      if (committed !== eligible.length) throw new Error('meeting inbox batch changed during commit');
+      return {
+        batchId: number(batch.id),
+        meetingId,
+        eventCount: eligible.length,
+        pendingCount: this.unreadMeetingInboxCount(),
+      };
     });
+  }
+
+  unreadMeetingInboxCount(meetingId = null) {
+    const row = meetingId
+      ? this.db.prepare(`
+        SELECT COUNT(*) AS count FROM meeting_events
+        WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
+      `).get(meetingId)
+      : this.db.prepare(`
+        SELECT COUNT(*) AS count FROM meeting_events
+        WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
+      `).get();
+    return number(row?.count) || 0;
+  }
+
+  readMeetingInbox({ meetingId = null, limit = 100, atMs = Date.now() } = {}) {
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    return this.transaction(() => {
+      const rows = (meetingId
+        ? this.db.prepare(`
+          SELECT * FROM meeting_events
+          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
+          ORDER BY id LIMIT ?
+        `).all(meetingId, safeLimit)
+        : this.db.prepare(`
+          SELECT * FROM meeting_events
+          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
+          ORDER BY id LIMIT ?
+        `).all(safeLimit));
+      const acknowledge = this.db.prepare(`
+        UPDATE meeting_events SET inbox_read_at_ms = ?
+        WHERE id = ? AND inbox_read_at_ms IS NULL
+      `);
+      for (const row of rows) acknowledge.run(atMs, row.id);
+      return {
+        items: rows.map((row) => rowToMeetingEvent({ ...row, inbox_read_at_ms: atMs })),
+        remaining: this.unreadMeetingInboxCount(meetingId),
+      };
+    });
+  }
+
+  markMeetingInboxBatchesNotified(batchIds, atMs = Date.now()) {
+    if (!Array.isArray(batchIds) || batchIds.length === 0) return 0;
+    const update = this.db.prepare(`
+      UPDATE meeting_inbox_batches SET notified_at_ms = COALESCE(notified_at_ms, ?) WHERE id = ?
+    `);
+    return this.transaction(() => batchIds.reduce(
+      (count, id) => count + number(update.run(atMs, id).changes),
+      0,
+    ));
   }
 
   finishMeeting(meetingId, atMs = Date.now()) {
@@ -1569,7 +1686,14 @@ export class Store {
         WHERE received_at_ms < ? AND status IN ('DONE', 'DEAD', 'RULE_IGNORED')
       `).run(cutoff);
       const meetingEvents = this.db.prepare(`
-        DELETE FROM meeting_events WHERE received_at_ms < ? AND journal_seq IS NOT NULL
+        DELETE FROM meeting_events WHERE received_at_ms < ? AND inbox_read_at_ms IS NOT NULL
+      `).run(cutoff);
+      this.db.prepare(`
+        DELETE FROM meeting_inbox_batches
+        WHERE created_at_ms < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM meeting_events WHERE meeting_events.inbox_batch_id = meeting_inbox_batches.id
+          )
       `).run(cutoff);
       const meetingSessions = this.db.prepare(`
         DELETE FROM meeting_sessions
@@ -1627,7 +1751,8 @@ export class Store {
     const meetingEvents = number(this.db.prepare(`
       SELECT COUNT(*) AS count FROM meeting_events
     `).get().count);
-    return { inbound, turns, outbox, activities, meetings, meetingEvents };
+    const meetingInbox = this.unreadMeetingInboxCount();
+    return { inbound, turns, outbox, activities, meetings, meetingEvents, meetingInbox };
   }
 
   close() {

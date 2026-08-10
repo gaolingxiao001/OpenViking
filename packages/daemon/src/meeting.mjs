@@ -279,6 +279,7 @@ export class MeetingAdapter {
     batchMaxChars = 30_000,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
+    onInboxReady = null,
   }) {
     this.store = store;
     this.lark = lark;
@@ -288,6 +289,7 @@ export class MeetingAdapter {
     this.batchMaxChars = batchMaxChars;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
+    this.onInboxReady = onInboxReady;
     this.timers = new Map();
     this.ingress = Promise.resolve();
     this.stopped = false;
@@ -453,22 +455,25 @@ export class MeetingAdapter {
       const rows = this.store.pendingMeetingEvents(meetingId, this.batchMaxEvents);
       if (rows.length === 0) break;
       const selected = [];
-      const lines = [];
       let chars = 0;
       for (const row of rows) {
         const rowLines = meetingContextLines(row.payload, row.activityType);
         const rendered = rowLines.join(' ⏎ ');
         if (selected.length > 0 && chars + rendered.length > this.batchMaxChars) break;
         selected.push(row);
-        lines.push(rendered.slice(0, this.batchMaxChars));
         chars += rendered.length;
       }
-      const first = selected[0];
       const last = selected.at(-1);
-      const text = `[meeting=${meetingId} kind=context_batch events=${selected.length}] ${lines.join(' ⏎ ')}`;
-      this.store.commitMeetingContextBatch(meetingId, selected, text, last.occurredAtMs, {
-        dedupeKey: `meeting-context:${meetingId}:${first.id}-${last.id}`,
-      });
+      const batch = this.store.commitMeetingInboxBatch(meetingId, selected, last.occurredAtMs);
+      if (batch) {
+        try { await this.onInboxReady?.(batch); }
+        catch (error) {
+          this.logger.warn('meeting_inbox_notify_failed', {
+            meetingRef: opaqueRef(meetingId),
+            error: safe(error),
+          });
+        }
+      }
       batches += 1;
       if (!all) break;
     } while (true);
@@ -526,5 +531,86 @@ export class MeetingAdapter {
     this.timers.clear();
     await this.ingress.catch(() => {});
     for (const meetingId of this.store.pendingMeetingIds()) await this.flushMeeting(meetingId, { all: true });
+  }
+}
+
+// One compact wake-up per committed generation. A short debounce folds batches
+// committed in the same tick (including different meetings) into one runtime
+// input, while later 15s generations still steer an active turn immediately.
+export class MeetingInboxNotifier {
+  constructor({
+    store,
+    runtime,
+    logger,
+    debounceMs = 50,
+    retryMs = 1_000,
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
+  }) {
+    this.store = store;
+    this.runtime = runtime;
+    this.logger = logger;
+    this.debounceMs = debounceMs;
+    this.retryMs = retryMs;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.batchIds = new Set();
+    this.catchup = false;
+    this.timer = null;
+    this.stopped = false;
+  }
+
+  start() {
+    if (this.store.unreadMeetingInboxCount() > 0) this.signal(null);
+  }
+
+  signal(batch = null) {
+    if (this.stopped) return false;
+    if (batch?.batchId !== null && batch?.batchId !== undefined) this.batchIds.add(batch.batchId);
+    else this.catchup = true;
+    if (this.timer) return true;
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      this.flush();
+    }, this.debounceMs);
+    this.timer?.unref?.();
+    return true;
+  }
+
+  flush() {
+    if (this.stopped) return false;
+    const pending = this.store.unreadMeetingInboxCount();
+    if (pending === 0) {
+      this.batchIds.clear();
+      this.catchup = false;
+      return false;
+    }
+    const batchIds = [...this.batchIds];
+    const text = `${pending} pending meeting messages; use read_meeting_inbox to read.`;
+    const accepted = this.runtime.deliver(text, null) !== false;
+    if (!accepted) {
+      this.timer = this.setTimer(() => {
+        this.timer = null;
+        this.flush();
+      }, this.retryMs);
+      this.timer?.unref?.();
+      return false;
+    }
+    if (batchIds.length > 0) this.store.markMeetingInboxBatchesNotified(batchIds);
+    this.batchIds.clear();
+    this.catchup = false;
+    this.logger?.info?.('meeting_inbox_runtime_notified', {
+      pending,
+      generations: Math.max(1, batchIds.length),
+      steered: Boolean(this.runtime.turnInProgress),
+    });
+    return true;
+  }
+
+  stop() {
+    this.stopped = true;
+    if (this.timer) this.clearTimer(this.timer);
+    this.timer = null;
+    this.batchIds.clear();
   }
 }

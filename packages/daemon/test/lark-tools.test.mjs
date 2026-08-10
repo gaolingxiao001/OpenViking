@@ -33,6 +33,51 @@ function options(overrides = {}) {
 }
 
 describe('Lark proactive IM tool service', () => {
+  it('atomically reads and acknowledges the durable meeting inbox', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-meeting-inbox-tool-'));
+    const databasePath = path.join(directory, 'state.sqlite3');
+    const store = new Store(databasePath, quietLogger);
+    store.initializeCognition('codex', 'token-meeting');
+    store.ensureMeetingSession('734000000000000123');
+    store.ingestMeetingEvent({
+      eventKey: 'meeting:test-transcript',
+      meetingId: '734000000000000123',
+      eventType: 'vc.bot.meeting_activity_v1',
+      activityType: 'transcript_received',
+      occurredAtMs: 1_723_300_000_000,
+      payload: {
+        transcript_received_items: [{
+          speaker: { user_name: 'Alice' },
+          text: '请把结论发到群里',
+          sentence_id: 'sentence-tool-1',
+        }],
+      },
+    });
+    const rows = store.pendingMeetingEvents('734000000000000123');
+    store.commitMeetingInboxBatch('734000000000000123', rows, 1_723_300_000_001);
+    const service = new LarkToolService(options({
+      databasePath,
+      runtimeToken: 'token-meeting',
+      freshnessCheck: undefined,
+    }));
+    try {
+      const first = service.readMeetingInbox({ limit: 10 });
+      assert.equal(first.count, 1);
+      assert.equal(first.remaining, 0);
+      assert.equal(first.items[0].meeting_id, '734000000000000123');
+      assert.match(JSON.stringify(first.items[0].payload), /请把结论发到群里/);
+      assert.deepEqual(service.readMeetingInbox({ limit: 10 }).items, []);
+      assert.equal(store.unreadMeetingInboxCount(), 0);
+    } finally {
+      service.close();
+      store.close();
+      const reopened = new Store(databasePath, quietLogger);
+      assert.equal(reopened.unreadMeetingInboxCount(), 0);
+      reopened.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('separates response attribution from the latest freshness fence', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-steered-delivery-'));
     const databasePath = path.join(directory, 'state.sqlite3');
@@ -846,6 +891,9 @@ describe('Lark proactive IM MCP protocol', () => {
       async listThreadMessages() {
         return { thread_id: 'omt_topic1234567', as: 'bot', messages: [{ message_id: 'om_inthread12345', chat_id: '', msg_type: 'text', create_time: '1', sender: { id: 'ou_person123456', name: 'Ada' }, content: 'thread reply' }], count: 1, has_more: false };
       },
+      readMeetingInbox() {
+        return { items: [], count: 0, remaining: 0, acknowledged_at_ms: 1 };
+      },
       async sendMessage() {
         return { sent: true, chat_id: 'oc_memorize123456', message_id: 'om_sent12345678', idempotency_key: 'key' };
       },
@@ -863,7 +911,7 @@ describe('Lark proactive IM MCP protocol', () => {
     const initialized = await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(initialized.result.serverInfo.name, 'lark-daemon-im');
     const listed = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
+    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), toolNames);
     assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), toolNames);
     for (const name of ['send_lark_message', 'reply_lark_message', 'react_to_lark_message']) {
@@ -886,6 +934,8 @@ describe('Lark proactive IM MCP protocol', () => {
     assert.match(searched.result.content[0].text, /More results exist/);
     const threaded = await handle({ jsonrpc: '2.0', id: 41, method: 'tools/call', params: { name: 'list_lark_thread_messages', arguments: { thread_id: 'omt_topic1234567' } } });
     assert.match(threaded.result.content[0].text, /omt_topic1234567[\s\S]*thread reply/);
+    const inbox = await handle({ jsonrpc: '2.0', id: 42, method: 'tools/call', params: { name: 'read_meeting_inbox', arguments: {} } });
+    assert.equal(inbox.result.structuredContent.remaining, 0);
     const sent = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', text: 'hi', decision_message_id: DECISION_MESSAGE_ID } } });
     assert.equal(sent.result.structuredContent.sent, true);
     const replied = await handle({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', text: 'hi', reply_in_thread: true, decision_message_id: DECISION_MESSAGE_ID } } });
@@ -1042,7 +1092,7 @@ describe('Lark proactive IM MCP protocol', () => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: {} } })}\n`);
       await waitFor(3);
       assert.equal(responses[0].result.serverInfo.name, 'lark-daemon-im');
-      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
+      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
       assert.match(responses[2].result.content[0].text, /Fixture Chat/);
     } finally {
       child.stdin.end();

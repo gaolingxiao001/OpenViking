@@ -13,7 +13,7 @@ import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
-import { isMeetingEvent, MeetingAdapter } from './meeting.mjs';
+import { isMeetingEvent, MeetingAdapter, MeetingInboxNotifier } from './meeting.mjs';
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -93,6 +93,7 @@ export class LarkDaemon {
     this.groupBurst = null;
     this.lark = null;
     this.meeting = null;
+    this.meetingInboxNotifier = null;
     this.liveness = null;
     this.roster = null;
     this.httpServer = null;
@@ -152,6 +153,7 @@ export class LarkDaemon {
         store: this.store,
         lark: this.lark,
         logger: this.logger.child({ component: 'meeting' }),
+        onInboxReady: (batch) => this.meetingInboxNotifier?.signal(batch),
       });
       // Best-effort member roster so inbound lines carry display names instead
       // of id stubs. The formatters read it through the process-wide resolver.
@@ -193,7 +195,13 @@ export class LarkDaemon {
         isConnected: () => this.codex.state.connected,
         isTurnInProgress: () => this.codex.turnInProgress,
       });
+      this.meetingInboxNotifier = new MeetingInboxNotifier({
+        store: this.store,
+        runtime: this.codex,
+        logger: this.logger.child({ component: 'meeting-inbox' }),
+      });
       await this.codex.start();
+      this.meetingInboxNotifier.start();
       this.recordSystemActivity('system.subscriber_started', {
         summary: `${this.codex.runtime} runtime 已连接`,
         status: 'RUNNING',
@@ -892,6 +900,7 @@ export class LarkDaemon {
       this.maintenanceTimer = null;
       registerNameResolver(null);
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
+      this.meetingInboxNotifier?.stop();
       try { await this.meeting?.stop(); } catch (error) { this.logger.warn('meeting_stop_failed', { error }); }
       this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }
