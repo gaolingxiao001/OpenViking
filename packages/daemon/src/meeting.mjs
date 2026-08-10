@@ -274,23 +274,28 @@ export class MeetingAdapter {
     store,
     lark,
     logger,
-    batchDelayMs = 15_000,
+    batchDelayMs = 1_000,
+    batchMaxDelayMs = 4_000,
     batchMaxEvents = 50,
     batchMaxChars = 30_000,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
+    now = Date.now,
     onInboxReady = null,
   }) {
     this.store = store;
     this.lark = lark;
     this.logger = logger;
     this.batchDelayMs = batchDelayMs;
+    this.batchMaxDelayMs = Math.max(batchDelayMs, batchMaxDelayMs);
     this.batchMaxEvents = batchMaxEvents;
     this.batchMaxChars = batchMaxChars;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
+    this.now = now;
     this.onInboxReady = onInboxReady;
     this.timers = new Map();
+    this.batchWindows = new Map();
     this.ingress = Promise.resolve();
     this.stopped = false;
   }
@@ -435,13 +440,20 @@ export class MeetingAdapter {
   }
 
   _schedule(meetingId) {
-    if (this.stopped || this.timers.has(meetingId)) return;
+    if (this.stopped) return;
+    const now = this.now();
+    const window = this.batchWindows.get(meetingId) ?? { startedAtMs: now };
+    window.lastAtMs = now;
+    this.batchWindows.set(meetingId, window);
+    if (this.timers.has(meetingId)) this.clearTimer(this.timers.get(meetingId));
+    const dueAtMs = Math.min(now + this.batchDelayMs, window.startedAtMs + this.batchMaxDelayMs);
     const timer = this.setTimer(() => {
       this.timers.delete(meetingId);
+      this.batchWindows.delete(meetingId);
       void this.flushMeeting(meetingId).catch((error) => {
         this.logger.warn('meeting_batch_flush_failed', { meetingRef: opaqueRef(meetingId), error: safe(error) });
       });
-    }, this.batchDelayMs);
+    }, Math.max(0, dueAtMs - now));
     timer?.unref?.();
     this.timers.set(meetingId, timer);
   }
@@ -450,6 +462,7 @@ export class MeetingAdapter {
     const timer = this.timers.get(meetingId);
     if (timer) this.clearTimer(timer);
     this.timers.delete(meetingId);
+    this.batchWindows.delete(meetingId);
     let batches = 0;
     do {
       const rows = this.store.pendingMeetingEvents(meetingId, this.batchMaxEvents);
@@ -529,6 +542,7 @@ export class MeetingAdapter {
     this.stopped = true;
     for (const timer of this.timers.values()) this.clearTimer(timer);
     this.timers.clear();
+    this.batchWindows.clear();
     await this.ingress.catch(() => {});
     for (const meetingId of this.store.pendingMeetingIds()) await this.flushMeeting(meetingId, { all: true });
   }

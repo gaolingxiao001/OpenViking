@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { opaqueRef } from './logger.mjs';
 import {
@@ -1264,25 +1265,32 @@ export class Store {
   }) {
     const payloadJson = JSON.stringify(payload ?? {});
     const existing = this.db.prepare(`
-      SELECT id, payload_json, inbox_batch_id FROM meeting_events WHERE event_key = ?
+      SELECT id, payload_json, inbox_batch_id, inbox_read_at_ms
+      FROM meeting_events WHERE event_key = ?
     `).get(eventKey);
-    // Live transcript pushes revise the same sentence_id as speech recognition
-    // stabilizes. Before the 15s inbox batch closes, retain the newest text.
+    // Live transcript pushes can revise the same sentence_id as speech
+    // recognition stabilizes. Before the inbox item is read, retain the newest text.
     if (existing) {
-      if (existing.inbox_batch_id !== null || existing.payload_json === payloadJson) return false;
-      return number(this.db.prepare(`
-        UPDATE meeting_events
-        SET event_type = ?, activity_type = ?, occurred_at_ms = ?,
-            received_at_ms = ?, payload_json = ?
-        WHERE id = ? AND inbox_batch_id IS NULL
-      `).run(
-        eventType,
-        activityType,
-        occurredAtMs,
-        receivedAtMs,
-        payloadJson,
-        existing.id,
-      ).changes) > 0;
+      if (existing.payload_json === payloadJson) return false;
+      // Revisions arriving before the agent reads the item can replace it in
+      // place. After acknowledgement, retain the correction as a new inbox
+      // item so a low-latency flush never freezes or drops a later ASR final.
+      if (existing.inbox_read_at_ms === null) {
+        return number(this.db.prepare(`
+          UPDATE meeting_events
+          SET event_type = ?, activity_type = ?, occurred_at_ms = ?,
+              received_at_ms = ?, payload_json = ?
+          WHERE id = ? AND inbox_read_at_ms IS NULL
+        `).run(
+          eventType,
+          activityType,
+          occurredAtMs,
+          receivedAtMs,
+          payloadJson,
+          existing.id,
+        ).changes) > 0 && existing.inbox_batch_id === null;
+      }
+      eventKey = `${eventKey}:revision:${createHash('sha256').update(payloadJson).digest('hex')}`;
     }
     const result = this.db.prepare(`
       INSERT OR IGNORE INTO meeting_events(
