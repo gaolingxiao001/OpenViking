@@ -55,6 +55,10 @@ export function humanizeContent(messageType, rawContent) {
   collectText(parsed, parts);
   const unique = [...new Set(parts)];
   if (unique.length > 0) return unique.join('\n').trim();
+  // Lark emits call invitations and call lifecycle notices as video_chat IM
+  // messages. They often carry no human-readable body, but still need to wake
+  // the Agent so it can inspect the active meeting and decide whether to join.
+  if (messageType === 'video_chat') return '[Video call]';
   if (['image', 'file', 'audio', 'media', 'video', 'sticker'].includes(messageType)) {
     return `[${messageType}]`;
   }
@@ -141,7 +145,11 @@ export function normalizeEvent(input, profile = 'default') {
 export function deterministicFilter(event, config, now = Date.now()) {
   if (event.type !== 'im.message.receive_v1') return 'wrong_event_type';
   if (event.senderId && config.ignoredSenderIds.has(event.senderId)) return 'ignored_sender';
-  if (!config.allowedMessageTypes.has(event.messageType)) return 'unsupported_message_type';
+  // video_chat is a control signal rather than ordinary media. Deliver it even
+  // when deployments intentionally keep the general message allowlist narrow.
+  if (event.messageType !== 'video_chat' && !config.allowedMessageTypes.has(event.messageType)) {
+    return 'unsupported_message_type';
+  }
   if (!event.content.trim()) return 'empty_content';
   if (event.createTimeMs < now - config.maxEventAgeMs) return 'stale_event';
   return null;

@@ -140,6 +140,20 @@ describe('normalizeEvent', () => {
     });
     assert.equal(audioEvent.content, '[audio file_key=file_v3_def456]');
   });
+
+  it('turns a bodyless video-chat notice into an Agent-visible control signal', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-video-chat',
+      chat_id: 'oc-video-chat',
+      chat_type: 'p2p',
+      message_type: 'video_chat',
+      content: '{}',
+      sender_id: 'ou-user',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '[Video call]');
+  });
 });
 
 describe('deterministicFilter', () => {
@@ -176,5 +190,19 @@ describe('deterministicFilter', () => {
     };
     assert.equal(deterministicFilter(base, config()), null);
     assert.equal(deterministicFilter({ ...base, chatType: 'p2p' }, config()), null);
+  });
+
+  it('delivers video-chat control signals outside the ordinary media allowlist', () => {
+    const event = {
+      type: 'im.message.receive_v1',
+      senderType: 'user',
+      senderId: 'ou-user',
+      chatId: 'oc-chat',
+      chatType: 'p2p',
+      messageType: 'video_chat',
+      content: '[Video call]',
+      createTimeMs: Date.now(),
+    };
+    assert.equal(deterministicFilter(event, config()), null);
   });
 });
