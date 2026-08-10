@@ -255,6 +255,8 @@ describe('formatting helpers', () => {
     assert.match(rendered, /--database-path.*lark-daemon-test\.sqlite3/);
     assert.match(rendered, /--dry-run.*true/);
     assert.match(rendered, /mcp_servers\.lark_daemon_im\.tool_timeout_sec=10/);
+    assert.match(rendered, /service_tier="fast"/);
+    assert.match(rendered, /features\.fast_mode=true/);
     assert.match(rendered, /features\.plugins=false/);
     assert.match(rendered, /features\.tool_suggest=false/);
     assert.match(rendered, /features\.apps=false/);

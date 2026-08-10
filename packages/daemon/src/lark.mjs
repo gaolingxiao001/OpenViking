@@ -1,6 +1,12 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { terminateProcessTree } from './process-utils.mjs';
+import { MEETING_EVENT_TYPES } from './meeting.mjs';
+
+export const SUBSCRIBED_EVENT_TYPES = Object.freeze([
+  'im.message.receive_v1',
+  ...MEETING_EVENT_TYPES,
+]);
 
 function findChatName(value, depth = 0) {
   if (depth > 8 || value === null || value === undefined) return null;
@@ -80,7 +86,7 @@ export class LarkClient {
     const args = [
       '--profile', this.profile,
       'event', '+subscribe',
-      '--event-types', 'im.message.receive_v1',
+      '--event-types', SUBSCRIBED_EVENT_TYPES.join(','),
       '--as', 'bot',
       '--quiet',
       '--format', 'ndjson',
@@ -208,6 +214,51 @@ export class LarkClient {
       throw new Error('lark-cli chat lookup returned invalid JSON');
     }
     return findChatName(parsed);
+  }
+
+  async joinMeeting({ meetingNumber, callId = null, password = null }) {
+    const args = [
+      '--profile', this.profile,
+      'vc', '+meeting-join', '--as', 'bot',
+      '--meeting-number', meetingNumber,
+    ];
+    if (callId) args.push('--call-id', callId);
+    if (password) args.push('--password', password);
+    args.push('--format', 'json');
+    return this.runJson(args, 'meeting join', this.config.sendTimeoutMs ?? 30_000);
+  }
+
+  async listMeetingEvents({ meetingId, pageToken = null, startMs = null }) {
+    const args = [
+      '--profile', this.profile,
+      'vc', '+meeting-events', '--as', 'bot',
+      '--meeting-id', meetingId,
+    ];
+    if (pageToken) args.push('--page-token', pageToken);
+    else if (Number.isFinite(startMs) && startMs > 0) {
+      // Small overlap makes timestamp-only crash recovery lossless; event_key
+      // dedupe removes the overlap after the pull.
+      args.push('--start', new Date(Math.max(0, startMs - 2_000)).toISOString());
+    }
+    args.push('--page-all', '--format', 'json');
+    return this.runJson(args, 'meeting event recovery', 30_000);
+  }
+
+  async runJson(args, label, timeoutMs) {
+    const result = await this.registry.run(this.config.larkCliBin, args, {
+      cwd: this.config.projectDir,
+      timeoutMs,
+    });
+    if (result.timedOut) throw new Error(`lark-cli ${label} timed out after ${timeoutMs}ms`);
+    let parsed = null;
+    try { parsed = JSON.parse(result.stdout); } catch {}
+    if (result.code !== 0 || parsed?.ok === false) {
+      const detail = parsed?.error?.message || result.stderr.trim() || `exit ${result.code}`;
+      const code = parsed?.error?.code ? ` (${parsed.error.code})` : '';
+      throw new Error(`lark-cli ${label} failed${code}: ${detail.slice(-2000)}`);
+    }
+    if (!parsed) throw new Error(`lark-cli ${label} returned invalid JSON`);
+    return parsed;
   }
 
   async stop() {

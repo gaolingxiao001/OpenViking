@@ -13,6 +13,7 @@ import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
+import { isMeetingEvent, MeetingAdapter } from './meeting.mjs';
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,6 +92,7 @@ export class LarkDaemon {
     this.codex = null;
     this.groupBurst = null;
     this.lark = null;
+    this.meeting = null;
     this.liveness = null;
     this.roster = null;
     this.httpServer = null;
@@ -146,6 +148,11 @@ export class LarkDaemon {
       this.runMaintenance();
 
       this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
+      this.meeting = new MeetingAdapter({
+        store: this.store,
+        lark: this.lark,
+        logger: this.logger.child({ component: 'meeting' }),
+      });
       // Best-effort member roster so inbound lines carry display names instead
       // of id stubs. The formatters read it through the process-wide resolver.
       this.roster = new ChatRoster({
@@ -200,6 +207,9 @@ export class LarkDaemon {
 
       await delay(500);
       if (!this.lark.subscriptionRunning) throw new Error('lark-cli subscriber exited during startup');
+      void this.meeting.start().catch((error) => {
+        this.logger.warn('meeting_recovery_start_failed', { error: safeError(error) });
+      });
       this.store.closeRunningSubscriberActivities();
       this.recordSystemActivity('system.subscriber_started', {
         summary: '正在接收飞书消息事件',
@@ -248,6 +258,16 @@ export class LarkDaemon {
         summary: '收到无法解析的飞书事件',
         status: 'DROPPED',
         metadata: { reason: 'invalid_json', error: safeError(error) },
+      });
+      return;
+    }
+
+    // VC events have a different schema and lifecycle from IM messages. Keep
+    // them off the IM normalizer/filter path so existing chat behavior remains
+    // byte-for-byte unchanged.
+    if (isMeetingEvent(parsed)) {
+      void this.meeting.handleEvent(parsed).catch((error) => {
+        this.logger.warn('meeting_event_handle_failed', { error: safeError(error) });
       });
       return;
     }
@@ -872,6 +892,7 @@ export class LarkDaemon {
       this.maintenanceTimer = null;
       registerNameResolver(null);
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
+      try { await this.meeting?.stop(); } catch (error) { this.logger.warn('meeting_stop_failed', { error }); }
       this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }
       try { await this.registry.stopAll(Math.min(3_000, this.config.shutdownTimeoutMs)); } catch {}

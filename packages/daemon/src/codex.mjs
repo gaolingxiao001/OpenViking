@@ -789,6 +789,10 @@ export class CodexAgent {
       const args = [
         'app-server', '--listen', 'stdio://',
         '-c', `developer_instructions=${tomlString(this.developerInstructionsText)}`,
+        // Fast mode is a Codex service tier. Pin both the tier and its stable
+        // feature gate for this daemon-owned app-server process.
+        '-c', 'service_tier="fast"',
+        '-c', 'features.fast_mode=true',
         // The user's interactive ~/.codex config drags desktop-only machinery into
         // every turn: plugin marketplaces, <recommended_plugins> prompt injections,
         // plugin-suggestion tools, and multi-agent framing. None of it serves a
