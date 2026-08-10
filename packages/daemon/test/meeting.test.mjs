@@ -7,9 +7,10 @@ import { cognitionHistoryPrefix } from '../src/cognition.mjs';
 import {
   MeetingAdapter,
   MeetingInboxNotifier,
+  meetingActivityDebounceMs,
   meetingContextLines,
   normalizeMeetingEvent,
-} from '../src/meeting.mjs';
+} from '../src/meeting/index.mjs';
 import { Store } from '../src/store.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
@@ -62,7 +63,7 @@ describe('TAT meeting adapter', () => {
     };
     const inboxBatches = [];
     const adapter = new MeetingAdapter({
-      store,
+      store: store.meetings,
       lark,
       logger: quietLogger,
       batchDelayMs: 60_000,
@@ -148,10 +149,23 @@ describe('TAT meeting adapter', () => {
         }],
       }],
     }));
+    await adapter.handleEvent(envelope('vc.bot.meeting_activity_v1', 'evt-a1-corrected-again', {
+      meeting_activity_items: [{
+        meeting: { id: '734000000000000001', meeting_no: '123456789' },
+        activity_event_type: 'transcript_received',
+        transcript_received_items: [{
+          speaker: { id: 'ou-alice', user_name: 'Alice' },
+          text: '第一句（最终修正 v2）',
+          sentence_id: 'sentence-1',
+        }],
+      }],
+    }));
     await adapter.flushMeeting('734000000000000001');
     const correction = store.readMeetingInbox();
     assert.equal(correction.items.length, 1);
-    assert.match(JSON.stringify(correction.items[0].payload), /最终修正/);
+    assert.match(JSON.stringify(correction.items[0].payload), /最终修正 v2/);
+    assert.doesNotMatch(JSON.stringify(correction.items[0].payload), /第一句（最终修正）/);
+    assert.equal(store.stats().meetingEvents, 3, 'post-ack revisions coalesce into one pending generation');
     assert.equal(inboxBatches.length, 2);
 
     // The next real IM turn must not receive transcript payload via cognition catch-up.
@@ -194,7 +208,7 @@ describe('TAT meeting adapter', () => {
     store.updateMeetingProgress('734000000000000099', { pageToken: 'cursor-before' });
     const pulls = [];
     const adapter = new MeetingAdapter({
-      store,
+      store: store.meetings,
       logger: quietLogger,
       batchDelayMs: 60_000,
       lark: {
@@ -232,6 +246,73 @@ describe('TAT meeting adapter', () => {
     assert.equal(read.items.length, 1);
     assert.equal(read.items[0].occurredAtMs, Date.parse('2026-08-10T12:00:00Z'));
     assert.match(JSON.stringify(read.items[0].payload), /恢复内容/);
+  });
+
+  it('dedupes push and restart pull copies with equivalent transcript semantics', async () => {
+    const push = new MeetingAdapter({
+      store: store.meetings,
+      logger: quietLogger,
+      batchDelayMs: 60_000,
+      lark: {
+        async joinMeeting() { throw new Error('not expected'); },
+        async listMeetingEvents() { throw new Error('not expected before restart'); },
+      },
+    });
+    await push.handleEvent(envelope('vc.bot.meeting_activity_v1', 'evt-live-copy', {
+      meeting_activity_items: [{
+        meeting: { id: '734000000000000555', meeting_no: '555555555' },
+        activity_event_type: 'transcript_received',
+        actors: [{ open_id: 'ou-alice', display_name: 'Alice' }],
+        transcript_received_items: [{
+          speaker: { id: 'ou-alice', user_name: 'Alice' },
+          sentence_id: 'sentence-same',
+          text: '同一份逐字稿',
+          start_time_ms: '1786371738000',
+          end_time_ms: '1786371738442',
+        }],
+      }],
+    }));
+    await push.flushMeeting('734000000000000555');
+    assert.equal(store.meetings.readMeetingInbox().items.length, 1);
+    await push.stop();
+
+    const notifications = [];
+    const recovered = new MeetingAdapter({
+      store: store.meetings,
+      logger: quietLogger,
+      batchDelayMs: 60_000,
+      onInboxReady: (batch) => notifications.push(batch),
+      lark: {
+        async joinMeeting() { throw new Error('not expected'); },
+        async listMeetingEvents() {
+          return {
+            ok: true,
+            data: {
+              events: [{
+                event_type: 'transcript_received',
+                event_time: '2026-08-10T12:00:00Z',
+                payload: {
+                  transcript_received_items: [{
+                    speaker: 'Alice',
+                    sentence_id: 'sentence-same',
+                    text: '同一份逐字稿',
+                    start_time_ms: '2026-08-10T12:00:00.000Z',
+                    end_time_ms: '2026-08-10T12:00:00.442Z',
+                  }],
+                },
+              }],
+              has_more: false,
+            },
+          };
+        },
+      },
+    });
+    await recovered.start();
+    assert.equal(store.meetings.unreadMeetingInboxCount(), 0);
+    assert.equal(store.meetings.pendingMeetingEvents('734000000000000555').length, 0);
+    assert.equal(store.stats().meetingEvents, 1);
+    assert.deepEqual(notifications, [], 'restart recovery must not replay an acknowledged semantic duplicate');
+    await recovered.stop();
   });
 
   it('merges an activity-created placeholder when join completion arrives', () => {
@@ -297,12 +378,19 @@ describe('TAT meeting adapter', () => {
     assert.deepEqual(notified[1], [12]);
   });
 
-  it('flushes after 1s of inactivity but caps a continuously revised partial at 4s', async () => {
+  it('uses 1s for closed items, 3s for partials, and caps partial churn at 4s', async () => {
+    assert.equal(meetingActivityDebounceMs({
+      transcript_received_items: [{ text: 'closed', end_time_ms: '1786371738442' }],
+    }, 'transcript_received'), 1_000);
+    assert.equal(meetingActivityDebounceMs({
+      transcript_received_items: [{ text: 'partial' }],
+    }, 'transcript_received'), 3_000);
+    assert.equal(meetingActivityDebounceMs({ chat_received_items: [{ text: 'hi' }] }, 'chat_received'), 1_000);
     let now = 1_000;
     const scheduled = [];
     const cleared = [];
     const adapter = new MeetingAdapter({
-      store,
+      store: store.meetings,
       logger: quietLogger,
       lark: {
         async joinMeeting() { throw new Error('not expected'); },
@@ -318,7 +406,7 @@ describe('TAT meeting adapter', () => {
       },
       clearTimer: (timer) => cleared.push(timer),
     });
-    const activity = (eventId, text) => envelope('vc.bot.meeting_activity_v1', eventId, {
+    const activity = (eventId, text, endTimeMs = null) => envelope('vc.bot.meeting_activity_v1', eventId, {
       meeting_activity_items: [{
         meeting: { id: '734000000000000222', meeting_no: '222222222' },
         activity_event_type: 'transcript_received',
@@ -326,16 +414,17 @@ describe('TAT meeting adapter', () => {
           speaker: { id: 'ou-alice', user_name: 'Alice' },
           text,
           sentence_id: 'sentence-live',
+          ...(endTimeMs === null ? {} : { end_time_ms: endTimeMs }),
         }],
       }],
     });
 
     await adapter.handleEvent(activity('evt-partial-1', '请帮我'));
-    assert.equal(scheduled.at(-1).delay, 1_000);
+    assert.equal(scheduled.at(-1).delay, 3_000);
     now = 1_600;
     await adapter.handleEvent(activity('evt-partial-2', '请帮我记录'));
     assert.equal(cleared.length, 1);
-    assert.equal(scheduled.at(-1).delay, 1_000);
+    assert.equal(scheduled.at(-1).delay, 3_000);
     now = 4_500;
     await adapter.handleEvent(activity('evt-partial-3', '请帮我记录结论'));
     assert.equal(scheduled.at(-1).delay, 500, 'the original 4s max-age wins over another 1s reset');
@@ -344,6 +433,13 @@ describe('TAT meeting adapter', () => {
     const read = store.readMeetingInbox();
     assert.equal(read.items.length, 1);
     assert.match(JSON.stringify(read.items[0].payload), /请帮我记录结论/);
+
+    now = 10_000;
+    await adapter.handleEvent(activity('evt-partial-later', '新的草稿'));
+    assert.equal(scheduled.at(-1).delay, 3_000);
+    now = 10_500;
+    await adapter.handleEvent(activity('evt-stable-later', '新的完整句子', '1786371738442'));
+    assert.equal(scheduled.at(-1).delay, 1_000, 'a closed revision pulls the partial window forward');
     await adapter.stop();
   });
 });

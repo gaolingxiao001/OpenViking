@@ -13,7 +13,7 @@ import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
-import { isMeetingEvent, MeetingAdapter, MeetingInboxNotifier } from './meeting.mjs';
+import { isMeetingEvent, MeetingAdapter, MeetingInboxNotifier } from './meeting/index.mjs';
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -150,7 +150,7 @@ export class LarkDaemon {
 
       this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
       this.meeting = new MeetingAdapter({
-        store: this.store,
+        store: this.store.meetings,
         lark: this.lark,
         logger: this.logger.child({ component: 'meeting' }),
         onInboxReady: (batch) => this.meetingInboxNotifier?.signal(batch),
@@ -196,7 +196,7 @@ export class LarkDaemon {
         isTurnInProgress: () => this.codex.turnInProgress,
       });
       this.meetingInboxNotifier = new MeetingInboxNotifier({
-        store: this.store,
+        store: this.store.meetings,
         runtime: this.codex,
         logger: this.logger.child({ component: 'meeting-inbox' }),
       });

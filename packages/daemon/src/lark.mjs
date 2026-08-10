@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { terminateProcessTree } from './process-utils.mjs';
-import { MEETING_EVENT_TYPES } from './meeting.mjs';
+import { MEETING_EVENT_TYPES } from './meeting/index.mjs';
 
 export const SUBSCRIBED_EVENT_TYPES = Object.freeze([
   'im.message.receive_v1',

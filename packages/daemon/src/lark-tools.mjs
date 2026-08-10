@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
 import { ChatRoster } from './roster.mjs';
-import { meetingContextLines } from './meeting.mjs';
+import { meetingContextLines, readMeetingInboxDatabase } from './meeting/index.mjs';
 
 const SERVER_NAME = 'lark-daemon-im';
 const SERVER_VERSION = '1.0.0';
@@ -951,60 +951,26 @@ export class LarkToolService {
     }
     const limit = Math.min(500, Math.max(1, Number.parseInt(input.limit ?? 100, 10) || 100));
     if (!this._openJournal()) throw new Error('meeting inbox state is unavailable');
-    const db = this.journalDb;
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      const rows = meetingId
-        ? db.prepare(`
-          SELECT * FROM meeting_events
-          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
-          ORDER BY id LIMIT ?
-        `).all(meetingId, limit)
-        : db.prepare(`
-          SELECT * FROM meeting_events
-          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
-          ORDER BY id LIMIT ?
-        `).all(limit);
-      const readAtMs = Date.now();
-      const acknowledge = db.prepare(`
-        UPDATE meeting_events SET inbox_read_at_ms = ?
-        WHERE id = ? AND inbox_read_at_ms IS NULL
-      `);
-      for (const row of rows) acknowledge.run(readAtMs, row.id);
-      const remainingRow = meetingId
-        ? db.prepare(`
-          SELECT COUNT(*) AS count FROM meeting_events
-          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
-        `).get(meetingId)
-        : db.prepare(`
-          SELECT COUNT(*) AS count FROM meeting_events
-          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
-        `).get();
-      db.exec('COMMIT');
-      const items = rows.map((row) => {
-        let payload = {};
-        try { payload = JSON.parse(row.payload_json || '{}'); } catch {}
-        return {
-          id: Number(row.id),
-          batch_id: Number(row.inbox_batch_id),
-          meeting_id: row.meeting_id,
-          event_type: row.event_type,
-          activity_type: row.activity_type,
-          occurred_at_ms: Number(row.occurred_at_ms),
-          received_at_ms: Number(row.received_at_ms),
-          payload,
-        };
-      });
-      return {
-        items,
-        count: items.length,
-        remaining: Number(remainingRow?.count) || 0,
-        acknowledged_at_ms: readAtMs,
-      };
-    } catch (error) {
-      try { db.exec('ROLLBACK'); } catch {}
-      throw error;
-    }
+    const result = readMeetingInboxDatabase(this.journalDb, {
+      meetingId: meetingId || null,
+      limit,
+    });
+    const items = result.items.map((item) => ({
+      id: item.id,
+      batch_id: item.inboxBatchId,
+      meeting_id: item.meetingId,
+      event_type: item.eventType,
+      activity_type: item.activityType,
+      occurred_at_ms: item.occurredAtMs,
+      received_at_ms: item.receivedAtMs,
+      payload: item.payload,
+    }));
+    return {
+      items,
+      count: items.length,
+      remaining: result.remaining,
+      acknowledged_at_ms: result.acknowledgedAtMs,
+    };
   }
 
   async sendMessage(input = {}) {

@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { opaqueRef } from './logger.mjs';
 import {
@@ -10,6 +9,7 @@ import {
   cleanActivityText,
   reasonLabel,
 } from './activity.mjs';
+import { MeetingStore, migrateMeetingStore } from './meeting/store.mjs';
 
 function number(value) {
   return typeof value === 'bigint' ? Number(value) : value;
@@ -72,46 +72,6 @@ function rowToCognitionJournal(row) {
     actor: row.actor,
     text: row.text,
     metadata: parseJsonObject(row.detail_json),
-  };
-}
-
-function rowToMeetingSession(row) {
-  if (!row) return null;
-  return {
-    sessionKey: row.session_key,
-    meetingId: row.meeting_id,
-    meetingNumber: row.meeting_no,
-    callId: row.call_id,
-    inviteEventId: row.invite_event_id,
-    status: row.status,
-    pageToken: row.page_token,
-    lastSequence: row.last_sequence === null ? null : number(row.last_sequence),
-    lastEventAtMs: row.last_event_at_ms === null ? null : number(row.last_event_at_ms),
-    joinedAtMs: row.joined_at_ms === null ? null : number(row.joined_at_ms),
-    endedAtMs: row.ended_at_ms === null ? null : number(row.ended_at_ms),
-    lastError: row.last_error,
-    updatedAtMs: number(row.updated_at_ms),
-  };
-}
-
-function rowToMeetingEvent(row) {
-  if (!row) return null;
-  return {
-    id: number(row.id),
-    eventKey: row.event_key,
-    meetingId: row.meeting_id,
-    eventType: row.event_type,
-    activityType: row.activity_type,
-    occurredAtMs: number(row.occurred_at_ms),
-    receivedAtMs: number(row.received_at_ms),
-    payload: parseJsonObject(row.payload_json),
-    journalSeq: row.journal_seq === null ? null : number(row.journal_seq),
-    inboxBatchId: row.inbox_batch_id === null || row.inbox_batch_id === undefined
-      ? null
-      : number(row.inbox_batch_id),
-    inboxReadAtMs: row.inbox_read_at_ms === null || row.inbox_read_at_ms === undefined
-      ? null
-      : number(row.inbox_read_at_ms),
   };
 }
 
@@ -205,6 +165,7 @@ export class Store {
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.migrate();
     this.prepare();
+    this.meetings = new MeetingStore(this.db, (fn) => this.transaction(fn));
     this.backfillChatSources();
     this.backfillActivities();
     this.backfillActivitySources();
@@ -360,54 +321,6 @@ export class Store {
       CREATE INDEX IF NOT EXISTS chat_sources_lookup
         ON chat_sources(chat_type, next_lookup_at_ms);
 
-      CREATE TABLE IF NOT EXISTS meeting_sessions (
-        session_key TEXT PRIMARY KEY,
-        meeting_id TEXT UNIQUE,
-        meeting_no TEXT,
-        call_id TEXT,
-        invite_event_id TEXT,
-        status TEXT NOT NULL,
-        page_token TEXT,
-        last_sequence INTEGER,
-        last_event_at_ms INTEGER,
-        joined_at_ms INTEGER,
-        ended_at_ms INTEGER,
-        last_error TEXT,
-        created_at_ms INTEGER NOT NULL,
-        updated_at_ms INTEGER NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS meeting_sessions_status
-        ON meeting_sessions(status, updated_at_ms);
-
-      CREATE TABLE IF NOT EXISTS meeting_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_key TEXT NOT NULL UNIQUE,
-        meeting_id TEXT,
-        event_type TEXT NOT NULL,
-        activity_type TEXT,
-        occurred_at_ms INTEGER NOT NULL,
-        received_at_ms INTEGER NOT NULL,
-        payload_json TEXT NOT NULL,
-        journal_seq INTEGER,
-        inbox_batch_id INTEGER,
-        inbox_read_at_ms INTEGER
-      );
-
-      CREATE INDEX IF NOT EXISTS meeting_events_received
-        ON meeting_events(received_at_ms);
-
-      CREATE TABLE IF NOT EXISTS meeting_inbox_batches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        meeting_id TEXT NOT NULL,
-        first_event_id INTEGER NOT NULL,
-        last_event_id INTEGER NOT NULL,
-        event_count INTEGER NOT NULL,
-        created_at_ms INTEGER NOT NULL,
-        notified_at_ms INTEGER,
-        UNIQUE(meeting_id, first_event_id, last_event_id)
-      );
-
       -- Canonical, daemon-owned observable cognition shared by every chat and
       -- every model runtime. Runtime-native transcripts stay opaque; a hard
       -- runtime switch starts one fresh target session and catches it up from
@@ -439,43 +352,13 @@ export class Store {
       -- treat it as failed and invite a duplicate send.
       UPDATE cognition_journal SET status = 'UNCERTAIN' WHERE status = 'PENDING';
     `);
+    migrateMeetingStore(this.db);
     const inboundColumns = new Set(
       this.db.prepare('PRAGMA table_info(inbound)').all().map((row) => row.name),
     );
     if (!inboundColumns.has('thread_id')) {
       this.db.exec('ALTER TABLE inbound ADD COLUMN thread_id TEXT');
     }
-    const meetingEventColumns = new Set(
-      this.db.prepare('PRAGMA table_info(meeting_events)').all().map((row) => row.name),
-    );
-    if (!meetingEventColumns.has('inbox_batch_id') || !meetingEventColumns.has('inbox_read_at_ms')) {
-      this.db.exec('BEGIN IMMEDIATE');
-      try {
-        if (!meetingEventColumns.has('inbox_batch_id')) {
-          this.db.exec('ALTER TABLE meeting_events ADD COLUMN inbox_batch_id INTEGER');
-        }
-        if (!meetingEventColumns.has('inbox_read_at_ms')) {
-          this.db.exec('ALTER TABLE meeting_events ADD COLUMN inbox_read_at_ms INTEGER');
-        }
-        // Rows journaled by the previous release have already been exposed to
-        // the model. Mark them read so an upgrade never replays old transcripts.
-        this.db.exec(`
-          UPDATE meeting_events
-          SET inbox_read_at_ms = COALESCE(inbox_read_at_ms, received_at_ms)
-          WHERE journal_seq IS NOT NULL
-        `);
-        this.db.exec('COMMIT');
-      } catch (error) {
-        try { this.db.exec('ROLLBACK'); } catch {}
-        throw error;
-      }
-    }
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS meeting_events_pending_v2
-        ON meeting_events(meeting_id, inbox_batch_id, id);
-      CREATE INDEX IF NOT EXISTS meeting_events_inbox
-        ON meeting_events(inbox_read_at_ms, inbox_batch_id, id)
-    `);
     const outboxColumns = new Set(
       this.db.prepare('PRAGMA table_info(outbox)').all().map((row) => row.name),
     );
@@ -1141,117 +1024,33 @@ export class Store {
     eventId,
     atMs = Date.now(),
   }) {
-    this.db.prepare(`
-      INSERT INTO meeting_sessions(
-        session_key, meeting_id, meeting_no, call_id, invite_event_id,
-        status, created_at_ms, updated_at_ms
-      ) VALUES (?, ?, ?, ?, ?, 'INVITED', ?, ?)
-      ON CONFLICT(session_key) DO UPDATE SET
-        meeting_id = COALESCE(excluded.meeting_id, meeting_sessions.meeting_id),
-        meeting_no = COALESCE(excluded.meeting_no, meeting_sessions.meeting_no),
-        call_id = COALESCE(excluded.call_id, meeting_sessions.call_id),
-        invite_event_id = COALESCE(excluded.invite_event_id, meeting_sessions.invite_event_id),
-        updated_at_ms = MAX(meeting_sessions.updated_at_ms, excluded.updated_at_ms)
-    `).run(sessionKey, meetingId, meetingNumber, callId, eventId, atMs, atMs);
-    return rowToMeetingSession(this.db.prepare(
-      'SELECT * FROM meeting_sessions WHERE session_key = ?',
-    ).get(sessionKey));
-  }
-
-  markMeetingJoining(sessionKey, atMs = Date.now()) {
-    return number(this.db.prepare(`
-      UPDATE meeting_sessions SET status = 'JOINING', last_error = NULL, updated_at_ms = ?
-      WHERE session_key = ? AND status IN ('INVITED', 'FAILED')
-    `).run(atMs, sessionKey).changes) > 0;
-  }
-
-  markMeetingJoinFailed(sessionKey, error, atMs = Date.now()) {
-    return number(this.db.prepare(`
-      UPDATE meeting_sessions SET status = 'FAILED', last_error = ?, updated_at_ms = ?
-      WHERE session_key = ?
-    `).run(String(error).slice(0, 2000), atMs, sessionKey).changes) > 0;
-  }
-
-  markMeetingJoined(sessionKey, { meetingId, meetingNumber = null, atMs = Date.now() }) {
-    return this.transaction(() => {
-      const placeholder = this.db.prepare(`
-        SELECT * FROM meeting_sessions WHERE meeting_id = ? AND session_key <> ?
-      `).get(meetingId, sessionKey);
-      if (placeholder) {
-        // A fast activity push can identify the meeting before the join command
-        // returns. Merge that placeholder into the invite-correlated row rather
-        // than colliding with the UNIQUE(meeting_id) constraint.
-        this.db.prepare('DELETE FROM meeting_sessions WHERE session_key = ?')
-          .run(placeholder.session_key);
-      }
-      this.db.prepare(`
-        UPDATE meeting_sessions
-        SET meeting_id = ?, meeting_no = COALESCE(?, meeting_no, ?),
-            status = CASE WHEN ? = 'ENDED' THEN 'ENDED' ELSE 'JOINED' END,
-            page_token = COALESCE(page_token, ?),
-            last_sequence = CASE
-              WHEN last_sequence IS NULL THEN ?
-              WHEN ? IS NULL THEN last_sequence
-              ELSE MAX(last_sequence, ?)
-            END,
-            last_event_at_ms = CASE
-              WHEN last_event_at_ms IS NULL THEN ?
-              WHEN ? IS NULL THEN last_event_at_ms
-              ELSE MAX(last_event_at_ms, ?)
-            END,
-            joined_at_ms = COALESCE(joined_at_ms, ?),
-            ended_at_ms = COALESCE(ended_at_ms, ?),
-            last_error = NULL, updated_at_ms = ?
-        WHERE session_key = ?
-      `).run(
-        meetingId,
-        meetingNumber,
-        placeholder?.meeting_no ?? null,
-        placeholder?.status ?? null,
-        placeholder?.page_token ?? null,
-        placeholder?.last_sequence ?? null,
-        placeholder?.last_sequence ?? null,
-        placeholder?.last_sequence ?? null,
-        placeholder?.last_event_at_ms ?? null,
-        placeholder?.last_event_at_ms ?? null,
-        placeholder?.last_event_at_ms ?? null,
-        atMs,
-        placeholder?.ended_at_ms ?? null,
-        atMs,
-        sessionKey,
-      );
-      return this.meetingSessionById(meetingId);
+    return this.meetings.upsertMeetingInvite({
+      sessionKey, meetingId, meetingNumber, callId, eventId, atMs,
     });
   }
 
+  markMeetingJoining(sessionKey, atMs = Date.now()) {
+    return this.meetings.markMeetingJoining(sessionKey, atMs);
+  }
+
+  markMeetingJoinFailed(sessionKey, error, atMs = Date.now()) {
+    return this.meetings.markMeetingJoinFailed(sessionKey, error, atMs);
+  }
+
+  markMeetingJoined(sessionKey, { meetingId, meetingNumber = null, atMs = Date.now() }) {
+    return this.meetings.markMeetingJoined(sessionKey, { meetingId, meetingNumber, atMs });
+  }
+
   ensureMeetingSession(meetingId, { meetingNumber = null, atMs = Date.now() } = {}) {
-    this.db.prepare(`
-      INSERT OR IGNORE INTO meeting_sessions(
-        session_key, meeting_id, meeting_no, status, created_at_ms, updated_at_ms
-      ) VALUES (?, ?, ?, 'ACTIVE', ?, ?)
-    `).run(`meeting:${meetingId}`, meetingId, meetingNumber, atMs, atMs);
-    this.db.prepare(`
-      UPDATE meeting_sessions
-      SET meeting_no = COALESCE(?, meeting_no),
-          status = CASE WHEN status IN ('ENDED', 'JOINING') THEN status ELSE 'ACTIVE' END,
-          updated_at_ms = MAX(updated_at_ms, ?)
-      WHERE meeting_id = ?
-    `).run(meetingNumber, atMs, meetingId);
-    return this.meetingSessionById(meetingId);
+    return this.meetings.ensureMeetingSession(meetingId, { meetingNumber, atMs });
   }
 
   meetingSessionById(meetingId) {
-    return rowToMeetingSession(this.db.prepare(
-      'SELECT * FROM meeting_sessions WHERE meeting_id = ?',
-    ).get(meetingId));
+    return this.meetings.meetingSessionById(meetingId);
   }
 
   activeMeetingSessions() {
-    return this.db.prepare(`
-      SELECT * FROM meeting_sessions
-      WHERE meeting_id IS NOT NULL AND status IN ('JOINED', 'ACTIVE')
-      ORDER BY updated_at_ms
-    `).all().map(rowToMeetingSession);
+    return this.meetings.activeMeetingSessions();
   }
 
   ingestMeetingEvent({
@@ -1263,50 +1062,9 @@ export class Store {
     payload = {},
     receivedAtMs = Date.now(),
   }) {
-    const payloadJson = JSON.stringify(payload ?? {});
-    const existing = this.db.prepare(`
-      SELECT id, payload_json, inbox_batch_id, inbox_read_at_ms
-      FROM meeting_events WHERE event_key = ?
-    `).get(eventKey);
-    // Live transcript pushes can revise the same sentence_id as speech
-    // recognition stabilizes. Before the inbox item is read, retain the newest text.
-    if (existing) {
-      if (existing.payload_json === payloadJson) return false;
-      // Revisions arriving before the agent reads the item can replace it in
-      // place. After acknowledgement, retain the correction as a new inbox
-      // item so a low-latency flush never freezes or drops a later ASR final.
-      if (existing.inbox_read_at_ms === null) {
-        return number(this.db.prepare(`
-          UPDATE meeting_events
-          SET event_type = ?, activity_type = ?, occurred_at_ms = ?,
-              received_at_ms = ?, payload_json = ?
-          WHERE id = ? AND inbox_read_at_ms IS NULL
-        `).run(
-          eventType,
-          activityType,
-          occurredAtMs,
-          receivedAtMs,
-          payloadJson,
-          existing.id,
-        ).changes) > 0 && existing.inbox_batch_id === null;
-      }
-      eventKey = `${eventKey}:revision:${createHash('sha256').update(payloadJson).digest('hex')}`;
-    }
-    const result = this.db.prepare(`
-      INSERT OR IGNORE INTO meeting_events(
-        event_key, meeting_id, event_type, activity_type, occurred_at_ms,
-        received_at_ms, payload_json, journal_seq
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-    `).run(
-      eventKey,
-      meetingId,
-      eventType,
-      activityType,
-      occurredAtMs,
-      receivedAtMs,
-      payloadJson,
-    );
-    return number(result.changes) > 0;
+    return this.meetings.ingestMeetingEvent({
+      eventKey, meetingId, eventType, activityType, occurredAtMs, payload, receivedAtMs,
+    });
   }
 
   updateMeetingProgress(meetingId, {
@@ -1315,147 +1073,41 @@ export class Store {
     eventAtMs = null,
     atMs = Date.now(),
   } = {}) {
-    return number(this.db.prepare(`
-      UPDATE meeting_sessions SET
-        page_token = COALESCE(?, page_token),
-        last_sequence = CASE
-          WHEN ? IS NULL THEN last_sequence
-          WHEN last_sequence IS NULL OR ? > last_sequence THEN ?
-          ELSE last_sequence
-        END,
-        last_event_at_ms = CASE
-          WHEN ? IS NULL THEN last_event_at_ms
-          WHEN last_event_at_ms IS NULL OR ? > last_event_at_ms THEN ?
-          ELSE last_event_at_ms
-        END,
-        updated_at_ms = MAX(updated_at_ms, ?)
-      WHERE meeting_id = ?
-    `).run(
-      pageToken,
-      sequence, sequence, sequence,
-      eventAtMs, eventAtMs, eventAtMs,
-      atMs,
-      meetingId,
-    ).changes) > 0;
+    return this.meetings.updateMeetingProgress(meetingId, {
+      pageToken, sequence, eventAtMs, atMs,
+    });
   }
 
   meetingHasSequenceGap(meetingId, sequence) {
-    if (!Number.isSafeInteger(sequence)) return false;
-    const previous = this.meetingSessionById(meetingId)?.lastSequence;
-    return Number.isSafeInteger(previous) && sequence > previous + 1;
+    return this.meetings.meetingHasSequenceGap(meetingId, sequence);
   }
 
   pendingMeetingEvents(meetingId, limit = 50) {
-    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 50));
-    return this.db.prepare(`
-      SELECT * FROM meeting_events
-      WHERE meeting_id = ? AND inbox_batch_id IS NULL AND inbox_read_at_ms IS NULL
-      ORDER BY id LIMIT ?
-    `).all(meetingId, safeLimit).map(rowToMeetingEvent);
+    return this.meetings.pendingMeetingEvents(meetingId, limit);
   }
 
   pendingMeetingIds() {
-    return this.db.prepare(`
-      SELECT DISTINCT meeting_id FROM meeting_events
-      WHERE meeting_id IS NOT NULL AND inbox_batch_id IS NULL AND inbox_read_at_ms IS NULL
-      ORDER BY meeting_id
-    `).all().map((row) => row.meeting_id);
+    return this.meetings.pendingMeetingIds();
   }
 
   commitMeetingInboxBatch(meetingId, rows, atMs = Date.now()) {
-    if (!Array.isArray(rows) || rows.length === 0) return null;
-    return this.transaction(() => {
-      const eligible = rows.filter((row) => {
-        const current = this.db.prepare(`
-          SELECT inbox_batch_id, inbox_read_at_ms FROM meeting_events WHERE id = ?
-        `).get(row.id);
-        return current && current.inbox_batch_id === null && current.inbox_read_at_ms === null;
-      });
-      if (eligible.length === 0) return null;
-      const first = eligible[0];
-      const last = eligible.at(-1);
-      const inserted = this.db.prepare(`
-        INSERT OR IGNORE INTO meeting_inbox_batches(
-          meeting_id, first_event_id, last_event_id, event_count, created_at_ms
-        ) VALUES (?, ?, ?, ?, ?)
-      `).run(meetingId, first.id, last.id, eligible.length, atMs);
-      const batch = this.db.prepare(`
-        SELECT * FROM meeting_inbox_batches
-        WHERE meeting_id = ? AND first_event_id = ? AND last_event_id = ?
-      `).get(meetingId, first.id, last.id);
-      if (!batch || number(inserted.changes) === 0) return null;
-      const update = this.db.prepare(`
-        UPDATE meeting_events SET inbox_batch_id = ?
-        WHERE id = ? AND inbox_batch_id IS NULL AND inbox_read_at_ms IS NULL
-      `);
-      let committed = 0;
-      for (const row of eligible) committed += number(update.run(batch.id, row.id).changes);
-      if (committed !== eligible.length) throw new Error('meeting inbox batch changed during commit');
-      return {
-        batchId: number(batch.id),
-        meetingId,
-        eventCount: eligible.length,
-        pendingCount: this.unreadMeetingInboxCount(),
-      };
-    });
+    return this.meetings.commitMeetingInboxBatch(meetingId, rows, atMs);
   }
 
   unreadMeetingInboxCount(meetingId = null) {
-    const row = meetingId
-      ? this.db.prepare(`
-        SELECT COUNT(*) AS count FROM meeting_events
-        WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
-      `).get(meetingId)
-      : this.db.prepare(`
-        SELECT COUNT(*) AS count FROM meeting_events
-        WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
-      `).get();
-    return number(row?.count) || 0;
+    return this.meetings.unreadMeetingInboxCount(meetingId);
   }
 
   readMeetingInbox({ meetingId = null, limit = 100, atMs = Date.now() } = {}) {
-    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
-    return this.transaction(() => {
-      const rows = (meetingId
-        ? this.db.prepare(`
-          SELECT * FROM meeting_events
-          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL AND meeting_id = ?
-          ORDER BY id LIMIT ?
-        `).all(meetingId, safeLimit)
-        : this.db.prepare(`
-          SELECT * FROM meeting_events
-          WHERE inbox_batch_id IS NOT NULL AND inbox_read_at_ms IS NULL
-          ORDER BY id LIMIT ?
-        `).all(safeLimit));
-      const acknowledge = this.db.prepare(`
-        UPDATE meeting_events SET inbox_read_at_ms = ?
-        WHERE id = ? AND inbox_read_at_ms IS NULL
-      `);
-      for (const row of rows) acknowledge.run(atMs, row.id);
-      return {
-        items: rows.map((row) => rowToMeetingEvent({ ...row, inbox_read_at_ms: atMs })),
-        remaining: this.unreadMeetingInboxCount(meetingId),
-      };
-    });
+    return this.meetings.readMeetingInbox({ meetingId, limit, atMs });
   }
 
   markMeetingInboxBatchesNotified(batchIds, atMs = Date.now()) {
-    if (!Array.isArray(batchIds) || batchIds.length === 0) return 0;
-    const update = this.db.prepare(`
-      UPDATE meeting_inbox_batches SET notified_at_ms = COALESCE(notified_at_ms, ?) WHERE id = ?
-    `);
-    return this.transaction(() => batchIds.reduce(
-      (count, id) => count + number(update.run(atMs, id).changes),
-      0,
-    ));
+    return this.meetings.markMeetingInboxBatchesNotified(batchIds, atMs);
   }
 
   finishMeeting(meetingId, atMs = Date.now()) {
-    return number(this.db.prepare(`
-      UPDATE meeting_sessions
-      SET status = 'ENDED', ended_at_ms = COALESCE(ended_at_ms, ?), updated_at_ms = ?
-      WHERE meeting_id = ?
-    `).run(atMs, atMs, meetingId).changes) > 0;
+    return this.meetings.finishMeeting(meetingId, atMs);
   }
 
   getCognitionState() {
@@ -1693,23 +1345,7 @@ export class Store {
         DELETE FROM inbound
         WHERE received_at_ms < ? AND status IN ('DONE', 'DEAD', 'RULE_IGNORED')
       `).run(cutoff);
-      const meetingEvents = this.db.prepare(`
-        DELETE FROM meeting_events WHERE received_at_ms < ? AND inbox_read_at_ms IS NOT NULL
-      `).run(cutoff);
-      this.db.prepare(`
-        DELETE FROM meeting_inbox_batches
-        WHERE created_at_ms < ?
-          AND NOT EXISTS (
-            SELECT 1 FROM meeting_events WHERE meeting_events.inbox_batch_id = meeting_inbox_batches.id
-          )
-      `).run(cutoff);
-      const meetingSessions = this.db.prepare(`
-        DELETE FROM meeting_sessions
-        WHERE status IN ('ENDED', 'FAILED') AND updated_at_ms < ?
-          AND (meeting_id IS NULL OR NOT EXISTS (
-            SELECT 1 FROM meeting_events WHERE meeting_events.meeting_id = meeting_sessions.meeting_id
-          ))
-      `).run(cutoff);
+      const meeting = this.meetings.prune(cutoff);
       const outbox = this.db.prepare(`
         DELETE FROM outbox
         WHERE updated_at_ms < ?
@@ -1729,8 +1365,8 @@ export class Store {
       `).run();
       return {
         inbound: number(inbound.changes),
-        meetingEvents: number(meetingEvents.changes),
-        meetingSessions: number(meetingSessions.changes),
+        meetingEvents: meeting.events,
+        meetingSessions: meeting.sessions,
         outbox: number(outbox.changes),
         turns: number(turns.changes),
         conversations: number(conversations.changes),
@@ -1753,14 +1389,8 @@ export class Store {
     const activities = number(this.db.prepare(`
       SELECT COUNT(*) AS count FROM activities
     `).get().count);
-    const meetings = Object.fromEntries(this.db.prepare(`
-      SELECT status, COUNT(*) AS count FROM meeting_sessions GROUP BY status
-    `).all().map((row) => [row.status, number(row.count)]));
-    const meetingEvents = number(this.db.prepare(`
-      SELECT COUNT(*) AS count FROM meeting_events
-    `).get().count);
-    const meetingInbox = this.unreadMeetingInboxCount();
-    return { inbound, turns, outbox, activities, meetings, meetingEvents, meetingInbox };
+    const meeting = this.meetings.stats();
+    return { inbound, turns, outbox, activities, ...meeting };
   }
 
   close() {
