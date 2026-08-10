@@ -143,7 +143,7 @@ describe('normalizeEvent', () => {
 });
 
 describe('deterministicFilter', () => {
-  it('filters bots, unsupported media, and explicit deny-list senders', () => {
+  it('allows bot senders but filters unsupported media and explicit deny-list senders', () => {
     const base = {
       type: 'im.message.receive_v1',
       senderType: 'user',
@@ -154,8 +154,8 @@ describe('deterministicFilter', () => {
       content: 'hello',
       createTimeMs: Date.now(),
     };
-    assert.equal(deterministicFilter({ ...base, senderType: 'bot' }, config()), 'bot_message');
-    assert.equal(deterministicFilter({ ...base, senderType: 'app' }, config()), 'bot_message');
+    assert.equal(deterministicFilter({ ...base, senderType: 'bot' }, config()), null);
+    assert.equal(deterministicFilter({ ...base, senderType: 'app' }, config()), null);
     assert.equal(deterministicFilter({ ...base, messageType: 'image' }, config()), 'unsupported_message_type');
     assert.equal(
       deterministicFilter(base, config({ ignoredSenderIds: new Set(['ou-user']) })),

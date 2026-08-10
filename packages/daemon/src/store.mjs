@@ -1216,11 +1216,11 @@ export class Store {
     this.setMetaStatement.run(`setting:${key}`, String(value));
   }
 
-  // Cross-chat history injected into a fresh thread's first turn. Only inbound DONE
-  // rows exist now (codex sends its own replies via lark-cli, and its own bot messages
-  // are filtered out on the way in), so history is user-message context only.
-  // ponytail: the bot's own replies are not in history; a resumed thread keeps codex's
-  // in-process context, but a fresh thread after a policy change loses prior answers.
+  // Cross-chat history injected into a fresh thread's first turn. DONE rows include
+  // every accepted sender, including bot/app messages. Outbound replies re-enter only
+  // if Lark emits them back as inbound events.
+  // ponytail: a resumed thread keeps codex's in-process context, but a fresh thread
+  // after a policy change loses prior answers that Lark did not emit back.
   history(limit, beforeSeq = null) {
     if (limit <= 0) return [];
     const rows = this.db.prepare(`

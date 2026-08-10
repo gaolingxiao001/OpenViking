@@ -140,7 +140,6 @@ export function normalizeEvent(input, profile = 'default') {
 
 export function deterministicFilter(event, config, now = Date.now()) {
   if (event.type !== 'im.message.receive_v1') return 'wrong_event_type';
-  if (event.senderType === 'bot' || event.senderType === 'app') return 'bot_message';
   if (event.senderId && config.ignoredSenderIds.has(event.senderId)) return 'ignored_sender';
   if (!config.allowedMessageTypes.has(event.messageType)) return 'unsupported_message_type';
   if (!event.content.trim()) return 'empty_content';
