@@ -22,6 +22,24 @@ afterEach(() => {
 });
 
 describe('configuration safety', { concurrency: false }, () => {
+  it('keeps meeting audio entirely disabled unless explicitly configured', () => {
+    setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'false');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', undefined);
+    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', undefined);
+    assert.equal(getConfig().meetingAudio, null);
+  });
+
+  it('builds an isolated SQLite spool and worker command only behind the feature flag', () => {
+    setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'true');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
+    const config = getConfig();
+    assert.match(config.meetingAudio.spoolPath, /meeting-audio-spool\.sqlite3$/);
+    assert.deepEqual(config.meetingAudio.workerArgs, ['worker.py']);
+    assert.match(config.meetingAudio.authoritySocketPath, /meeting-audio-authority\.sock$/);
+  });
+
   it('accepts only raw event mode', () => {
     setEnv('LARK_DAEMON_EVENT_MODE', 'raw');
     assert.equal(getConfig().eventMode, 'raw');
@@ -55,6 +73,21 @@ describe('release-owned system prompt', () => {
         systemPromptPath,
         teamTaskBoardUrl: 'https://board.example',
       }), 'policy\n\nhttps://board.example\n\npersona\n');
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('adds meeting capability policy only when the feature is enabled', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-audio-'));
+    const systemPromptPath = path.join(directory, 'system-prompt.md');
+    fs.writeFileSync(systemPromptPath, 'base\n');
+    try {
+      assert.equal(loadSystemPrompt({ systemPromptPath, meetingAudio: null }), 'base\n');
+      assert.match(
+        loadSystemPrompt({ systemPromptPath, meetingAudio: {} }),
+        /decision_capability/,
+      );
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

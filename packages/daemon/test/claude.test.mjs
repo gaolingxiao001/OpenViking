@@ -221,6 +221,51 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.stop();
   });
 
+  it('returns active receipt-only items and preserves the legacy success shape otherwise', async () => {
+    const successes = [];
+    const { agent, persistent } = harness({
+      agentOptions: { onTurnSucceeded: (info) => successes.push(info) },
+    });
+    await agent.start();
+    const child = persistent[0];
+
+    agent.deliver('first audio segment', null, 'receipt-1');
+    agent.deliverBatch([{ text: 'second audio segment', receiptId: 'receipt-2' }]);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({ type: 'result', subtype: 'success', result: 'handled' });
+
+    agent.deliver('normal inbound', 7);
+    child.feed({ type: 'result', subtype: 'success', result: 'handled' });
+    assert.deepEqual(successes, [
+      { inboundSeqs: [], receiptIds: ['receipt-1', 'receipt-2'] },
+      { inboundSeqs: [7] },
+    ]);
+    await agent.stop();
+  });
+
+  it('surfaces a receipt when prompt preparation fails before Claude owns the turn', async () => {
+    const store = makeStore();
+    store.cognitionJournalBeforeInbound = () => 1;
+    store.cognitionJournal = () => [{
+      seq: 1,
+      epoch: 1,
+      kind: 'control',
+      status: 'COMMITTED',
+      atMs: 1,
+      text: 'x'.repeat(130_000),
+    }];
+    const { agent, persistent, failures } = harness({ store });
+    await agent.start();
+
+    agent.deliver('will not be written', null, 'receipt-terminal');
+    assert.equal(persistent[0].writes.length, 0);
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].inboundSeqs, []);
+    assert.deepEqual(failures[0].receiptIds, ['receipt-terminal']);
+    assert.match(failures[0].error, /above the 120000-char handoff limit/);
+    await agent.stop();
+  });
+
   it('reports an is_error result with subtype success as a turn failure', async () => {
     const { agent, persistent, failures } = harness();
     await agent.start();
@@ -286,8 +331,12 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
 
   it('interruptTurn kills the in-flight turn and keeps queued messages for the next session', async () => {
     const abandoned = [];
+    const successes = [];
     const { agent, persistent, failures } = harness({
-      agentOptions: { onTurnAbandoned: (info) => abandoned.push(info) },
+      agentOptions: {
+        onTurnAbandoned: (info) => abandoned.push(info),
+        onTurnSucceeded: (info) => successes.push(info),
+      },
     });
     await agent.start();
     const child = persistent[0];
@@ -300,13 +349,35 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     assert.equal(failures.length, 0); // intentional abandonment is not a failure
     assert.deepEqual(abandoned, [{ inboundSeqs: [7] }]);
 
-    agent.deliver('queued while switching', 8); // disconnected: queued, not lost
+    agent.deliver('queued while switching', 8, 'receipt-queued'); // disconnected: queued, not lost
     const rotated = agent.rotateSession({ resume: false });
     await waitFor(() => persistent.length === 2);
     await rotated;
     await waitFor(() => persistent[1].writes.length > 0);
     const bodies = persistent[1].writes.map((line) => JSON.parse(line).message.content[0].text);
     assert.ok(bodies.some((text) => text.includes('queued while switching')));
+    persistent[1].feed({ type: 'result', subtype: 'success', result: 'handled' });
+    assert.deepEqual(successes, [{
+      inboundSeqs: [8],
+      receiptIds: ['receipt-queued'],
+    }]);
+    await agent.stop();
+  });
+
+  it('returns receipt-only active work through the interruption callback', async () => {
+    const abandoned = [];
+    const { agent, persistent } = harness({
+      agentOptions: { onTurnAbandoned: (info) => abandoned.push(info) },
+    });
+    await agent.start();
+    agent.deliver('stuck audio segment', null, 'receipt-abandoned');
+    persistent[0].feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+
+    await agent.interruptTurn();
+    assert.deepEqual(abandoned, [{
+      inboundSeqs: [],
+      receiptIds: ['receipt-abandoned'],
+    }]);
     await agent.stop();
   });
 

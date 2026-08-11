@@ -28,6 +28,9 @@ export class MeetingAdapter {
     clearTimer = clearTimeout,
     now = Date.now,
     onInboxReady = null,
+    onJoined = null,
+    onEnding = null,
+    onFlyTranscript = null,
   }) {
     Object.assign(this, {
       store,
@@ -40,6 +43,9 @@ export class MeetingAdapter {
       clearTimer,
       now,
       onInboxReady,
+      onJoined,
+      onEnding,
+      onFlyTranscript,
     });
     this.batchMaxDelayMs = Math.max(batchDelayMs, batchMaxDelayMs);
     this.timers = new Map();
@@ -86,6 +92,19 @@ export class MeetingAdapter {
     if (inserted) this._schedule(event.meetingId);
 
     if (event.eventType === 'vc.bot.meeting_ended_v1') {
+      try {
+        await this.onEnding?.({
+          meetingId: event.meetingId,
+          meetingNumber: event.meetingNumber ?? before?.meetingNumber ?? null,
+          occurredAtMs: event.createTimeMs,
+          reason: 'meeting_ended',
+        });
+      } catch (error) {
+        this.logger.warn('meeting_ending_hook_failed', {
+          meetingRef: opaqueRef(event.meetingId),
+          error: safe(error),
+        });
+      }
       await this._recoverMeeting(before);
       await this.flushMeeting(event.meetingId, { all: true });
       this.store.finishMeeting(event.meetingId, event.createTimeMs);
@@ -138,6 +157,16 @@ export class MeetingAdapter {
       let inserted = false;
       for (const fragment of semanticFragments(item, meetingId, activityType, itemAtMs)) {
         latest = Math.max(latest, fragment.occurredAtMs);
+        if (fragment.kind === 'transcript' && this.onFlyTranscript) {
+          await this.onFlyTranscript({
+            meetingId,
+            meetingNumber,
+            eventKey: fragment.eventKey,
+            occurredAtMs: fragment.occurredAtMs,
+            payload: fragment.payload,
+          });
+          continue;
+        }
         inserted = this.store.ingestMeetingEvent({
           eventKey: fragment.eventKey,
           meetingId,
@@ -188,12 +217,22 @@ export class MeetingAdapter {
       });
       const joined = joinMeetingFrom(result);
       if (!joined.meetingId) throw new Error('meeting join returned no meeting.id');
-      this.store.markMeetingJoined(key, {
+      const session = this.store.markMeetingJoined(key, {
         meetingId: joined.meetingId,
         meetingNumber: joined.meetingNumber ?? event.meetingNumber,
         atMs: Date.now(),
       });
       this.logger.info('meeting_joined', { meetingRef: opaqueRef(joined.meetingId) });
+      try {
+        await this.onJoined?.(session);
+      } catch (error) {
+        // Joining succeeded. A media-branch failure must not rewrite membership
+        // state to FAILED or invite a second visible join.
+        this.logger.warn('meeting_joined_hook_failed', {
+          meetingRef: opaqueRef(joined.meetingId),
+          error: safe(error),
+        });
+      }
       return true;
     } catch (error) {
       this.store.markMeetingJoinFailed(key, safe(error));
@@ -296,6 +335,16 @@ export class MeetingAdapter {
           'start_time',
         ])), Date.now());
         for (const fragment of semanticFragments(item, row.meetingId, type, at)) {
+          if (fragment.kind === 'transcript' && this.onFlyTranscript) {
+            await this.onFlyTranscript({
+              meetingId: row.meetingId,
+              meetingNumber: row.meetingNumber,
+              eventKey: fragment.eventKey,
+              occurredAtMs: fragment.occurredAtMs,
+              payload: fragment.payload,
+            });
+            continue;
+          }
           inserted = this.store.ingestMeetingEvent({
             eventKey: fragment.eventKey,
             meetingId: row.meetingId,
@@ -336,6 +385,14 @@ export class MeetingAdapter {
       this._schedule(id, meetingActivityDebounceMs(next?.payload, next?.activityType));
     }
     for (const row of this.store.activeMeetingSessions()) {
+      if (this.onJoined) {
+        try { await this.onJoined(row); } catch (error) {
+          this.logger.warn('meeting_media_recovery_failed', {
+            meetingRef: opaqueRef(row.meetingId),
+            error: safe(error),
+          });
+        }
+      }
       await this._recoverMeeting(row);
     }
   }

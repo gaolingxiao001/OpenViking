@@ -30,6 +30,22 @@ function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
 }
 
+function deliveryItem({ text, seq = null, receiptId }) {
+  return receiptId === null || receiptId === undefined
+    ? { text, seq }
+    : { text, seq, receiptId };
+}
+
+function receiptIds(items) {
+  return [...new Set(items
+    .map((item) => item.receiptId)
+    .filter((receiptId) => receiptId !== null && receiptId !== undefined))];
+}
+
+function withReceiptIds(fields, ids) {
+  return ids.length > 0 ? { ...fields, receiptIds: ids } : fields;
+}
+
 const LARK_DELIVERY_TOOLS = new Set([
   'react_to_lark_message',
   'retract_lark_message',
@@ -273,6 +289,12 @@ export class ClaudeAgent {
       '--dry-run', String(Boolean(this.config.dryRun)),
       '--runtime-token', this.authorityToken,
     ];
+    if (this.config.meetingAudio?.authoritySocketPath) {
+      toolArgs.push(
+        '--decision-authority-socket',
+        this.config.meetingAudio.authoritySocketPath,
+      );
+    }
     const configPath = path.join(directory, 'mcp-config.json');
     fs.writeFileSync(configPath, JSON.stringify({
       mcpServers: {
@@ -393,11 +415,13 @@ export class ClaudeAgent {
     });
   }
 
-  deliver(text, seq = null) { return this.deliverBatch([{ text, seq }]); }
+  deliver(text, seq = null, receiptId = null) {
+    return this.deliverBatch([deliveryItem({ text, seq, receiptId })]);
+  }
 
   deliverBatch(items) {
     if (this.stopping || !Array.isArray(items) || items.length === 0) return false;
-    const batch = items.map(({ text, seq = null }) => ({ text, seq }));
+    const batch = items.map(deliveryItem);
     if (!this.connected || !this.child?.stdin?.writable) {
       this.queue.push(batch);
       return true;
@@ -409,7 +433,7 @@ export class ClaudeAgent {
   tryStartBatch(items) {
     if (this.stopping || !this.connected || this.turnActive || this.queue.length > 0
       || !Array.isArray(items) || items.length === 0) return false;
-    this._writeBatch(items.map(({ text, seq = null }) => ({ text, seq })));
+    this._writeBatch(items.map(deliveryItem));
     return true;
   }
 
@@ -643,6 +667,7 @@ export class ClaudeAgent {
   _completeTurn(error = null) {
     const items = this.activeItems.splice(0);
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
+    const receipts = receiptIds(items);
     this.turnActive = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
@@ -663,10 +688,12 @@ export class ClaudeAgent {
       metadata: { runtime: 'claude', inboundSeqs: seqs },
     });
     if (error && this.onTurnFailed) {
-      try { this.onTurnFailed({ inboundSeqs: seqs, error: safe(error) }); } catch {}
+      try {
+        this.onTurnFailed(withReceiptIds({ inboundSeqs: seqs, error: safe(error) }, receipts));
+      } catch {}
     }
     if (!error && this.onTurnSucceeded) {
-      try { this.onTurnSucceeded({ inboundSeqs: seqs }); } catch {}
+      try { this.onTurnSucceeded(withReceiptIds({ inboundSeqs: seqs }, receipts)); } catch {}
     }
     this._drain();
     this._notifyAvailable();
@@ -674,6 +701,7 @@ export class ClaudeAgent {
 
   _failItems(items, error) {
     const seqs = items.map((item) => item.seq).filter((seq) => seq != null);
+    const receipts = receiptIds(items);
     this._recordActivity('agent.turn_completed', {
       inboundSeq: seqs.at(-1) ?? null,
       status: 'failed',
@@ -685,7 +713,9 @@ export class ClaudeAgent {
       },
     });
     if (this.onTurnFailed) {
-      try { this.onTurnFailed({ inboundSeqs: seqs, error: safe(error) }); } catch {}
+      try {
+        this.onTurnFailed(withReceiptIds({ inboundSeqs: seqs, error: safe(error) }, receipts));
+      } catch {}
     }
     this._notifyAvailable();
   }
@@ -786,14 +816,15 @@ export class ClaudeAgent {
   async interruptTurn() {
     if (!this.turnActive) return;
     const inboundSeqs = this._activeSeqs();
+    const receipts = receiptIds(this.activeItems);
     this.activeItems.splice(0);
     this.turnActive = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
     this.deliveryTools.clear();
-    if (inboundSeqs.length > 0 && this.onTurnAbandoned) {
-      try { this.onTurnAbandoned({ inboundSeqs }); } catch (error) {
+    if ((inboundSeqs.length > 0 || receipts.length > 0) && this.onTurnAbandoned) {
+      try { this.onTurnAbandoned(withReceiptIds({ inboundSeqs }, receipts)); } catch (error) {
         this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });
       }
     }
@@ -882,7 +913,11 @@ export class ClaudeAgent {
   async stop() {
     this.stopping = true;
     this.autoReconnect = false;
+    const queued = this.queue.flat();
     this.queue = [];
+    if (receiptIds(queued).length > 0) {
+      this._failItems(queued, new Error('claude stopped before queued work started'));
+    }
     const items = this.activeItems.splice(0);
     this.turnActive = false;
     if (items.length > 0) this._failItems(items, new Error('claude stopped during an active turn'));

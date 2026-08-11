@@ -10,6 +10,22 @@ function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
 }
 
+function deliveryItem({ text, seq = null, receiptId }) {
+  return receiptId === null || receiptId === undefined
+    ? { text, seq }
+    : { text, seq, receiptId };
+}
+
+function receiptIds(items) {
+  return [...new Set(items
+    .map((item) => item.receiptId)
+    .filter((receiptId) => receiptId !== null && receiptId !== undefined))];
+}
+
+function withReceiptIds(fields, ids) {
+  return ids.length > 0 ? { ...fields, receiptIds: ids } : fields;
+}
+
 // turn/completed carries error as an object whose .message is often a JSON blob
 // wrapping the upstream API error; unwrap to the innermost human-readable message.
 export function turnErrorText(error) {
@@ -255,6 +271,7 @@ export class CodexAgent {
     this.startingItems = [];         // inbound items waiting for turn/started
     this.startingJournalThroughSeq = 0; // promoted only after turn completion
     this.activeInboundSeqs = [];     // inbound rows associated with the live app-server turn
+    this.activeReceiptIds = [];      // opaque non-DB receipts associated with the live turn
     this.needsHistoryPrefix = false; // fresh thread: prepend history to the first turn
     this.queue = [];                 // texts waiting for a live idle thread
     this.pending = new Map();        // rpc id -> { resolve, reject }
@@ -330,8 +347,8 @@ export class CodexAgent {
 
   // ---- outbound state machine -------------------------------------------------
 
-  deliver(text, seq = null) {
-    return this.deliverBatch([{ text, seq }]);
+  deliver(text, seq = null, receiptId = null) {
+    return this.deliverBatch([deliveryItem({ text, seq, receiptId })]);
   }
 
   // Starts one turn atomically when idle. The burst router uses this to keep
@@ -340,7 +357,7 @@ export class CodexAgent {
   deliverBatch(items) {
     if (this.stopping) return false;
     if (!Array.isArray(items) || items.length === 0) return false;
-    const batch = items.map(({ text, seq = null }) => ({ text, seq }));
+    const batch = items.map(deliveryItem);
     if (!this.child || !this.threadId) { this._enqueueBatch(batch); return true; }
     if (this.activeTurnId) {
       this._steerBatch(batch);
@@ -366,7 +383,7 @@ export class CodexAgent {
       || this.queue.length > 0
       || !Array.isArray(items)
       || items.length === 0) return false;
-    const batch = items.map(({ text, seq = null }) => ({ text, seq }));
+    const batch = items.map(deliveryItem);
     this._claimBatch(batch);
     return true;
   }
@@ -377,8 +394,11 @@ export class CodexAgent {
     } catch (error) {
       if (error instanceof CognitionLimitError) {
         const inboundSeqs = batch.map((item) => item.seq).filter((seq) => seq != null);
+        const receipts = receiptIds(batch);
         this.logger.warn('codex_cognition_limit', { error: safe(error) });
-        try { this.onTurnFailed?.({ inboundSeqs, error: safe(error) }); } catch {}
+        try {
+          this.onTurnFailed?.(withReceiptIds({ inboundSeqs, error: safe(error) }, receipts));
+        } catch {}
         this._notifyAvailable();
         return;
       }
@@ -430,7 +450,7 @@ export class CodexAgent {
     this.modelWorking = true;
     this.modelStartedAtMs = this.turnStartedAtMs;
     this.startingTurn = true;
-    this.startingItems = items.map((item) => ({ text: item.text, seq: item.seq }));
+    this.startingItems = items.map(deliveryItem);
     this.startingJournalThroughSeq = journalThroughSeq;
     // model/effort ride on every turn/start: thread/resume does not re-apply its
     // config to an already-running thread, so per-turn overrides are the only way
@@ -461,8 +481,8 @@ export class CodexAgent {
     });
   }
 
-  _steer(text, seq = null) {
-    this._steerBatch([{ text, seq }]);
+  _steer(text, seq = null, receiptId = null) {
+    this._steerBatch([deliveryItem({ text, seq, receiptId })]);
   }
 
   _steerBatch(items) {
@@ -471,6 +491,7 @@ export class CodexAgent {
     const seqs = [...new Set(
       items.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
     )];
+    const receipts = receiptIds(items);
     this._request('turn/steer', {
       threadId: this.threadId,
       expectedTurnId,
@@ -478,6 +499,9 @@ export class CodexAgent {
     }).then(() => {
       for (const seq of seqs) {
         if (!this.activeInboundSeqs.includes(seq)) this.activeInboundSeqs.push(seq);
+      }
+      for (const receiptId of receipts) {
+        if (!this.activeReceiptIds.includes(receiptId)) this.activeReceiptIds.push(receiptId);
       }
       this._recordActivity('agent.steered', {
         turnId: expectedTurnId,
@@ -499,6 +523,7 @@ export class CodexAgent {
     this.activeInboundSeqs = [...new Set(
       this.startingItems.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
     )];
+    this.activeReceiptIds = receiptIds(this.startingItems);
     this.startingItems = [];
     this._recordActivity('agent.turn_started', {
       turnId: this.activeTurnId,
@@ -510,7 +535,7 @@ export class CodexAgent {
     for (let index = 0; index < items.length;) {
       const queuedBatchId = items[index].queuedBatchId;
       if (queuedBatchId === undefined) {
-        this._steer(items[index].text, items[index].seq);
+        this._steer(items[index].text, items[index].seq, items[index].receiptId);
         index += 1;
         continue;
       }
@@ -528,11 +553,17 @@ export class CodexAgent {
     )];
   }
 
+  _associatedReceiptIds() {
+    if (this.activeReceiptIds.length > 0) return [...this.activeReceiptIds];
+    return receiptIds(this.startingItems);
+  }
+
   // turn/completed: idle again. Anything still queued (e.g. a very fast turn that never
   // emitted turn/started) is merged into one fresh turn/start.
   _onTurnCompleted(status, error, completedTurnId = null) {
     const turnId = this.activeTurnId ?? completedTurnId;
     const inboundSeqs = this._associatedInboundSeqs();
+    const receipts = this._associatedReceiptIds();
     this.activeTurnId = null;
     this.startingTurn = false;
     this.turnStartedAtMs = null;
@@ -548,6 +579,7 @@ export class CodexAgent {
       metadata: { status, error: errorText || undefined, inboundSeqs },
     });
     this.activeInboundSeqs = [];
+    this.activeReceiptIds = [];
     this.startingItems = [];
     if (!failed) {
       this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.startingJournalThroughSeq);
@@ -578,14 +610,17 @@ export class CodexAgent {
     }
     if (failed && !wasPrime && this.onTurnFailed) {
       try {
-        this.onTurnFailed({ inboundSeqs, error: errorText || '未知错误' });
+        this.onTurnFailed(withReceiptIds(
+          { inboundSeqs, error: errorText || '未知错误' },
+          receipts,
+        ));
       } catch (callbackError) {
         this.logger.warn('turn_failure_notify_failed', { error: safe(callbackError) });
       }
     }
     if (!failed && !wasPrime && this.onTurnSucceeded) {
       try {
-        this.onTurnSucceeded({ inboundSeqs });
+        this.onTurnSucceeded(withReceiptIds({ inboundSeqs }, receipts));
       } catch (callbackError) {
         this.logger.warn('turn_success_notify_failed', { error: safe(callbackError) });
       }
@@ -617,7 +652,7 @@ export class CodexAgent {
     for (let index = 0; index < items.length;) {
       const queuedBatchId = items[index].queuedBatchId;
       if (queuedBatchId === undefined) {
-        this.deliver(items[index].text, items[index].seq);
+        this.deliver(items[index].text, items[index].seq, items[index].receiptId);
         index += 1;
         continue;
       }
@@ -818,6 +853,12 @@ export class CodexAgent {
           '--dry-run', String(Boolean(this.config.dryRun)),
           '--runtime-token', this.authorityToken,
         ];
+        if (this.config.meetingAudio?.authoritySocketPath) {
+          toolArgs.push(
+            '--decision-authority-socket',
+            this.config.meetingAudio.authoritySocketPath,
+          );
+        }
         args.push(
           '-c', `mcp_servers.lark_daemon_im.command=${tomlString(process.execPath)}`,
           '-c', `mcp_servers.lark_daemon_im.args=${JSON.stringify(toolArgs)}`,
@@ -927,6 +968,7 @@ export class CodexAgent {
   async interruptTurn() {
     if (!this.turnInProgress) return;
     const inboundSeqs = this._associatedInboundSeqs();
+    const receipts = this._associatedReceiptIds();
     if (this.activeTurnId && this.child && this.threadId) {
       try {
         await this._request('turn/interrupt', {
@@ -944,8 +986,9 @@ export class CodexAgent {
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
-    if (inboundSeqs.length > 0 && this.onTurnAbandoned) {
-      try { this.onTurnAbandoned({ inboundSeqs }); } catch (error) {
+    this.activeReceiptIds = [];
+    if ((inboundSeqs.length > 0 || receipts.length > 0) && this.onTurnAbandoned) {
+      try { this.onTurnAbandoned(withReceiptIds({ inboundSeqs }, receipts)); } catch (error) {
         this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });
       }
     }
@@ -965,6 +1008,8 @@ export class CodexAgent {
     }
     if (!this.child || !this.threadId) return null;
     const previousThreadId = this.threadId;
+    const abandonedInboundSeqs = this._associatedInboundSeqs();
+    const abandonedReceiptIds = this._associatedReceiptIds();
     if (this.activeTurnId) {
       try {
         await this._request('turn/interrupt', {
@@ -982,6 +1027,18 @@ export class CodexAgent {
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
+    this.activeReceiptIds = [];
+    if ((abandonedInboundSeqs.length > 0 || abandonedReceiptIds.length > 0)
+      && this.onTurnAbandoned) {
+      try {
+        this.onTurnAbandoned(withReceiptIds(
+          { inboundSeqs: abandonedInboundSeqs },
+          abandonedReceiptIds,
+        ));
+      } catch (error) {
+        this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });
+      }
+    }
     this.storedThreadId = resume ? previousThreadId : null;
     this.threadId = null; // deliver() queues while the new thread comes up
     try {
@@ -1023,6 +1080,7 @@ export class CodexAgent {
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
+    this.activeReceiptIds = [];
     for (const pending of this.pending.values()) {
       try { pending.reject(new Error('codex connection replaced')); } catch { /* ignore */ }
     }
@@ -1065,6 +1123,10 @@ export class CodexAgent {
 
   _handleExit(child, code, signal) {
     if (this.child !== child) return; // a stale child from a prior connection
+    // An unacknowledged turn/start rejects below and its closure requeues the
+    // original items. Only a receipt already owned by a live turn is terminal.
+    const failedInboundSeqs = [...this.activeInboundSeqs];
+    const failedReceiptIds = [...this.activeReceiptIds];
     this.child = null;
     this.threadId = null;
     this.activeTurnId = null;
@@ -1074,10 +1136,21 @@ export class CodexAgent {
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.activeInboundSeqs = [];
+    this.activeReceiptIds = [];
     for (const pending of this.pending.values()) {
       try { pending.reject(new Error('codex connection lost')); } catch { /* ignore */ }
     }
     this.pending.clear();
+    if (!this.stopping && failedReceiptIds.length > 0 && this.onTurnFailed) {
+      try {
+        this.onTurnFailed(withReceiptIds({
+          inboundSeqs: failedInboundSeqs,
+          error: 'codex connection lost',
+        }, failedReceiptIds));
+      } catch (error) {
+        this.logger.warn('turn_failure_notify_failed', { error: safe(error) });
+      }
+    }
     if (this.stopping || !this.startedOk) return;
     this.logger.warn('codex_disconnected', { code, signal });
     void this._reconnectLoop();
@@ -1133,6 +1206,30 @@ export class CodexAgent {
 
   async stop() {
     this.stopping = true;
+    const failedItems = [
+      ...this.startingItems,
+      ...this.queue,
+      ...this.activeReceiptIds.map((receiptId) => ({ receiptId })),
+    ];
+    const failedReceiptIds = receiptIds(failedItems);
+    if (failedReceiptIds.length > 0 && this.onTurnFailed) {
+      const inboundSeqs = [...new Set([
+        ...this._associatedInboundSeqs(),
+        ...this.queue.map((item) => item.seq).filter((seq) => seq != null),
+      ])];
+      try {
+        this.onTurnFailed(withReceiptIds({
+          inboundSeqs,
+          error: 'codex stopped before turn completion',
+        }, failedReceiptIds));
+      } catch (error) {
+        this.logger.warn('turn_failure_notify_failed', { error: safe(error) });
+      }
+    }
+    this.queue = [];
+    this.startingItems = [];
+    this.activeInboundSeqs = [];
+    this.activeReceiptIds = [];
     if (this.primeWaiter) {
       this.primeWaiter.reject(new Error('codex stopped during cognition catch-up'));
       this.primeWaiter = null;

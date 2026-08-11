@@ -87,6 +87,26 @@ describe('global Codex/Claude hard switch', () => {
     });
   });
 
+  it('forwards opaque delivery receipts without requiring an inbound sequence', () => {
+    const runtime = new AgentRuntime({}, {}, quietLogger);
+    const calls = [];
+    runtime.backend = {
+      deliver(...args) { calls.push(['deliver', ...args]); return true; },
+      deliverBatch(items) { calls.push(['deliverBatch', items]); return true; },
+    };
+
+    assert.equal(runtime.deliver('normal inbound', 7), true);
+    assert.equal(runtime.deliver('meeting audio', null, 'receipt-1'), true);
+    assert.equal(runtime.deliverBatch([
+      { text: 'next segment', receiptId: 'receipt-2' },
+    ]), true);
+    assert.deepEqual(calls, [
+      ['deliver', 'normal inbound', 7],
+      ['deliver', 'meeting audio', null, 'receipt-1'],
+      ['deliverBatch', [{ text: 'next segment', receiptId: 'receipt-2' }]],
+    ]);
+  });
+
   it('live-validates a direct Codex name before switching from Claude', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-direct-model-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);

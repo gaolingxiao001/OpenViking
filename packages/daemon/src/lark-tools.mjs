@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
 import { ChatRoster } from './roster.mjs';
 import { meetingContextLines, readMeetingInboxDatabase } from './meeting/index.mjs';
+import { claimDecisionCapability } from './meeting/decision-socket.mjs';
 
 const SERVER_NAME = 'lark-daemon-im';
 const SERVER_VERSION = '1.0.0';
@@ -341,6 +342,33 @@ export const LARK_TOOLS = [
   },
 ];
 
+export function larkToolsForOptions(options = {}) {
+  if (!options.decisionAuthoritySocketPath && typeof options.decisionCapabilityClaim !== 'function') {
+    return LARK_TOOLS;
+  }
+  return LARK_TOOLS.map((tool) => {
+    if (tool.name !== 'send_lark_message') return tool;
+    return {
+      ...tool,
+      description: `${tool.description} A daemon-authenticated meeting-audio input may instead supply an opaque decision_capability; it authorizes only one plain-text send to its exact chat and cannot be combined with decision_message_id.`,
+      inputSchema: {
+        ...tool.inputSchema,
+        properties: {
+          ...tool.inputSchema.properties,
+          decision_capability: {
+            type: 'string',
+            pattern: '^decision_[A-Za-z0-9_-]{32,}$',
+            description: 'Opaque one-use capability from a daemon-authenticated [meeting-audio ...] line. Use instead of decision_message_id, only for a plain-text send to the exact target_chat in that line.',
+          },
+        },
+        // Runtime validation enforces exactly one decision authority. Keeping
+        // only chat_id required lets either the normal fence or capability fit.
+        required: ['chat_id'],
+      },
+    };
+  });
+}
+
 function appendBounded(current, chunk) {
   const next = current + chunk;
   if (Buffer.byteLength(next, 'utf8') > MAX_STDIO_BYTES) {
@@ -373,6 +401,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     maxTextChars: 30_000,
     dryRun: false,
     tempDir: '',
+    decisionAuthoritySocketPath: '',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -384,6 +413,9 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
     else if (flag === '--database-path') options.databasePath = path.resolve(value);
     else if (flag === '--temp-dir') options.tempDir = path.resolve(value);
     else if (flag === '--runtime-token') options.runtimeToken = value;
+    else if (flag === '--decision-authority-socket') {
+      options.decisionAuthoritySocketPath = path.resolve(value);
+    }
     else if (flag === '--timeout-ms') options.timeoutMs = Number.parseInt(value, 10);
     else if (flag === '--max-text-chars') options.maxTextChars = Number.parseInt(value, 10);
     else if (flag === '--dry-run') {
@@ -534,6 +566,16 @@ function cleanMessage(message) {
 export class LarkToolService {
   constructor(options, run = runCommand) {
     this.options = options;
+    this.tools = larkToolsForOptions(options);
+    this.decisionCapabilityClaim = typeof options.decisionCapabilityClaim === 'function'
+      ? options.decisionCapabilityClaim
+      : options.decisionAuthoritySocketPath
+        ? (request) => claimDecisionCapability({
+            socketPath: options.decisionAuthoritySocketPath,
+            runtimeToken: options.runtimeToken,
+            ...request,
+          })
+        : null;
     this.run = run;
     this.freshnessCheck = typeof options.freshnessCheck === 'function'
       ? options.freshnessCheck
@@ -976,30 +1018,91 @@ export class LarkToolService {
   async sendMessage(input = {}) {
     const chatId = typeof input.chat_id === 'string' ? input.chat_id.trim() : '';
     if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(chatId)) throw new Error('chat_id must be a full oc_ Lark chat ID');
-    const mentionUserIds = await this._resolveMentions(input, chatId);
-    const body = resolveMessageBody(input);
+    const decisionMessageId = typeof input.decision_message_id === 'string'
+      ? input.decision_message_id.trim()
+      : '';
+    const decisionCapability = typeof input.decision_capability === 'string'
+      ? input.decision_capability.trim()
+      : '';
+    if (decisionMessageId && decisionCapability) {
+      throw new Error('provide exactly one of decision_message_id or decision_capability');
+    }
+
+    let mentionUserIds;
+    let body;
+    let fresh = null;
+    let responseToMessageId = null;
+    let actionKey;
+    let idempotencyKey;
+    let journalDedupeKey;
+    let deliveryMetadata;
+    if (decisionCapability) {
+      if (!this.decisionCapabilityClaim) {
+        throw new Error('decision_capability is unavailable in this daemon configuration');
+      }
+      if (input.markdown !== undefined
+        || input.mention_names !== undefined
+        || input.mention_user_ids !== undefined
+        || input.response_to_message_id !== undefined
+        || input.idempotency_key !== undefined) {
+        throw new Error('decision_capability authorizes only one plain-text send without mentions, markdown, attribution, or a caller idempotency key');
+      }
+      mentionUserIds = [];
+      body = resolveMessageBody({ text: input.text });
+      if (/<\/?at\b/i.test(body.raw)) {
+        throw new Error('decision_capability plain text must not contain Lark <at> mention tags');
+      }
+    } else {
+      mentionUserIds = await this._resolveMentions(input, chatId);
+      body = resolveMessageBody(input);
+    }
     const text = renderMessageText(body.raw, mentionUserIds);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
     this._assertAuthority();
-    const fresh = this._assertFreshDecision(input.decision_message_id);
-    const responseToMessageId = this._resolveResponseDecision(input.response_to_message_id, fresh);
-    const actionKey = stableActionKey(
-      'send', fresh.messageId, responseToMessageId, chatId, body.flag, text,
-    );
-    const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
-      ? input.idempotency_key
-      : '';
-    if (requestedKey && !/^[A-Za-z0-9_-]{1,64}$/.test(requestedKey)) {
-      throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
+    if (decisionCapability) {
+      const decision = await this.decisionCapabilityClaim({
+        capability: decisionCapability,
+        action: 'send_lark_message',
+        target: chatId,
+      });
+      if (!decision || typeof decision.decisionKey !== 'string' || !decision.decisionKey) {
+        throw new Error('decision authority returned an invalid claim');
+      }
+      actionKey = stableActionKey('capability-send', decision.decisionKey, chatId, text);
+      idempotencyKey = stableActionKey('remote-capability-send', decision.decisionKey);
+      journalDedupeKey = `delivery:meeting-input:${decision.decisionKey}`;
+      deliveryMetadata = {
+        action: 'send',
+        decisionKey: decision.decisionKey,
+        authority: 'generic_capability',
+      };
+    } else {
+      fresh = this._assertFreshDecision(decisionMessageId);
+      responseToMessageId = this._resolveResponseDecision(input.response_to_message_id, fresh);
+      actionKey = stableActionKey(
+        'send', fresh.messageId, responseToMessageId, chatId, body.flag, text,
+      );
+      const requestedKey = typeof input.idempotency_key === 'string' && input.idempotency_key
+        ? input.idempotency_key
+        : '';
+      if (requestedKey && !/^[A-Za-z0-9_-]{1,64}$/.test(requestedKey)) {
+        throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
+      }
+      // Bind caller-supplied retry labels to the canonical payload. Reusing one
+      // label for two burst messages can no longer make Lark collapse the second
+      // message while the local journal incorrectly records both as sent.
+      idempotencyKey = requestedKey
+        ? stableActionKey('remote-send', requestedKey, actionKey)
+        : actionKey;
+      journalDedupeKey = `delivery:${actionKey}`;
+      deliveryMetadata = {
+        action: 'send',
+        decisionMessageId: fresh.messageId,
+        responseToMessageId,
+      };
     }
-    // Bind caller-supplied retry labels to the canonical payload. Reusing one
-    // label for two burst messages can no longer make Lark collapse the second
-    // message while the local journal incorrectly records both as sent.
-    const idempotencyKey = requestedKey
-      ? stableActionKey('remote-send', requestedKey, actionKey)
-      : actionKey;
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(idempotencyKey)) {
       throw new Error('idempotency_key must contain 1-64 letters, numbers, underscores, or hyphens');
     }
@@ -1013,13 +1116,8 @@ export class LarkToolService {
         idempotency_key: idempotencyKey,
       };
     }
-    const deliveryMetadata = {
-      action: 'send',
-      decisionMessageId: fresh.messageId,
-      responseToMessageId,
-    };
     const journal = this._reserveOutbound({
-      dedupeKey: `delivery:${actionKey}`,
+      dedupeKey: journalDedupeKey,
       chatId,
       text: body.raw,
       metadata: deliveryMetadata,
@@ -1039,7 +1137,7 @@ export class LarkToolService {
     }
     const remoteMessageId = findMessageId(data);
     this._settleOutbound(journal?.key, 'COMMITTED', remoteMessageId, deliveryMetadata);
-    await this._clearTemporaryReaction(this._deliveryScope(fresh));
+    if (fresh) await this._clearTemporaryReaction(this._deliveryScope(fresh));
     return {
       sent: true,
       chat_id: chatId,
@@ -1360,7 +1458,7 @@ export function createMcpHandler(service) {
     }
     if (message.method === 'ping') return { jsonrpc: '2.0', id, result: {} };
     if (message.method === 'tools/list') {
-      return { jsonrpc: '2.0', id, result: { tools: LARK_TOOLS } };
+      return { jsonrpc: '2.0', id, result: { tools: service.tools ?? LARK_TOOLS } };
     }
     if (message.method === 'tools/call') {
       try {

@@ -213,6 +213,7 @@ export function semanticFragments(item, meetingId, activityType, fallbackAtMs) {
         : providerId ?? createHash('sha256').update(JSON.stringify(child)).digest('hex');
       const key = createHash('sha256').update(`${meetingId}\0${spec.kind}\0${stableId}`).digest('hex');
       fragments.push({
+        kind: spec.kind,
         eventKey: `meeting:${key}`,
         occurredAtMs: timestampMs(namedValue(child, new Set(spec.timeKeys)), fallbackAtMs),
         payload: {
@@ -225,7 +226,12 @@ export function semanticFragments(item, meetingId, activityType, fallbackAtMs) {
   }
   if (fragments.length > 0) return fragments;
   const digest = createHash('sha256').update(`${meetingId}\0${activityType}\0${JSON.stringify(item)}`).digest('hex');
-  return [{ eventKey: `meeting:${digest}`, occurredAtMs: fallbackAtMs, payload: item }];
+  return [{
+    kind: 'activity',
+    eventKey: `meeting:${digest}`,
+    occurredAtMs: fallbackAtMs,
+    payload: item,
+  }];
 }
 
 export function joinMeetingFrom(value) {

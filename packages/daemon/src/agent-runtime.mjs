@@ -96,9 +96,12 @@ export class AgentRuntime {
     await this.backend.start();
   }
 
-  deliver(text, seq = null) {
+  deliver(text, seq = null, receiptId = null) {
     if (this.stopping) return false;
-    return this.backend?.deliver(text, seq) ?? false;
+    if (!this.backend) return false;
+    return receiptId === null || receiptId === undefined
+      ? this.backend.deliver(text, seq)
+      : this.backend.deliver(text, seq, receiptId);
   }
   deliverBatch(items) {
     if (this.stopping) return false;

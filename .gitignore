@@ -6,3 +6,5 @@ agent/.tmp/
 coverage/
 node_modules/
 .loopy/
+__pycache__/
+*.py[cod]

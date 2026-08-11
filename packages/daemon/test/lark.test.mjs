@@ -72,6 +72,22 @@ describe('Lark meeting transport', () => {
             stderr: '',
           };
         }
+        if (args.includes('/open-apis/vc/v1/realtime/endpoint')) {
+          return {
+            code: 0,
+            timedOut: false,
+            stdout: JSON.stringify({ ok: true, data: { websocket_url: 'wss://media.example.test/token' } }),
+            stderr: '',
+          };
+        }
+        if (args.includes('+meeting-leave')) {
+          return {
+            code: 0,
+            timedOut: false,
+            stdout: JSON.stringify({ ok: true, data: {} }),
+            stderr: '',
+          };
+        }
         return {
           code: 0,
           timedOut: false,
@@ -88,6 +104,11 @@ describe('Lark meeting transport', () => {
     }, registry, quietLogger);
     await client.joinMeeting({ meetingNumber: '123456789', callId: 'call-123' });
     await client.listMeetingEvents({ meetingId: '734000000000000001', pageToken: 'cursor' });
+    assert.equal(
+      await client.getMeetingRealtimeEndpoint('734000000000000001'),
+      'wss://media.example.test/token',
+    );
+    await client.leaveMeeting('734000000000000001');
     assert.deepEqual(calls[0].args, [
       '--profile', 'test-profile', 'vc', '+meeting-join', '--as', 'bot',
       '--meeting-number', '123456789', '--call-id', 'call-123', '--format', 'json',
@@ -96,6 +117,15 @@ describe('Lark meeting transport', () => {
       '--profile', 'test-profile', 'vc', '+meeting-events', '--as', 'bot',
       '--meeting-id', '734000000000000001', '--page-token', 'cursor',
       '--page-all', '--format', 'json',
+    ]);
+    assert.deepEqual(calls[2].args, [
+      '--profile', 'test-profile',
+      'api', 'GET', '/open-apis/vc/v1/realtime/endpoint',
+      '--as', 'bot', '--params', '{"meeting_id":"734000000000000001"}', '--json',
+    ]);
+    assert.deepEqual(calls[3].args, [
+      '--profile', 'test-profile', 'vc', '+meeting-leave', '--as', 'bot',
+      '--meeting-id', '734000000000000001', '--format', 'json',
     ]);
   });
 });

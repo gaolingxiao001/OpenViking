@@ -1295,6 +1295,15 @@ export class Store {
     return row ? number(row.seq) : null;
   }
 
+  latestAcceptedInboundSeq(chatId) {
+    if (!chatId) return 0;
+    const row = this.db.prepare(`
+      SELECT COALESCE(MAX(seq), 0) AS seq
+      FROM inbound WHERE chat_id = ? AND status = 'DONE'
+    `).get(chatId);
+    return number(row?.seq);
+  }
+
   inboundBySeq(seq) {
     if (seq === null || seq === undefined) return null;
     return rowToInbound(this.db.prepare('SELECT * FROM inbound WHERE seq = ?').get(seq));

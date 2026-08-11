@@ -70,10 +70,10 @@ function makeStore({ history = [] } = {}) {
   };
 }
 
-function newAgent(store, options = {}) {
+function newAgent(store, options = {}, config = baseConfig) {
   const children = [];
   const spawn = () => { const child = new FakeChild(); children.push(child); return child; };
-  const agent = new CodexAgent(baseConfig, store, quietLogger, {
+  const agent = new CodexAgent(config, store, quietLogger, {
     spawn,
     handshakeTimeoutMs: 1_000,
     reconnectBaseMs: 5,
@@ -308,6 +308,87 @@ describe('CodexAgent turn/steer state machine', () => {
     const start = children[0].ofMethod('turn/start').at(-1);
     assert.equal(start.params.threadId, 'th-1');
     assert.equal(start.params.input[0].text, 'hello');
+  });
+
+  it('carries receipt-only work through turn/start, queued steer, and completion', async () => {
+    const successes = [];
+    const store = makeStore();
+    const { agent, children } = newAgent(store, {
+      onTurnSucceeded: (info) => successes.push(info),
+    });
+    const child = await handshake(agent, children);
+
+    agent.deliver('first audio segment', null, 'receipt-start');
+    agent.deliverBatch([{ text: 'second audio segment', receiptId: 'receipt-steer' }]);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-receipts' } } });
+    const steer = child.ofMethod('turn/steer').at(-1);
+    child.feed({ id: steer.id, result: {} });
+    await flush();
+    child.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 't-receipts', status: 'completed' } },
+    });
+
+    assert.deepEqual(successes, [{
+      inboundSeqs: [],
+      receiptIds: ['receipt-start', 'receipt-steer'],
+    }]);
+  });
+
+  it('fails a receipt through the callback when cognition limits reject it before turn ownership', async () => {
+    const failures = [];
+    const store = makeStore();
+    store.cognitionJournalBeforeInbound = () => 1;
+    store.cognitionJournal = () => [{
+      seq: 1,
+      epoch: 1,
+      kind: 'control',
+      status: 'COMMITTED',
+      atMs: 1,
+      text: 'too large',
+    }];
+    const { agent, children } = newAgent(store, {
+      onTurnFailed: (info) => failures.push(info),
+    }, { ...baseConfig, cognitionMaxChars: 1 });
+    const child = await handshake(agent, children);
+
+    agent.deliver('cannot start', null, 'receipt-terminal');
+    assert.equal(child.ofMethod('turn/start').length, 0);
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].inboundSeqs, []);
+    assert.deepEqual(failures[0].receiptIds, ['receipt-terminal']);
+    assert.match(failures[0].error, /above the 1-char handoff limit/);
+  });
+
+  it('keeps a receipt on the fresh turn when steer falls back', async () => {
+    const successes = [];
+    const store = makeStore();
+    const { agent, children } = newAgent(store, {
+      onTurnSucceeded: (info) => successes.push(info),
+    });
+    const child = await handshake(agent, children);
+
+    agent.deliver('active request', 10);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-active' } } });
+    agent.deliver('racing segment', null, 'receipt-fallback');
+    const steer = child.ofMethod('turn/steer').at(-1);
+    child.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 't-active', status: 'completed' } },
+    });
+    child.feed({ id: steer.id, error: { message: 'expected turn mismatch' } });
+    await flush();
+    const fallback = child.ofMethod('turn/start').at(-1);
+    assert.equal(fallback.params.input[0].text, 'racing segment');
+    child.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 't-fallback', status: 'completed' } },
+    });
+
+    assert.deepEqual(successes, [
+      { inboundSeqs: [10] },
+      { inboundSeqs: [], receiptIds: ['receipt-fallback'] },
+    ]);
   });
 
   it('starts one atomic turn for a same-conversation batch', async () => {
@@ -898,6 +979,28 @@ describe('CodexAgent session rotation (slash commands)', () => {
     assert.equal(agent.turnInProgress, false);
     assert.deepEqual(abandoned, [{ inboundSeqs: [1] }]);
     await agent.whenIdle(); // resolves without any turn/completed event
+  });
+
+  it('returns a receipt-only turn through the abandonment callback', async () => {
+    const abandoned = [];
+    const store = makeStore();
+    const { agent, children } = newAgent(store, {
+      onTurnAbandoned: (info) => abandoned.push(info),
+    });
+    const child = await handshake(agent, children);
+
+    agent.deliver('live meeting segment', null, 'receipt-abandoned');
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-receipt' } } });
+    const interrupting = agent.interruptTurn();
+    await flush();
+    const interrupt = child.ofMethod('turn/interrupt').at(-1);
+    child.feed({ id: interrupt.id, result: {} });
+    await interrupting;
+
+    assert.deepEqual(abandoned, [{
+      inboundSeqs: [],
+      receiptIds: ['receipt-abandoned'],
+    }]);
   });
 
   it('queues messages arriving mid-rotate and delivers them to the new thread', async () => {

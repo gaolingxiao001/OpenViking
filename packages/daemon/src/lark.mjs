@@ -228,6 +228,38 @@ export class LarkClient {
     return this.runJson(args, 'meeting join', this.config.sendTimeoutMs ?? 30_000);
   }
 
+  async getMeetingRealtimeEndpoint(meetingId) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(meetingId ?? ''))) {
+      throw new Error('meeting realtime endpoint requires a valid meeting id');
+    }
+    const result = await this.runJson([
+      '--profile', this.profile,
+      'api', 'GET', '/open-apis/vc/v1/realtime/endpoint',
+      '--as', 'bot',
+      '--params', JSON.stringify({ meeting_id: String(meetingId) }),
+      '--json',
+    ], 'meeting realtime endpoint', this.config.sendTimeoutMs ?? 30_000);
+    const url = result?.data?.websocket_url
+      ?? result?.data?.data?.websocket_url
+      ?? result?.websocket_url;
+    if (typeof url !== 'string' || !/^wss:\/\//i.test(url)) {
+      throw new Error('lark-cli meeting realtime endpoint returned no secure websocket URL');
+    }
+    return url;
+  }
+
+  async leaveMeeting(meetingId) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(meetingId ?? ''))) {
+      throw new Error('meeting leave requires a valid meeting id');
+    }
+    return await this.runJson([
+      '--profile', this.profile,
+      'vc', '+meeting-leave', '--as', 'bot',
+      '--meeting-id', String(meetingId),
+      '--format', 'json',
+    ], 'meeting leave', this.config.sendTimeoutMs ?? 30_000);
+  }
+
   async listMeetingEvents({ meetingId, pageToken = null, startMs = null }) {
     const args = [
       '--profile', this.profile,

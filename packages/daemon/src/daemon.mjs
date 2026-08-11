@@ -13,7 +13,21 @@ import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
-import { isMeetingEvent, MeetingAdapter, MeetingInboxNotifier } from './meeting/index.mjs';
+import {
+  DecisionAuthorityServer,
+  FlyReferenceRing,
+  GenericDecisionAuthority,
+  isMeetingEvent,
+  LiveSpool,
+  MeetingAdapter,
+  MeetingAudioCoordinator,
+  MeetingGenerationClock,
+  MeetingInboxNotifier,
+  MeetingInputPort,
+  MeetingMediaSupervisor,
+  MeetingRuntimeAdapter,
+  StdioMeetingWorkerFactory,
+} from './meeting/index.mjs';
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -94,6 +108,11 @@ export class LarkDaemon {
     this.lark = null;
     this.meeting = null;
     this.meetingInboxNotifier = null;
+    this.meetingAudio = null;
+    this.meetingAudioRuntime = null;
+    this.meetingAudioSpool = null;
+    this.meetingDecisionAuthority = null;
+    this.meetingDecisionServer = null;
     this.liveness = null;
     this.roster = null;
     this.httpServer = null;
@@ -149,11 +168,69 @@ export class LarkDaemon {
       this.runMaintenance();
 
       this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
+      if (this.config.meetingAudio) {
+        const audioConfig = this.config.meetingAudio;
+        this.meetingAudioSpool = new LiveSpool(audioConfig.spoolPath);
+        const generationClock = new MeetingGenerationClock();
+        const flyReferences = new FlyReferenceRing({ ttlMs: audioConfig.flyReferenceTtlMs });
+        this.meetingDecisionAuthority = new GenericDecisionAuthority({
+          runtimeToken: this.store.getCognitionState().authorityToken,
+          getCurrentGeneration: (sessionEpoch) => generationClock.current(sessionEpoch),
+          getLatestLarkSeq: (chatId) => this.store.latestAcceptedInboundSeq(chatId),
+          ttlMs: audioConfig.capabilityTtlMs,
+        });
+        this.meetingDecisionServer = new DecisionAuthorityServer({
+          socketPath: audioConfig.authoritySocketPath,
+          authority: this.meetingDecisionAuthority,
+          getRuntimeToken: () => this.store.getCognitionState().authorityToken,
+          logger: this.logger.child({ component: 'meeting-decision-authority' }),
+        });
+        await this.meetingDecisionServer.start();
+        const input = new MeetingInputPort({
+          spool: this.meetingAudioSpool,
+          onReady: (item) => this.meetingAudioRuntime?.onReady(item),
+        });
+        const workerFactory = new StdioMeetingWorkerFactory({
+          command: audioConfig.workerCommand,
+          args: audioConfig.workerArgs,
+          cwd: audioConfig.workerCwd,
+          registry: this.registry,
+          logger: this.logger.child({ component: 'meeting-media-worker' }),
+          stopTimeoutMs: 15_000,
+        });
+        let coordinator = null;
+        const media = new MeetingMediaSupervisor({
+          workerFactory,
+          onFinal: (session, event) => input.accept(session, event),
+          onUnavailable: (session, reason) => coordinator?.onUnavailable(session, reason),
+          onState: (session) => coordinator?.onMediaState(session),
+          logger: this.logger.child({ component: 'meeting-media' }),
+        });
+        coordinator = new MeetingAudioCoordinator({
+          media,
+          flyReferences,
+          authority: this.meetingDecisionAuthority,
+          targetChatId: audioConfig.targetChatId,
+          generationClock,
+          mediaEndpointProvider: (meetingId) => this.lark.getMeetingRealtimeEndpoint(meetingId),
+          onSessionClosed: (session) => {
+            this.meetingAudioSpool.retireSession(session.sessionEpoch);
+          },
+          sessionCloseGraceMs: audioConfig.capabilityTtlMs * 2,
+          logger: this.logger.child({ component: 'meeting-audio' }),
+        });
+        this.meetingAudio = { coordinator, generationClock, flyReferences };
+      }
       this.meeting = new MeetingAdapter({
         store: this.store.meetings,
         lark: this.lark,
         logger: this.logger.child({ component: 'meeting' }),
         onInboxReady: (batch) => this.meetingInboxNotifier?.signal(batch),
+        ...(this.meetingAudio ? {
+          onJoined: (session) => this.meetingAudio.coordinator.onJoined(session),
+          onEnding: (event) => this.meetingAudio.coordinator.onEnding(event),
+          onFlyTranscript: (event) => this.meetingAudio.coordinator.observeFlyTranscript(event),
+        } : {}),
       });
       // Best-effort member roster so inbound lines carry display names instead
       // of id stubs. The formatters read it through the process-wide resolver.
@@ -178,13 +255,18 @@ export class LarkDaemon {
 
       this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
+          this.meetingAudioRuntime?.onTurnFailed(info);
           void this.handleTurnFailure(info)
             .catch((error) => {
               this.logger.warn('turn_failure_handler_failed', { error: safeError(error) });
             });
         },
         onTurnSucceeded: (info) => {
+          this.meetingAudioRuntime?.onTurnSucceeded(info);
           this.handleTurnSuccess(info);
+        },
+        onTurnAbandoned: (info) => {
+          this.meetingAudioRuntime?.onTurnAbandoned(info);
         },
         onDeliverySucceeded: (info) => { void this.liveness?.onDeliverySucceeded(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
@@ -200,7 +282,27 @@ export class LarkDaemon {
         runtime: this.codex,
         logger: this.logger.child({ component: 'meeting-inbox' }),
       });
+      if (this.meetingAudio) {
+        this.meetingAudioRuntime = new MeetingRuntimeAdapter({
+          spool: this.meetingAudioSpool,
+          authority: this.meetingDecisionAuthority,
+          generationClock: this.meetingAudio.generationClock,
+          flyReferences: this.meetingAudio.flyReferences,
+          runtime: this.codex,
+          targetChatId: this.config.meetingAudio.targetChatId,
+          getRuntimeToken: () => this.store.getCognitionState().authorityToken,
+          submitIngress: (action) => this.enqueueIngress(action),
+          flushBufferedIngress: () => this.groupBurst.flushAll(),
+          logger: this.logger.child({ component: 'meeting-runtime' }),
+        });
+      }
       await this.codex.start();
+      if (this.meetingDecisionAuthority) {
+        this.meetingDecisionAuthority.setRuntimeToken(
+          this.store.getCognitionState().authorityToken,
+        );
+        this.meetingAudioRuntime.start();
+      }
       this.meetingInboxNotifier.start();
       this.recordSystemActivity('system.subscriber_started', {
         summary: `${this.codex.runtime} runtime 已连接`,
@@ -700,6 +802,12 @@ export class LarkDaemon {
         metadata: { removed },
       });
     }
+    try { this.meetingAudioSpool?.prune(); } catch (error) {
+      this.logger.warn('meeting_spool_prune_failed', { error: safeError(error) });
+    }
+    try { this.meetingDecisionAuthority?.prune(); } catch (error) {
+      this.logger.warn('meeting_decision_prune_failed', { error: safeError(error) });
+    }
     if (this.ready) this.refreshChatNames();
   }
 
@@ -901,9 +1009,24 @@ export class LarkDaemon {
       registerNameResolver(null);
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
       this.meetingInboxNotifier?.stop();
+      // Fence model-owned meeting authority before stopping the model process:
+      // first stop and drain local issuance, then revoke every outstanding cap
+      // and close the only claim path.
+      this.meetingAudioRuntime?.stop();
+      try { await this.ingressBarrier; } catch {}
+      this.meetingDecisionAuthority?.revokeAll();
+      try { await this.meetingDecisionServer?.close(); } catch (error) {
+        this.logger.warn('meeting_decision_server_stop_failed', { error });
+      }
       try { await this.meeting?.stop(); } catch (error) { this.logger.warn('meeting_stop_failed', { error }); }
+      try { await this.meetingAudio?.coordinator.stop(); } catch (error) {
+        this.logger.warn('meeting_audio_stop_failed', { error });
+      }
       this.groupBurst?.stop();
       try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }
+      try { this.meetingAudioSpool?.close(); } catch (error) {
+        this.logger.warn('meeting_spool_close_failed', { error });
+      }
       try { await this.registry.stopAll(Math.min(3_000, this.config.shutdownTimeoutMs)); } catch {}
       if (this.httpServer) {
         await Promise.race([
