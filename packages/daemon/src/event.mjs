@@ -1,3 +1,6 @@
+// Message types that reach the Agent regardless of the configured allowlist.
+const ALWAYS_DELIVERED_TYPES = new Set(['video_chat', 'interactive']);
+
 function parseJson(value) {
   if (typeof value !== 'string') return value;
   try {
@@ -59,6 +62,11 @@ export function humanizeContent(messageType, rawContent) {
   // messages. They often carry no human-readable body, but still need to wake
   // the Agent so it can inspect the active meeting and decide whether to join.
   if (messageType === 'video_chat') return '[Video call]';
+  // A card's receive event can arrive without any extractable body even though
+  // the message API does return its text, so fall back to a placeholder that
+  // wakes the Agent instead of letting empty_content drop the card. Reading the
+  // body is a list_lark_chat_messages call away — see lark-message-formats.md.
+  if (messageType === 'interactive') return '[card]';
   if (['image', 'file', 'audio', 'media', 'video', 'sticker'].includes(messageType)) {
     return `[${messageType}]`;
   }
@@ -145,9 +153,11 @@ export function normalizeEvent(input, profile = 'default') {
 export function deterministicFilter(event, config, now = Date.now()) {
   if (event.type !== 'im.message.receive_v1') return 'wrong_event_type';
   if (event.senderId && config.ignoredSenderIds.has(event.senderId)) return 'ignored_sender';
-  // video_chat is a control signal rather than ordinary media. Deliver it even
-  // when deployments intentionally keep the general message allowlist narrow.
-  if (event.messageType !== 'video_chat' && !config.allowedMessageTypes.has(event.messageType)) {
+  // video_chat is a control signal and interactive is how people send the Agent
+  // a structured ask, so neither is ordinary media. Deliver both even when
+  // deployments intentionally keep the general message allowlist narrow.
+  if (!ALWAYS_DELIVERED_TYPES.has(event.messageType)
+    && !config.allowedMessageTypes.has(event.messageType)) {
     return 'unsupported_message_type';
   }
   if (!event.content.trim()) return 'empty_content';

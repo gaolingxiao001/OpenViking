@@ -22,6 +22,10 @@ markdown: "**审核通过** 详情看 [PR #123](https://example.com/pr/123)"
 
 这几类消息现在也能过滤器了,inbound 行里会显示占位 `[file file_key=file_xxx file_name=...]` / `[audio file_key=...]` / `[video file_key=...]` / `[sticker file_key=...]`,但还没有对应的 view_lark_* 工具去真的取内容。要看时走 lark-cli fallback:`im +messages-resources-download --as bot --message-id <om_xxx> --file-key <file_key> --type file --output <安全相对路径>`,下载到本地后自己 Read。
 
+## 收卡片 interactive(占位 + 用只读工具补正文)
+
+卡片消息一律送达,不受 `allowedMessageTypes` 限制。卡片的 receive 事件经常提不出正文,这时 inbound 行里只有一个 `[card]` 占位;事件里带得出文字的话就直接显示文字。看到 `[card]` 说明有内容没读到,别当成空消息忽略,用行里的 `message_id` 调 `list_lark_chat_messages` 把那条读出来,消息 API 会把卡片渲染成 `<card>...</card>` 的可读文本。
+
 ## 仍需 lark-cli fallback 的格式(MCP 未覆盖,只涉及发送)
 
 按 policy,只有用户在当前对话里明确要求、且没有更合适的可信工具时才能走 shell fallback,且遵守：id 只用可信元数据里的、一次决策只发一次、带 idempotency key。

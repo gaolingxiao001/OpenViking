@@ -154,6 +154,34 @@ describe('normalizeEvent', () => {
     });
     assert.equal(event.content, '[Video call]');
   });
+
+  it('keeps a card visible even when its receive event carries no extractable body', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-card-empty',
+      chat_id: 'oc-card',
+      chat_type: 'group',
+      message_type: 'interactive',
+      content: '{}',
+      sender_id: 'ou-user',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '[card]');
+  });
+
+  it('prefers the card body when the receive event does carry one', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-card-text',
+      chat_id: 'oc-card',
+      chat_type: 'group',
+      message_type: 'interactive',
+      content: JSON.stringify({ elements: [{ tag: 'div', text: { content: '打个 reaction 就行' } }] }),
+      sender_id: 'ou-user',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '打个 reaction 就行');
+  });
 });
 
 describe('deterministicFilter', () => {
@@ -204,5 +232,21 @@ describe('deterministicFilter', () => {
       createTimeMs: Date.now(),
     };
     assert.equal(deterministicFilter(event, config()), null);
+  });
+
+  it('delivers cards outside the ordinary media allowlist', () => {
+    const event = {
+      type: 'im.message.receive_v1',
+      senderType: 'user',
+      senderId: 'ou-user',
+      chatId: 'oc-chat',
+      chatType: 'group',
+      messageType: 'interactive',
+      content: '[card]',
+      createTimeMs: Date.now(),
+    };
+    assert.equal(deterministicFilter(event, config({
+      allowedMessageTypes: new Set(['text', 'post']),
+    })), null);
   });
 });
