@@ -100,7 +100,6 @@ export function cleanActivityMetadata(value) {
 export function reasonLabel(reason) {
   const labels = {
     wrong_event_type: '不是消息事件',
-    bot_message: '机器人自己的消息',
     ignored_sender: '发送者在忽略列表',
     unsupported_message_type: '暂不支持的消息类型',
     empty_content: '消息没有可处理的正文',
