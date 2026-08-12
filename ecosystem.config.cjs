@@ -2,7 +2,8 @@
 
 const path = require('node:path');
 const {
-  getDeploymentConfig,
+  CONTROL_ENV_MAX_BYTES,
+  loadDeploymentManifest,
   loadDeploymentEnv,
   updaterTargetsFor,
 } = require('./deployment-config.cjs');
@@ -28,6 +29,33 @@ function defined(values) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined));
 }
 
+const sharedDaemonEnvKeys = Object.freeze([
+  'TEAM_TASK_BOARD_URL',
+  'LARK_CLI_BIN',
+  'CODEX_BIN',
+  'CLAUDE_BIN',
+  'LARK_DAEMON_LOG_LEVEL',
+  'LARK_DAEMON_DRY_RUN',
+  'LARK_DAEMON_IGNORED_SENDER_IDS',
+  'LARK_DAEMON_SEND_TIMEOUT_MS',
+  'LARK_DAEMON_SHUTDOWN_TIMEOUT_MS',
+  'LARK_DAEMON_MAX_REPLY_CHARS',
+  'LARK_DAEMON_MAX_EVENT_BYTES',
+  'LARK_DAEMON_MAX_EVENT_AGE_MS',
+  'LARK_DAEMON_IDLE_REACTION_AFTER_MS',
+  'LARK_DAEMON_RETENTION_MS',
+  'LARK_DAEMON_CODEX_EFFORT',
+  'LARK_DAEMON_CLAUDE_EFFORT',
+  'LARK_DAEMON_CLAUDE_MODEL',
+  'FALLBACK_MODEL',
+  'LARK_DAEMON_COGNITION_MAX_CHARS',
+  'LARK_DAEMON_HISTORY_LIMIT',
+]);
+
+function pick(source, keys) {
+  return defined(Object.fromEntries(keys.map((key) => [key, source[key]])));
+}
+
 function buildEcosystem(sourceEnv = process.env) {
   const env = loadDeploymentEnv(releaseDir, sourceEnv);
   const homeDir = env.HOME;
@@ -35,12 +63,17 @@ function buildEcosystem(sourceEnv = process.env) {
   const baseDir = path.join(homeDir, '.local', 'lib', 'lark-daemon');
   const shareDir = path.join(homeDir, '.local', 'share');
   const inheritedPath = env.PATH || '';
-  const instance = getDeploymentConfig(env);
-  const updaterTargets = updaterTargetsFor(instance);
+  const deployment = loadDeploymentManifest(env);
+  if (deployment.agents.some((agent) => agent.port === 3737)) {
+    throw new Error('agent port 3737 conflicts with the shared Web port');
+  }
+  const updaterTargets = updaterTargetsFor(deployment);
+  const updaterTargetsJson = JSON.stringify(updaterTargets);
+  const sharedDaemonEnv = pick(env, sharedDaemonEnvKeys);
 
-  const daemonApp = {
+  const daemonApps = deployment.agents.map((agent) => ({
     ...common,
-    name: `lark-daemon-${instance.id}`,
+    name: `lark-daemon-${agent.id}`,
     script: path.join(daemonDir, 'src', 'main.mjs'),
     cwd: daemonDir,
     restart_delay: 2000,
@@ -49,18 +82,22 @@ function buildEcosystem(sourceEnv = process.env) {
     kill_timeout: 30000,
     listen_timeout: 30000,
     env: defined({
+      ...sharedDaemonEnv,
       NODE_ENV: 'production',
-      LARK_DAEMON_INSTANCE_ID: instance.id,
-      LARK_DAEMON_UPGRADE_TARGET: instance.id,
+      LARK_DAEMON_DEPLOYMENT_MANIFEST: deployment.manifestPath,
+      LARK_DAEMON_INSTANCE_ID: agent.id,
+      LARK_DAEMON_UPGRADE_TARGET: agent.id,
       LARK_DAEMON_HOST: '127.0.0.1',
-      LARK_DAEMON_PORT: String(instance.port),
-      LARK_DAEMON_PROFILE: instance.profile,
-      LARKSUITE_CLI_PROFILE: instance.profile,
-      LARK_DAEMON_AGENT_NAME: instance.label,
-      LARK_DAEMON_DATA_DIR: instance.dataDir,
-      LARK_DAEMON_WORKSPACE: instance.workspace,
-      LARK_DAEMON_CODEX_MODEL: instance.model,
-      OPENVIKING_CLI_CONFIG_FILE: instance.ovConfig,
+      LARK_DAEMON_HTTP_ENABLED: 'true',
+      LARK_DAEMON_EVENT_MODE: 'raw',
+      LARK_DAEMON_PORT: String(agent.port),
+      LARK_DAEMON_PROFILE: agent.profile,
+      LARKSUITE_CLI_PROFILE: agent.profile,
+      LARK_DAEMON_AGENT_NAME: agent.displayName,
+      LARK_DAEMON_DATA_DIR: agent.dataDir,
+      LARK_DAEMON_WORKSPACE: agent.workspace,
+      LARK_DAEMON_CODEX_MODEL: agent.model,
+      OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
       OPENVIKING_CREDENTIAL_SOURCE: 'cli',
       OPENVIKING_MEMORY_ENABLED: '1',
       OPENVIKING_AUTO_RECALL: '0',
@@ -69,18 +106,27 @@ function buildEcosystem(sourceEnv = process.env) {
       OPENVIKING_RECALL_PEER_SCOPE: 'actor',
       PATH: `${executablePath}:${inheritedPath}`,
     }),
-  };
+  }));
 
-  const webTargets = [{
-    id: instance.id,
-    label: instance.label,
+  const webTargets = deployment.agents.map((agent) => ({
+    id: agent.id,
+    label: agent.displayName,
     host: '127.0.0.1',
-    port: instance.port,
-  }];
+    port: agent.port,
+  }));
+  const webTargetsJson = JSON.stringify(webTargets);
+  for (const [name, value] of [
+    ['LARK_WEB_INSTANCES', webTargetsJson],
+    ['LARK_UPDATER_TARGETS_JSON', updaterTargetsJson],
+  ]) {
+    if (Buffer.byteLength(value) > CONTROL_ENV_MAX_BYTES) {
+      throw new Error(`${name} exceeds ${CONTROL_ENV_MAX_BYTES} bytes`);
+    }
+  }
 
   return {
     apps: [
-      daemonApp,
+      ...daemonApps,
       {
         ...common,
         name: 'lark-web',
@@ -95,8 +141,8 @@ function buildEcosystem(sourceEnv = process.env) {
           NODE_ENV: 'production',
           LARK_WEB_HOST: '127.0.0.1',
           LARK_WEB_PORT: '3737',
-          LARK_WEB_DEFAULT_INSTANCE: instance.id,
-          LARK_WEB_INSTANCES: JSON.stringify(webTargets),
+          LARK_WEB_DEFAULT_INSTANCE: deployment.defaultInstance,
+          LARK_WEB_INSTANCES: webTargetsJson,
           PATH: `${executablePath}:${inheritedPath}`,
         },
       },
@@ -112,7 +158,7 @@ function buildEcosystem(sourceEnv = process.env) {
         listen_timeout: 10000,
         env: {
           NODE_ENV: 'production',
-          LARK_UPDATER_TARGETS_JSON: JSON.stringify(updaterTargets),
+          LARK_UPDATER_TARGETS_JSON: updaterTargetsJson,
           LARK_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
           LARK_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),
           LARK_UPDATER_REMOTE_URL: 'https://github.com/ZaynJarvis/lark-daemon.git',

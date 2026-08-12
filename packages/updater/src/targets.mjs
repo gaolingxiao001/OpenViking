@@ -4,11 +4,15 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const {
-  getDeploymentConfig,
+  CONTROL_ENV_MAX_BYTES,
+  loadDeploymentManifest,
   updaterTargetsFor,
 } = require('../../../deployment-config.cjs');
 
 function parseUpdaterTargets(raw) {
+  if (Buffer.byteLength(raw) > CONTROL_ENV_MAX_BYTES) {
+    throw new Error(`LARK_UPDATER_TARGETS_JSON exceeds ${CONTROL_ENV_MAX_BYTES} bytes`);
+  }
   let value;
   try { value = JSON.parse(raw); } catch {
     throw new Error('LARK_UPDATER_TARGETS_JSON must be valid JSON');
@@ -41,7 +45,7 @@ function parseUpdaterTargets(raw) {
 const generatedTargets = process.env.LARK_UPDATER_TARGETS_JSON
   ? parseUpdaterTargets(process.env.LARK_UPDATER_TARGETS_JSON)
   : parseUpdaterTargets(JSON.stringify(
-    updaterTargetsFor(getDeploymentConfig(process.env)),
+    updaterTargetsFor(loadDeploymentManifest(process.env)),
   ));
 
 export const TARGETS = Object.freeze(generatedTargets);

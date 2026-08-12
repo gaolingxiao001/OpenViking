@@ -39,7 +39,7 @@ function parseInstances(raw, fallbackHost, fallbackPort) {
       port: fallbackPort,
     })]);
   }
-  if (Buffer.byteLength(raw, 'utf8') > 8_192) {
+  if (Buffer.byteLength(raw, 'utf8') > 262_144) {
     throw new Error('LARK_WEB_INSTANCES is too large');
   }
   let parsed;
@@ -48,8 +48,8 @@ function parseInstances(raw, fallbackHost, fallbackPort) {
   } catch {
     throw new Error('LARK_WEB_INSTANCES must be valid JSON');
   }
-  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 16) {
-    throw new Error('LARK_WEB_INSTANCES must contain between 1 and 16 instances');
+  if (!Array.isArray(parsed) || parsed.length < 1) {
+    throw new Error('LARK_WEB_INSTANCES must contain at least one instance');
   }
   const ids = new Set();
   const ports = new Set();

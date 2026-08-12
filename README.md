@@ -1,6 +1,6 @@
 # lark-daemon
 
-一个单用户、本机常驻的飞书 AI Agent。项目拆成三个可独立运行的模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 只负责本机 Activity 页面和固定路由代理；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
+一个单用户、本机常驻、可横向扩展的飞书 AI Agent 服务。项目拆成三个模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 提供本机 Activity 页面并按 manifest 代理各实例；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
 
 daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout；两边都通过同一套 Lark MCP 工具回复。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；思考中途来的纠正会即时进入当前会话。日常使用不需要 `@`。
 
@@ -18,12 +18,23 @@ daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到
 
 ```bash
 cd lark-daemon
-cp .env.example .env   # 按需调整工作区等配置
+cp .env.example .env
+cp deployment.example.json /absolute/persistent/path/lark-daemon-deployment.json
+# 修改 manifest，并在 .env 设置它的绝对路径
 npm test && npm run check
-npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
+npm run start:daemon   # 默认跑 defaultInstance
+# LARK_DAEMON_INSTANCE_ID=research npm run start:daemon  # 显式选择
 ```
 
-首次上线用 `./scripts/deploy.sh` 发布 bootstrap release，再启动 updater。此后代码合入并 push 到 upstream `main` 后，只需 `lark-daemon upgrade <instance-id>`：updater 会自行 fetch、打包、跑测试、发布并滚动目标，不再手动执行 deploy（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次发布时从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
+首次上线依次执行：
+
+```bash
+./scripts/deploy.sh HEAD
+./scripts/bootstrap-updater.sh
+lark-daemon upgrade all
+```
+
+`deploy.sh` 发布 bootstrap release，第二步启动独立 updater，最后一步应执行 `lark-daemon upgrade all`，启动并验收 manifest 中的全部 daemon 与共享 Web。此后普通代码合入并 push 到 upstream `main` 后，只需升级目标实例；共享 Web 改动使用 `upgrade all`。部署配置集中在 `~/.local/lib/lark-daemon/env`，其中 `LARK_DAEMON_DEPLOYMENT_MANIFEST` 指向 release 之外的持久 JSON；首次发布时 env 从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
 
 ## 交互规则
 
@@ -40,7 +51,7 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 
 ## 飞书前置条件
 
-仓库根目录的 [`permission.json`](./permission.json) 是完整功能权限清单。首次配置应用时，在飞书开放平台进入「开发配置 → 权限管理 → 批量开通」，导入该文件；具体格式和审核规则见[官方权限申请说明](https://open.feishu.cn/document/server-docs/application-scope/introduction?lang=zh-CN)。清单覆盖 daemon 可调用的文档、消息、任务、会议等完整能力，并非最小权限集；正式环境应按实际用途删减权限、限制应用可见范围。新增的需审核权限只有在创建应用版本、发布并经管理员审核后才会生效。
+仓库根目录的 [`permission.json`](./permission.json) 是完整功能权限清单。首次配置应用时，在飞书开放平台进入「开发配置 → 权限管理 → 批量开通」，导入该文件；具体格式和审核规则见 [官方权限申请说明](https://open.feishu.cn/document/server-docs/application-scope/introduction?lang=zh-CN)。清单覆盖 daemon 可调用的文档、消息、任务、会议等完整能力，并非最小权限集；正式环境应按实际用途删减权限、限制应用可见范围。新增的需审核权限只有在创建应用版本、发布并经管理员审核后才会生效。
 
 只运行基础消息链路至少需要：
 
@@ -60,13 +71,14 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 ```bash
 cd lark-daemon
 cp .env.example .env
+cp deployment.example.json /absolute/persistent/path/lark-daemon-deployment.json
 npm test
 npm run check
 npm run start:daemon   # 127.0.0.1:3738
 npm run start:web      # 127.0.0.1:3737
 ```
 
-源码目录使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.local/lib/lark-daemon/releases/`，其 `.env` 把工作区设为 `/Users/bytedance/Documents/work`。
+源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.local/lib/lark-daemon/releases/`；release 链接共享 `.env`，每个实例的工作区由持久 manifest 独立配置。
 
 ## 日常运维
 
@@ -74,50 +86,23 @@ npm run start:web      # 127.0.0.1:3737
 pm2 status lark-daemon-<instance-id> lark-web lark-updater
 pm2 logs lark-daemon-<instance-id> --lines 100
 curl http://127.0.0.1:3737/ready
-./scripts/deploy.sh [git-ref]
 lark-daemon upgrade <instance-id>
 lark-daemon upgrade all
 ```
 
 `deploy.sh` 是首次安装或 updater 控制面协议变更时的 bootstrap 工具，不是日常升级步骤。
 
-`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 `LARK_DAEMON_INSTANCE_ID` 和 `all`，从固定的 `https://github.com/ZaynJarvis/lark-daemon.git`、`main` 分支 fetch 到 updater 自有的 bare mirror；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先从 Git archive 打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 同时滚动 daemon 和共享 Web，并校验 `/ready`。相同 commit 的第二次请求直接复用已验证 release。整个发布与滚动过程持有同一把 deploy lock。
+`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 manifest 中的 agent id 和 `all`，从固定的 upstream `main` 发布 release；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 滚动目标 daemon；`all` 还会滚动共享 Web。相同 commit 的第二次请求直接复用已验证 release。整个过程持有同一把 deploy lock。
 
-### 单实例与多 Agent
+### 可横向扩展的多 Agent 部署
 
-每个 Agent 都是一个独立 daemon 进程，不是另一个 Agent 的子 agent。一个宿主可从同一份 release 发布多个 Agent；共享的只有 Web 和 updater，不能共享身份、数据或工作区。
+每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 `LARK_DAEMON_DEPLOYMENT_MANIFEST` 指向的 JSON，完整格式见 [`deployment.example.json`](./deployment.example.json)。顶层只接受 `version`、`defaultInstance`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`。
 
-多 Agent 的标准配置应使用一个持久 deployment manifest。每一条实例配置至少有：
+启动 preflight 严格拒绝未知字段、相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `lark-daemon-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
 
-```yaml
-agents:
-  - id: research
-    display_name: Research
-    profile: cli_research
-    port: 3738
-    data_dir: /absolute/path/lark-daemon-research
-    workspace: /absolute/path/research-workspace
-    ov_config: /absolute/path/ovcli.conf.research
-    model: gpt-5.6-sol
-  - id: operations
-    display_name: Operations
-    profile: cli_operations
-    port: 3740
-    data_dir: /absolute/path/lark-daemon-operations
-    workspace: /absolute/path/operations-workspace
-    ov_config: /absolute/path/ovcli.conf.operations
-    model: gpt-5.6-sol
-```
+`npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `LARK_DAEMON_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `lark-daemon upgrade all`。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `lark-daemon upgrade <id>`。
 
-发布器据此生成 `lark-daemon-<id>` 进程、Web 路由和 updater allowlist：`lark-daemon upgrade research` 只滚 research，`lark-daemon upgrade all` 逐个滚所有实例。添加一个 Agent 就是新增一条 manifest 并通过 preflight 后发布，不复制 ecosystem 文件、不新起一套 Web/updater。
-
-preflight 必须拒绝 profile、端口、dataDir、workspace 或 OV config 重复；任何一项重复都不能启动。可信 Lark 工具必须显式指定对应 profile；fallback 使用 daemon 固定的 CLI binary/profile wrapper，启动时校验 CLI 支持 profile 隔离。默认 profile 和 prompt 都不能作为隔离边界。
-
-当前 main 仍是单实例实现；上述 manifest 是多 Agent 的目标契约。实现和迁移完成前，不能把单实例 rollout 用到已有多 Agent 主机。
-
-首次安装，或 release 修改了 updater 自身的协议 / target allowlist 时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `lark-daemon upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
-
-Meeting audio 默认关闭。启用时，`LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE` 必须指向 daemon 用户拥有、权限为 `0600` 的外部 YAML；ASR token 放在该文件里，不放进共享 `.env` 或 PM2 环境。YAML 的 provider 字段由外部 `meeting-asr-poc` 定义。
+首次安装，或 release 修改了 updater 自身协议时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `lark-daemon upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
 
 ## Activity 页面
 

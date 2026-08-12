@@ -348,6 +348,63 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
   assert.deepEqual(calls.at(-1), ['save']);
 });
 
+test('upgrade all removes only stale daemon apps owned by the managed releases directory', async () => {
+  const fixture = await fixtureRelease();
+  const daemonEntry = path.join(fixture.release, 'packages', 'daemon', 'src', 'main.mjs');
+  const webEntry = path.join(fixture.release, 'packages', 'web', 'src', 'main.mjs');
+  const foreignEntry = path.join(fixture.root, 'foreign', 'main.mjs');
+  for (const entry of [daemonEntry, webEntry, foreignEntry]) {
+    await mkdir(path.dirname(entry), { recursive: true });
+    await writeFile(entry, '');
+  }
+  let processes = [
+    { name: 'lark-daemon-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'lark-daemon-sally', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'lark-web', pm2_env: { status: 'online', pm_exec_path: webEntry } },
+    { name: 'lark-daemon-retired', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'lark-daemon-foreign', pm2_env: { status: 'online', pm_exec_path: foreignEntry } },
+    { name: 'unrelated-service', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+  ];
+  const deleted = [];
+
+  const result = await upgradeTarget('all', {
+    releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
+    pm2Bin: '/fake/pm2',
+    execFileImpl: async (_command, args) => {
+      const [operation] = args;
+      if (operation === 'jlist') return { stdout: JSON.stringify(processes) };
+      if (operation === 'delete') {
+        deleted.push(args[1]);
+        processes = processes.filter((row) => row.name !== args[1]);
+        return { stdout: '' };
+      }
+      if (operation === 'start') {
+        const app = args[3];
+        processes.push({
+          name: app,
+          pm2_env: {
+            status: 'online',
+            pm_exec_path: app === 'lark-web' ? webEntry : daemonEntry,
+          },
+        });
+        return { stdout: '' };
+      }
+      if (operation === 'save') return { stdout: '' };
+      throw new Error(`unexpected PM2 operation: ${operation}`);
+    },
+    fetchImpl: async () => ({ ok: true }),
+    readyOptions: { attempts: 1, intervalMs: 0 },
+  });
+
+  assert.deepEqual(result.removedApps, ['lark-daemon-retired']);
+  assert.ok(deleted.includes('lark-daemon-retired'));
+  assert.ok(!deleted.includes('lark-daemon-foreign'));
+  assert.ok(!deleted.includes('unrelated-service'));
+  assert.ok(processes.some((row) => row.name === 'lark-daemon-foreign'));
+  assert.ok(processes.some((row) => row.name === 'unrelated-service'));
+});
+
 test('PM2 control commands discard metadata inherited from a managed caller', () => {
   assert.deepEqual(cleanPm2ControlEnv({
     HOME: '/safe-home',
@@ -710,7 +767,9 @@ test('request body timeout does not abort a long-running upgrade response', asyn
 });
 
 test('client disconnect does not cancel an upgrade already owned by the updater', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-disconnect-test-');
+  // Keep the Unix socket path below macOS's sockaddr_un limit. os.tmpdir()
+  // already expands to a long /private/var/folders path on developer Macs.
+  const root = await fixtureTempRoot('lud-');
   const socketPath = path.join(root, 'updater.sock');
   let markStarted;
   let finishUpgrade;

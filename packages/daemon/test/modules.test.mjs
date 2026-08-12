@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -19,64 +20,103 @@ describe('module boundaries', () => {
     assert.equal(daemonProjectDir, root);
   });
 
-  it('builds daemon, web, and updater identity from one environment instance', () => {
+  it('builds every daemon plus shared web and updater from one manifest', () => {
     const require = createRequire(import.meta.url);
     const ecosystemPath = path.join(root, 'ecosystem.config.cjs');
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-ecosystem-'));
+    const manifestPath = path.join(directory, 'deployment.json');
+    fs.writeFileSync(manifestPath, `${JSON.stringify({
+      version: 1,
+      defaultInstance: 'beta',
+      agents: [
+        {
+          id: 'alpha',
+          displayName: 'Alpha',
+          profile: 'cli_alpha',
+          port: 3738,
+          dataDir: '/Users/test/.local/share/lark-daemon-alpha',
+          workspace: '/Users/test/Documents/work/alpha-workspace',
+          ovConfig: '/Users/test/.openviking/ovcli.conf.alpha',
+          model: 'gpt-5.6-sol',
+        },
+        {
+          id: 'beta',
+          displayName: 'Beta',
+          profile: 'cli_beta',
+          port: 3740,
+          dataDir: '/Users/test/.local/share/lark-daemon-beta',
+          workspace: '/Users/test/Documents/work/beta-workspace',
+          ovConfig: '/Users/test/.openviking/ovcli.conf.beta',
+          model: 'gpt-5.6-terra',
+        },
+      ],
+    }, null, 2)}\n`);
     const env = {
       HOME: '/Users/test',
       PATH: '/safe/bin',
-      LARK_DAEMON_INSTANCE_ID: 'sisi',
-      LARK_DAEMON_AGENT_NAME: '斯斯',
-      LARK_DAEMON_PROFILE: 'cli_sisi',
-      LARKSUITE_CLI_PROFILE: 'cli_sisi',
-      LARK_DAEMON_PORT: '3738',
-      LARK_DAEMON_DATA_DIR: '/Users/test/.local/share/lark-daemon-sisi',
-      LARK_DAEMON_WORKSPACE: '/Users/test/Documents/work/sisi-workspace',
+      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+      LARK_DAEMON_LOG_LEVEL: 'debug',
     };
     const original = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     Object.assign(process.env, env);
-    let buildEcosystem;
+    let ecosystem;
     try {
       delete require.cache[require.resolve(ecosystemPath)];
-      ({ buildEcosystem } = require(ecosystemPath));
+      const { buildEcosystem } = require(ecosystemPath);
+      ecosystem = buildEcosystem(env);
     } finally {
       for (const [key, value] of Object.entries(original)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+      fs.rmSync(directory, { recursive: true, force: true });
     }
-    const ecosystem = buildEcosystem(env);
     assert.deepEqual(
       ecosystem.apps.map((app) => app.name),
-      ['lark-daemon-sisi', 'lark-web', 'lark-updater'],
+      ['lark-daemon-alpha', 'lark-daemon-beta', 'lark-web', 'lark-updater'],
     );
-    const [sisi, web, updater] = ecosystem.apps;
-    assert.match(sisi.script, /packages\/daemon\/src\/main\.mjs$/);
+    const [alpha, beta, web, updater] = ecosystem.apps;
+    assert.match(alpha.script, /packages\/daemon\/src\/main\.mjs$/);
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
-    assert.equal(sisi.env.LARK_DAEMON_PORT, '3738');
-    assert.equal(sisi.env.LARK_DAEMON_PROFILE, 'cli_sisi');
-    assert.equal(sisi.env.LARKSUITE_CLI_PROFILE, 'cli_sisi');
-    assert.equal(sisi.env.LARK_DAEMON_AGENT_NAME, '斯斯');
-    assert.equal(sisi.env.LARK_DAEMON_UPGRADE_TARGET, 'sisi');
+    assert.equal(alpha.env.LARK_DAEMON_PORT, '3738');
+    assert.equal(alpha.env.LARK_DAEMON_HTTP_ENABLED, 'true');
+    assert.equal(alpha.env.LARK_DAEMON_EVENT_MODE, 'raw');
+    assert.equal(alpha.env.LARK_DAEMON_PROFILE, 'cli_alpha');
+    assert.equal(alpha.env.LARKSUITE_CLI_PROFILE, 'cli_alpha');
+    assert.equal(alpha.env.LARK_DAEMON_AGENT_NAME, 'Alpha');
+    assert.equal(alpha.env.LARK_DAEMON_UPGRADE_TARGET, 'alpha');
+    assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
+    assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-sol');
+    assert.equal(alpha.env.LARK_DAEMON_LOG_LEVEL, 'debug');
+    assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
+    assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-terra');
     assert.equal(web.env.LARK_WEB_PORT, '3737');
-    assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'sisi');
+    assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'beta');
     assert.deepEqual(
       JSON.parse(web.env.LARK_WEB_INSTANCES),
-      [{ id: 'sisi', label: '斯斯', host: '127.0.0.1', port: 3738 }],
+      [
+        { id: 'alpha', label: 'Alpha', host: '127.0.0.1', port: 3738 },
+        { id: 'beta', label: 'Beta', host: '127.0.0.1', port: 3740 },
+      ],
     );
     assert.match(updater.script, /packages\/updater\/src\/main\.mjs$/);
     assert.match(updater.env.LARK_UPDATER_SOCKET, /updater\.sock$/);
     assert.deepEqual(JSON.parse(updater.env.LARK_UPDATER_TARGETS_JSON), {
-      sisi: {
-        app: 'lark-daemon-sisi',
+      alpha: {
+        app: 'lark-daemon-alpha',
         readyUrl: 'http://127.0.0.1:3738/ready',
-        upgradeSharedWeb: true,
+        upgradeSharedWeb: false,
+      },
+      beta: {
+        app: 'lark-daemon-beta',
+        readyUrl: 'http://127.0.0.1:3740/ready',
+        upgradeSharedWeb: false,
       },
     });
-    assert.equal(sisi.wait_ready, true);
+    assert.equal(alpha.wait_ready, true);
+    assert.equal(beta.wait_ready, true);
     assert.equal(web.wait_ready, true);
     assert.equal(updater.wait_ready, true);
-    assert.equal(fs.existsSync(path.join(root, 'ecosystem.sally.config.cjs')), false);
   });
 
   it('keeps the web module independent from SQLite and daemon source code', () => {

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "defaultInstance": "primary",
+  "agents": [
+    {
+      "id": "primary",
+      "displayName": "Primary Agent",
+      "profile": "cli_primary",
+      "port": 3738,
+      "dataDir": "/Users/you/.local/share/lark-daemon-primary",
+      "workspace": "/Users/you/Documents/work/primary-workspace",
+      "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
+      "model": "gpt-5.6-sol"
+    },
+    {
+      "id": "research",
+      "displayName": "Research Agent",
+      "profile": "cli_research",
+      "port": 3740,
+      "dataDir": "/Users/you/.local/share/lark-daemon-research",
+      "workspace": "/Users/you/Documents/work/research-workspace",
+      "ovConfig": "/Users/you/.openviking/ovcli.conf.research",
+      "model": "gpt-5.6-sol"
+    }
+  ]
+}

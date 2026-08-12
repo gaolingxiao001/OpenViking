@@ -1,12 +1,20 @@
 #!/usr/bin/env node
+import { createRequire } from 'node:module';
 import { loadProjectEnv, getConfig, publicConfig } from './config.mjs';
 import { createLogger } from './logger.mjs';
 import { LarkDaemon } from './daemon.mjs';
 
 loadProjectEnv();
+const require = createRequire(import.meta.url);
+const {
+  applyDeploymentAgentEnv,
+  loadDeploymentManifest,
+} = require('../../../deployment-config.cjs');
 
 let config;
 try {
+  const deployment = loadDeploymentManifest(process.env);
+  applyDeploymentAgentEnv(process.env, deployment);
   config = getConfig();
 } catch (error) {
   process.stderr.write(`${JSON.stringify({

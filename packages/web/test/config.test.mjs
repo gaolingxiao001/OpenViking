@@ -39,6 +39,19 @@ test('web config accepts a fixed loopback allowlist of daemon instances', () => 
   assert.ok(Object.isFrozen(config.instances));
 });
 
+test('web routes are not capped to a fixed agent count', () => {
+  process.env.LARK_WEB_INSTANCES = JSON.stringify(Array.from({ length: 32 }, (_, index) => ({
+    id: `agent-${index}`,
+    label: `Agent ${index}`,
+    host: '127.0.0.1',
+    port: 4000 + index,
+  })));
+  process.env.LARK_WEB_DEFAULT_INSTANCE = 'agent-17';
+  const config = getConfig();
+  assert.equal(config.instances.length, 32);
+  assert.equal(config.defaultInstance, 'agent-17');
+});
+
 test('web config rejects arbitrary upstreams, duplicate ids, and an unknown default', () => {
   process.env.LARK_WEB_INSTANCES = JSON.stringify([
     { id: 'zayn', label: 'Zayn', host: 'example.test', port: 3738 },

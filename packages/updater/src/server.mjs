@@ -16,6 +16,7 @@ import { publishLatestRelease } from './publisher.mjs';
 
 const execFile = promisify(execFileCallback);
 const MAX_BODY_BYTES = 4096;
+const MANAGED_DAEMON_APP = /^lark-daemon-[a-z][a-z0-9-]{0,31}$/;
 const PM2_CONTROL_ENV_KEYS = Object.freeze([
   'HOME',
   'USER',
@@ -116,6 +117,24 @@ async function pm2Processes({ pm2Bin, execFileImpl, pm2Env }) {
   } catch {
     throw new Error('pm2 jlist returned invalid JSON');
   }
+}
+
+async function removeStaleManagedDaemonApps({ release, pm2Bin, execFileImpl, pm2Env }) {
+  const configuredApps = new Set(getUpgradeTargets('all').map(([, spec]) => spec.app));
+  const releasesRoot = path.dirname(release);
+  const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env });
+  const removedApps = [];
+
+  for (const processInfo of processes) {
+    const app = processInfo?.name;
+    if (typeof app !== 'string' || !MANAGED_DAEMON_APP.test(app) || configuredApps.has(app)) continue;
+    const execPath = await realpath(processInfo.pm2_env?.pm_exec_path || '').catch(() => null);
+    if (!execPath || !isInside(releasesRoot, execPath)) continue;
+    await execFileImpl(pm2Bin, ['delete', app], { timeout: 30_000, env: pm2Env });
+    removedApps.push(app);
+  }
+
+  return removedApps;
 }
 
 async function previousConfigForProcess(processInfo, release) {
@@ -270,12 +289,16 @@ export async function upgradeTarget(target, {
       });
       upgradedApps.push(SHARED_WEB.app);
     }
+    const removedApps = target === 'all'
+      ? await removeStaleManagedDaemonApps({ release, pm2Bin, execFileImpl, pm2Env })
+      : [];
     await execFileImpl(pm2Bin, ['save'], { timeout: 30_000, env: pm2Env });
 
     return {
       target,
       ...(upgradedApps.length === 1 ? { app: upgradedApps[0] } : {}),
       apps: upgradedApps,
+      removedApps,
       release,
       commit: publication.commit,
       published: publication.published === true,
