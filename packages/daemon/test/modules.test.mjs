@@ -35,6 +35,8 @@ describe('module boundaries', () => {
     assert.equal(zayn.kill_timeout, sally.kill_timeout);
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
     assert.equal(zayn.env.LARK_DAEMON_PORT, '3738');
+    assert.equal(zayn.env.LARK_DAEMON_DATA_DIR, undefined);
+    assert.equal(zayn.env.LARK_DAEMON_WORKSPACE, undefined);
     assert.equal(sally.env.LARK_DAEMON_PORT, '3740');
     assert.equal(sally.env.LARK_DAEMON_PROFILE, 'sally');
     assert.equal(zayn.env.LARK_DAEMON_AGENT_NAME, undefined);

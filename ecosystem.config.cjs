@@ -17,10 +17,9 @@ const bots = Object.freeze([
   Object.freeze({
     id: 'zayn',
     port: '3738',
-    // Zayn keeps the long-lived defaults from the shared release .env file.
-    // Explicitly pin only the paths that must not be inherited by another bot.
-    dataDir: path.join(shareDir, 'lark-daemon'),
-    ovConfig: path.join(homeDir, '.openviking', 'ovcli.conf.zayn'),
+    // This primary slot also adopts the legacy daemon. Keep its identity,
+    // profile, workspace and SQLite paths in the persistent shared env so a
+    // first updater rollout cannot silently fork the existing bot's state.
   }),
   Object.freeze({
     id: 'sally',
