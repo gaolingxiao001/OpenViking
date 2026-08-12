@@ -85,18 +85,35 @@ lark-daemon upgrade all
 
 ### 单实例与多 Agent
 
-当前代码的部署单元是一个独立 Agent：`LARK_DAEMON_INSTANCE_ID` 派生一个 daemon、一个 updater target 和一个 Web target；profile、端口、SQLite dataDir、workspace、model 和 OV config 都必须由该实例专属的持久 env 提供。Web 入口保持为 `127.0.0.1:3737`，只代理这个实例的 loopback target，不接受客户端传入任意 upstream。
+每个 Agent 都是一个独立 daemon 进程，不是另一个 Agent 的子 agent。一个宿主可从同一份 release 发布多个 Agent；共享的只有 Web 和 updater，不能共享身份、数据或工作区。
 
-这意味着当前 main **不能直接覆盖**仍在运行旧双实例模板的机器。旧模板会在同一份 release 中同时启动 `lark-daemon-zayn` 和 `lark-daemon-sally`，两者是独立 daemon：各自的 lark-cli profile、端口、SQLite、workspace 和 OV config 都隔离，只共享 Web 与 updater。把它直接滚到单实例配置会让未被选中的 Agent 丢失 updater/Web target；旧 env 若缺少实例字段，或 daemon 与 Web 端口复用，也会使 rollout 回滚。
+多 Agent 的标准配置应使用一个持久 deployment manifest。每一条实例配置至少有：
 
-要让一台机器长期跑多个 Agent，推荐的目标模型是“一个 release，多实例 manifest”，不把某个 Agent 作为另一个的子进程：
+```yaml
+agents:
+  - id: research
+    display_name: Research
+    profile: cli_research
+    port: 3738
+    data_dir: /absolute/path/lark-daemon-research
+    workspace: /absolute/path/research-workspace
+    ov_config: /absolute/path/ovcli.conf.research
+    model: gpt-5.6-sol
+  - id: operations
+    display_name: Operations
+    profile: cli_operations
+    port: 3740
+    data_dir: /absolute/path/lark-daemon-operations
+    workspace: /absolute/path/operations-workspace
+    ov_config: /absolute/path/ovcli.conf.operations
+    model: gpt-5.6-sol
+```
 
-1. 在持久 deployment manifest 中逐条声明 `id`、显示名、profile、port、dataDir、workspace、OV config 和模型。
-2. ecosystem 从 manifest 生成多个独立 daemon；共享 Web 路由全部实例，updater 为每个实例生成 allowlist target，支持单独升级和 `all`。
-3. 上线前做 migration/preflight：所有 profile、端口和路径必须唯一；把现有实例完整导入 manifest 后才允许 rollout，禁止隐式丢弃实例。
-4. profile 隔离要由运行时强制：可信工具始终显式指定 profile；fallback 需要固定 CLI binary/profile 的 wrapper，并在启动时验证 CLI 支持该隔离机制。仅靠 prompt 或默认 profile 不够。
+发布器据此生成 `lark-daemon-<id>` 进程、Web 路由和 updater allowlist：`lark-daemon upgrade research` 只滚 research，`lark-daemon upgrade all` 逐个滚所有实例。添加一个 Agent 就是新增一条 manifest 并通过 preflight 后发布，不复制 ecosystem 文件、不新起一套 Web/updater。
 
-在 manifest 实现并完成迁移前，单实例配置只适合全新、单 bot 安装；不要用它升级现有多 Agent 主机。
+preflight 必须拒绝 profile、端口、dataDir、workspace 或 OV config 重复；任何一项重复都不能启动。可信 Lark 工具必须显式指定对应 profile；fallback 使用 daemon 固定的 CLI binary/profile wrapper，启动时校验 CLI 支持 profile 隔离。默认 profile 和 prompt 都不能作为隔离边界。
+
+当前 main 仍是单实例实现；上述 manifest 是多 Agent 的目标契约。实现和迁移完成前，不能把单实例 rollout 用到已有多 Agent 主机。
 
 首次安装，或 release 修改了 updater 自身的协议 / target allowlist 时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `lark-daemon upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
 
