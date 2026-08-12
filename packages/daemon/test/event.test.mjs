@@ -5,7 +5,6 @@ import { normalizeEvent, deterministicFilter } from '../src/event.mjs';
 function config(overrides = {}) {
   return {
     ignoredSenderIds: new Set(),
-    allowedMessageTypes: new Set(['text', 'post']),
     maxEventAgeMs: 86_400_000,
     ...overrides,
   };
@@ -115,6 +114,28 @@ describe('normalizeEvent', () => {
     assert.equal(event.content, '[image image_key=img_v3_abc123]');
   });
 
+  it('preserves image references embedded in a rich post in content order', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-post-image',
+      chat_id: 'oc-post-image',
+      chat_type: 'group',
+      message_type: 'post',
+      content: JSON.stringify({
+        content: [[
+          { tag: 'text', text: '先看' },
+          { tag: 'img', image_key: 'img_v3_first' },
+          { tag: 'text', text: '再看' },
+          { tag: 'img', image_key: 'img_v3_second' },
+          { tag: 'img', image_key: 'img_v3_first' },
+        ]],
+      }),
+      sender_id: 'ou-post',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '先看\n[image image_key=img_v3_first]\n再看\n[image image_key=img_v3_second]');
+  });
+
   it('surfaces the file_key for file/audio/video/sticker messages', () => {
     const fileEvent = normalizeEvent({
       type: 'im.message.receive_v1',
@@ -185,7 +206,7 @@ describe('normalizeEvent', () => {
 });
 
 describe('deterministicFilter', () => {
-  it('allows bot senders but filters unsupported media and explicit deny-list senders', () => {
+  it('allows supported media and filters unsupported types and explicit deny-list senders', () => {
     const base = {
       type: 'im.message.receive_v1',
       senderType: 'user',
@@ -198,7 +219,7 @@ describe('deterministicFilter', () => {
     };
     assert.equal(deterministicFilter({ ...base, senderType: 'bot' }, config()), null);
     assert.equal(deterministicFilter({ ...base, senderType: 'app' }, config()), null);
-    assert.equal(deterministicFilter({ ...base, messageType: 'image' }, config()), 'unsupported_message_type');
+    assert.equal(deterministicFilter({ ...base, messageType: 'image', content: '[image image_key=img_v3_abc123]' }, config()), null);
     assert.equal(
       deterministicFilter(base, config({ ignoredSenderIds: new Set(['ou-user']) })),
       'ignored_sender',
@@ -246,7 +267,6 @@ describe('deterministicFilter', () => {
       createTimeMs: Date.now(),
     };
     assert.equal(deterministicFilter(event, config({
-      allowedMessageTypes: new Set(['text', 'post']),
     })), null);
   });
 });

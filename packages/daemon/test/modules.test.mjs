@@ -22,9 +22,7 @@ describe('module boundaries', () => {
   it('builds daemon, web, and updater identity from one environment instance', () => {
     const require = createRequire(import.meta.url);
     const ecosystemPath = path.join(root, 'ecosystem.config.cjs');
-    delete require.cache[require.resolve(ecosystemPath)];
-    const { buildEcosystem } = require(ecosystemPath);
-    const ecosystem = buildEcosystem({
+    const env = {
       HOME: '/Users/test',
       PATH: '/safe/bin',
       LARK_DAEMON_INSTANCE_ID: 'sisi',
@@ -34,7 +32,20 @@ describe('module boundaries', () => {
       LARK_DAEMON_PORT: '3738',
       LARK_DAEMON_DATA_DIR: '/Users/test/.local/share/lark-daemon-sisi',
       LARK_DAEMON_WORKSPACE: '/Users/test/Documents/work/sisi-workspace',
-    });
+    };
+    const original = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+    Object.assign(process.env, env);
+    let buildEcosystem;
+    try {
+      delete require.cache[require.resolve(ecosystemPath)];
+      ({ buildEcosystem } = require(ecosystemPath));
+    } finally {
+      for (const [key, value] of Object.entries(original)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    const ecosystem = buildEcosystem(env);
     assert.deepEqual(
       ecosystem.apps.map((app) => app.name),
       ['lark-daemon-sisi', 'lark-web', 'lark-updater'],

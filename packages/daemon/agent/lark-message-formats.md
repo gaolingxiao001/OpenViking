@@ -16,7 +16,7 @@ markdown: "**审核通过** 详情看 [PR #123](https://example.com/pr/123)"
 
 ## 收图片(MCP 原生支持)
 
-收到的图片消息默认能过滤器(`allowedMessageTypes` 含 `image`),inbound 那一行里图片会显示成占位 `[image image_key=img_xxx]`,不含真实图片内容。要看图时调 `view_lark_image`,参数是那行里的 `message_id` 和 `image_key`(照抄,别猜),返回一个 MCP image content block,直接就能看到图,不用自己再下载/转 base64。
+收到的图片消息会进入 Agent，inbound 那一行里图片会显示成占位 `[image image_key=img_xxx]`，不含真实图片内容。富文本 post 里的图片也会按出现顺序显示这个占位。要看图时调 `view_lark_image`，参数是那行里的 `message_id` 和 `image_key`（照抄，别猜），返回一个 MCP image content block，直接就能看到图，不用自己再下载/转 base64。
 
 ## 收 file / audio / video / sticker(只有占位,没有原生查看工具)
 
@@ -24,7 +24,7 @@ markdown: "**审核通过** 详情看 [PR #123](https://example.com/pr/123)"
 
 ## 收卡片 interactive(占位 + 用只读工具补正文)
 
-卡片消息一律送达,不受 `allowedMessageTypes` 限制。卡片的 receive 事件经常提不出正文,这时 inbound 行里只有一个 `[card]` 占位;事件里带得出文字的话就直接显示文字。看到 `[card]` 说明有内容没读到,别当成空消息忽略,用行里的 `message_id` 调 `list_lark_chat_messages` 把那条读出来,消息 API 会把卡片渲染成 `<card>...</card>` 的可读文本。
+卡片消息一律送达。卡片的 receive 事件经常提不出正文，这时 inbound 行里只有一个 `[card]` 占位；事件里带得出文字的话就直接显示文字。看到 `[card]` 说明有内容没读到，别当成空消息忽略，用行里的 `message_id` 调 `list_lark_chat_messages` 把那条读出来，消息 API 会把卡片渲染成 `<card>...</card>` 的可读文本。
 
 ## 仍需 lark-cli fallback 的格式(MCP 未覆盖,只涉及发送)
 

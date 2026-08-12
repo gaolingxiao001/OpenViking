@@ -1,5 +1,9 @@
-// Message types that reach the Agent regardless of the configured allowlist.
-const ALWAYS_DELIVERED_TYPES = new Set(['video_chat', 'interactive']);
+// Keep the inbound contract consistent across every deployment. Media is
+// delivered as a resource reference, never as bytes in the prompt.
+const AGENT_VISIBLE_MESSAGE_TYPES = new Set([
+  'text', 'post', 'image', 'file', 'audio', 'media', 'video', 'sticker',
+  'video_chat', 'interactive',
+]);
 
 function parseJson(value) {
   if (typeof value !== 'string') return value;
@@ -10,7 +14,7 @@ function parseJson(value) {
   }
 }
 
-function collectText(value, output, depth = 0) {
+function collectText(value, output, mediaKeys = new Set(), depth = 0) {
   if (depth > 8 || value === null || value === undefined) return;
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -18,22 +22,41 @@ function collectText(value, output, depth = 0) {
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectText(item, output, depth + 1);
+    for (const item of value) collectText(item, output, mediaKeys, depth + 1);
     return;
   }
   if (typeof value !== 'object') return;
+
+  // Rich-post image/media nodes carry resources inside otherwise generic
+  // content. Preserve only the resource pointer that the matching MCP tool
+  // can retrieve; keep the generic sensitive-key filter below for everything
+  // else.
+  if ((value.tag === 'img' || value.tag === 'image')
+    && typeof value.image_key === 'string' && value.image_key) {
+    const key = `image:${value.image_key}`;
+    if (!mediaKeys.has(key)) output.push(`[image image_key=${value.image_key}]`);
+    mediaKeys.add(key);
+    return;
+  }
+  if ((value.tag === 'media' || value.tag === 'file')
+    && typeof value.file_key === 'string' && value.file_key) {
+    const key = `file:${value.file_key}`;
+    if (!mediaKeys.has(key)) output.push(`[${value.tag} file_key=${value.file_key}]`);
+    mediaKeys.add(key);
+    return;
+  }
 
   const priorityKeys = ['text', 'title', 'content', 'name', 'file_name'];
   const visited = new Set();
   for (const key of priorityKeys) {
     if (Object.hasOwn(value, key)) {
-      collectText(value[key], output, depth + 1);
+      collectText(value[key], output, mediaKeys, depth + 1);
       visited.add(key);
     }
   }
   for (const [key, child] of Object.entries(value)) {
     if (visited.has(key) || ['tag', 'style', 'language'].includes(key) || /(?:_key|_id|url|token|secret)$/i.test(key)) continue;
-    collectText(child, output, depth + 1);
+    collectText(child, output, mediaKeys, depth + 1);
   }
 }
 
@@ -153,11 +176,7 @@ export function normalizeEvent(input, profile = 'default') {
 export function deterministicFilter(event, config, now = Date.now()) {
   if (event.type !== 'im.message.receive_v1') return 'wrong_event_type';
   if (event.senderId && config.ignoredSenderIds.has(event.senderId)) return 'ignored_sender';
-  // video_chat is a control signal and interactive is how people send the Agent
-  // a structured ask, so neither is ordinary media. Deliver both even when
-  // deployments intentionally keep the general message allowlist narrow.
-  if (!ALWAYS_DELIVERED_TYPES.has(event.messageType)
-    && !config.allowedMessageTypes.has(event.messageType)) {
+  if (!AGENT_VISIBLE_MESSAGE_TYPES.has(event.messageType)) {
     return 'unsupported_message_type';
   }
   if (!event.content.trim()) return 'empty_content';
