@@ -4,6 +4,7 @@ const AGENT_VISIBLE_MESSAGE_TYPES = new Set([
   'text', 'post', 'image', 'file', 'audio', 'media', 'video', 'sticker',
   'video_chat', 'interactive',
 ]);
+const IMAGE_KEY = /^img_[A-Za-z0-9_-]{8,}$/;
 
 function parseJson(value) {
   if (typeof value !== 'string') return value;
@@ -32,7 +33,7 @@ function collectText(value, output, mediaKeys = new Set(), depth = 0) {
   // can retrieve; keep the generic sensitive-key filter below for everything
   // else.
   if ((value.tag === 'img' || value.tag === 'image')
-    && typeof value.image_key === 'string' && value.image_key) {
+    && typeof value.image_key === 'string' && IMAGE_KEY.test(value.image_key)) {
     const key = `image:${value.image_key}`;
     if (!mediaKeys.has(key)) output.push(`[image image_key=${value.image_key}]`);
     mediaKeys.add(key);
@@ -69,7 +70,7 @@ export function humanizeContent(messageType, rawContent) {
   // image_key/file_key are resource pointers scoped to this message and requiring bot auth
   // to resolve, so surfacing them here (unlike other *_key/*_url fields) is not a content
   // leak — see packages/daemon/agent/lark-message-formats.md for how to fetch each type.
-  if (messageType === 'image' && typeof parsed?.image_key === 'string' && parsed.image_key) {
+  if (messageType === 'image' && typeof parsed?.image_key === 'string' && IMAGE_KEY.test(parsed.image_key)) {
     return `[image image_key=${parsed.image_key}]`;
   }
   if (['file', 'audio', 'media', 'video', 'sticker'].includes(messageType)

@@ -136,6 +136,23 @@ describe('normalizeEvent', () => {
     assert.equal(event.content, '先看\n[image image_key=img_v3_first]\n再看\n[image image_key=img_v3_second]');
   });
 
+  it('does not turn malformed post image keys into resource references', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-post-bad-image',
+      chat_id: 'oc-post-bad-image',
+      chat_type: 'group',
+      message_type: 'post',
+      content: JSON.stringify({ content: [[
+        { tag: 'img', image_key: 'not-an-image-key' },
+        { tag: 'text', text: '请看附件' },
+      ]] }),
+      sender_id: 'ou-post',
+      timestamp: String(Date.now()),
+    });
+    assert.equal(event.content, '请看附件');
+  });
+
   it('surfaces the file_key for file/audio/video/sticker messages', () => {
     const fileEvent = normalizeEvent({
       type: 'im.message.receive_v1',
