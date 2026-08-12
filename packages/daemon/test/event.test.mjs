@@ -193,6 +193,21 @@ describe('normalizeEvent', () => {
     assert.equal(event.content, '[Video call]');
   });
 
+  it('delivers readable forwarded conversations instead of filtering them as unknown', () => {
+    const event = normalizeEvent({
+      type: 'im.message.receive_v1',
+      message_id: 'om-forward',
+      chat_id: 'oc-forward',
+      chat_type: 'group',
+      message_type: 'merge_forward',
+      content: '<forwarded_messages>\nAda: 请 review #42\n</forwarded_messages>',
+      sender_id: 'ou-user',
+      timestamp: String(Date.now()),
+    });
+    assert.match(event.content, /Ada: 请 review #42/);
+    assert.equal(deterministicFilter(event, config()), null);
+  });
+
   it('keeps a card visible even when its receive event carries no extractable body', () => {
     const event = normalizeEvent({
       type: 'im.message.receive_v1',

@@ -2,7 +2,7 @@
 // delivered as a resource reference, never as bytes in the prompt.
 const AGENT_VISIBLE_MESSAGE_TYPES = new Set([
   'text', 'post', 'image', 'file', 'audio', 'media', 'video', 'sticker',
-  'video_chat', 'interactive',
+  'merge_forward', 'video_chat', 'interactive',
 ]);
 const IMAGE_KEY = /^img_[A-Za-z0-9_-]{8,}$/;
 
@@ -86,6 +86,7 @@ export function humanizeContent(messageType, rawContent) {
   // messages. They often carry no human-readable body, but still need to wake
   // the Agent so it can inspect the active meeting and decide whether to join.
   if (messageType === 'video_chat') return '[Video call]';
+  if (messageType === 'merge_forward') return '[Forwarded messages]';
   // A card's receive event can arrive without any extractable body even though
   // the message API does return its text, so fall back to a placeholder that
   // wakes the Agent instead of letting empty_content drop the card. Reading the
