@@ -24,6 +24,7 @@ const bots = Object.freeze([
   }),
   Object.freeze({
     id: 'sally',
+    agentName: '斯斯',
     port: '3740',
     profile: 'sally',
     dataDir: path.join(shareDir, 'lark-daemon-sally'),
@@ -64,6 +65,7 @@ function daemonApp(bot) {
       LARK_DAEMON_HOST: '127.0.0.1',
       LARK_DAEMON_PORT: bot.port,
       LARK_DAEMON_PROFILE: bot.profile,
+      LARK_DAEMON_AGENT_NAME: bot.agentName,
       LARK_DAEMON_DATA_DIR: bot.dataDir,
       LARK_DAEMON_WORKSPACE: bot.workspace,
       LARK_DAEMON_CODEX_MODEL: bot.model,

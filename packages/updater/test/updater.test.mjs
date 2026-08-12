@@ -16,8 +16,12 @@ import { fileURLToPath } from 'node:url';
 import { publishLatestRelease } from '../src/publisher.mjs';
 import { cleanPm2ControlEnv, createUpdaterServer, upgradeTarget } from '../src/server.mjs';
 
+async function fixtureTempRoot(prefix) {
+  return realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+}
+
 async function fixtureRelease() {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-test-'));
+  const root = await fixtureTempRoot('lark-updater-test-');
   const base = path.join(root, 'lark-daemon');
   const release = path.join(base, 'releases', '0.4.0-test');
   await mkdir(release, { recursive: true });
@@ -82,7 +86,7 @@ function replacePm2Harness({ app, initialEntry, entriesByConfig }) {
 }
 
 async function fixtureBootstrapUpdater({ failCurrentReady = false } = {}) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-bootstrap-test-'));
+  const root = await fixtureTempRoot('lark-updater-bootstrap-test-');
   const home = path.join(root, 'home');
   const fakeBin = path.join(root, 'bin');
   const base = path.join(home, '.local', 'lib', 'lark-daemon');
@@ -165,7 +169,7 @@ if (fs.existsSync(path.join(home, 'fail-current-ready')) && activeRelease === cu
           USER: 'test',
           LOGNAME: 'test',
           LANG: 'C.UTF-8',
-          PATH: `${fakeBin}:/usr/bin:/bin`,
+          PATH: `${fakeBin}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -610,7 +614,7 @@ test('upgradeTarget publishes upstream before rolling the target', async () => {
 });
 
 test('publisher fetches trusted main, validates once, and reuses the same commit', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-publisher-test-'));
+  const root = await fixtureTempRoot('lark-publisher-test-');
   const source = path.join(root, 'source');
   const remote = path.join(root, 'remote.git');
   const baseDir = path.join(root, 'installed');
@@ -664,7 +668,7 @@ test('publisher fetches trusted main, validates once, and reuses the same commit
 });
 
 test('publisher advances current and keeps the prior release as rollback', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-publisher-rollback-test-'));
+  const root = await fixtureTempRoot('lark-publisher-rollback-test-');
   const source = path.join(root, 'source');
   const remote = path.join(root, 'remote.git');
   const baseDir = path.join(root, 'installed');
@@ -715,7 +719,7 @@ test('publisher advances current and keeps the prior release as rollback', async
 });
 
 test('server accepts one allowlisted upgrade over its private socket', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-socket-test-'));
+  const root = await fixtureTempRoot('lark-updater-socket-test-');
   const socketPath = path.join(root, 'updater.sock');
   const calls = [];
   const updater = await createUpdaterServer({
@@ -734,7 +738,7 @@ test('server accepts one allowlisted upgrade over its private socket', async (t)
 });
 
 test('request body timeout does not abort a long-running upgrade response', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-socket-test-'));
+  const root = await fixtureTempRoot('lark-updater-socket-test-');
   const socketPath = path.join(root, 'updater.sock');
   const updater = await createUpdaterServer({
     socketPath,
@@ -752,7 +756,7 @@ test('request body timeout does not abort a long-running upgrade response', asyn
 });
 
 test('client disconnect does not cancel an upgrade already owned by the updater', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-disconnect-test-'));
+  const root = await fixtureTempRoot('lark-updater-disconnect-test-');
   const socketPath = path.join(root, 'updater.sock');
   let markStarted;
   let finishUpgrade;
@@ -788,7 +792,7 @@ test('client disconnect does not cancel an upgrade already owned by the updater'
 });
 
 test('server rejects a non-allowlisted target without calling upgrade', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-reject-test-'));
+  const root = await fixtureTempRoot('lark-updater-reject-test-');
   const socketPath = path.join(root, 'updater.sock');
   let called = false;
   const updater = await createUpdaterServer({
@@ -804,7 +808,7 @@ test('server rejects a non-allowlisted target without calling upgrade', async (t
 });
 
 test('server serializes upgrade requests', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-busy-test-'));
+  const root = await fixtureTempRoot('lark-updater-busy-test-');
   const socketPath = path.join(root, 'updater.sock');
   let releaseFirst;
   const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
@@ -826,7 +830,7 @@ test('server serializes upgrade requests', async (t) => {
 });
 
 test('a second updater cannot unlink the live updater socket', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-owner-test-'));
+  const root = await fixtureTempRoot('lark-updater-owner-test-');
   const socketPath = path.join(root, 'updater.sock');
   const first = await createUpdaterServer({
     socketPath,
@@ -843,7 +847,7 @@ test('a second updater cannot unlink the live updater socket', async (t) => {
 });
 
 test('CLI upgrade command reaches the updater over the Unix socket', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'lark-updater-cli-test-'));
+  const root = await fixtureTempRoot('lark-updater-cli-test-');
   const socketPath = path.join(root, 'updater.sock');
   const updater = await createUpdaterServer({
     socketPath,

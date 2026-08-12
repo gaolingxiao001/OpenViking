@@ -67,12 +67,13 @@ describe('release-owned system prompt', () => {
   it('loads the single prompt file and substitutes release configuration', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
-    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\npersona\n');
+    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n');
     try {
       assert.equal(loadSystemPrompt({
         systemPromptPath,
         teamTaskBoardUrl: 'https://board.example',
-      }), 'policy\n\nhttps://board.example\n\npersona\n');
+        agentName: '斯斯',
+      }), 'policy\n\nhttps://board.example\n\n斯斯\n');
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

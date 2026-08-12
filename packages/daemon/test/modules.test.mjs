@@ -37,6 +37,8 @@ describe('module boundaries', () => {
     assert.equal(zayn.env.LARK_DAEMON_PORT, '3738');
     assert.equal(sally.env.LARK_DAEMON_PORT, '3740');
     assert.equal(sally.env.LARK_DAEMON_PROFILE, 'sally');
+    assert.equal(zayn.env.LARK_DAEMON_AGENT_NAME, undefined);
+    assert.equal(sally.env.LARK_DAEMON_AGENT_NAME, '斯斯');
     assert.equal(web.env.LARK_WEB_PORT, '3737');
     assert.deepEqual(
       JSON.parse(web.env.LARK_WEB_INSTANCES).map(({ id, port }) => ({ id, port })),
