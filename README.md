@@ -83,7 +83,20 @@ lark-daemon upgrade all
 
 `lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 `LARK_DAEMON_INSTANCE_ID` 和 `all`，从固定的 `https://github.com/ZaynJarvis/lark-daemon.git`、`main` 分支 fetch 到 updater 自有的 bare mirror；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先从 Git archive 打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 同时滚动 daemon 和共享 Web，并校验 `/ready`。相同 commit 的第二次请求直接复用已验证 release。整个发布与滚动过程持有同一把 deploy lock。
 
-这是单实例部署。PM2 名、updater allowlist、Web target 和 agent 自升级命令都从 `LARK_DAEMON_INSTANCE_ID` 派生；profile、端口、dataDir、workspace、model 和 OV config 直接读取同一份持久 env。代码没有旧实例 alias 或迁移分支。替换 agent 时，先显式删除旧 PM2 app，再修改 env 并启动新 id。Web 入口保持为 `127.0.0.1:3737`，只代理该实例的 loopback target，不接受客户端传入任意 upstream。
+### 单实例与多 Agent
+
+当前代码的部署单元是一个独立 Agent：`LARK_DAEMON_INSTANCE_ID` 派生一个 daemon、一个 updater target 和一个 Web target；profile、端口、SQLite dataDir、workspace、model 和 OV config 都必须由该实例专属的持久 env 提供。Web 入口保持为 `127.0.0.1:3737`，只代理这个实例的 loopback target，不接受客户端传入任意 upstream。
+
+这意味着当前 main **不能直接覆盖**仍在运行旧双实例模板的机器。旧模板会在同一份 release 中同时启动 `lark-daemon-zayn` 和 `lark-daemon-sally`，两者是独立 daemon：各自的 lark-cli profile、端口、SQLite、workspace 和 OV config 都隔离，只共享 Web 与 updater。把它直接滚到单实例配置会让未被选中的 Agent 丢失 updater/Web target；旧 env 若缺少实例字段，或 daemon 与 Web 端口复用，也会使 rollout 回滚。
+
+要让一台机器长期跑多个 Agent，推荐的目标模型是“一个 release，多实例 manifest”，不把某个 Agent 作为另一个的子进程：
+
+1. 在持久 deployment manifest 中逐条声明 `id`、显示名、profile、port、dataDir、workspace、OV config 和模型。
+2. ecosystem 从 manifest 生成多个独立 daemon；共享 Web 路由全部实例，updater 为每个实例生成 allowlist target，支持单独升级和 `all`。
+3. 上线前做 migration/preflight：所有 profile、端口和路径必须唯一；把现有实例完整导入 manifest 后才允许 rollout，禁止隐式丢弃实例。
+4. profile 隔离要由运行时强制：可信工具始终显式指定 profile；fallback 需要固定 CLI binary/profile 的 wrapper，并在启动时验证 CLI 支持该隔离机制。仅靠 prompt 或默认 profile 不够。
+
+在 manifest 实现并完成迁移前，单实例配置只适合全新、单 bot 安装；不要用它升级现有多 Agent 主机。
 
 首次安装，或 release 修改了 updater 自身的协议 / target allowlist 时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `lark-daemon upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
 
