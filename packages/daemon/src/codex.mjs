@@ -154,11 +154,12 @@ function tomlString(value) {
   return JSON.stringify(value);
 }
 
-export function sanitizeCodexEnv(environment) {
+export function sanitizeCodexEnv(environment, profile = '') {
   const safeEnv = { ...environment, FORCE_COLOR: '0', NO_COLOR: '1' };
   for (const key of Object.keys(safeEnv)) {
-    if (/^(?:LARK|FEISHU)_/i.test(key)) delete safeEnv[key];
+    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key)) delete safeEnv[key];
   }
+  if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
   return safeEnv;
 }
 
@@ -289,7 +290,7 @@ export class CodexAgent {
   }
 
   developerInstructions(profile) {
-    return `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${profile}`;
+    return `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${profile}. Shell fallbacks inherit this profile through LARKSUITE_CLI_PROFILE. Never pass --profile and never override or unset that environment variable.`;
   }
 
   // One global thread is shared across every chat; policyHash only detects when the
@@ -870,7 +871,7 @@ export class CodexAgent {
       try {
         child = this._spawn(this.config.codexBin, args, {
           cwd: this.config.workspace,
-          env: sanitizeCodexEnv(process.env),
+          env: sanitizeCodexEnv(process.env, this.config.profile),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['pipe', 'pipe', 'pipe'],

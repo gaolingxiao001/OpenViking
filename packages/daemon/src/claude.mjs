@@ -70,11 +70,12 @@ function appendBounded(current, chunk, label) {
   return next;
 }
 
-export function sanitizeClaudeEnv(environment) {
+export function sanitizeClaudeEnv(environment, profile = '') {
   const safeEnv = { ...environment, FORCE_COLOR: '0', NO_COLOR: '1' };
   for (const key of Object.keys(safeEnv)) {
-    if (/^(?:LARK|FEISHU)_/i.test(key) || key === 'CLAUDECODE') delete safeEnv[key];
+    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key) || key === 'CLAUDECODE') delete safeEnv[key];
   }
+  if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
   return safeEnv;
 }
 
@@ -110,7 +111,7 @@ export class ClaudeAgent {
     this.deliveredThroughSeq = this.syncedThroughSeq;
 
     this.systemPrompt = loadSystemPrompt(config);
-    this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${config.profile}`;
+    this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${config.profile}. Shell fallbacks inherit this profile through LARKSUITE_CLI_PROFILE. Never pass --profile and never override or unset that environment variable.`;
     this.model = options.model ?? store.getSetting?.('claude_model') ?? config.claudeModel ?? '';
     this.effort = store.getSetting?.('claude_effort') ?? config.claudeEffort ?? 'medium';
 
@@ -228,7 +229,7 @@ export class ClaudeAgent {
       try {
         child = this._spawn(this.config.claudeBin, args, {
           cwd: this.config.workspace,
-          env: sanitizeClaudeEnv(process.env),
+          env: sanitizeClaudeEnv(process.env, this.config.profile),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -337,7 +338,7 @@ export class ClaudeAgent {
       try {
         child = this._spawn(this.config.claudeBin, args, {
           cwd: this.config.workspace,
-          env: sanitizeClaudeEnv(process.env),
+          env: sanitizeClaudeEnv(process.env, this.config.profile),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['pipe', 'pipe', 'pipe'],

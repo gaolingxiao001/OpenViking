@@ -226,9 +226,11 @@ describe('formatting helpers', () => {
   it('injects the dedicated Lark MCP server into the app-server spawn', async () => {
     const store = makeStore();
     const spawnArgs = [];
+    const spawnOptions = [];
     const children = [];
-    const spawn = (_bin, args) => {
+    const spawn = (_bin, args, options) => {
       spawnArgs.push(args);
+      spawnOptions.push(options);
       const child = new FakeChild();
       children.push(child);
       return child;
@@ -260,6 +262,7 @@ describe('formatting helpers', () => {
     assert.match(rendered, /features\.plugins=false/);
     assert.match(rendered, /features\.tool_suggest=false/);
     assert.match(rendered, /features\.apps=false/);
+    assert.equal(spawnOptions[0].env.LARKSUITE_CLI_PROFILE, 'test-profile');
   });
 
   it('strips only Lark/Feishu credentials from the inherited environment', () => {
@@ -268,10 +271,12 @@ describe('formatting helpers', () => {
       OPENAI_API_KEY: 'codex-needs-it',
       LARK_APP_SECRET: 'must-never-leak',
       FEISHU_TOKEN: 'must-never-leak',
-    });
+      LARKSUITE_CLI_PROFILE: 'wrong-profile',
+    }, 'fixed-profile');
     assert.equal(env.LARK_APP_SECRET, undefined);
     assert.equal(env.FEISHU_TOKEN, undefined);
     assert.equal(env.OPENAI_API_KEY, 'codex-needs-it');
+    assert.equal(env.LARKSUITE_CLI_PROFILE, 'fixed-profile');
     assert.equal(env.FORCE_COLOR, '0');
     assert.equal(env.NO_COLOR, '1');
   });

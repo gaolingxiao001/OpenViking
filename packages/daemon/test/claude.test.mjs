@@ -124,9 +124,9 @@ async function waitFor(predicate, timeoutMs = 500) {
 function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {}) {
   const calls = [];
   const persistent = [];
-  const spawn = (_bin, args) => {
+  const spawn = (_bin, args, options) => {
     const child = new FakeChild();
-    calls.push({ args, child });
+    calls.push({ args, child, options });
     queueMicrotask(() => {
       if (args.includes('--version')) {
         child.stdout.emit('data', '2.1.220 (Claude Code)\n');
@@ -178,6 +178,7 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     assert.equal(args[args.indexOf('--effort') + 1], 'medium');
     assert.ok(args.includes('--session-id'));
     assert.ok(!args.includes('--resume'));
+    assert.ok(calls.every((call) => call.options.env.LARKSUITE_CLI_PROFILE === 'test-profile'));
 
     agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
     const first = JSON.parse(persistent[0].writes[0]);
@@ -432,11 +433,13 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
       ANTHROPIC_API_KEY: 'keep-for-claude',
       LARK_APP_SECRET: 'remove',
       FEISHU_TOKEN: 'remove',
+      LARKSUITE_CLI_PROFILE: 'wrong-profile',
       CLAUDECODE: 'remove',
-    });
+    }, 'fixed-profile');
     assert.equal(environment.ANTHROPIC_API_KEY, 'keep-for-claude');
     assert.equal(environment.LARK_APP_SECRET, undefined);
     assert.equal(environment.FEISHU_TOKEN, undefined);
     assert.equal(environment.CLAUDECODE, undefined);
+    assert.equal(environment.LARKSUITE_CLI_PROFILE, 'fixed-profile');
   });
 });
