@@ -7,31 +7,6 @@ const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 export const moduleDir = path.resolve(sourceDir, '..');
 export const projectDir = path.resolve(moduleDir, '..', '..');
 
-function parseEnvLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith('#')) return null;
-  const index = trimmed.indexOf('=');
-  if (index <= 0) return null;
-  const key = trimmed.slice(0, index).trim();
-  let value = trimmed.slice(index + 1).trim();
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return null;
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    value = value.slice(1, -1);
-  }
-  return [key, value];
-}
-
-export function loadProjectEnv(envFile = path.join(projectDir, '.env')) {
-  if (!fs.existsSync(envFile)) return;
-  const content = fs.readFileSync(envFile, 'utf8');
-  for (const line of content.split(/\r?\n/)) {
-    const parsed = parseEnvLine(line);
-    if (!parsed) continue;
-    const [key, value] = parsed;
-    if (process.env[key] === undefined) process.env[key] = value;
-  }
-}
-
 function intEnv(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;

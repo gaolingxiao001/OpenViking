@@ -194,8 +194,6 @@ export async function publishLatestRelease({
   }
 
   const releasesRoot = path.join(baseDir, 'releases');
-  const envFile = path.join(baseDir, 'env');
-  await access(envFile);
   await mkdir(releasesRoot, { recursive: true, mode: 0o700 });
   const pending = await mkdtemp(path.join(releasesRoot, '.pending-'));
   const archive = `${pending}.tar`;
@@ -211,7 +209,6 @@ export async function publishLatestRelease({
       commit,
     ]);
     await run(execFileImpl, tarBin, ['-xf', archive, '-C', pending]);
-    await symlink(envFile, path.join(pending, '.env'));
 
     const packageJson = JSON.parse(await readFile(path.join(pending, 'package.json'), 'utf8'));
     const version = packageJson?.version;

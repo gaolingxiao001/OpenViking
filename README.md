@@ -18,13 +18,15 @@ daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到
 
 ```bash
 cd lark-daemon
-cp .env.example .env
-cp deployment.example.json /absolute/persistent/path/lark-daemon-deployment.json
-# 修改 manifest，并在 .env 设置它的绝对路径
+mkdir -p ~/.lark-daemon
+cp deployment.example.json ~/.lark-daemon/deployment.json
+# 修改 deployment.json 中的 env 和 agents
 npm test && npm run check
 npm run start:daemon   # 默认跑 defaultInstance
 # LARK_DAEMON_INSTANCE_ID=research npm run start:daemon  # 显式选择
 ```
+
+默认配置路径是 `~/.lark-daemon/deployment.json`。需要放在其他位置时，为启动 daemon、执行 `deploy.sh`、bootstrap updater 和 `lark-daemon` CLI 的系统环境设置绝对路径 `LARK_DAEMON_DEPLOYMENT_MANIFEST`；每次调用都必须带上同一个 override。它只选择 manifest，不承载 Agent 配置。`deploy.sh` 会在发布 release 前完成 manifest preflight。
 
 首次上线依次执行：
 
@@ -34,7 +36,7 @@ npm run start:daemon   # 默认跑 defaultInstance
 lark-daemon upgrade all
 ```
 
-`deploy.sh` 发布 bootstrap release，第二步启动独立 updater，最后一步应执行 `lark-daemon upgrade all`，启动并验收 manifest 中的全部 daemon 与共享 Web。此后普通代码合入并 push 到 upstream `main` 后，只需升级目标实例；共享 Web 改动使用 `upgrade all`。部署配置集中在 `~/.local/lib/lark-daemon/env`，其中 `LARK_DAEMON_DEPLOYMENT_MANIFEST` 指向 release 之外的持久 JSON；首次发布时 env 从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
+`deploy.sh` 发布 bootstrap release，第二步启动独立 updater，最后一步应执行 `lark-daemon upgrade all`，启动并验收 manifest 中的全部 daemon 与共享 Web。此后普通代码合入并 push 到 upstream `main` 后，只需升级目标实例；共享 Web 改动使用 `upgrade all`。部署配置只有 release 之外的持久 manifest，不读取或生成 `.env`。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
 
 ## 交互规则
 
@@ -70,15 +72,15 @@ lark-daemon upgrade all
 
 ```bash
 cd lark-daemon
-cp .env.example .env
-cp deployment.example.json /absolute/persistent/path/lark-daemon-deployment.json
+mkdir -p ~/.lark-daemon
+cp deployment.example.json ~/.lark-daemon/deployment.json
 npm test
 npm run check
 npm run start:daemon   # 127.0.0.1:3738
 npm run start:web      # 127.0.0.1:3737
 ```
 
-源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.local/lib/lark-daemon/releases/`；release 链接共享 `.env`，每个实例的工作区由持久 manifest 独立配置。
+源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.local/lib/lark-daemon/releases/`；每个实例的工作区由 release 之外的持久 manifest 独立配置。
 
 ## 日常运维
 
@@ -96,7 +98,9 @@ lark-daemon upgrade all
 
 ### 可横向扩展的多 Agent 部署
 
-每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 `LARK_DAEMON_DEPLOYMENT_MANIFEST` 指向的 JSON，完整格式见 [`deployment.example.json`](./deployment.example.json)。顶层只接受 `version`、`defaultInstance`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`。
+每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 JSON manifest，完整格式见 [`deployment.example.json`](./deployment.example.json)。顶层只接受 `version`、`defaultInstance`、`env`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`。
+
+`env` 是所有 daemon 共用的运行参数，只接受示例中列出的 key，所有 JSON value 都必须是字符串（包括布尔值和数字；空字符串允许）。同名系统进程环境变量优先于 manifest `env`，可用于临时覆盖。Agent identity、Lark profile、端口、dataDir、workspace、OV config、model，以及 Web/updater 控制面字段不能放进 `env`；未知或保留字段会让 preflight 直接失败。每个 agent 的 `profile` 会同时固定注入 `LARK_DAEMON_PROFILE` 和 `LARKSUITE_CLI_PROFILE`，不能被 `env` 覆盖，确保多 Agent 隔离不会被全局配置穿透。
 
 启动 preflight 严格拒绝未知字段、相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `lark-daemon-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
 

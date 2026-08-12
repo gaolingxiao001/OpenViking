@@ -3,8 +3,9 @@
 const path = require('node:path');
 const {
   CONTROL_ENV_MAX_BYTES,
+  deploymentDaemonEnvOverrides,
   loadDeploymentManifest,
-  loadDeploymentEnv,
+  resolvedDeploymentDaemonEnv,
   updaterTargetsFor,
 } = require('./deployment-config.cjs');
 
@@ -29,47 +30,20 @@ function defined(values) {
   return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined));
 }
 
-const sharedDaemonEnvKeys = Object.freeze([
-  'TEAM_TASK_BOARD_URL',
-  'LARK_CLI_BIN',
-  'CODEX_BIN',
-  'CLAUDE_BIN',
-  'LARK_DAEMON_LOG_LEVEL',
-  'LARK_DAEMON_DRY_RUN',
-  'LARK_DAEMON_IGNORED_SENDER_IDS',
-  'LARK_DAEMON_SEND_TIMEOUT_MS',
-  'LARK_DAEMON_SHUTDOWN_TIMEOUT_MS',
-  'LARK_DAEMON_MAX_REPLY_CHARS',
-  'LARK_DAEMON_MAX_EVENT_BYTES',
-  'LARK_DAEMON_MAX_EVENT_AGE_MS',
-  'LARK_DAEMON_IDLE_REACTION_AFTER_MS',
-  'LARK_DAEMON_RETENTION_MS',
-  'LARK_DAEMON_CODEX_EFFORT',
-  'LARK_DAEMON_CLAUDE_EFFORT',
-  'LARK_DAEMON_CLAUDE_MODEL',
-  'FALLBACK_MODEL',
-  'LARK_DAEMON_COGNITION_MAX_CHARS',
-  'LARK_DAEMON_HISTORY_LIMIT',
-]);
-
-function pick(source, keys) {
-  return defined(Object.fromEntries(keys.map((key) => [key, source[key]])));
-}
-
 function buildEcosystem(sourceEnv = process.env) {
-  const env = loadDeploymentEnv(releaseDir, sourceEnv);
-  const homeDir = env.HOME;
+  const homeDir = sourceEnv.HOME;
   if (!homeDir || !path.isAbsolute(homeDir)) throw new Error('HOME must be an absolute path');
   const baseDir = path.join(homeDir, '.local', 'lib', 'lark-daemon');
   const shareDir = path.join(homeDir, '.local', 'share');
-  const inheritedPath = env.PATH || '';
-  const deployment = loadDeploymentManifest(env);
+  const inheritedPath = sourceEnv.PATH || '';
+  const deployment = loadDeploymentManifest(sourceEnv);
   if (deployment.agents.some((agent) => agent.port === 3737)) {
     throw new Error('agent port 3737 conflicts with the shared Web port');
   }
   const updaterTargets = updaterTargetsFor(deployment);
   const updaterTargetsJson = JSON.stringify(updaterTargets);
-  const sharedDaemonEnv = pick(env, sharedDaemonEnvKeys);
+  const sharedDaemonEnv = resolvedDeploymentDaemonEnv(deployment, sourceEnv);
+  const systemDaemonEnvOverrides = deploymentDaemonEnvOverrides(sourceEnv);
 
   const daemonApps = deployment.agents.map((agent) => ({
     ...common,
@@ -157,7 +131,9 @@ function buildEcosystem(sourceEnv = process.env) {
         kill_timeout: 5000,
         listen_timeout: 10000,
         env: {
+          ...systemDaemonEnvOverrides,
           NODE_ENV: 'production',
+          LARK_DAEMON_DEPLOYMENT_MANIFEST: deployment.manifestPath,
           LARK_UPDATER_TARGETS_JSON: updaterTargetsJson,
           LARK_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
           LARK_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),

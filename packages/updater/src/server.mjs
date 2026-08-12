@@ -4,6 +4,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { createRequire } from 'node:module';
 import {
   SHARED_WEB,
   assertUpgradeTarget,
@@ -15,6 +16,9 @@ import {
 import { publishLatestRelease } from './publisher.mjs';
 
 const execFile = promisify(execFileCallback);
+const require = createRequire(import.meta.url);
+const { DAEMON_ENV_FIELDS } = require('../../../deployment-config.cjs');
+const DAEMON_ENV_FIELD_SET = new Set(DAEMON_ENV_FIELDS);
 const MAX_BODY_BYTES = 4096;
 const MANAGED_DAEMON_APP = /^lark-daemon-[a-z][a-z0-9-]{0,31}$/;
 const PM2_CONTROL_ENV_KEYS = Object.freeze([
@@ -28,11 +32,14 @@ const PM2_CONTROL_ENV_KEYS = Object.freeze([
   'LC_CTYPE',
   'TMPDIR',
   'XDG_RUNTIME_DIR',
+  'LARK_DAEMON_DEPLOYMENT_MANIFEST',
+  ...DAEMON_ENV_FIELDS,
 ]);
 
 export function cleanPm2ControlEnv(source = process.env) {
   return Object.fromEntries(PM2_CONTROL_ENV_KEYS
-    .filter((key) => typeof source[key] === 'string' && source[key] !== '')
+    .filter((key) => typeof source[key] === 'string'
+      && (source[key] !== '' || DAEMON_ENV_FIELD_SET.has(key)))
     .map((key) => [key, source[key]]));
 }
 

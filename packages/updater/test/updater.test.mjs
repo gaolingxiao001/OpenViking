@@ -130,6 +130,11 @@ const eventsPath = path.join(home, 'events.jsonl');
 const [operation, ...args] = process.argv.slice(2);
 const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
+fs.writeFileSync(path.join(home, 'pm2-env.json'), JSON.stringify({
+  manifest: process.env.LARK_DAEMON_DEPLOYMENT_MANIFEST,
+  logLevel: process.env.LARK_DAEMON_LOG_LEVEL,
+  profile: process.env.LARK_DAEMON_PROFILE,
+}));
 fs.appendFileSync(eventsPath, JSON.stringify(['pm2', operation, ...args]) + '\\n');
 if (operation === 'jlist') {
   process.stdout.write(JSON.stringify(readState()));
@@ -174,7 +179,7 @@ if (fs.existsSync(path.join(home, 'fail-current-ready')) && activeRelease === cu
     currentRelease,
     oldEntry,
     currentEntry,
-    async run() {
+    async run(extraEnv = {}) {
       const script = fileURLToPath(new URL('../../../scripts/bootstrap-updater.sh', import.meta.url));
       const child = spawn('/bin/bash', [script], {
         env: {
@@ -183,6 +188,7 @@ if (fs.existsSync(path.join(home, 'fail-current-ready')) && activeRelease === cu
           LOGNAME: 'test',
           LANG: 'C.UTF-8',
           PATH: `${fakeBin}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+          ...extraEnv,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -201,6 +207,7 @@ if (fs.existsSync(path.join(home, 'fail-current-ready')) && activeRelease === cu
         stderr: Buffer.concat(stderr).toString('utf8'),
         events: eventsText.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)),
         state: JSON.parse(await readFile(path.join(home, 'pm2-state.json'), 'utf8')),
+        pm2Env: JSON.parse(await readFile(path.join(home, 'pm2-env.json'), 'utf8')),
       };
     },
   };
@@ -416,11 +423,17 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     pm_exec_path: '/old/release/main.mjs',
     cwd: '/old/release',
     LARK_DAEMON_PROFILE: 'secret-profile',
+    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/safe-home/custom/deployment.json',
+    LARK_DAEMON_LOG_LEVEL: 'debug',
+    TEAM_TASK_BOARD_URL: '',
   }), {
     HOME: '/safe-home',
     PATH: '/safe-bin',
     PM2_HOME: '/safe-pm2',
     LANG: 'C.UTF-8',
+    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/safe-home/custom/deployment.json',
+    LARK_DAEMON_LOG_LEVEL: 'debug',
+    TEAM_TASK_BOARD_URL: '',
   });
 });
 
@@ -507,12 +520,20 @@ test('failed replacement restores the app from the release that owned its old ex
 
 test('bootstrap replaces the updater from the exact current release config and verifies readiness', async () => {
   const fixture = await fixtureBootstrapUpdater();
-  const result = await fixture.run();
+  const result = await fixture.run({
+    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/custom/deployment.json',
+    LARK_DAEMON_LOG_LEVEL: 'debug',
+    LARK_DAEMON_PROFILE: 'must-not-pass',
+  });
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.deepEqual(result.state, [{
     name: 'lark-updater',
     pm2_env: { status: 'online', pm_exec_path: fixture.currentEntry },
   }]);
+  assert.deepEqual(result.pm2Env, {
+    manifest: '/custom/deployment.json',
+    logLevel: 'debug',
+  });
 
   const pm2Events = result.events.filter((event) => event[0] === 'pm2');
   assert.deepEqual(pm2Events.map((event) => event[1]), [
@@ -651,7 +672,6 @@ test('publisher fetches trusted main, validates once, and reuses the same commit
   await git('commit', '-m', 'initial');
   await git('clone', '--bare', source, remote);
   await mkdir(baseDir, { recursive: true });
-  await writeFile(path.join(baseDir, 'env'), 'LARK_DAEMON_TEST=1\n', { mode: 0o600 });
   let validations = 0;
   const options = {
     baseDir,
@@ -661,7 +681,7 @@ test('publisher fetches trusted main, validates once, and reuses the same commit
     validateReleaseImpl: async (release) => {
       validations += 1;
       assert.equal(await readFile(path.join(release, 'ecosystem.config.cjs'), 'utf8'), 'module.exports = {};\n');
-      assert.equal(await realpath(path.join(release, '.env')), path.join(baseDir, 'env'));
+      await assert.rejects(readFile(path.join(release, '.env')), { code: 'ENOENT' });
     },
   };
 

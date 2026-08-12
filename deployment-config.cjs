@@ -6,7 +6,29 @@ const path = require('node:path');
 const INSTANCE_ID = /^[a-z][a-z0-9-]{0,31}$/;
 const CONTROL_ENV_MAX_BYTES = 262_144;
 const DEPLOYMENT_MANIFEST_MAX_BYTES = 1_048_576;
-const TOP_LEVEL_FIELDS = Object.freeze(['version', 'defaultInstance', 'agents']);
+const TOP_LEVEL_FIELDS = Object.freeze(['version', 'defaultInstance', 'env', 'agents']);
+const DAEMON_ENV_FIELDS = Object.freeze([
+  'TEAM_TASK_BOARD_URL',
+  'LARK_CLI_BIN',
+  'CODEX_BIN',
+  'CLAUDE_BIN',
+  'LARK_DAEMON_LOG_LEVEL',
+  'LARK_DAEMON_DRY_RUN',
+  'LARK_DAEMON_IGNORED_SENDER_IDS',
+  'LARK_DAEMON_SEND_TIMEOUT_MS',
+  'LARK_DAEMON_SHUTDOWN_TIMEOUT_MS',
+  'LARK_DAEMON_MAX_REPLY_CHARS',
+  'LARK_DAEMON_MAX_EVENT_BYTES',
+  'LARK_DAEMON_MAX_EVENT_AGE_MS',
+  'LARK_DAEMON_IDLE_REACTION_AFTER_MS',
+  'LARK_DAEMON_RETENTION_MS',
+  'LARK_DAEMON_CODEX_EFFORT',
+  'LARK_DAEMON_CLAUDE_EFFORT',
+  'LARK_DAEMON_CLAUDE_MODEL',
+  'FALLBACK_MODEL',
+  'LARK_DAEMON_COGNITION_MAX_CHARS',
+  'LARK_DAEMON_HISTORY_LIMIT',
+]);
 const AGENT_FIELDS = Object.freeze([
   'id',
   'displayName',
@@ -18,43 +40,19 @@ const AGENT_FIELDS = Object.freeze([
   'model',
 ]);
 
-function parseEnvLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith('#')) return null;
-  const separator = trimmed.indexOf('=');
-  if (separator <= 0) return null;
-  const key = trimmed.slice(0, separator).trim();
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return null;
-  let value = trimmed.slice(separator + 1).trim();
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    value = value.slice(1, -1);
+function resolveDeploymentManifestPath(env = process.env) {
+  const override = typeof env.LARK_DAEMON_DEPLOYMENT_MANIFEST === 'string'
+    ? env.LARK_DAEMON_DEPLOYMENT_MANIFEST.trim()
+    : '';
+  if (override) {
+    if (!path.isAbsolute(override)) {
+      throw new Error('LARK_DAEMON_DEPLOYMENT_MANIFEST must be an absolute path');
+    }
+    return path.normalize(override);
   }
-  return [key, value];
-}
-
-function loadDeploymentEnv(releaseDir, source = process.env) {
-  const env = { ...source };
-  const envFile = path.join(releaseDir, '.env');
-  if (!fs.existsSync(envFile)) return env;
-  for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
-    const parsed = parseEnvLine(line);
-    if (!parsed) continue;
-    const [key, value] = parsed;
-    if (env[key] === undefined) env[key] = value;
-  }
-  return env;
-}
-
-function required(env, name) {
-  const value = typeof env[name] === 'string' ? env[name].trim() : '';
-  if (!value) throw new Error(`${name} is required for a managed deployment`);
-  return value;
-}
-
-function absolutePath(env, name) {
-  const value = required(env, name);
-  if (!path.isAbsolute(value)) throw new Error(`${name} must be an absolute path`);
-  return path.normalize(value);
+  const home = typeof env.HOME === 'string' ? env.HOME.trim() : '';
+  if (!home || !path.isAbsolute(home)) throw new Error('HOME must be an absolute path');
+  return path.join(path.normalize(home), '.lark-daemon', 'deployment.json');
 }
 
 function assertKnownFields(value, allowed, label) {
@@ -76,6 +74,23 @@ function manifestAbsolutePath(value, name) {
   const normalized = manifestString(value, name, { maxLength: 4096 });
   if (!path.isAbsolute(normalized)) throw new Error(`${name} must be an absolute path`);
   return path.normalize(normalized);
+}
+
+function parseDaemonEnv(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('deployment manifest env must be an object');
+  }
+  const allowed = new Set(DAEMON_ENV_FIELDS);
+  const result = {};
+  for (const [key, envValue] of Object.entries(value)) {
+    if (!allowed.has(key)) throw new Error(`deployment manifest env field is not allowed: ${key}`);
+    if (typeof envValue !== 'string') throw new Error(`deployment manifest env.${key} must be a string`);
+    if (envValue.length > 4096 || /[\u0000-\u001f\u007f]/.test(envValue)) {
+      throw new Error(`deployment manifest env.${key} is invalid`);
+    }
+    result[key] = envValue;
+  }
+  return Object.freeze(result);
 }
 
 function parseAgent(value, index) {
@@ -138,7 +153,7 @@ function assertIsolatedAgentStorage(agents) {
 }
 
 function loadDeploymentManifest(env) {
-  const manifestPath = absolutePath(env, 'LARK_DAEMON_DEPLOYMENT_MANIFEST');
+  const manifestPath = resolveDeploymentManifestPath(env);
   let raw;
   try {
     raw = fs.readFileSync(manifestPath, 'utf8');
@@ -163,17 +178,38 @@ function loadDeploymentManifest(env) {
     throw new Error('deployment manifest agents must be a non-empty array');
   }
   const defaultInstance = manifestString(value.defaultInstance, 'deployment manifest defaultInstance');
+  const daemonEnv = parseDaemonEnv(value.env);
   const agents = value.agents.map(parseAgent);
   assertUniqueAgentFields(agents);
   assertIsolatedAgentStorage(agents);
   const deployment = Object.freeze({
     version: 1,
     defaultInstance,
+    env: daemonEnv,
     agents: Object.freeze(agents),
     manifestPath,
   });
   selectDeploymentAgent(deployment);
   return deployment;
+}
+
+function resolvedDeploymentDaemonEnv(deployment, sourceEnv = process.env) {
+  return Object.freeze(Object.fromEntries(DAEMON_ENV_FIELDS.flatMap((key) => {
+    if (typeof sourceEnv[key] === 'string') return [[key, sourceEnv[key]]];
+    if (Object.hasOwn(deployment.env, key)) return [[key, deployment.env[key]]];
+    return [];
+  })));
+}
+
+function deploymentDaemonEnvOverrides(sourceEnv = process.env) {
+  return Object.freeze(Object.fromEntries(DAEMON_ENV_FIELDS.flatMap((key) => (
+    typeof sourceEnv[key] === 'string' ? [[key, sourceEnv[key]]] : []
+  ))));
+}
+
+function applyDeploymentDaemonEnv(env, deployment, sourceEnv = env) {
+  Object.assign(env, resolvedDeploymentDaemonEnv(deployment, sourceEnv));
+  return env;
 }
 
 function selectDeploymentAgent(deployment, id = deployment.defaultInstance) {
@@ -217,11 +253,15 @@ function updaterTargetsFor(deployment) {
 module.exports = {
   AGENT_FIELDS,
   CONTROL_ENV_MAX_BYTES,
+  DAEMON_ENV_FIELDS,
   DEPLOYMENT_MANIFEST_MAX_BYTES,
   TOP_LEVEL_FIELDS,
   applyDeploymentAgentEnv,
+  applyDeploymentDaemonEnv,
+  deploymentDaemonEnvOverrides,
   loadDeploymentManifest,
-  loadDeploymentEnv,
+  resolveDeploymentManifestPath,
+  resolvedDeploymentDaemonEnv,
   selectDeploymentAgent,
   updaterTargetsFor,
 };

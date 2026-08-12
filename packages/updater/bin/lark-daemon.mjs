@@ -1,16 +1,5 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import path from 'node:path';
-import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
-
-const require = createRequire(import.meta.url);
-const { loadDeploymentEnv } = require('../../../deployment-config.cjs');
-const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const deploymentEnv = loadDeploymentEnv(projectDir, process.env);
-for (const [key, value] of Object.entries(deploymentEnv)) {
-  if (process.env[key] === undefined) process.env[key] = value;
-}
 const {
   UPGRADE_TARGETS,
   assertUpgradeTarget,

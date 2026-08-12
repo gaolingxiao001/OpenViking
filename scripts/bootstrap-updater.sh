@@ -10,13 +10,32 @@ SOCKET="$HOME/.local/share/lark-daemon/updater.sock"
 NODE_BIN="/opt/homebrew/bin/node"
 
 pm2_control() {
+  local clean_env=(
+    "HOME=$HOME"
+    "USER=${USER:-}"
+    "LOGNAME=${LOGNAME:-${USER:-}}"
+    "PATH=$PATH"
+    "PM2_HOME=${PM2_HOME:-$HOME/.pm2}"
+    "LANG=${LANG:-C.UTF-8}"
+  )
+  local key
+  for key in \
+    LARK_DAEMON_DEPLOYMENT_MANIFEST \
+    TEAM_TASK_BOARD_URL LARK_CLI_BIN CODEX_BIN CLAUDE_BIN \
+    LARK_DAEMON_LOG_LEVEL LARK_DAEMON_DRY_RUN LARK_DAEMON_IGNORED_SENDER_IDS \
+    LARK_DAEMON_SEND_TIMEOUT_MS LARK_DAEMON_SHUTDOWN_TIMEOUT_MS \
+    LARK_DAEMON_MAX_REPLY_CHARS LARK_DAEMON_MAX_EVENT_BYTES \
+    LARK_DAEMON_MAX_EVENT_AGE_MS LARK_DAEMON_IDLE_REACTION_AFTER_MS \
+    LARK_DAEMON_RETENTION_MS LARK_DAEMON_CODEX_EFFORT \
+    LARK_DAEMON_CLAUDE_EFFORT LARK_DAEMON_CLAUDE_MODEL FALLBACK_MODEL \
+    LARK_DAEMON_COGNITION_MAX_CHARS LARK_DAEMON_HISTORY_LIMIT
+  do
+    if declare -p "$key" >/dev/null 2>&1; then
+      clean_env+=("$key=${!key}")
+    fi
+  done
   env -i \
-    HOME="$HOME" \
-    USER="${USER:-}" \
-    LOGNAME="${LOGNAME:-${USER:-}}" \
-    PATH="$PATH" \
-    PM2_HOME="${PM2_HOME:-$HOME/.pm2}" \
-    LANG="${LANG:-C.UTF-8}" \
+    "${clean_env[@]}" \
     pm2 "$@"
 }
 

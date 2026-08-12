@@ -3,8 +3,8 @@
 # local ref as a versioned release under
 # ~/.local/lib/lark-daemon/releases and move the current release pointer.
 # The working tree is never deployed — commit first, then run this.
-# Config lives in one shared file (~/.local/lib/lark-daemon/env); every
-# release symlinks its .env to it, so edits there survive publishes.
+# Runtime config lives in ~/.lark-daemon/deployment.json by default, outside
+# versioned releases. LARK_DAEMON_DEPLOYMENT_MANIFEST may select another path.
 #
 # This script deliberately does not touch PM2. After the initial bootstrap,
 # normal updates use only `lark-daemon upgrade <target|all>`; the updater
@@ -13,7 +13,6 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BASE="$HOME/.local/lib/lark-daemon"
-ENV_FILE="$BASE/env"
 DEPLOY_LOCK="$BASE/deploy.lock"
 CLI_LINK="$HOME/.local/bin/lark-daemon"
 CLI_TARGET="$BASE/current/packages/updater/bin/lark-daemon.mjs"
@@ -52,13 +51,15 @@ else
   git archive "$REF" | tar -x -C "$REL"
 fi
 
+if ! node -e 'require(process.argv[1]).loadDeploymentManifest(process.env)' "$REL/deployment-config.cjs"; then
+  echo "deployment manifest preflight failed"
+  exit 1
+fi
+
 VERSION=$(node -p "require('$REL/package.json').version")
 FINAL="$BASE/releases/$VERSION-$(date +%Y%m%d-%H%M%S)-$COMMIT"
 mv "$REL" "$FINAL"
 REL="$FINAL"
-
-[ -f "$ENV_FILE" ] || { cp "$REPO/.env" "$ENV_FILE"; echo "seeded $ENV_FILE from repo .env — review it"; }
-ln -sf "$ENV_FILE" "$REL/.env"
 
 echo "running tests in $REL ..."
 (cd "$REL" && npm test >/dev/null && npm run check >/dev/null) || { echo "tests failed — aborting deploy"; exit 1; }

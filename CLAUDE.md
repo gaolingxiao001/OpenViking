@@ -38,7 +38,7 @@ pm2 logs lark-daemon --lines 100
 
 ## 运行时事实(排查问题先看这里)
 
-- **工作区改动不会生效**:线上跑的是 `~/.local/lib/lark-daemon/releases/<version>-<ts>-<commit>` 下的 release(pm2),`.env` 统一 symlink 到 `~/.local/lib/lark-daemon/env`。必须 commit 后跑 deploy.sh 才上线。
+- **工作区改动不会生效**:线上跑的是 `~/.local/lib/lark-daemon/releases/<version>-<ts>-<commit>` 下的 release(pm2)，配置默认来自 `~/.lark-daemon/deployment.json`。必须 commit 后发布 release 才能让代码上线。
 - **运行数据**:`~/.local/share/lark-daemon/lark-daemon.sqlite3`(activities / inbound / turns / conversations 表)。查一次交互到底发生了什么,先 `sqlite3` 查 activities。
 - **模型侧真相**:codex rollout 在 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,记录模型实际看到的输入和工具调用顺序,是 daemon activity 之外的第二证据源。
 - **effort 校验与失败通知**:`/effort` 按 `model/list` 里当前模型的 `supportedReasoningEfforts` 校验(不支持的档位如 minimal 会让每个 turn 都 400);turn failed 时 daemon 解包 API 错误(`turnErrorText`)记入 activity,并经 `notifyTurnFailure` 引用回复发信人。

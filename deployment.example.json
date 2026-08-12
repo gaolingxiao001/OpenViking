@@ -1,6 +1,28 @@
 {
   "version": 1,
   "defaultInstance": "primary",
+  "env": {
+    "TEAM_TASK_BOARD_URL": "",
+    "LARK_CLI_BIN": "/opt/homebrew/bin/lark-cli",
+    "CODEX_BIN": "/opt/homebrew/bin/codex",
+    "CLAUDE_BIN": "claude",
+    "LARK_DAEMON_LOG_LEVEL": "info",
+    "LARK_DAEMON_DRY_RUN": "false",
+    "LARK_DAEMON_IGNORED_SENDER_IDS": "",
+    "LARK_DAEMON_SEND_TIMEOUT_MS": "30000",
+    "LARK_DAEMON_SHUTDOWN_TIMEOUT_MS": "20000",
+    "LARK_DAEMON_MAX_REPLY_CHARS": "30000",
+    "LARK_DAEMON_MAX_EVENT_BYTES": "1000000",
+    "LARK_DAEMON_MAX_EVENT_AGE_MS": "86400000",
+    "LARK_DAEMON_IDLE_REACTION_AFTER_MS": "600000",
+    "LARK_DAEMON_RETENTION_MS": "7776000000",
+    "LARK_DAEMON_CODEX_EFFORT": "medium",
+    "LARK_DAEMON_CLAUDE_EFFORT": "medium",
+    "LARK_DAEMON_CLAUDE_MODEL": "",
+    "FALLBACK_MODEL": "gpt-5.6-sol",
+    "LARK_DAEMON_COGNITION_MAX_CHARS": "120000",
+    "LARK_DAEMON_HISTORY_LIMIT": "30"
+  },
   "agents": [
     {
       "id": "primary",

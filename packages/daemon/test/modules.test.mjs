@@ -28,6 +28,10 @@ describe('module boundaries', () => {
     fs.writeFileSync(manifestPath, `${JSON.stringify({
       version: 1,
       defaultInstance: 'beta',
+      env: {
+        LARK_DAEMON_LOG_LEVEL: 'info',
+        LARK_DAEMON_DRY_RUN: 'false',
+      },
       agents: [
         {
           id: 'alpha',
@@ -60,10 +64,16 @@ describe('module boundaries', () => {
     const original = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     Object.assign(process.env, env);
     let ecosystem;
+    let manifestOnlyEcosystem;
     try {
       delete require.cache[require.resolve(ecosystemPath)];
       const { buildEcosystem } = require(ecosystemPath);
       ecosystem = buildEcosystem(env);
+      manifestOnlyEcosystem = buildEcosystem({
+        HOME: '/Users/test',
+        PATH: '/safe/bin',
+        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+      });
     } finally {
       for (const [key, value] of Object.entries(original)) {
         if (value === undefined) delete process.env[key];
@@ -88,6 +98,7 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
     assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-sol');
     assert.equal(alpha.env.LARK_DAEMON_LOG_LEVEL, 'debug');
+    assert.equal(alpha.env.LARK_DAEMON_DRY_RUN, 'false');
     assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
     assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-terra');
     assert.equal(web.env.LARK_WEB_PORT, '3737');
@@ -101,6 +112,15 @@ describe('module boundaries', () => {
     );
     assert.match(updater.script, /packages\/updater\/src\/main\.mjs$/);
     assert.match(updater.env.LARK_UPDATER_SOCKET, /updater\.sock$/);
+    assert.equal(updater.env.LARK_DAEMON_DEPLOYMENT_MANIFEST, manifestPath);
+    assert.equal(updater.env.LARK_DAEMON_LOG_LEVEL, 'debug');
+    assert.equal(updater.env.LARK_DAEMON_DRY_RUN, undefined);
+    assert.equal(web.env.LARK_DAEMON_LOG_LEVEL, undefined);
+    const [manifestOnlyAlpha, , , manifestOnlyUpdater] = manifestOnlyEcosystem.apps;
+    assert.equal(manifestOnlyAlpha.env.LARK_DAEMON_LOG_LEVEL, 'info');
+    assert.equal(manifestOnlyAlpha.env.LARK_DAEMON_DRY_RUN, 'false');
+    assert.equal(manifestOnlyUpdater.env.LARK_DAEMON_LOG_LEVEL, undefined);
+    assert.equal(manifestOnlyUpdater.env.LARK_DAEMON_DRY_RUN, undefined);
     assert.deepEqual(JSON.parse(updater.env.LARK_UPDATER_TARGETS_JSON), {
       alpha: {
         app: 'lark-daemon-alpha',
@@ -147,7 +167,8 @@ describe('module boundaries', () => {
     assert.match(deploy, /DEPLOY_LOCK=.*deploy\.lock/);
     assert.match(deploy, /if ! mkdir "\$DEPLOY_LOCK"/);
     assert.match(deploy, /npm test[^\n]*npm run check/);
-    assert.match(deploy, /ln -sf "\$ENV_FILE" "\$REL\/\.env"/);
+    assert.match(deploy, /loadDeploymentManifest\(process\.env\)/);
+    assert.doesNotMatch(deploy, /ENV_FILE|REL\/\.env|REPO\/\.env|BASE\/env/);
     assert.match(deploy, /ln -sfn "\$REL" "\$BASE\/current"/);
     assert.match(deploy, /ln -sfn "\$PREV" "\$BASE\/rollback"/);
     assert.match(deploy, /lark-daemon upgrade <target\|all>/);
@@ -161,6 +182,8 @@ describe('module boundaries', () => {
     const bootstrap = fs.readFileSync(path.join(root, 'scripts', 'bootstrap-updater.sh'), 'utf8');
     assert.match(bootstrap, /pm2_control\(\)/);
     assert.match(bootstrap, /env -i/);
+    assert.match(bootstrap, /LARK_DAEMON_DEPLOYMENT_MANIFEST/);
+    assert.match(bootstrap, /LARK_DAEMON_LOG_LEVEL/);
     assert.match(bootstrap, /delete lark-updater/);
     assert.match(bootstrap, /start "\$CONFIG" --only lark-updater --update-env/);
     assert.doesNotMatch(bootstrap, /startOrReload/);

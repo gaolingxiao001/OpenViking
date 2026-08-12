@@ -11,6 +11,7 @@ const manifestPath = path.join(directory, 'deployment.json');
 fs.writeFileSync(manifestPath, `${JSON.stringify({
   version: 1,
   defaultInstance: 'beta',
+  env: {},
   agents: ['alpha', 'beta', 'gamma'].map((id, index) => ({
     id,
     displayName: id.toUpperCase(),
