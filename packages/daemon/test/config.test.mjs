@@ -30,14 +30,48 @@ describe('configuration safety', { concurrency: false }, () => {
   });
 
   it('builds an isolated SQLite spool and worker command only behind the feature flag', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-asr-config-'));
+    const asrConfigFile = path.join(directory, 'config.yaml');
+    fs.writeFileSync(asrConfigFile, 'asr: {}\n', { mode: 0o600 });
     setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'true');
     setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
     setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
     setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
-    const config = getConfig();
-    assert.match(config.meetingAudio.spoolPath, /meeting-audio-spool\.sqlite3$/);
-    assert.deepEqual(config.meetingAudio.workerArgs, ['worker.py']);
-    assert.match(config.meetingAudio.authoritySocketPath, /meeting-audio-authority\.sock$/);
+    setEnv('LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE', asrConfigFile);
+    try {
+      const config = getConfig();
+      assert.match(config.meetingAudio.spoolPath, /meeting-audio-spool\.sqlite3$/);
+      assert.deepEqual(config.meetingAudio.workerArgs, ['worker.py', '--config', asrConfigFile]);
+      assert.equal(config.meetingAudio.asrConfigFile, asrConfigFile);
+      assert.match(config.meetingAudio.authoritySocketPath, /meeting-audio-authority\.sock$/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('requires a private ASR credential file instead of accepting secrets in worker env', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-asr-private-'));
+    const asrConfigFile = path.join(directory, 'config.yaml');
+    fs.writeFileSync(asrConfigFile, 'asr: {}\n', { mode: 0o644 });
+    setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'true');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
+    setEnv('LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE', asrConfigFile);
+    try {
+      assert.throws(() => getConfig(), /ASR_CONFIG_FILE must have mode 0600/);
+      fs.chmodSync(asrConfigFile, 0o600);
+      setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py","--config","other.yaml"]');
+      assert.throws(() => getConfig(), /must not contain --config/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a mismatched daemon and lark-cli profile', () => {
+    setEnv('LARK_DAEMON_PROFILE', 'cli_expected');
+    setEnv('LARKSUITE_CLI_PROFILE', 'cli_wrong');
+    assert.throws(() => getConfig(), /must match LARKSUITE_CLI_PROFILE/);
   });
 
   it('accepts only raw event mode', () => {
@@ -67,13 +101,14 @@ describe('release-owned system prompt', () => {
   it('loads the single prompt file and substitutes release configuration', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
-    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n');
+    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{LARK_DAEMON_UPGRADE_TARGET}}\n');
     try {
       assert.equal(loadSystemPrompt({
         systemPromptPath,
         teamTaskBoardUrl: 'https://board.example',
         agentName: '斯斯',
-      }), 'policy\n\nhttps://board.example\n\n斯斯\n');
+        upgradeTarget: 'sisi',
+      }), 'policy\n\nhttps://board.example\n\n斯斯\n\nsisi\n');
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

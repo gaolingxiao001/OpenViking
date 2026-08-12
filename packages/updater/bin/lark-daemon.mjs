@@ -1,9 +1,24 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { assertUpgradeTarget, defaultSocketPath } from '../src/targets.mjs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const { loadDeploymentEnv } = require('../../../deployment-config.cjs');
+const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const deploymentEnv = loadDeploymentEnv(projectDir, process.env);
+for (const [key, value] of Object.entries(deploymentEnv)) {
+  if (process.env[key] === undefined) process.env[key] = value;
+}
+const {
+  UPGRADE_TARGETS,
+  assertUpgradeTarget,
+  defaultSocketPath,
+} = await import('../src/targets.mjs');
 
 function usage() {
-  process.stderr.write('usage: lark-daemon upgrade <zayn|sally|all>\n');
+  process.stderr.write(`usage: lark-daemon upgrade <${UPGRADE_TARGETS.join('|')}>\n`);
 }
 
 function requestUpgrade(socketPath, target) {

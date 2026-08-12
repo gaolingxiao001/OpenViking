@@ -14,7 +14,20 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { publishLatestRelease } from '../src/publisher.mjs';
-import { cleanPm2ControlEnv, createUpdaterServer, upgradeTarget } from '../src/server.mjs';
+
+process.env.LARK_UPDATER_TARGETS_JSON = JSON.stringify({
+  zayn: {
+    app: 'lark-daemon-zayn',
+    readyUrl: 'http://127.0.0.1:3738/ready',
+    upgradeSharedWeb: false,
+  },
+  sally: {
+    app: 'lark-daemon-sally',
+    readyUrl: 'http://127.0.0.1:3740/ready',
+    upgradeSharedWeb: false,
+  },
+});
+const { cleanPm2ControlEnv, createUpdaterServer, upgradeTarget } = await import('../src/server.mjs');
 
 async function fixtureTempRoot(prefix) {
   return realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
@@ -301,7 +314,6 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
     { name: 'lark-daemon-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
     { name: 'lark-daemon-sally', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
     { name: 'lark-web', pm2_env: { status: 'online', pm_exec_path: webEntry } },
-    { name: 'lark-web-sally', pm2_env: { status: 'online', pm_exec_path: webEntry } },
   ];
   const result = await upgradeTarget('all', {
     releaseLink: fixture.releaseLink,
@@ -328,70 +340,12 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
   for (const app of ['lark-daemon-zayn', 'lark-daemon-sally', 'lark-web']) {
     assert.ok(calls.some((args) => args[0] === 'delete' && args[1] === app));
   }
-  assert.ok(calls.some((args) => args[0] === 'delete' && args[1] === 'lark-web-sally'));
   assert.deepEqual(fetches, [
     'http://127.0.0.1:3738/ready',
     'http://127.0.0.1:3740/ready',
     'http://127.0.0.1:3737/ready',
   ]);
   assert.deepEqual(calls.at(-1), ['save']);
-});
-
-test('first Zayn upgrade replaces the exact legacy PM2 name', async () => {
-  const fixture = await fixtureRelease();
-  const daemonEntry = path.join(fixture.release, 'packages', 'daemon', 'src', 'main.mjs');
-  await mkdir(path.dirname(daemonEntry), { recursive: true });
-  await writeFile(daemonEntry, '');
-  let jlistCalls = 0;
-  const calls = [];
-  await upgradeTarget('zayn', {
-    releaseLink: fixture.releaseLink,
-    publishReleaseImpl: useFixtureRelease(fixture),
-    execFileImpl: async (_command, args) => {
-      calls.push(args);
-      if (args[0] !== 'jlist') return { stdout: '' };
-      jlistCalls += 1;
-      return { stdout: JSON.stringify(jlistCalls === 1
-        ? [{ name: 'lark-daemon', pm2_env: { status: 'online', pm_exec_path: '/old/main.mjs' } }]
-        : [{ name: 'lark-daemon-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } }]) };
-    },
-    fetchImpl: async () => ({ ok: true }),
-    readyOptions: { attempts: 1, intervalMs: 0 },
-  });
-
-  assert.deepEqual(calls.map((args) => args[0]), [
-    'jlist', 'stop', 'start', 'jlist', 'delete', 'save',
-  ]);
-  assert.deepEqual(calls[1], ['stop', 'lark-daemon']);
-  assert.deepEqual(calls[4], ['delete', 'lark-daemon']);
-});
-
-test('failed first Zayn upgrade restores the stopped legacy process', async () => {
-  const fixture = await fixtureRelease();
-  const daemonEntry = path.join(fixture.release, 'packages', 'daemon', 'src', 'main.mjs');
-  await mkdir(path.dirname(daemonEntry), { recursive: true });
-  await writeFile(daemonEntry, '');
-  let jlistCalls = 0;
-  let fetchCalls = 0;
-  const calls = [];
-  await assert.rejects(upgradeTarget('zayn', {
-    releaseLink: fixture.releaseLink,
-    publishReleaseImpl: useFixtureRelease(fixture),
-    execFileImpl: async (_command, args) => {
-      calls.push(args);
-      if (args[0] !== 'jlist') return { stdout: '' };
-      jlistCalls += 1;
-      return { stdout: JSON.stringify(jlistCalls === 1
-        ? [{ name: 'lark-daemon', pm2_env: { status: 'online', pm_exec_path: '/old/main.mjs' } }]
-        : [{ name: 'lark-daemon-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } }]) };
-    },
-    fetchImpl: async () => ({ ok: (fetchCalls += 1) > 1, status: 503 }),
-    readyOptions: { attempts: 1, intervalMs: 0 },
-  }), /did not become ready/);
-
-  assert.ok(calls.some((args) => args[0] === 'delete' && args[1] === 'lark-daemon-zayn'));
-  assert.ok(calls.some((args) => args[0] === 'restart' && args[1] === 'lark-daemon'));
-  assert.ok(!calls.some((args) => args[0] === 'save'));
 });
 
 test('PM2 control commands discard metadata inherited from a managed caller', () => {
@@ -862,7 +816,17 @@ test('CLI upgrade command reaches the updater over the Unix socket', async (t) =
 
   const bin = fileURLToPath(new URL('../bin/lark-daemon.mjs', import.meta.url));
   const child = spawn(process.execPath, [bin, 'upgrade', 'sally'], {
-    env: { ...process.env, LARK_UPDATER_SOCKET: socketPath },
+    env: {
+      ...process.env,
+      LARK_UPDATER_SOCKET: socketPath,
+      LARK_UPDATER_TARGETS_JSON: JSON.stringify({
+        sally: {
+          app: 'lark-daemon-sally',
+          readyUrl: 'http://127.0.0.1:3740/ready',
+          upgradeSharedWeb: false,
+        },
+      }),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdout = [];

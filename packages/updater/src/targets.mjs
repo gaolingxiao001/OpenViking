@@ -1,25 +1,55 @@
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
-export const TARGETS = Object.freeze({
-  zayn: Object.freeze({
-    app: 'lark-daemon-zayn',
-    config: 'ecosystem.config.cjs',
-    readyUrl: 'http://127.0.0.1:3738/ready',
-    legacyApp: 'lark-daemon',
-  }),
-  sally: Object.freeze({
-    app: 'lark-daemon-sally',
-    config: 'ecosystem.config.cjs',
-    readyUrl: 'http://127.0.0.1:3740/ready',
-  }),
-});
+const require = createRequire(import.meta.url);
+const {
+  getDeploymentConfig,
+  updaterTargetsFor,
+} = require('../../../deployment-config.cjs');
+
+function parseUpdaterTargets(raw) {
+  let value;
+  try { value = JSON.parse(raw); } catch {
+    throw new Error('LARK_UPDATER_TARGETS_JSON must be valid JSON');
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length === 0) {
+    throw new Error('LARK_UPDATER_TARGETS_JSON must be a non-empty object');
+  }
+  return Object.fromEntries(Object.entries(value).map(([id, spec]) => {
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(id) || id === 'all') {
+      throw new Error(`invalid updater target id: ${id}`);
+    }
+    const expectedApp = `lark-daemon-${id}`;
+    if (spec?.app !== expectedApp) throw new Error(`${id}.app must be ${expectedApp}`);
+    if (spec?.readyUrl !== `http://127.0.0.1:${new URL(spec?.readyUrl).port}/ready`
+      || !/^http:\/\/127\.0\.0\.1:\d+\/ready$/.test(spec.readyUrl)) {
+      throw new Error(`${id}.readyUrl must be a loopback ready endpoint`);
+    }
+    if (typeof spec.upgradeSharedWeb !== 'boolean') {
+      throw new Error(`${id}.upgradeSharedWeb must be a boolean`);
+    }
+    return [id, Object.freeze({
+      app: expectedApp,
+      config: 'ecosystem.config.cjs',
+      readyUrl: spec.readyUrl,
+      upgradeSharedWeb: spec.upgradeSharedWeb,
+    })];
+  }));
+}
+
+const generatedTargets = process.env.LARK_UPDATER_TARGETS_JSON
+  ? parseUpdaterTargets(process.env.LARK_UPDATER_TARGETS_JSON)
+  : parseUpdaterTargets(JSON.stringify(
+    updaterTargetsFor(getDeploymentConfig(process.env)),
+  ));
+
+export const TARGETS = Object.freeze(generatedTargets);
 
 export const SHARED_WEB = Object.freeze({
   app: 'lark-web',
   config: 'ecosystem.config.cjs',
   readyUrl: 'http://127.0.0.1:3737/ready',
-  legacyApps: Object.freeze(['lark-web-sally']),
 });
 
 export const UPGRADE_TARGETS = Object.freeze([...Object.keys(TARGETS), 'all']);
@@ -28,8 +58,7 @@ export function getTarget(target) {
   if (typeof target !== 'string' || !Object.hasOwn(TARGETS, target)) {
     throw new Error(`target must be one of: ${UPGRADE_TARGETS.join(', ')}`);
   }
-  const spec = TARGETS[target];
-  return spec;
+  return TARGETS[target];
 }
 
 export function getUpgradeTargets(target) {
@@ -42,6 +71,10 @@ export function assertUpgradeTarget(target) {
     throw new Error(`target must be one of: ${UPGRADE_TARGETS.join(', ')}`);
   }
   return target;
+}
+
+export function shouldUpgradeSharedWeb(target) {
+  return target === 'all' || getTarget(target).upgradeSharedWeb === true;
 }
 
 export function defaultSocketPath(homeDir = os.homedir()) {

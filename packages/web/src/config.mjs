@@ -33,8 +33,8 @@ function assertLoopbackHost(name, host) {
 function parseInstances(raw, fallbackHost, fallbackPort) {
   if (!raw) {
     return Object.freeze([Object.freeze({
-      id: 'zayn',
-      label: 'Zayn',
+      id: 'agent',
+      label: 'Agent',
       host: fallbackHost,
       port: fallbackPort,
     })]);

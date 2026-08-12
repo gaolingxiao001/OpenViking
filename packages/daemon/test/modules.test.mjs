@@ -19,37 +19,50 @@ describe('module boundaries', () => {
     assert.equal(daemonProjectDir, root);
   });
 
-  it('defines two homomorphic daemons plus one shared web and updater', () => {
+  it('builds daemon, web, and updater identity from one environment instance', () => {
     const require = createRequire(import.meta.url);
     const ecosystemPath = path.join(root, 'ecosystem.config.cjs');
     delete require.cache[require.resolve(ecosystemPath)];
-    const ecosystem = require(ecosystemPath);
+    const { buildEcosystem } = require(ecosystemPath);
+    const ecosystem = buildEcosystem({
+      HOME: '/Users/test',
+      PATH: '/safe/bin',
+      LARK_DAEMON_INSTANCE_ID: 'sisi',
+      LARK_DAEMON_AGENT_NAME: '斯斯',
+      LARK_DAEMON_PROFILE: 'cli_sisi',
+      LARKSUITE_CLI_PROFILE: 'cli_sisi',
+      LARK_DAEMON_PORT: '3738',
+      LARK_DAEMON_DATA_DIR: '/Users/test/.local/share/lark-daemon-sisi',
+      LARK_DAEMON_WORKSPACE: '/Users/test/Documents/work/sisi-workspace',
+    });
     assert.deepEqual(
       ecosystem.apps.map((app) => app.name),
-      ['lark-daemon-zayn', 'lark-daemon-sally', 'lark-web', 'lark-updater'],
+      ['lark-daemon-sisi', 'lark-web', 'lark-updater'],
     );
-    const [zayn, sally, web, updater] = ecosystem.apps;
-    assert.match(zayn.script, /packages\/daemon\/src\/main\.mjs$/);
-    assert.equal(zayn.script, sally.script);
-    assert.equal(zayn.cwd, sally.cwd);
-    assert.equal(zayn.kill_timeout, sally.kill_timeout);
+    const [sisi, web, updater] = ecosystem.apps;
+    assert.match(sisi.script, /packages\/daemon\/src\/main\.mjs$/);
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
-    assert.equal(zayn.env.LARK_DAEMON_PORT, '3738');
-    assert.equal(zayn.env.LARK_DAEMON_DATA_DIR, undefined);
-    assert.equal(zayn.env.LARK_DAEMON_WORKSPACE, undefined);
-    assert.equal(sally.env.LARK_DAEMON_PORT, '3740');
-    assert.equal(sally.env.LARK_DAEMON_PROFILE, 'sally');
-    assert.equal(zayn.env.LARK_DAEMON_AGENT_NAME, undefined);
-    assert.equal(sally.env.LARK_DAEMON_AGENT_NAME, '斯斯');
+    assert.equal(sisi.env.LARK_DAEMON_PORT, '3738');
+    assert.equal(sisi.env.LARK_DAEMON_PROFILE, 'cli_sisi');
+    assert.equal(sisi.env.LARKSUITE_CLI_PROFILE, 'cli_sisi');
+    assert.equal(sisi.env.LARK_DAEMON_AGENT_NAME, '斯斯');
+    assert.equal(sisi.env.LARK_DAEMON_UPGRADE_TARGET, 'sisi');
     assert.equal(web.env.LARK_WEB_PORT, '3737');
+    assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'sisi');
     assert.deepEqual(
-      JSON.parse(web.env.LARK_WEB_INSTANCES).map(({ id, port }) => ({ id, port })),
-      [{ id: 'zayn', port: 3738 }, { id: 'sally', port: 3740 }],
+      JSON.parse(web.env.LARK_WEB_INSTANCES),
+      [{ id: 'sisi', label: '斯斯', host: '127.0.0.1', port: 3738 }],
     );
     assert.match(updater.script, /packages\/updater\/src\/main\.mjs$/);
     assert.match(updater.env.LARK_UPDATER_SOCKET, /updater\.sock$/);
-    assert.equal(zayn.wait_ready, true);
-    assert.equal(sally.wait_ready, true);
+    assert.deepEqual(JSON.parse(updater.env.LARK_UPDATER_TARGETS_JSON), {
+      sisi: {
+        app: 'lark-daemon-sisi',
+        readyUrl: 'http://127.0.0.1:3738/ready',
+        upgradeSharedWeb: true,
+      },
+    });
+    assert.equal(sisi.wait_ready, true);
     assert.equal(web.wait_ready, true);
     assert.equal(updater.wait_ready, true);
     assert.equal(fs.existsSync(path.join(root, 'ecosystem.sally.config.cjs')), false);
@@ -86,7 +99,7 @@ describe('module boundaries', () => {
     assert.match(deploy, /ln -sf "\$ENV_FILE" "\$REL\/\.env"/);
     assert.match(deploy, /ln -sfn "\$REL" "\$BASE\/current"/);
     assert.match(deploy, /ln -sfn "\$PREV" "\$BASE\/rollback"/);
-    assert.match(deploy, /lark-daemon upgrade zayn\|sally\|all/);
+    assert.match(deploy, /lark-daemon upgrade <target\|all>/);
     assert.match(deploy, /refusing to replace foreign CLI symlink/);
     assert.match(deploy, /refusing to replace existing CLI path/);
     assert.doesNotMatch(deploy, /pm2_control\(\)/);
@@ -113,7 +126,7 @@ describe('module boundaries', () => {
     );
     assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);
     assert.match(prompt, /Self-updates must go through an allowlisted external updater\/supervisor/);
-    assert.match(prompt, /lark-daemon upgrade zayn\|sally\|all/);
+    assert.match(prompt, /lark-daemon upgrade \{\{LARK_DAEMON_UPGRADE_TARGET\}\}/);
     assert.match(prompt, /without running `deploy\.sh`/);
     assert.match(prompt, /may manage an explicitly named sibling daemon\/web pair only after verifying/);
     assert.match(prompt, /Never use broad PM2 selectors or touch unrelated applications/);

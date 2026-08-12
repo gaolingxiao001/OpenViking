@@ -10,6 +10,7 @@ import {
   defaultReleaseLink,
   defaultSocketPath,
   getUpgradeTargets,
+  shouldUpgradeSharedWeb,
 } from './targets.mjs';
 import { publishLatestRelease } from './publisher.mjs';
 
@@ -168,14 +169,6 @@ async function upgradeApp(spec, {
   const previous = processes.find((processInfo) => processInfo?.name === spec.app) || null;
   const previousWasOnline = previous?.pm2_env?.status === 'online';
   const previousConfig = previous ? await previousConfigForProcess(previous, release) : null;
-  const legacy = spec.legacyApp
-    ? processes.find((processInfo) => processInfo?.name === spec.legacyApp) || null
-    : null;
-  const legacyWasOnline = legacy?.pm2_env?.status === 'online';
-
-  if (legacyWasOnline) {
-    await execFileImpl(pm2Bin, ['stop', spec.legacyApp], { timeout: 30_000, env: pm2Env });
-  }
   if (previous) {
     await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: pm2Env });
   }
@@ -206,29 +199,7 @@ async function upgradeApp(spec, {
         await execFileImpl(pm2Bin, ['stop', spec.app], { timeout: 30_000, env: pm2Env }).catch(() => {});
       }
     }
-    if (legacyWasOnline) {
-      // The one-time Zayn process rename cannot bind the same port until the
-      // legacy app is stopped. Restore it if the replacement fails to become
-      // ready, so a naming migration never strands the bot offline.
-      await execFileImpl(pm2Bin, ['restart', spec.legacyApp], { timeout: 60_000, env: pm2Env }).catch(() => {});
-      await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions).catch(() => {});
-    }
     throw error;
-  }
-
-  if (legacy) {
-    await execFileImpl(pm2Bin, ['delete', spec.legacyApp], { timeout: 30_000, env: pm2Env });
-  }
-}
-
-async function removeLegacyApps(apps, { pm2Bin, execFileImpl, pm2Env }) {
-  if (apps.length === 0) return;
-  const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env });
-  const present = new Set(processes.map((processInfo) => processInfo?.name));
-  for (const app of apps) {
-    if (present.has(app)) {
-      await execFileImpl(pm2Bin, ['delete', app], { timeout: 30_000, env: pm2Env });
-    }
   }
 }
 
@@ -285,9 +256,9 @@ export async function upgradeTarget(target, {
       upgradedApps.push(spec.app);
     }
 
-    // The shared Activity Web is release-wide rather than owned by either bot.
-    // Roll it with the two daemons only for the explicit `all` operation.
-    if (target === 'all') {
+    // Single-instance installations roll their shared Activity Web with their
+    // only daemon. Multi-instance installs keep the explicit `all` boundary.
+    if (shouldUpgradeSharedWeb(target)) {
       await upgradeApp(SHARED_WEB, {
         release,
         configPath,
@@ -298,7 +269,6 @@ export async function upgradeTarget(target, {
         pm2Env,
       });
       upgradedApps.push(SHARED_WEB.app);
-      await removeLegacyApps(SHARED_WEB.legacyApps, { pm2Bin, execFileImpl, pm2Env });
     }
     await execFileImpl(pm2Bin, ['save'], { timeout: 30_000, env: pm2Env });
 

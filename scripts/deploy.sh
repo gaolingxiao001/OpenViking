@@ -7,7 +7,7 @@
 # release symlinks its .env to it, so edits there survive publishes.
 #
 # This script deliberately does not touch PM2. After the initial bootstrap,
-# normal updates use only `lark-daemon upgrade zayn|sally|all`; the updater
+# normal updates use only `lark-daemon upgrade <target|all>`; the updater
 # fetches trusted upstream main and publishes the release itself.
 set -euo pipefail
 
@@ -78,4 +78,4 @@ ln -sfn "$CLI_TARGET" "$CLI_LINK"
 # successful `upgrade all`.
 echo "published $REL"
 echo "bootstrap/refresh the updater with: ./scripts/bootstrap-updater.sh"
-echo "then roll out with: lark-daemon upgrade zayn|sally|all"
+echo "then roll out with: lark-daemon upgrade <target|all>"

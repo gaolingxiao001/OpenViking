@@ -23,7 +23,7 @@ npm test && npm run check
 npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 ```
 
-首次上线用 `./scripts/deploy.sh` 发布 bootstrap release，再启动 updater。此后代码合入并 push 到 upstream `main` 后，只需 `lark-daemon upgrade zayn|sally|all`：updater 会自行 fetch、打包、跑测试、发布并滚动目标，不再手动执行 deploy（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次发布时从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
+首次上线用 `./scripts/deploy.sh` 发布 bootstrap release，再启动 updater。此后代码合入并 push 到 upstream `main` 后，只需 `lark-daemon upgrade <instance-id>`：updater 会自行 fetch、打包、跑测试、发布并滚动目标，不再手动执行 deploy（见「日常运维」）。部署配置集中在 `~/.local/lib/lark-daemon/env`：首次发布时从仓库 `.env` 播种，之后不随 release 覆盖。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
 
 ## 交互规则
 
@@ -32,7 +32,7 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 - 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn；已有 turn 时继续沿用即时 steer。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和其他暂不支持的消息不会触发回复。
-- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；prompt 和代码更新通过 `lark-daemon upgrade zayn|sally|all` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。
+- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。
 - 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；只有决定处理且预计是长工作时，才调用 `react_to_lark_message` 的 `temporary: true` 发一个 `OnIt`。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。MCP sidecar 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
@@ -67,21 +67,23 @@ npm run start:web      # 127.0.0.1:3737
 ## 日常运维
 
 ```bash
-pm2 status lark-daemon-zayn lark-daemon-sally lark-web lark-updater
-pm2 logs lark-daemon-zayn --lines 100
+pm2 status lark-daemon-<instance-id> lark-web lark-updater
+pm2 logs lark-daemon-<instance-id> --lines 100
 curl http://127.0.0.1:3737/ready
 ./scripts/deploy.sh [git-ref]
-lark-daemon upgrade sally
+lark-daemon upgrade <instance-id>
 lark-daemon upgrade all
 ```
 
 `deploy.sh` 是首次安装或 updater 控制面协议变更时的 bootstrap 工具，不是日常升级步骤。
 
-`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取任一 Agent 的源码 checkout。它只接受 `zayn` / `sally` / `all`，从固定的 `https://github.com/ZaynJarvis/lark-daemon.git`、`main` 分支 fetch 到 updater 自有的 bare mirror；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先从 Git archive 打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 精确滚动目标并校验 `/ready`；`all` 会依次升级两个 daemon 和共享 Web。相同 commit 的第二次请求直接复用已验证 release。整个发布与滚动过程持有同一把 deploy lock。
+`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 `LARK_DAEMON_INSTANCE_ID` 和 `all`，从固定的 `https://github.com/ZaynJarvis/lark-daemon.git`、`main` 分支 fetch 到 updater 自有的 bare mirror；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先从 Git archive 打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 同时滚动 daemon 和共享 Web，并校验 `/ready`。相同 commit 的第二次请求直接复用已验证 release。整个发布与滚动过程持有同一把 deploy lock。
 
-PM2 的固定拓扑是 `lark-daemon-zayn`、`lark-daemon-sally`、共享 `lark-web`、共享 `lark-updater`。两个 daemon 来自同一模板，只替换 profile、dataDir、workspace、model、端口和 OV config。Web 入口保持为 `127.0.0.1:3737`，通过固定 loopback allowlist 在两个 daemon 间切换，不接受客户端传入任意 upstream。
+这是单实例部署。PM2 名、updater allowlist、Web target 和 agent 自升级命令都从 `LARK_DAEMON_INSTANCE_ID` 派生；profile、端口、dataDir、workspace、model 和 OV config 直接读取同一份持久 env。代码没有旧实例 alias 或迁移分支。替换 agent 时，先显式删除旧 PM2 app，再修改 env 并启动新 id。Web 入口保持为 `127.0.0.1:3737`，只代理该实例的 loopback target，不接受客户端传入任意 upstream。
 
-首次安装，或 release 修改了 updater 自身的协议 / target allowlist 时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再由任一 Agent 调用 `lark-daemon upgrade zayn|sally|all`。升级 sibling 可以同步验收；升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应由另一个 Agent 或 `/status` 验收。
+首次安装，或 release 修改了 updater 自身的协议 / target allowlist 时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `lark-daemon upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
+
+Meeting audio 默认关闭。启用时，`LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE` 必须指向 daemon 用户拥有、权限为 `0600` 的外部 YAML；ASR token 放在该文件里，不放进共享 `.env` 或 PM2 环境。YAML 的 provider 字段由外部 `meeting-asr-poc` 定义。
 
 ## Activity 页面
 
