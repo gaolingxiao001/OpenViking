@@ -40,7 +40,9 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 
 ## 飞书前置条件
 
-飞书应用需要：
+仓库根目录的 [`permission.json`](./permission.json) 是完整功能权限清单。首次配置应用时，在飞书开放平台进入「开发配置 → 权限管理 → 批量开通」，导入该文件；具体格式和审核规则见[官方权限申请说明](https://open.feishu.cn/document/server-docs/application-scope/introduction?lang=zh-CN)。清单覆盖 daemon 可调用的文档、消息、任务、会议等完整能力，并非最小权限集；正式环境应按实际用途删减权限、限制应用可见范围。新增的需审核权限只有在创建应用版本、发布并经管理员审核后才会生效。
+
+只运行基础消息链路至少需要：
 
 1. 使用长连接订阅 `im.message.receive_v1`。
 2. 私聊消息权限 `im:message.p2p_msg`（或对应只读权限）。
@@ -49,7 +51,9 @@ npm run start:daemon   # 前台验证：curl http://127.0.0.1:3738/ready
 5. 获取机器人所在群列表权限 `im:chat:read`。
 6. 把机器人加入需要参与的群，并把应用可见范围限制为自己的日常使用范围。
 
-本机的 `lark-cli` 和 `codex` 需要已经登录。daemon 会固定启动时选中的 lark profile，不会跟随后续默认 profile 的变化。
+截至 `lark-cli 1.0.86`，CLI 没有导入或发布开放平台应用权限清单的命令：`lark-cli application` 只管理 slash command，`lark-cli apps` 管理的是妙搭应用。不要用 `lark-cli auth login` 处理 bot 缺权；bot scope 必须在开发者后台导入、发布并完成审核。清单中的 user scope 还需要对应用户执行 OAuth 登录授权。
+
+本机 `lark-cli` 的目标 profile 必须已配置且 bot identity 为 `ready`；只有使用 user scope 时才需要额外 OAuth 登录。`codex` 需要已经登录。daemon 会固定启动时选中的 lark profile，不会跟随后续默认 profile 的变化。
 
 ## 本地开发验证
 
