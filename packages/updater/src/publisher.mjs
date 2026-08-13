@@ -94,7 +94,14 @@ async function ensureMirror({ mirrorDir, remoteUrl, gitBin, execFileImpl }) {
 }
 
 async function currentRelease(baseDir) {
-  const releasesRoot = path.join(baseDir, 'releases');
+  // `baseDir` may be reached through a compatibility symlink (for example
+  // /home -> /data00/home). Compare canonical paths so the current release
+  // is not rejected solely because `current` was resolved but `releases` was
+  // not.
+  const releasesRoot = await realpath(path.join(baseDir, 'releases')).catch((error) => {
+    if (error?.code === 'ENOENT') return path.resolve(baseDir, 'releases');
+    throw error;
+  });
   const release = await realpath(path.join(baseDir, 'current')).catch((error) => {
     if (error?.code === 'ENOENT') return null;
     throw error;
