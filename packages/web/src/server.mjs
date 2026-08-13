@@ -55,7 +55,7 @@ function sendJson(response, status, body, extraHeaders = {}) {
   sendBuffer(response, status, 'application/json; charset=utf-8', payload, extraHeaders);
 }
 
-function parseLoopbackAuthority(authority, expectedPort) {
+function parseHttpAuthority(authority, expectedPort) {
   if (typeof authority !== 'string' || authority.length > 255 || /[@/\\\s]/.test(authority)) {
     return null;
   }
@@ -65,8 +65,7 @@ function parseLoopbackAuthority(authority, expectedPort) {
   } catch {
     return null;
   }
-  const hostname = parsed.hostname.toLowerCase();
-  if (!['127.0.0.1', 'localhost', '[::1]'].includes(hostname)) return null;
+  if (!parsed.hostname) return null;
   if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return null;
   const effectivePort = parsed.port ? Number(parsed.port) : 80;
   if (effectivePort !== expectedPort) return null;
@@ -74,7 +73,7 @@ function parseLoopbackAuthority(authority, expectedPort) {
 }
 
 function requestIsSameOrigin(request, expectedPort) {
-  const authority = parseLoopbackAuthority(request.headers.host, expectedPort);
+  const authority = parseHttpAuthority(request.headers.host, expectedPort);
   if (!authority) return false;
   const origin = request.headers.origin;
   if (origin === undefined) return true;

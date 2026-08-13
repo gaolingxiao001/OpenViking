@@ -30,6 +30,12 @@ function assertLoopbackHost(name, host) {
   }
 }
 
+function assertWebBindHost(host) {
+  if (!['0.0.0.0', '::', '127.0.0.1', '::1', 'localhost'].includes(host)) {
+    throw new Error('LARK_WEB_HOST must be a wildcard or loopback address');
+  }
+}
+
 function parseInstances(raw, fallbackHost, fallbackPort) {
   if (!raw) {
     return Object.freeze([Object.freeze({
@@ -84,7 +90,7 @@ export function getConfig() {
   const port = intEnv('LARK_WEB_PORT', 3737, { min: 1, max: 65535 });
   const daemonHost = process.env.LARK_WEB_DAEMON_HOST || '127.0.0.1';
   const daemonPort = intEnv('LARK_WEB_DAEMON_PORT', 3738, { min: 1, max: 65535 });
-  assertLoopbackHost('LARK_WEB_HOST', host);
+  assertWebBindHost(host);
   assertLoopbackHost('LARK_WEB_DAEMON_HOST', daemonHost);
   const instances = parseInstances(process.env.LARK_WEB_INSTANCES, daemonHost, daemonPort);
   const defaultInstance = process.env.LARK_WEB_DEFAULT_INSTANCE || instances[0].id;

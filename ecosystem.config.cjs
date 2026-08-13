@@ -16,7 +16,7 @@ const updaterDir = path.join(releaseDir, 'packages', 'updater');
 const executablePath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
 
 const common = Object.freeze({
-  interpreter: '/opt/homebrew/bin/node',
+  interpreter: process.execPath,
   exec_mode: 'fork',
   instances: 1,
   autorestart: true,
@@ -113,7 +113,7 @@ function buildEcosystem(sourceEnv = process.env) {
         listen_timeout: 10000,
         env: {
           NODE_ENV: 'production',
-          LARK_WEB_HOST: '127.0.0.1',
+          LARK_WEB_HOST: '0.0.0.0',
           LARK_WEB_PORT: '3737',
           LARK_WEB_DEFAULT_INSTANCE: deployment.defaultInstance,
           LARK_WEB_INSTANCES: webTargetsJson,
@@ -137,7 +137,7 @@ function buildEcosystem(sourceEnv = process.env) {
           LARK_UPDATER_TARGETS_JSON: updaterTargetsJson,
           LARK_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
           LARK_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),
-          LARK_UPDATER_REMOTE_URL: 'https://github.com/ZaynJarvis/lark-daemon.git',
+          LARK_UPDATER_REMOTE_URL: 'git@code.byted.org:data-arch/lark-daemon.git',
           LARK_UPDATER_REMOTE_BRANCH: 'main',
           LARK_UPDATER_SOCKET: path.join(shareDir, 'lark-daemon', 'updater.sock'),
           PATH: `${executablePath}:${inheritedPath}`,
