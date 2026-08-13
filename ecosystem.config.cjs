@@ -71,6 +71,18 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_DATA_DIR: agent.dataDir,
       LARK_DAEMON_WORKSPACE: agent.workspace,
       LARK_DAEMON_CODEX_MODEL: agent.model,
+      ...(agent.meetingAudio ? {
+        LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
+        LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID: agent.meetingAudio.targetChatId,
+        LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
+        LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
+          path.join(daemonDir, 'worker', 'meeting_asr_worker.py'),
+          '--worker-dir',
+          path.join(releaseDir, 'meeting-asr'),
+        ]),
+        LARK_DAEMON_MEETING_AUDIO_WORKER_CWD: releaseDir,
+        LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
+      } : {}),
       OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
       OPENVIKING_CREDENTIAL_SOURCE: 'cli',
       OPENVIKING_MEMORY_ENABLED: '1',

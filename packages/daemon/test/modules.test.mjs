@@ -42,6 +42,11 @@ describe('module boundaries', () => {
           workspace: '/Users/test/Documents/work/alpha-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.alpha',
           model: 'gpt-5.6-sol',
+          meetingAudio: {
+            targetChatId: 'oc_target12345678',
+            pythonCommand: '/usr/bin/python3',
+            asrConfigFile: '/Users/test/.config/lark-daemon/alpha-asr.yaml',
+          },
         },
         {
           id: 'beta',
@@ -97,10 +102,19 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.LARK_DAEMON_UPGRADE_TARGET, 'alpha');
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
     assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-sol');
+    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, 'true');
+    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID, 'oc_target12345678');
+    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND, '/usr/bin/python3');
+    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE, '/Users/test/.config/lark-daemon/alpha-asr.yaml');
+    assert.deepEqual(JSON.parse(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON).slice(1, 3), [
+      '--worker-dir',
+      path.join(root, 'meeting-asr'),
+    ]);
     assert.equal(alpha.env.LARK_DAEMON_LOG_LEVEL, 'debug');
     assert.equal(alpha.env.LARK_DAEMON_DRY_RUN, 'false');
     assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
     assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-terra');
+    assert.equal(beta.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, undefined);
     assert.equal(web.env.LARK_WEB_PORT, '3737');
     assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'beta');
     assert.deepEqual(

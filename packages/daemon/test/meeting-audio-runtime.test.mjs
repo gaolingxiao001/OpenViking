@@ -667,6 +667,26 @@ assert not module.is_final_result(types.SimpleNamespace(kind="partial", text="no
     assert.equal(result.status, 0, result.stderr);
   });
 
+  it('loads the legacy private setup ASR token without putting it in worker env', () => {
+    const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
+    const script = `
+import importlib.util, pathlib, tempfile, yaml
+spec = importlib.util.spec_from_file_location("meeting_asr_worker", ${JSON.stringify(workerPath)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with tempfile.TemporaryDirectory() as directory:
+    path = pathlib.Path(directory) / ".setup.md"
+    path.write_text("Zayn:\\nignored\\n\\nASR:\\nprivate-token\\n", encoding="utf-8")
+    config = module.load_private_config(path, yaml)
+    assert config == {"doubao_api_key": "private-token"}
+`;
+    const result = spawnSync('python3', ['-c', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+
   it('steers once for a second-pass correction without text-deduping later speech', () => {
     const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
     const script = `

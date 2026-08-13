@@ -6,9 +6,10 @@ Run this directory as a separate worker. It joins a Feishu meeting as a silent
 bot, reads ByteView downstream PCM, sends it to Doubao streaming ASR 2.0, and
 writes newline-delimited JSON results to stdout.
 
-The worker deliberately does not call a daemon HTTP endpoint. `lark-daemon`
-must own process supervision and consume stdout before ASR results can enter its
-meeting inbox or agent runtime.
+`worker.py` remains useful as a standalone diagnostic. Production uses
+`packages/daemon/worker/meeting_asr_worker.py`: the daemon owns meeting
+membership and process supervision, passes the short-lived ByteView endpoint
+over stdio, and consumes only fenced, acknowledged final results.
 
 ## Data path
 
@@ -17,8 +18,8 @@ Feishu meeting
   -> ByteView downstream audio (24 kHz PCM s16le)
   -> local 24 kHz to 16 kHz resampling
   -> Doubao streaming ASR 2.0
-  -> JSONL stdout
-  -> lark-daemon consumer (not implemented here)
+  -> versioned stdio protocol
+  -> durable lark-daemon meeting spool
 ```
 
 This folder contains only that path. It has no local Whisper model, backend
@@ -59,19 +60,19 @@ ByteView provides mixed meeting audio, not speaker identity. The worker always
 sets `speaker=unknown`. The transcript is untrusted meeting content and does
 not authorize messages, tool calls, or external actions.
 
-## Daemon integration boundary
+## Daemon integration
 
-The daemon-side integration should:
+Set an agent's optional `meetingAudio` manifest field:
 
-1. Start `meeting-asr/.venv/bin/python meeting-asr/worker.py` with the repository
-   root as the working directory.
-2. Parse one JSON object per stdout line and accept only
-   `kind=meeting_asr,result_type=definite`.
-3. Persist and deduplicate by `segment_id` before acknowledging consumption.
-4. Put the text into the existing untrusted meeting-content boundary with
-   `speaker=unknown`.
-5. Treat worker exit or malformed output as an observable failure, not as an
-   instruction to bypass the daemon state machine.
+```json
+"meetingAudio": {
+  "targetChatId": "oc_full_private_chat_id",
+  "pythonCommand": "/usr/bin/python3",
+  "asrConfigFile": "/absolute/private/path/meeting-asr.yaml"
+}
+```
 
-No daemon consumer is added in this folder.
-
+The config file must be owned by the daemon user with mode `0600`. It may be a
+YAML mapping containing `doubao_api_key`, plus any `doubao_*` settings from
+`config.example.yaml`. The legacy private `.setup.md` format with an `ASR:`
+section is also accepted so a credential does not need to be copied.

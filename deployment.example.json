@@ -32,7 +32,12 @@
       "dataDir": "/Users/you/.local/share/lark-daemon-primary",
       "workspace": "/Users/you/Documents/work/primary-workspace",
       "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
-      "model": "gpt-5.6-sol"
+      "model": "gpt-5.6-sol",
+      "meetingAudio": {
+        "targetChatId": "oc_your_private_target_chat",
+        "pythonCommand": "/usr/bin/python3",
+        "asrConfigFile": "/Users/you/.config/lark-daemon/meeting-asr-primary.yaml"
+      }
     },
     {
       "id": "research",
