@@ -1,0 +1,19 @@
+# lark-cli profile for the Feishu custom app. Authenticate it before running.
+lark_profile: cli_your_feishu_app_id
+
+# Command resolved from PATH. Do not put machine-specific absolute paths here.
+lark_bin: lark-cli
+
+# Doubao streaming ASR 2.0. The API key is read only from VOLC_ASR_API_KEY.
+doubao_endpoint: wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+doubao_resource_id: volc.seedasr.sauc.duration
+doubao_packet_ms: 200
+doubao_end_window_size: 500
+doubao_enable_nonstream: true
+doubao_enable_ddc: false
+doubao_hotwords: []
+
+# Bounded handoff from ByteView audio receive to the Doubao WebSocket.
+audio_queue_size: 256
+shutdown_drain_ms: 5000
+
