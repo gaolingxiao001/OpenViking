@@ -38,7 +38,10 @@ const AGENT_FIELDS = Object.freeze([
   'workspace',
   'ovConfig',
   'model',
+  'meetingAudio',
 ]);
+
+const MEETING_AUDIO_FIELDS = Object.freeze(['targetChatId', 'asrConfigFile', 'pythonCommand']);
 
 function resolveDeploymentManifestPath(env = process.env) {
   const override = typeof env.LARK_DAEMON_DEPLOYMENT_MANIFEST === 'string'
@@ -106,6 +109,31 @@ function parseAgent(value, index) {
   if (!Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) {
     throw new Error(`${label}.port must be an integer between 1 and 65535`);
   }
+  let meetingAudio = null;
+  if (value.meetingAudio !== undefined && value.meetingAudio !== null) {
+    if (typeof value.meetingAudio !== 'object' || Array.isArray(value.meetingAudio)) {
+      throw new Error(`${label}.meetingAudio must be an object`);
+    }
+    assertKnownFields(value.meetingAudio, MEETING_AUDIO_FIELDS, `${label}.meetingAudio`);
+    const targetChatId = manifestString(
+      value.meetingAudio.targetChatId,
+      `${label}.meetingAudio.targetChatId`,
+    );
+    if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(targetChatId)) {
+      throw new Error(`${label}.meetingAudio.targetChatId must be a full oc_ chat ID`);
+    }
+    meetingAudio = Object.freeze({
+      targetChatId,
+      pythonCommand: manifestAbsolutePath(
+        value.meetingAudio.pythonCommand,
+        `${label}.meetingAudio.pythonCommand`,
+      ),
+      asrConfigFile: manifestAbsolutePath(
+        value.meetingAudio.asrConfigFile,
+        `${label}.meetingAudio.asrConfigFile`,
+      ),
+    });
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -115,6 +143,7 @@ function parseAgent(value, index) {
     workspace: manifestAbsolutePath(value.workspace, `${label}.workspace`),
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     model: manifestString(value.model, `${label}.model`),
+    meetingAudio,
   });
 }
 
@@ -235,6 +264,29 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
     LARK_DAEMON_CODEX_MODEL: agent.model,
   });
+  if (agent.meetingAudio) {
+    Object.assign(env, {
+      LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
+      LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID: agent.meetingAudio.targetChatId,
+      LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
+      LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
+        path.join(__dirname, 'packages', 'daemon', 'worker', 'meeting_asr_worker.py'),
+        '--worker-dir',
+        path.join(__dirname, 'meeting-asr'),
+      ]),
+      LARK_DAEMON_MEETING_AUDIO_WORKER_CWD: __dirname,
+      LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
+    });
+  } else {
+    for (const key of [
+      'LARK_DAEMON_MEETING_AUDIO_ENABLED',
+      'LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID',
+      'LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND',
+      'LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON',
+      'LARK_DAEMON_MEETING_AUDIO_WORKER_CWD',
+      'LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE',
+    ]) delete env[key];
+  }
   return agent;
 }
 
