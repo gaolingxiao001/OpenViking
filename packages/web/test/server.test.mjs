@@ -203,6 +203,7 @@ describe('independent activity web server', { concurrency: false }, () => {
     await web.start();
     const port = web.address().port;
 
+    assert.equal((await request(port, '/', { headers: { host: `10.0.0.8:${port}` } })).status, 200);
     assert.equal((await request(port, '/', { headers: { host: 'example.test' } })).status, 403);
     assert.equal((await request(port, '/', {
       headers: { origin: `http://localhost:${port}` },

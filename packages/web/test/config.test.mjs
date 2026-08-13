@@ -25,6 +25,7 @@ afterEach(() => {
 });
 
 test('web config accepts a fixed loopback allowlist of daemon instances', () => {
+  process.env.LARK_WEB_HOST = '0.0.0.0';
   process.env.LARK_WEB_INSTANCES = JSON.stringify([
     { id: 'zayn', label: 'Zayn', host: '127.0.0.1', port: 3738 },
     { id: 'sally', label: '斯斯', host: 'localhost', port: 3740 },
@@ -36,6 +37,7 @@ test('web config accepts a fixed loopback allowlist of daemon instances', () => 
     { id: 'sally', label: '斯斯', port: 3740 },
   ]);
   assert.equal(config.defaultInstance, 'sally');
+  assert.equal(config.host, '0.0.0.0');
   assert.ok(Object.isFrozen(config.instances));
 });
 
@@ -69,4 +71,11 @@ test('web config rejects arbitrary upstreams, duplicate ids, and an unknown defa
   ]);
   process.env.LARK_WEB_DEFAULT_INSTANCE = 'sally';
   assert.throws(() => getConfig(), /must name an entry/);
+});
+
+test('web config rejects arbitrary bind hosts while allowing wildcard listeners', () => {
+  process.env.LARK_WEB_HOST = 'example.test';
+  assert.throws(() => getConfig(), /wildcard or loopback/);
+  process.env.LARK_WEB_HOST = '::';
+  assert.equal(getConfig().host, '::');
 });

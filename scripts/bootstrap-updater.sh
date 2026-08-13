@@ -7,7 +7,7 @@ set -euo pipefail
 BASE="$HOME/.local/lib/lark-daemon"
 CURRENT="$BASE/current"
 SOCKET="$HOME/.local/share/lark-daemon/updater.sock"
-NODE_BIN="/opt/homebrew/bin/node"
+NODE_BIN="$(command -v node || true)"
 
 pm2_control() {
   local clean_env=(
