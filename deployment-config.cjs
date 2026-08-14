@@ -41,7 +41,7 @@ const AGENT_FIELDS = Object.freeze([
   'meetingAudio',
 ]);
 
-const MEETING_AUDIO_FIELDS = Object.freeze(['targetChatId', 'asrConfigFile', 'pythonCommand']);
+const MEETING_AUDIO_FIELDS = Object.freeze(['asrConfigFile', 'pythonCommand']);
 
 function resolveDeploymentManifestPath(env = process.env) {
   const override = typeof env.LARK_DAEMON_DEPLOYMENT_MANIFEST === 'string'
@@ -115,15 +115,7 @@ function parseAgent(value, index) {
       throw new Error(`${label}.meetingAudio must be an object`);
     }
     assertKnownFields(value.meetingAudio, MEETING_AUDIO_FIELDS, `${label}.meetingAudio`);
-    const targetChatId = manifestString(
-      value.meetingAudio.targetChatId,
-      `${label}.meetingAudio.targetChatId`,
-    );
-    if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(targetChatId)) {
-      throw new Error(`${label}.meetingAudio.targetChatId must be a full oc_ chat ID`);
-    }
     meetingAudio = Object.freeze({
-      targetChatId,
       pythonCommand: manifestAbsolutePath(
         value.meetingAudio.pythonCommand,
         `${label}.meetingAudio.pythonCommand`,
@@ -267,7 +259,6 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
   if (agent.meetingAudio) {
     Object.assign(env, {
       LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
-      LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID: agent.meetingAudio.targetChatId,
       LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
       LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
         path.join(__dirname, 'packages', 'daemon', 'worker', 'meeting_asr_worker.py'),

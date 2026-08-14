@@ -73,7 +73,6 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_CODEX_MODEL: agent.model,
       ...(agent.meetingAudio ? {
         LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
-        LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID: agent.meetingAudio.targetChatId,
         LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
         LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
           path.join(daemonDir, 'worker', 'meeting_asr_worker.py'),
