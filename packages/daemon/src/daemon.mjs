@@ -284,11 +284,9 @@ export class LarkDaemon {
       if (this.meetingAudio) {
         this.meetingAudioRuntime = new MeetingRuntimeAdapter({
           spool: this.meetingAudioSpool,
-          authority: this.meetingDecisionAuthority,
           generationClock: this.meetingAudio.generationClock,
           flyReferences: this.meetingAudio.flyReferences,
           runtime: this.codex,
-          getRuntimeToken: () => this.store.getCognitionState().authorityToken,
           submitIngress: (action) => this.enqueueIngress(action),
           flushBufferedIngress: () => this.groupBurst.flushAll(),
           logger: this.logger.child({ component: 'meeting-runtime' }),
@@ -299,8 +297,8 @@ export class LarkDaemon {
         this.meetingDecisionAuthority.setRuntimeToken(
           this.store.getCognitionState().authorityToken,
         );
-        this.meetingAudioRuntime.start();
       }
+      this.meetingAudioRuntime?.start();
       this.meetingInboxNotifier.start();
       this.recordSystemActivity('system.subscriber_started', {
         summary: `${this.codex.runtime} runtime 已连接`,

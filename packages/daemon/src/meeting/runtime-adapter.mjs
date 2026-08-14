@@ -48,7 +48,6 @@ export class MeetingRuntimeAdapter {
     generationClock,
     flyReferences,
     runtime,
-    getRuntimeToken,
     submitIngress,
     flushBufferedIngress = null,
     logger = null,
@@ -58,14 +57,12 @@ export class MeetingRuntimeAdapter {
   }) {
     if (typeof spool?.claim !== 'function') throw new TypeError('live spool is required');
     if (typeof runtime?.deliverBatch !== 'function') throw new TypeError('runtime deliverBatch is required');
-    if (typeof getRuntimeToken !== 'function') throw new TypeError('getRuntimeToken is required');
     if (typeof submitIngress !== 'function') throw new TypeError('submitIngress is required');
     Object.assign(this, {
       spool,
       generationClock,
       flyReferences,
       runtime,
-      getRuntimeToken,
       submitIngress,
       flushBufferedIngress,
       logger,

@@ -9,7 +9,6 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { LarkDaemon } from '../src/daemon.mjs';
-import { LarkToolService, larkToolsForOptions } from '../src/lark-tools.mjs';
 import {
   FlyReferenceRing,
   GenericDecisionAuthority,
@@ -36,10 +35,6 @@ function envelope(type, id, event, atMs = Date.now()) {
   };
 }
 
-function capabilityFrom(text) {
-  return /decision_capability=([^\s\]]+)/.exec(text)?.[1] ?? null;
-}
-
 async function tick() {
   await new Promise((resolve) => setImmediate(resolve));
 }
@@ -61,8 +56,7 @@ describe('meeting audio runtime vertical slice', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it('runs join → final spool → start/steer → generic send → ended revoke without polluting MeetingStore', async () => {
-    const targetChatId = 'oc_target12345678';
+  it('runs join → final spool → target-free start/steer → receipt settlement without polluting MeetingStore', async () => {
     const runtimeToken = 'runtime_token_12345678';
     const generations = new MeetingGenerationClock();
     const flyReferences = new FlyReferenceRing();
@@ -84,13 +78,9 @@ describe('meeting audio runtime vertical slice', () => {
     };
     const runtimeAdapter = new MeetingRuntimeAdapter({
       spool,
-      authority,
       generationClock: generations,
       flyReferences,
       runtime,
-      targetChatId,
-      getRuntimeToken: () => runtimeToken,
-      getLatestLarkSeq: () => 0,
       submitIngress: async (action) => await action(),
       flushBufferedIngress() {},
       logger: quietLogger,
@@ -127,7 +117,6 @@ describe('meeting audio runtime vertical slice', () => {
       media,
       flyReferences,
       authority,
-      targetChatId,
       generationClock: generations,
       mediaEndpointProvider: async () => 'wss://media.example.test/short-lived-token',
       onSessionClosed: (closedSession) => spool.retireSession(closedSession.sessionEpoch),
@@ -198,6 +187,10 @@ describe('meeting audio runtime vertical slice', () => {
     assert.match(deliveries[0].text, /Fly-only context/);
     assert.match(deliveries[0].text, /source=local_asr no_source=true/);
     assert.match(deliveries[0].text, /speaker=unknown/);
+    assert.doesNotMatch(deliveries[0].text, /target_chat=/);
+    assert.doesNotMatch(deliveries[0].text, /decision_capability=/);
+    assert.doesNotMatch(deliveries[1].text, /target_chat=/);
+    assert.doesNotMatch(deliveries[1].text, /decision_capability=/);
     assert.deepEqual(spool.stats(), {
       pending: 0,
       inflight: 2,
@@ -208,64 +201,9 @@ describe('meeting audio runtime vertical slice', () => {
     assert.equal(workerAcks.length, 2, 'worker finals are ACKed after durable spool commit');
     assert.equal(store.stats().meetingEvents, 0, 'local ASR never enters the normal meeting database');
 
-    const firstCapability = capabilityFrom(deliveries[0].text);
-    const latestCapability = capabilityFrom(deliveries[1].text);
-    const calls = [];
-    const service = new LarkToolService({
-      larkCliBin: '/fake/lark-cli',
-      profile: 'test-profile',
-      projectDir: directory,
-      timeoutMs: 5_000,
-      maxTextChars: 1_000,
-      dryRun: false,
-      decisionCapabilityClaim: ({ capability, action, target }) => authority.claim(
-        decodeURIComponent(capability),
-        { runtimeToken, action, target },
-      ),
-    }, async (_command, args) => {
-      calls.push(args);
-      return {
-        code: 0,
-        signal: null,
-        stdout: JSON.stringify({ ok: true, data: { message_id: 'om_sentMeeting1234' } }),
-        stderr: '',
-        timedOut: false,
-      };
-    });
-    await assert.rejects(
-      () => service.sendMessage({
-        chat_id: targetChatId,
-        text: 'stale generation',
-        decision_capability: decodeURIComponent(firstCapability),
-      }),
-      /generation is stale/,
-    );
-    await assert.rejects(
-      () => service.sendMessage({
-        chat_id: targetChatId,
-        text: '<at user_id="ou_untrusted1234"></at> bypass',
-        decision_capability: decodeURIComponent(latestCapability),
-      }),
-      /must not contain Lark <at> mention tags/,
-    );
-    assert.equal(calls.length, 0, 'raw mention rejection happens before capability claim or send');
-    const sent = await service.sendMessage({
-      chat_id: targetChatId,
-      text: 'current decision',
-      decision_capability: decodeURIComponent(latestCapability),
-    });
-    assert.equal(sent.sent, true);
-    assert.equal(calls.length, 1);
-    assert.equal(
-      larkToolsForOptions({ decisionCapabilityClaim() {} })
-        .find((tool) => tool.name === 'send_lark_message')
-        .inputSchema.properties.decision_capability.type,
-      'string',
-    );
-
     runtimeAdapter.onTurnSucceeded({ receiptIds: deliveries.map((item) => item.receiptId) });
     assert.equal(spool.stats().consumed, 2);
-    assert.equal(authority.stats().active, 0, 'turn completion revokes every unused capability');
+    assert.equal(authority.stats().active, 0, 'ASR ingress never mints delivery authority');
 
     const stranded = spool.enqueue({
       sessionEpoch: session.sessionEpoch,
@@ -313,7 +251,6 @@ describe('meeting audio runtime vertical slice', () => {
     runtimeAdapter.stop();
     await coordinator.stop();
     await adapter.stop();
-    await service.close();
   });
 
   it('keeps joined ownership and applies bounded exponential worker restart', async () => {
@@ -788,18 +725,11 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     assert.ok(index('claim-socket-closed') < index('model-stop'));
   });
 
-  it('settles silent, pre-claim failure, abandonment, and post-claim failure receipts safely', async () => {
-    const runtimeToken = 'runtime_settlement_1234';
+  it('settles successful, failed, and abandoned target-free ingress receipts safely', async () => {
     const generations = new MeetingGenerationClock();
-    const authority = new GenericDecisionAuthority({
-      runtimeToken,
-      getCurrentGeneration: (epoch) => generations.current(epoch),
-      getLatestLarkSeq: () => 0,
-    });
     const deliveries = [];
     const adapter = new MeetingRuntimeAdapter({
       spool,
-      authority,
       generationClock: generations,
       flyReferences: new FlyReferenceRing(),
       runtime: {
@@ -808,9 +738,6 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
           return true;
         },
       },
-      targetChatId: 'oc_target12345678',
-      getRuntimeToken: () => runtimeToken,
-      getLatestLarkSeq: () => 0,
       submitIngress: async (action) => await action(),
       retryMs: 1,
       logger: quietLogger,
@@ -830,60 +757,38 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
       await tick();
     };
 
-    // Successful silence consumes the durable input and removes the unspent cap.
+    // A successful turn, including a silent decision, consumes its durable input.
     const silent = enqueue('epoch_silent_12345678', 'segment_silent_1234', 'silent decision');
     adapter.onReady(silent);
     await tick();
-    assert.equal(authority.decisionStatus(silent.sessionEpoch, silent.generation, silent.inputId), 'active');
+    assert.doesNotMatch(deliveries.at(-1).text, /target_chat=|decision_capability=/);
     adapter.onTurnSucceeded({ receiptIds: [silent.inputId] });
     assert.equal(spool.get(silent.inputId).status, 'consumed');
-    assert.equal(authority.decisionStatus(silent.sessionEpoch, silent.generation, silent.inputId), 'missing');
 
-    // Before claim, both failure and abandonment release and reissue the input.
+    // Failures and abandonment release the same ingress receipt for retry. Any
+    // Lark send is an independently fenced Agent action, not ASR adapter state.
     const retried = enqueue('epoch_retry_12345678', 'segment_retry_12345', 'retry decision');
     adapter.onReady(retried);
     await tick();
-    const firstRetryCapability = capabilityFrom(deliveries.at(-1).text);
+    const firstRetryText = deliveries.at(-1).text;
+    const firstRetryDeliveryCount = deliveries.length;
     adapter.onTurnFailed({ receiptIds: [retried.inputId] });
     assert.equal(spool.get(retried.inputId).status, 'pending');
     await settleTick();
-    const secondRetryCapability = capabilityFrom(deliveries.at(-1).text);
-    assert.notEqual(secondRetryCapability, firstRetryCapability);
+    assert.equal(deliveries.length, firstRetryDeliveryCount + 1);
+    assert.equal(deliveries.at(-1).text, firstRetryText);
     assert.equal(spool.get(retried.inputId).status, 'inflight');
     adapter.onTurnAbandoned({ receiptIds: [retried.inputId] });
     await settleTick();
-    const thirdRetryCapability = capabilityFrom(deliveries.at(-1).text);
-    assert.notEqual(thirdRetryCapability, secondRetryCapability);
+    assert.equal(deliveries.length, firstRetryDeliveryCount + 2);
+    assert.equal(deliveries.at(-1).text, firstRetryText);
     adapter.onTurnSucceeded({ receiptIds: [retried.inputId] });
-
-    // Once claim crosses the side-effect boundary, a failed turn consumes and
-    // fail-closes. It must never create a fresh capability or model delivery.
-    const claimed = enqueue('epoch_claimed_12345678', 'segment_claimed_1234', 'claimed decision');
-    adapter.onReady(claimed);
-    await tick();
-    const claimedDeliveryCount = deliveries.length;
-    const claimedCapability = decodeURIComponent(capabilityFrom(deliveries.at(-1).text));
-    authority.claim(claimedCapability, {
-      runtimeToken,
-      action: 'send_lark_message',
-      target: 'oc_target12345678',
-    });
-    adapter.onTurnFailed({ receiptIds: [claimed.inputId] });
-    await settleTick();
-    assert.equal(spool.get(claimed.inputId).status, 'consumed');
-    assert.equal(deliveries.length, claimedDeliveryCount);
-    assert.equal(authority.decisionStatus(claimed.sessionEpoch, claimed.generation, claimed.inputId), 'claimed');
+    assert.equal(spool.get(retried.inputId).status, 'consumed');
     adapter.stop();
   });
 
   it('drains durable backlogs beyond one claim batch and releases an unsubmitted tail', async () => {
-    const runtimeToken = 'runtime_backlog_12345678';
     const generations = new MeetingGenerationClock();
-    const authority = new GenericDecisionAuthority({
-      runtimeToken,
-      getCurrentGeneration: (epoch) => generations.current(epoch),
-      getLatestLarkSeq: () => 0,
-    });
     const deliveries = [];
     const runtime = {
       deliverBatch(items) {
@@ -893,13 +798,9 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     };
     const adapter = new MeetingRuntimeAdapter({
       spool,
-      authority,
       generationClock: generations,
       flyReferences: new FlyReferenceRing(),
       runtime,
-      targetChatId: 'oc_target12345678',
-      getRuntimeToken: () => runtimeToken,
-      getLatestLarkSeq: () => 0,
       submitIngress: async (action) => await action(),
       retryMs: 7,
       logger: quietLogger,
