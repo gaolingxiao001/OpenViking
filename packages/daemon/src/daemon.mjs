@@ -210,7 +210,6 @@ export class LarkDaemon {
           media,
           flyReferences,
           authority: this.meetingDecisionAuthority,
-          targetChatId: audioConfig.targetChatId,
           generationClock,
           mediaEndpointProvider: (meetingId) => this.lark.getMeetingRealtimeEndpoint(meetingId),
           onSessionClosed: (session) => {
@@ -289,7 +288,6 @@ export class LarkDaemon {
           generationClock: this.meetingAudio.generationClock,
           flyReferences: this.meetingAudio.flyReferences,
           runtime: this.codex,
-          targetChatId: this.config.meetingAudio.targetChatId,
           getRuntimeToken: () => this.store.getCognitionState().authorityToken,
           submitIngress: (action) => this.enqueueIngress(action),
           flushBufferedIngress: () => this.groupBurst.flushAll(),

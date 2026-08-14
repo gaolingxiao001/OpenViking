@@ -51,7 +51,6 @@ export class MeetingAudioCoordinator {
     media,
     flyReferences,
     authority,
-    targetChatId,
     generationClock,
     mediaEndpointProvider = null,
     onSessionClosed = null,
@@ -67,7 +66,6 @@ export class MeetingAudioCoordinator {
       media,
       flyReferences,
       authority,
-      targetChatId,
       generationClock,
       mediaEndpointProvider,
       onSessionClosed,
@@ -122,7 +120,6 @@ export class MeetingAudioCoordinator {
         return await this.media.start({
           ...entry.session,
           mediaEndpoint,
-          targetChatId: this.targetChatId,
         });
       } catch (error) {
         if (!this.stopped && this.joined.get(entry.session.meetingId) === entry) {

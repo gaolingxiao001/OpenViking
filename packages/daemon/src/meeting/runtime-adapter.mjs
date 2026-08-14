@@ -12,7 +12,7 @@ function field(value) {
 const CLAIM_BATCH_SIZE = 100;
 const MAX_BATCHES_PER_DRAIN = 5;
 
-export function formatMeetingInput(item, capability, flyReferences = [], targetChatId) {
+export function formatMeetingInput(item, flyReferences = []) {
   const input = item.input ?? {};
   const startMs = input.audioStartMs ?? input.startMs ?? null;
   const endMs = input.audioEndMs ?? input.endMs ?? null;
@@ -25,8 +25,6 @@ export function formatMeetingInput(item, capability, flyReferences = [], targetC
     `speaker=${field(input.speakerName ?? input.speaker ?? 'unknown')}`,
     'source=local_asr',
     'no_source=true',
-    `target_chat=${field(targetChatId)}`,
-    `decision_capability=${field(capability)}`,
   ];
   if (startMs !== null) metadata.push(`audio_start_ms=${startMs}`);
   if (endMs !== null) metadata.push(`audio_end_ms=${endMs}`);
@@ -47,11 +45,9 @@ export function formatMeetingInput(item, capability, flyReferences = [], targetC
 export class MeetingRuntimeAdapter {
   constructor({
     spool,
-    authority,
     generationClock,
     flyReferences,
     runtime,
-    targetChatId,
     getRuntimeToken,
     submitIngress,
     flushBufferedIngress = null,
@@ -61,17 +57,14 @@ export class MeetingRuntimeAdapter {
     clearTimer = clearTimeout,
   }) {
     if (typeof spool?.claim !== 'function') throw new TypeError('live spool is required');
-    if (typeof authority?.issue !== 'function') throw new TypeError('decision authority is required');
     if (typeof runtime?.deliverBatch !== 'function') throw new TypeError('runtime deliverBatch is required');
     if (typeof getRuntimeToken !== 'function') throw new TypeError('getRuntimeToken is required');
     if (typeof submitIngress !== 'function') throw new TypeError('submitIngress is required');
     Object.assign(this, {
       spool,
-      authority,
       generationClock,
       flyReferences,
       runtime,
-      targetChatId,
       getRuntimeToken,
       submitIngress,
       flushBufferedIngress,
@@ -129,25 +122,16 @@ export class MeetingRuntimeAdapter {
       for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
         const item = items[itemIndex];
         try {
-          this.authority.setRuntimeToken?.(this.getRuntimeToken());
           this.generationClock.observe(item.sessionEpoch, item.generation);
-          const issued = this.authority.issue({
-            sessionEpoch: item.sessionEpoch,
-            generation: item.generation,
-            decisionKey: item.inputId,
-            action: 'send_lark_message',
-            target: this.targetChatId,
-          });
           const references = this.flyReferences?.snapshot?.({
             meetingId: item.input?.meetingId,
           }) ?? [];
           const accepted = this.runtime.deliverBatch([{
-            text: formatMeetingInput(item, issued.capability, references, this.targetChatId),
+            text: formatMeetingInput(item, references),
             seq: null,
             receiptId: item.inputId,
           }]);
           if (accepted === false) {
-            this.authority.revokeDecision?.(item.sessionEpoch, item.generation, item.inputId);
             this.spool.release(item.inputId);
             for (const unprocessed of items.slice(itemIndex + 1)) {
               this.spool.release(unprocessed.inputId);
@@ -155,7 +139,6 @@ export class MeetingRuntimeAdapter {
             return this.retryMs;
           }
         } catch (error) {
-          this.authority.revokeDecision?.(item.sessionEpoch, item.generation, item.inputId);
           try { this.spool.release(item.inputId); } catch {}
           for (const unprocessed of items.slice(itemIndex + 1)) {
             try { this.spool.release(unprocessed.inputId); } catch {}
@@ -174,16 +157,6 @@ export class MeetingRuntimeAdapter {
   onTurnSucceeded({ receiptIds = [] } = {}) {
     for (const inputId of receiptIds) {
       try {
-        const item = this.spool.get(inputId);
-        if (item && this.authority.decisionStatus?.(
-          item.sessionEpoch,
-          item.generation,
-          item.inputId,
-        ) !== 'claimed') {
-          // A successful silent turn is a real decision too. Revoke its unused
-          // capability before consuming the receipt.
-          this.authority.revokeDecision?.(item.sessionEpoch, item.generation, item.inputId);
-        }
         this.spool.consume(inputId);
       } catch (error) {
         this.logger?.warn?.('meeting_spool_consume_failed', { error: error?.message });
@@ -201,19 +174,6 @@ export class MeetingRuntimeAdapter {
 
   _releaseReceipts(receiptIds) {
     for (const inputId of receiptIds) {
-      const item = this.spool.get(inputId);
-      if (!item) continue;
-      if (this.authority.decisionStatus?.(
-        item.sessionEpoch,
-        item.generation,
-        item.inputId,
-      ) === 'claimed') {
-        // Claim is the external side-effect boundary. Once crossed, retrying
-        // the model input cannot authorize another send and would loop forever.
-        try { this.spool.consume(inputId); } catch {}
-        continue;
-      }
-      this.authority.revokeDecision?.(item.sessionEpoch, item.generation, item.inputId);
       try { this.spool.release(inputId); } catch {}
     }
     if (receiptIds.length) this.scheduleDrain(this.retryMs);
