@@ -41,7 +41,7 @@ const AGENT_FIELDS = Object.freeze([
   'meetingAudio',
 ]);
 
-const MEETING_AUDIO_FIELDS = Object.freeze(['asrConfigFile', 'pythonCommand']);
+const MEETING_AUDIO_FIELDS = Object.freeze(['targetChatId', 'asrConfigFile', 'pythonCommand']);
 
 function resolveDeploymentManifestPath(env = process.env) {
   const override = typeof env.LARK_DAEMON_DEPLOYMENT_MANIFEST === 'string'
