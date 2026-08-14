@@ -103,7 +103,6 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
     assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-sol');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, 'true');
-    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID, 'oc_target12345678');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND, '/usr/bin/python3');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE, '/Users/test/.config/lark-daemon/alpha-asr.yaml');
     assert.deepEqual(JSON.parse(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON).slice(1, 3), [

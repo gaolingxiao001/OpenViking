@@ -34,8 +34,7 @@ function validManifest() {
         ovConfig: '/srv/lark-daemon/ov/alpha.json',
         model: 'gpt-5.6-sol',
         meetingAudio: {
-          targetChatId: 'oc_target12345678',
-          pythonCommand: '/usr/bin/python3',
+              pythonCommand: '/usr/bin/python3',
           asrConfigFile: '/srv/lark-daemon/secrets/alpha-asr.yaml',
         },
       },
