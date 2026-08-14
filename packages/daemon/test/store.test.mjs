@@ -55,6 +55,21 @@ describe('Store', () => {
     assert.equal(store.ingest(event('1')).inserted, false);
   });
 
+  it('resolves a quoted message author from inbound history or the journal', () => {
+    store.ingest(event('parent', 'original', { senderId: 'ou-author' }));
+    assert.deepEqual(store.resolveMessageAuthor('om-parent'), {
+      kind: 'user', chatId: 'oc-chat', senderId: 'ou-author',
+    });
+
+    store.appendCognitionJournal({
+      kind: 'delivery', messageId: 'om-mine', actor: 'me', chatId: 'oc-chat', text: 'sent by bot',
+    });
+    assert.deepEqual(store.resolveMessageAuthor('om-mine'), { kind: 'me' });
+
+    assert.equal(store.resolveMessageAuthor('om-never-seen'), null);
+    assert.equal(store.resolveMessageAuthor(null), null);
+  });
+
   it('looks an inbound row up by seq for failure notices', () => {
     const { inbound } = store.ingest(event('7', 'needs a reply'));
     const found = store.inboundBySeq(inbound.seq);

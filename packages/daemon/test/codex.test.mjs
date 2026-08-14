@@ -120,6 +120,32 @@ describe('formatting helpers', () => {
     );
   });
 
+  it('renders the daemon-resolved quote-reply target', () => {
+    const message = {
+      chatId: 'oc_chat1234abcd',
+      threadId: null,
+      messageId: 'om_msg1234abcd',
+      senderId: 'ou_user1234abcd',
+      createTimeMs: Date.UTC(2026, 0, 2, 3, 4, 5),
+      mentions: [],
+      content: 'who is this for?',
+    };
+    const prefix = '[chat=oc_chat1234abcd msg=om_msg1234abcd time=2026-01-02T03:04Z from=ou_user1234';
+    assert.equal(
+      formatInboundLine(message, null, { replyTo: { kind: 'me' } }),
+      `${prefix} reply_to=me] who is this for?`,
+    );
+    assert.equal(
+      formatInboundLine(message, null, { replyTo: { kind: 'user', chatId: 'oc_chat1234abcd', senderId: 'ou_other9999zzzz' } }),
+      `${prefix} reply_to=ou_other999] who is this for?`,
+    );
+    assert.equal(
+      formatInboundLine(message, null, { replyTo: { kind: 'unknown', id: 'om_gone5678wxyz' } }),
+      `${prefix} reply_to=om_gone5678] who is this for?`,
+    );
+    assert.equal(formatInboundLine(message, null, {}), `${prefix}] who is this for?`);
+  });
+
   it('puts the optional idle hint inside daemon-authenticated metadata', () => {
     const line = formatInboundLine({
       chatId: 'oc_chat1234abcd',

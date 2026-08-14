@@ -459,10 +459,21 @@ export class LarkDaemon {
       this.groupBurst.route({
         conversationKey: event.conversationKey,
         chatType: event.chatType,
-        text: formatInboundLine(event, null, idleHint ?? undefined),
+        text: formatInboundLine(event, null, { ...(idleHint ?? {}), replyTo: this.replyToHint(event) }),
         seq: result.inbound.seq,
       });
     });
+  }
+
+  // A quote-reply's target, resolved from local history: 'me' when the sender
+  // quoted one of the bot's own messages (a strong addressing signal). Plain
+  // thread membership (parent == thread root) is not a quote and stays untagged.
+  replyToHint(message) {
+    const parentId = message.parentId;
+    if (!parentId || parentId === message.messageId) return null;
+    if (message.threadRootId && parentId === message.threadRootId) return null;
+    const author = this.store.resolveMessageAuthor?.(parentId);
+    return author ?? { kind: 'unknown', id: parentId };
   }
 
   // A slash command and every later accepted message share one global order.
@@ -552,7 +563,10 @@ export class LarkDaemon {
     await this.journaledDaemonReply(last, notice, 'daemon_fallback_notice', `fallback-notice:${last.messageId}`);
     // Redeliver the failed turn to the fallback runtime. A failure of the retry
     // surfaces through the normal onTurnFailed path (runtime is codex now).
-    this.codex.deliverBatch(rows.map((row) => ({ text: formatInboundLine(row), seq: row.seq })));
+    this.codex.deliverBatch(rows.map((row) => ({
+      text: formatInboundLine(row, null, { replyTo: this.replyToHint(row) }),
+      seq: row.seq,
+    })));
     return true;
   }
 

@@ -212,8 +212,19 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
   const idleTag = Number.isFinite(idleForMs) && idleForMs >= 0
     ? ` idle=${Math.max(1, Math.floor(idleForMs / 1_000))}s`
     : '';
+  // Daemon-resolved quote-reply target: reply_to=me means the sender quoted one
+  // of the bot's own messages (strong addressing signal); otherwise the quoted
+  // message author's label, falling back to a shortened id stub.
+  const replyTo = authenticated?.replyTo;
+  const replyTag = replyTo
+    ? ` reply_to=${replyTo.kind === 'me'
+      ? 'me'
+      : replyTo.kind === 'user'
+        ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName)
+        : shortenId(replyTo.id)}`
+    : '';
   let line = `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}${idleTag}] ${oneLine(message.content)}`;
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}${replyTag}${idleTag}] ${oneLine(message.content)}`;
   if (Array.isArray(message.mentions) && message.mentions.length > 0) {
     const names = message.mentions.map((m) => `@${oneLine(m.name) || shortenId(m.id)}`).join(' ');
     line += ` [mentions: ${names}]`;
