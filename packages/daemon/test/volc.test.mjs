@@ -63,6 +63,30 @@ function store() {
       };
       return managedTurn;
     },
+    prepareManagedTurnContinuation: ({
+      runtime,
+      authorityToken,
+      sessionId,
+      epoch,
+      expectedUserEventId,
+      body,
+      bridge,
+    }) => {
+      assert.equal(managedTurn.runtime, runtime);
+      assert.equal(managedTurn.authorityToken, authorityToken);
+      assert.equal(managedTurn.sessionId, sessionId);
+      assert.equal(managedTurn.epoch, epoch);
+      assert.equal(managedTurn.status, 'ACCEPTED');
+      assert.equal(managedTurn.expectedUserEventId, expectedUserEventId);
+      managedTurn = {
+        ...managedTurn,
+        status: 'CONTINUATION_READY',
+        expectedUserEventId: null,
+        continuationBody: body,
+        bridge,
+      };
+      return managedTurn;
+    },
     clearManagedTurn: (runtime, expected = {}) => {
       if (!managedTurn || managedTurn.runtime !== runtime) return false;
       if (expected.sessionId && managedTurn.sessionId !== expected.sessionId) return false;
@@ -182,6 +206,175 @@ describe('Volc managed-agent runtime', () => {
     assert.match(posted.events[1].content[0].text, /daemon relays only the final agent\.message locally/);
     assert.equal(agent.turnInProgress, false);
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
+  });
+
+  it('bridges strict text tool decisions across remote subturns before completing once', async () => {
+    const toolDefinitions = [
+      {
+        name: 'list_lark_chats',
+        description: 'List chats.',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { limit: { type: 'integer', minimum: 1, maximum: 500 } },
+        },
+      },
+      {
+        name: 'reply_lark_message',
+        description: 'Reply to a message.',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$' },
+            text: { type: 'string', minLength: 1 },
+          },
+          required: ['message_id'],
+        },
+      },
+    ];
+    const decisions = [
+      JSON.stringify({
+        protocol: 'lark-daemon-tools/v1',
+        kind: 'tool_call',
+        call_id: 'read_1',
+        name: 'list_lark_chats',
+        arguments: { limit: 5 },
+      }),
+      JSON.stringify({
+        protocol: 'lark-daemon-tools/v1',
+        kind: 'tool_call',
+        call_id: 'reply_1',
+        name: 'reply_lark_message',
+        arguments: { message_id: 'om_first12345678', text: 'done' },
+      }),
+    ];
+    const posts = [];
+    let streamIndex = 0;
+    const fetch = async (url, options = {}) => {
+      if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+      if (url.endsWith('/sessions') && options.method === 'POST') {
+        return json(templateSession('sesn-bridge123456'));
+      }
+      if (url.endsWith('/events/stream')) {
+        const index = streamIndex++;
+        const events = [
+          { id: `evt-user-${index + 1}`, type: 'user.message' },
+          { id: `evt-decision-${index + 1}`, type: 'agent.message', content: [{ type: 'text', text: decisions[index] }] },
+          { id: `evt-idle-${index + 1}`, type: 'session.status_idle', stop_reason: 'end_turn' },
+        ];
+        return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      if (url.includes('/events?')) return json({ data: [] });
+      if (url.endsWith('/events') && options.method === 'POST') {
+        const body = JSON.parse(options.body);
+        posts.push(body);
+        return json({ data: [{ id: `evt-user-${posts.length}`, type: 'user.message' }] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    };
+    const toolCalls = [];
+    const outputs = [];
+    let resolveCompleted;
+    const completed = new Promise((resolve) => { resolveCompleted = resolve; });
+    const data = store();
+    const agent = new VolcAgent(config(), data, quietLogger, {
+      fetch,
+      toolDefinitions,
+      onToolCall: async (call) => {
+        toolCalls.push(call);
+        if (call.name === 'list_lark_chats') {
+          return {
+            accepted: true,
+            ok: true,
+            terminal: false,
+            result: {
+              content: [{ type: 'text', text: 'one chat' }],
+              structuredContent: { chats: [{ chat_id: 'oc_chat12345678', name: 'chat' }] },
+            },
+          };
+        }
+        return { accepted: true, ok: true, terminal: true, result: { content: [] } };
+      },
+      onTurnOutput: async (output) => { outputs.push(output); return { accepted: true }; },
+      onTurnSucceeded: resolveCompleted,
+    });
+
+    await agent.start();
+    agent.deliver('hello', 1);
+    await completed;
+
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].events[0].content[0].text, 'hello');
+    assert.match(posts[0].events[1].content[0].text, /lark-daemon-tools\/v1/);
+    const continuation = JSON.parse(posts[1].events[0].content[0].text);
+    assert.equal(continuation.kind, 'tool_result');
+    assert.equal(continuation.call_id, 'read_1');
+    assert.deepEqual(toolCalls.map((call) => call.name), ['list_lark_chats', 'reply_lark_message']);
+    assert.equal(toolCalls[1].eventId, 'evt-decision-2');
+    assert.deepEqual(outputs, []);
+    assert.equal(agent.turnInProgress, false);
+    assert.equal(data.getManagedTurn(), null);
+    assert.equal(data.activities.filter((activity) => activity.kind === 'agent.turn_completed').length, 1);
+  });
+
+  it('returns a protocol error subturn when the managed agent emits prose', async () => {
+    const toolDefinitions = [{
+      name: 'list_lark_chats',
+      description: 'List chats.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    }];
+    const decisions = [
+      'I should use a tool.',
+      JSON.stringify({ protocol: 'lark-daemon-tools/v1', kind: 'finish', outcome: 'silent' }),
+    ];
+    const posts = [];
+    let streamIndex = 0;
+    const fetch = async (url, options = {}) => {
+      if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+      if (url.endsWith('/sessions') && options.method === 'POST') {
+        return json(templateSession('sesn-repair123456'));
+      }
+      if (url.endsWith('/events/stream')) {
+        const index = streamIndex++;
+        const events = [
+          { id: `evt-repair-user-${index}`, type: 'user.message' },
+          { id: `evt-repair-agent-${index}`, type: 'agent.message', content: [{ type: 'text', text: decisions[index] }] },
+          { id: `evt-repair-idle-${index}`, type: 'session.status_idle', stop_reason: 'end_turn' },
+        ];
+        return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }
+      if (url.includes('/events?')) return json({ data: [] });
+      if (url.endsWith('/events') && options.method === 'POST') {
+        posts.push(JSON.parse(options.body));
+        return json({ data: [{ id: `evt-repair-user-${posts.length - 1}`, type: 'user.message' }] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    };
+    let completed;
+    const done = new Promise((resolve) => { completed = resolve; });
+    const agent = new VolcAgent(config(), store(), quietLogger, {
+      fetch,
+      toolDefinitions,
+      onToolCall: async () => { throw new Error('no tool should execute'); },
+      onTurnSucceeded: completed,
+    });
+
+    await agent.start();
+    agent.deliver('hello', 1);
+    await done;
+
+    assert.equal(posts.length, 2);
+    const repair = JSON.parse(posts[1].events[0].content[0].text);
+    assert.equal(repair.kind, 'protocol_error');
+    assert.match(repair.error, /strict JSON/);
+    assert.equal(agent.turnInProgress, false);
   });
 
   it('does not replay accepted cognition after an idle turn has no agent.message', async () => {
@@ -412,6 +605,103 @@ describe('Volc managed-agent runtime', () => {
     await recovered.start();
     await done;
     assert.equal(calls.some((call) => call.url.endsWith('/events') && call.method === 'POST'), false);
+    assert.equal(data.getManagedTurn(), null);
+    await recovered.stop();
+  });
+
+  it('reposts a persisted tool result after restart without executing the tool again', async () => {
+    const toolDefinitions = [{
+      name: 'list_lark_chats',
+      description: 'List chats.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    }];
+    const data = store();
+    const bridgeOptions = {
+      toolDefinitions,
+      onToolCall: async () => {
+        throw new Error('persisted tool call must not execute again');
+      },
+    };
+    const bootstrap = new VolcAgent(config(), data, quietLogger, {
+      ...bridgeOptions,
+      fetch: async (url, options = {}) => {
+        if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+        if (url.endsWith('/sessions') && options.method === 'POST') {
+          return json(templateSession('sesn-continuation1'));
+        }
+        throw new Error(`unexpected bootstrap request: ${url}`);
+      },
+    });
+    await bootstrap.start();
+    data.beginManagedTurn({
+      runtime: 'volc',
+      authorityToken: 'token',
+      sessionId: bootstrap.sessionId,
+      epoch: 1,
+      inboundSeqs: [1],
+      conversationKey: 'chat-a',
+      deliveredThroughSeq: 1,
+      bridge: { calls: 0, protocolErrors: 0 },
+    });
+    data.acceptManagedTurn('volc', bootstrap.sessionId, 'evt-original-user');
+    const continuationBody = JSON.stringify({
+      protocol: 'lark-daemon-tools/v1',
+      kind: 'tool_result',
+      call_id: 'read_1',
+      name: 'list_lark_chats',
+      ok: true,
+      result: { content: [{ type: 'text', text: 'one chat' }] },
+    });
+    data.prepareManagedTurnContinuation({
+      runtime: 'volc',
+      authorityToken: 'token',
+      sessionId: bootstrap.sessionId,
+      epoch: 1,
+      expectedUserEventId: 'evt-original-user',
+      body: continuationBody,
+      bridge: { calls: 1, protocolErrors: 0 },
+    });
+
+    const posts = [];
+    const finish = JSON.stringify({
+      protocol: 'lark-daemon-tools/v1',
+      kind: 'finish',
+      outcome: 'silent',
+    });
+    let completed;
+    const done = new Promise((resolve) => { completed = resolve; });
+    const recovered = new VolcAgent(config(), data, quietLogger, {
+      ...bridgeOptions,
+      fetch: async (url, options = {}) => {
+        if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+        if (url.endsWith('/sessions/sesn-continuation1')) {
+          return json(templateSession('sesn-continuation1'));
+        }
+        if (url.endsWith('/events/stream')) {
+          const events = [
+            { id: 'evt-cont-user', type: 'user.message' },
+            { id: 'evt-cont-finish', type: 'agent.message', content: [{ type: 'text', text: finish }] },
+            { id: 'evt-cont-idle', type: 'session.status_idle', stop_reason: 'end_turn' },
+          ];
+          return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          });
+        }
+        if (url.includes('/events?')) return json({ data: [] });
+        if (url.endsWith('/events') && options.method === 'POST') {
+          posts.push(JSON.parse(options.body));
+          return json({ data: [{ id: 'evt-cont-user', type: 'user.message' }] });
+        }
+        throw new Error(`unexpected recovery request: ${url}`);
+      },
+      onTurnSucceeded: completed,
+    });
+    await recovered.start();
+    await done;
+
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].events[0].content[0].text, continuationBody);
     assert.equal(data.getManagedTurn(), null);
     await recovered.stop();
   });
