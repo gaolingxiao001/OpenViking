@@ -1,0 +1,152 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { describe, it } from 'node:test';
+import {
+  DEFAULT_RUNTIME_ID,
+  RUNTIME_ALIASES,
+  RUNTIME_CATALOG,
+  RUNTIME_IDS,
+  getRuntimeDefinition,
+  modelMatchesRuntime,
+  parseRuntimeModelSelector,
+  resolveRuntimeModelTarget,
+  staticModelEntries,
+} from '../src/runtime-catalog.mjs';
+
+describe('runtime catalog', () => {
+  it('owns runtime ids, aliases, static models, efforts, and capabilities', () => {
+    assert.equal(DEFAULT_RUNTIME_ID, 'codex');
+    assert.deepEqual(RUNTIME_IDS, ['codex', 'claude', 'volc']);
+    assert.deepEqual(RUNTIME_ALIASES, {
+      codex: 'codex',
+      claude: 'claude',
+      volc: 'volc',
+      volcengine: 'volc',
+      ark: 'volc',
+    });
+    assert.deepEqual(getRuntimeDefinition('claude').models, ['sonnet', 'opus', 'haiku', 'fable']);
+    assert.deepEqual(getRuntimeDefinition('claude').efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+    assert.equal(getRuntimeDefinition('codex').capabilities.sessionAuthority, 'preserve-process');
+    assert.equal(getRuntimeDefinition('claude').capabilities.sessionAuthority, 'preserve-process');
+    assert.deepEqual(getRuntimeDefinition('ark').models, ['ark']);
+    assert.deepEqual(getRuntimeDefinition('volc').efforts, ['managed']);
+    assert.deepEqual(getRuntimeDefinition('volc').capabilities, {
+      modelCatalog: 'static',
+      effortControl: 'remote-managed',
+      activeInput: 'queue-next-turn',
+      scopePolicy: 'single-conversation',
+      outputOwnership: 'host',
+      sessionAuthority: 'rotate',
+    });
+    assert.equal(Object.isFrozen(RUNTIME_CATALOG), true);
+    assert.equal(Object.isFrozen(getRuntimeDefinition('codex').capabilities), true);
+    assert.equal(getRuntimeDefinition('__proto__'), null);
+    const aliases = new Set();
+    const models = new Set();
+    for (const id of RUNTIME_IDS) {
+      const definition = getRuntimeDefinition(id);
+      for (const alias of definition.aliases) {
+        assert.equal(aliases.has(alias), false, `duplicate alias: ${alias}`);
+        aliases.add(alias);
+      }
+      for (const alias of definition.directAliases) {
+        assert.equal(definition.aliases.includes(alias), true, `unknown direct alias: ${alias}`);
+      }
+      for (const model of definition.models) {
+        assert.equal(models.has(model), false, `duplicate static model: ${model}`);
+        models.add(model);
+      }
+      if (definition.defaultModel) {
+        assert.equal(definition.models.includes(definition.defaultModel), true);
+      }
+    }
+  });
+
+  it('preserves direct, qualified, and compatibility target resolution', () => {
+    const cases = [
+      ['sonnet', { runtime: 'claude', model: 'sonnet', canonical: 'sonnet' }],
+      ['gpt-5.6-sol', { runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol' }],
+      ['claude', { runtime: 'codex', model: 'claude', canonical: 'claude' }],
+      ['codex', { runtime: 'codex', model: 'codex', canonical: 'codex' }],
+      ['claude:sonnet', { runtime: 'claude', model: 'sonnet', canonical: 'sonnet' }],
+      ['claude:', { runtime: 'claude', model: '', canonical: 'claude' }],
+      ['codex:gpt-5.6-sol', { runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol' }],
+      ['codex:', { runtime: 'codex', model: '', canonical: '' }],
+      ['ark', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
+      ['volcengine', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
+      ['volc:', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
+      ['volcengine:custom', { runtime: 'volc', model: 'custom', canonical: 'custom' }],
+      ['ark:model:variant', { runtime: 'volc', model: 'model:variant', canonical: 'model:variant' }],
+      ['foo:bar', { runtime: 'codex', model: 'foo:bar', canonical: 'foo:bar' }],
+      ['Sonnet', { runtime: 'codex', model: 'Sonnet', canonical: 'Sonnet' }],
+      ['ARK', { runtime: 'codex', model: 'ARK', canonical: 'ARK' }],
+      ['constructor:x', { runtime: 'codex', model: 'constructor:x', canonical: 'constructor:x' }],
+      ['toString:x', { runtime: 'codex', model: 'toString:x', canonical: 'toString:x' }],
+      ['__proto__:x', { runtime: 'codex', model: '__proto__:x', canonical: '__proto__:x' }],
+    ];
+    for (const [value, expected] of cases) {
+      assert.deepEqual(resolveRuntimeModelTarget(value), expected, value);
+    }
+  });
+
+  it('parses command selectors without treating bare runtime-looking names as qualifiers', () => {
+    assert.deepEqual(parseRuntimeModelSelector('volcengine'), {
+      raw: 'volcengine',
+      qualified: false,
+      qualifier: null,
+      runtime: null,
+      model: 'ark',
+    });
+    assert.deepEqual(parseRuntimeModelSelector('claude:son'), {
+      raw: 'claude:son',
+      qualified: true,
+      qualifier: 'claude',
+      runtime: 'claude',
+      model: 'son',
+    });
+    assert.deepEqual(parseRuntimeModelSelector('unknown:model'), {
+      raw: 'unknown:model',
+      qualified: false,
+      qualifier: null,
+      runtime: null,
+      model: 'unknown:model',
+    });
+  });
+
+  it('filters live model ids using the same ownership rules as target resolution', () => {
+    assert.equal(modelMatchesRuntime('sonnet', 'claude'), true);
+    assert.equal(modelMatchesRuntime('ark', 'volcengine'), true);
+    assert.equal(modelMatchesRuntime('gpt-5.6-sol', 'codex'), true);
+    assert.equal(modelMatchesRuntime('sonnet', 'codex'), false);
+    assert.equal(modelMatchesRuntime('gpt-5.6-sol', 'claude'), false);
+    assert.equal(modelMatchesRuntime('anything', 'missing'), false);
+    assert.deepEqual(staticModelEntries(), [
+      { id: 'sonnet', efforts: getRuntimeDefinition('claude').efforts },
+      { id: 'opus', efforts: getRuntimeDefinition('claude').efforts },
+      { id: 'haiku', efforts: getRuntimeDefinition('claude').efforts },
+      { id: 'fable', efforts: getRuntimeDefinition('claude').efforts },
+      { id: 'ark', efforts: getRuntimeDefinition('volc').efforts },
+    ]);
+  });
+});
+
+describe('runtime catalog dependency direction', () => {
+  it('keeps adapter constants in the catalog and concrete adapters out of command policy', () => {
+    const source = (name) => fs.readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source('runtime-catalog.mjs'), /^\s*import\s|\sfrom\s+['"]/m);
+    const commands = source('commands.mjs');
+    const coordinator = source('agent-runtime.mjs');
+    const compositionRoot = source('runtime-factory.mjs');
+    assert.match(commands, /from ['"]\.\/runtime-catalog\.mjs['"]/);
+    assert.doesNotMatch(commands, /from ['"]\.\/(?:claude|volc)\.mjs['"]/);
+    assert.doesNotMatch(commands, /\.(?:setModel|setEffort|rotateSession|interruptTurn|deliverBatch)\s*\(/);
+    assert.doesNotMatch(coordinator, /\b(?:CLAUDE|VOLC)_(?:MODELS|EFFORTS)\b/);
+    assert.doesNotMatch(coordinator, /from ['"]\.\/(?:codex|claude|volc)\.mjs['"]/);
+    for (const adapter of ['codex', 'claude', 'volc']) {
+      assert.match(compositionRoot, new RegExp(`from ['"]\\./${adapter}\\.mjs['"]`));
+    }
+    for (const adapter of ['codex.mjs', 'claude.mjs', 'volc.mjs']) {
+      assert.match(source(adapter), /from ['"]\.\/runtime-catalog\.mjs['"]/, adapter);
+    }
+  });
+});

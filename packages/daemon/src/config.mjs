@@ -134,6 +134,15 @@ export function getConfig() {
   if (daemonProfile && cliProfile && daemonProfile !== cliProfile) {
     throw new Error('LARK_DAEMON_PROFILE must match LARKSUITE_CLI_PROFILE');
   }
+  const volcBaseUrl = (process.env.LARK_DAEMON_VOLC_BASE_URL
+    || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/+$/, '');
+  let parsedVolcBaseUrl;
+  try { parsedVolcBaseUrl = new URL(volcBaseUrl); } catch {
+    throw new Error('LARK_DAEMON_VOLC_BASE_URL must be a valid HTTPS URL');
+  }
+  if (parsedVolcBaseUrl.protocol !== 'https:') {
+    throw new Error('LARK_DAEMON_VOLC_BASE_URL must be a valid HTTPS URL');
+  }
   let meetingAudio = null;
   if (meetingAudioEnabled) {
     const workerCommand = (process.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND ?? '').trim();
@@ -179,10 +188,27 @@ export function getConfig() {
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
-    codexModel: process.env.LARK_DAEMON_CODEX_MODEL || '',
+    initialModel: process.env.LARK_DAEMON_MODEL || process.env.LARK_DAEMON_CODEX_MODEL || '',
+    codexModel: process.env.LARK_DAEMON_MODEL === 'ark'
+      ? ''
+      : process.env.LARK_DAEMON_CODEX_MODEL || '',
     codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
     claudeModel: process.env.LARK_DAEMON_CLAUDE_MODEL || '',
     claudeEffort: enumEnv('LARK_DAEMON_CLAUDE_EFFORT', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']),
+    volcApiKey: process.env.ARK_API_KEY || '',
+    volcSessionId: process.env.LARK_DAEMON_VOLC_SESSION_ID
+      || process.env.ARK_SESSION_ID
+      || process.env.SESSION_ID
+      || '',
+    volcBaseUrl,
+    volcRequestTimeoutMs: intEnv('LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS', 30_000, {
+      min: 1_000,
+      max: 300_000,
+    }),
+    volcStreamIdleTimeoutMs: intEnv('LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS', 900_000, {
+      min: 30_000,
+      max: 3_600_000,
+    }),
     // Codex model the daemon auto-switches to when a claude turn fails.
     fallbackModel: process.env.FALLBACK_MODEL || 'gpt-5.6-sol',
     host,

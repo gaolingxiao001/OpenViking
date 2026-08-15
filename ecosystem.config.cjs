@@ -70,7 +70,8 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_AGENT_NAME: agent.displayName,
       LARK_DAEMON_DATA_DIR: agent.dataDir,
       LARK_DAEMON_WORKSPACE: agent.workspace,
-      LARK_DAEMON_CODEX_MODEL: agent.model,
+      LARK_DAEMON_MODEL: agent.model,
+      LARK_DAEMON_CODEX_MODEL: agent.model === 'ark' ? '' : agent.model,
       ...(agent.meetingAudio ? {
         LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
         LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
@@ -114,6 +115,13 @@ function buildEcosystem(sourceEnv = process.env) {
       ...daemonApps,
       {
         ...common,
+        filter_env: [
+          ...common.filter_env,
+          'ARK_',
+          'VOLCENGINE_',
+          'LARK_DAEMON_VOLC_',
+          'SESSION_ID',
+        ],
         name: 'lark-web',
         script: path.join(webDir, 'src', 'main.mjs'),
         cwd: webDir,

@@ -1122,6 +1122,10 @@ export class Store {
     };
   }
 
+  hasCognitionRuntime() {
+    return Boolean(this.getMetaStatement.get('active_runtime')?.value);
+  }
+
   initializeCognition(runtime, authorityToken) {
     return this.transaction(() => {
       const current = this.getCognitionState();
@@ -1140,6 +1144,48 @@ export class Store {
       this.setMetaStatement.run('active_runtime_token', authorityToken);
       this.setMetaStatement.run('global_cognition_epoch', String(epoch));
       return { runtime, epoch, authorityToken };
+    });
+  }
+
+  // A managed runtime must create its remote session before retiring the old
+  // one locally. Once prepared, advance the epoch and publish the replacement
+  // session in one transaction so a crash cannot leave an empty global session.
+  commitCognitionSessionRotation({
+    runtime,
+    authorityToken,
+    nextAuthorityToken = authorityToken,
+    sessionId,
+    policyHash,
+    expectedEpoch,
+    syncedThroughSeq = 0,
+    sessionReady = true,
+    settings = {},
+  }) {
+    return this.transaction(() => {
+      const current = this.getCognitionState();
+      if (current.runtime !== runtime
+        || current.authorityToken !== authorityToken
+        || current.epoch !== expectedEpoch) {
+        throw new Error('cognition authority changed during session rotation');
+      }
+      const epoch = current.epoch + 1;
+      this.setMetaStatement.run('active_runtime', runtime);
+      this.setMetaStatement.run('active_runtime_token', nextAuthorityToken);
+      this.setMetaStatement.run('global_cognition_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_id', sessionId);
+      this.setMetaStatement.run('global_policy_hash', policyHash);
+      this.setMetaStatement.run('global_session_runtime', runtime);
+      this.setMetaStatement.run('global_session_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_synced_through_seq', String(syncedThroughSeq));
+      this.setMetaStatement.run('global_session_ready', sessionReady ? '1' : '0');
+      for (const [key, value] of Object.entries(settings)) {
+        this.setMetaStatement.run(`setting:${key}`, String(value));
+      }
+      this.db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(
+        `managed_turn:${runtime}`,
+        `managed_session_poison:${runtime}`,
+      );
+      return { runtime, epoch, authorityToken: nextAuthorityToken };
     });
   }
 
@@ -1279,6 +1325,145 @@ export class Store {
       this.setMetaStatement.run('global_session_epoch', String(epoch));
       this.setMetaStatement.run('global_session_synced_through_seq', String(syncedThroughSeq));
       this.setMetaStatement.run('global_session_ready', sessionReady ? '1' : '0');
+    });
+  }
+
+  getManagedTurn(runtime) {
+    const raw = this.getMetaStatement.get(`managed_turn:${runtime}`)?.value;
+    if (!raw) return null;
+    const turn = parseJsonObject(raw);
+    return turn.runtime === runtime && turn.sessionId ? turn : null;
+  }
+
+  beginManagedTurn({
+    runtime,
+    sessionId,
+    epoch,
+    inboundSeqs,
+    conversationKey,
+    deliveredThroughSeq = 0,
+    atMs = Date.now(),
+  }) {
+    return this.transaction(() => {
+      const cognition = this.getCognitionState();
+      const session = this.getGlobalSession();
+      if (cognition.runtime !== runtime || cognition.epoch !== epoch
+        || session.runtime !== runtime || session.epoch !== epoch
+        || session.sessionId !== sessionId) {
+        throw new Error('managed turn no longer owns the active session');
+      }
+      const turn = {
+        runtime,
+        sessionId,
+        epoch,
+        status: 'POSTING',
+        inboundSeqs: [...new Set((inboundSeqs ?? []).filter(Number.isSafeInteger))],
+        conversationKey,
+        deliveredThroughSeq,
+        expectedUserEventId: null,
+        atMs,
+      };
+      this.setMetaStatement.run(`managed_turn:${runtime}`, JSON.stringify(turn));
+      return turn;
+    });
+  }
+
+  acceptManagedTurn(runtime, sessionId, expectedUserEventId) {
+    return this.transaction(() => {
+      const turn = this.getManagedTurn(runtime);
+      if (!turn || turn.sessionId !== sessionId || turn.status !== 'POSTING') {
+        throw new Error('managed turn acceptance does not match the pending POST');
+      }
+      const accepted = { ...turn, status: 'ACCEPTED', expectedUserEventId };
+      this.setMetaStatement.run(`managed_turn:${runtime}`, JSON.stringify(accepted));
+      return accepted;
+    });
+  }
+
+  clearManagedTurn(runtime, { sessionId = null, expectedUserEventId = null } = {}) {
+    return this.transaction(() => {
+      const turn = this.getManagedTurn(runtime);
+      if (!turn) return false;
+      if (sessionId && turn.sessionId !== sessionId) return false;
+      if (expectedUserEventId && turn.expectedUserEventId !== expectedUserEventId) return false;
+      this.db.prepare('DELETE FROM meta WHERE key = ?').run(`managed_turn:${runtime}`);
+      return true;
+    });
+  }
+
+  getManagedSessionPolicy(runtime, sessionId) {
+    const value = parseJsonObject(
+      this.getMetaStatement.get(`managed_session_policy:${runtime}`)?.value,
+    );
+    return value.sessionId === sessionId && typeof value.policyHash === 'string'
+      ? value.policyHash
+      : null;
+  }
+
+  setManagedSessionPolicy(runtime, sessionId, policyHash) {
+    this.setMetaStatement.run(
+      `managed_session_policy:${runtime}`,
+      JSON.stringify({ sessionId, policyHash }),
+    );
+  }
+
+  getManagedSessionPoison(runtime) {
+    const value = parseJsonObject(
+      this.getMetaStatement.get(`managed_session_poison:${runtime}`)?.value,
+    );
+    return value.runtime === runtime && value.sessionId ? value : null;
+  }
+
+  poisonManagedSession(runtime, sessionId, epoch, atMs = Date.now()) {
+    return this.transaction(() => {
+      const cognition = this.getCognitionState();
+      const session = this.getGlobalSession();
+      if (cognition.runtime !== runtime || cognition.epoch !== epoch
+        || session.runtime !== runtime || session.epoch !== epoch
+        || session.sessionId !== sessionId) return false;
+      const poison = { runtime, sessionId, epoch, atMs };
+      this.setMetaStatement.run(`managed_session_poison:${runtime}`, JSON.stringify(poison));
+      return true;
+    });
+  }
+
+  replacePoisonedManagedSession({
+    runtime,
+    authorityToken,
+    nextAuthorityToken,
+    expectedSessionId,
+    sessionId,
+    policyHash,
+    expectedEpoch,
+  }) {
+    return this.transaction(() => {
+      const cognition = this.getCognitionState();
+      const current = this.getGlobalSession();
+      const poison = this.getManagedSessionPoison(runtime);
+      if (cognition.runtime !== runtime
+        || cognition.authorityToken !== authorityToken
+        || cognition.epoch !== expectedEpoch
+        || current.runtime !== runtime
+        || current.epoch !== expectedEpoch
+        || current.sessionId !== expectedSessionId
+        || poison?.sessionId !== expectedSessionId
+        || poison?.epoch !== expectedEpoch) {
+        throw new Error('managed session quarantine no longer owns cognition authority');
+      }
+      const epoch = expectedEpoch + 1;
+      this.setMetaStatement.run('active_runtime_token', nextAuthorityToken);
+      this.setMetaStatement.run('global_cognition_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_id', sessionId);
+      this.setMetaStatement.run('global_policy_hash', policyHash);
+      this.setMetaStatement.run('global_session_runtime', runtime);
+      this.setMetaStatement.run('global_session_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_synced_through_seq', '0');
+      this.setMetaStatement.run('global_session_ready', '1');
+      this.db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(
+        `managed_turn:${runtime}`,
+        `managed_session_poison:${runtime}`,
+      );
+      return { runtime, epoch, authorityToken: nextAuthorityToken };
     });
   }
 

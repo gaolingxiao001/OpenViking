@@ -5,8 +5,9 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { redactSensitive } from './logger.mjs';
-import { terminateProcessTree } from './process-utils.mjs';
+import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { loadSystemPrompt } from './config.mjs';
+import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -14,13 +15,9 @@ const START_STABILITY_MS = 250;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
-export const CLAUDE_MODELS = [
-  'sonnet',
-  'opus',
-  'haiku',
-  'fable',
-];
-export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_RUNTIME = getRuntimeDefinition('claude');
+export const CLAUDE_MODELS = CLAUDE_RUNTIME.models;
+export const CLAUDE_EFFORTS = CLAUDE_RUNTIME.efforts;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -71,12 +68,7 @@ function appendBounded(current, chunk, label) {
 }
 
 export function sanitizeClaudeEnv(environment, profile = '') {
-  const safeEnv = { ...environment, FORCE_COLOR: '0', NO_COLOR: '1' };
-  for (const key of Object.keys(safeEnv)) {
-    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key) || key === 'CLAUDECODE') delete safeEnv[key];
-  }
-  if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
-  return safeEnv;
+  return sanitizeAgentChildEnv(environment, { profile, stripClaudeCode: true });
 }
 
 // Persistent Anthropic stream-json adapter, adapted from zouk-daemon v0.6.0's
@@ -100,8 +92,9 @@ export class ClaudeAgent {
     this.reconnectCapMs = options.reconnectCapMs ?? RECONNECT_CAP_MS;
 
     const cognition = store.getCognitionState?.()
-      ?? { runtime: 'claude', epoch: 1, authorityToken: null };
-    this.runtime = 'claude';
+      ?? { runtime: CLAUDE_RUNTIME.id, epoch: 1, authorityToken: null };
+    this.runtime = CLAUDE_RUNTIME.id;
+    this.capabilities = CLAUDE_RUNTIME.capabilities;
     this.cognitionEpoch = options.cognitionEpoch ?? cognition.epoch;
     this.authorityToken = options.authorityToken ?? cognition.authorityToken ?? '';
     this.sessionPersistence = options.sessionPersistence !== false;
@@ -113,7 +106,10 @@ export class ClaudeAgent {
     this.systemPrompt = loadSystemPrompt(config);
     this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${config.profile}. Shell fallbacks inherit this profile through LARKSUITE_CLI_PROFILE. Never pass --profile and never override or unset that environment variable.`;
     this.model = options.model ?? store.getSetting?.('claude_model') ?? config.claudeModel ?? '';
-    this.effort = store.getSetting?.('claude_effort') ?? config.claudeEffort ?? 'medium';
+    this.effort = options.effort
+      ?? store.getSetting?.('claude_effort')
+      ?? config.claudeEffort
+      ?? 'medium';
 
     this.sessionId = null;
     this.sessionInitialized = false;
@@ -138,6 +134,7 @@ export class ClaudeAgent {
     this.idleWaiters = [];
     this.deliveryTools = new Map();
     this.mcpTempDir = null;
+    this.sessionRotation = null;
   }
 
   get threadId() { return this.sessionId; }
@@ -512,7 +509,7 @@ export class ClaudeAgent {
     }
     this._recordActivity(wasActive ? 'agent.steered' : 'agent.turn_started', {
       inboundSeq: prepared.seqs.at(-1) ?? null,
-      metadata: { runtime: 'claude', inboundSeqs: prepared.seqs },
+      metadata: { runtime: CLAUDE_RUNTIME.id, inboundSeqs: prepared.seqs },
     });
   }
 
@@ -573,14 +570,14 @@ export class ClaudeAgent {
           // Hidden thinking is intentionally not persisted into the daemon journal.
           this._recordActivity('agent.thinking', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
-            metadata: { runtime: 'claude' },
+            metadata: { runtime: CLAUDE_RUNTIME.id },
           });
         } else if (block.type === 'text' && block.text) {
           // Telemetry only. Claude must call the Lark MCP tool to deliver text.
           this._recordActivity('agent.note', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
             summary: String(block.text),
-            metadata: { runtime: 'claude', delivery: 'telemetry_only' },
+            metadata: { runtime: CLAUDE_RUNTIME.id, delivery: 'telemetry_only' },
           });
         } else if (block.type === 'tool_use') {
           this.modelWorking = false;
@@ -595,7 +592,7 @@ export class ClaudeAgent {
           this._recordActivity('agent.tool_called', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
             summary: String(block.name ?? 'unknown tool'),
-            metadata: { runtime: 'claude', toolId: block.id },
+            metadata: { runtime: CLAUDE_RUNTIME.id, toolId: block.id },
           });
         }
       }
@@ -612,7 +609,7 @@ export class ClaudeAgent {
           inboundSeq: this._activeSeqs().at(-1) ?? null,
           status: block.is_error === true ? 'FAILED' : 'COMPLETED',
           summary: block.is_error === true ? 'Claude tool failed' : 'Claude tool completed',
-          metadata: { runtime: 'claude', toolId: block.tool_use_id },
+          metadata: { runtime: CLAUDE_RUNTIME.id, toolId: block.tool_use_id },
         });
         if (delivery && block.is_error !== true && this.onDeliverySucceeded) {
           const responseMessageId = delivery.input.response_to_message_id
@@ -686,7 +683,7 @@ export class ClaudeAgent {
       inboundSeq: seqs.at(-1) ?? null,
       status: error ? 'failed' : 'completed',
       summary: error ? safe(error) : undefined,
-      metadata: { runtime: 'claude', inboundSeqs: seqs },
+      metadata: { runtime: CLAUDE_RUNTIME.id, inboundSeqs: seqs },
     });
     if (error && this.onTurnFailed) {
       try {
@@ -708,7 +705,7 @@ export class ClaudeAgent {
       status: 'failed',
       summary: safe(error),
       metadata: {
-        runtime: 'claude',
+        runtime: CLAUDE_RUNTIME.id,
         inboundSeqs: seqs,
         terminal: error instanceof CognitionLimitError,
       },
@@ -795,7 +792,7 @@ export class ClaudeAgent {
     this.reconnecting = false;
   }
 
-  async _replaceProcess({ fresh }) {
+  async _replaceProcess({ fresh, persist = true, activate = true }) {
     await this._terminateCurrent();
     if (fresh) {
       this.sessionId = randomUUID();
@@ -805,9 +802,75 @@ export class ClaudeAgent {
       this.resumeRequested = this.sessionInitialized;
     }
     await this._spawnPersistent();
-    this._persistSession();
+    if (persist) this._persistSession();
+    if (activate) {
+      this._drain();
+      this._notifyAvailable();
+    }
+  }
+
+  async _restorePreparedSession(previous) {
+    await this._terminateCurrent();
+    this.sessionId = previous.sessionId;
+    this.sessionInitialized = previous.sessionInitialized;
+    this.resumeRequested = previous.resumeRequested;
+    this.needsHistoryPrefix = previous.needsHistoryPrefix;
+    this.syncedThroughSeq = previous.syncedThroughSeq;
+    this.deliveredThroughSeq = previous.deliveredThroughSeq;
+    this.model = previous.model;
+    this.effort = previous.effort;
+    if (previous.sessionId) await this._spawnPersistent();
     this._drain();
     this._notifyAvailable();
+  }
+
+  // Claude CLI assigns the session before the first input. Replace the idle
+  // process during prepare, but do not persist or drain until the coordinator's
+  // SQLite CAS publishes the new epoch/session. On CAS failure cancel restores
+  // the old session under the still-current authority token.
+  async prepareSessionRotation({ rollback = {} } = {}) {
+    if (this.turnActive) throw new Error('claude session rotation requires an idle runtime');
+    if (this.sessionRotation) throw new Error('claude session rotation is already prepared');
+    const previous = Object.freeze({
+      sessionId: this.sessionId,
+      sessionInitialized: this.sessionInitialized,
+      resumeRequested: this.resumeRequested,
+      needsHistoryPrefix: this.needsHistoryPrefix,
+      syncedThroughSeq: this.syncedThroughSeq,
+      deliveredThroughSeq: this.deliveredThroughSeq,
+      model: rollback.model ?? this.model,
+      effort: rollback.effort ?? this.effort,
+    });
+    this.sessionRotation = { id: null, previous };
+    try {
+      await this._replaceProcess({ fresh: true, persist: false, activate: false });
+      this.sessionRotation.id = this.sessionId;
+      return Object.freeze({ id: this.sessionId, sessionReady: false });
+    } catch (error) {
+      try { await this._restorePreparedSession(previous); } catch (restoreError) {
+        this.logger.warn('claude_session_prepare_restore_failed', { error: safe(restoreError) });
+      }
+      this.sessionRotation = null;
+      throw error;
+    }
+  }
+
+  commitSessionRotation(prepared, { persist = true } = {}) {
+    if (!prepared?.id || this.sessionRotation?.id !== prepared.id || this.sessionId !== prepared.id) {
+      throw new Error('prepared claude session is no longer current');
+    }
+    this.sessionRotation = null;
+    if (persist) this._persistSession();
+    this._drain();
+    this._notifyAvailable();
+    return this.sessionId;
+  }
+
+  async cancelSessionRotation() {
+    const rotation = this.sessionRotation;
+    this.sessionRotation = null;
+    if (!rotation?.previous) return;
+    await this._restorePreparedSession(rotation.previous);
   }
 
   // /m must not wait for a stuck turn: kill the in-flight turn's process. The
@@ -848,20 +911,20 @@ export class ClaudeAgent {
     return this.sessionId;
   }
 
-  async setModel(model) {
-    await this.whenIdle();
+  async setModel(model, { persist = true, reconfigure = true } = {}) {
+    if (reconfigure) await this.whenIdle();
     this.model = model;
-    this.store.setSetting?.('claude_model', model);
-    if (this.connected) await this._replaceProcess({ fresh: false });
+    if (persist) this.store.setSetting?.('claude_model', model);
+    if (reconfigure && this.connected) await this._replaceProcess({ fresh: false });
   }
 
-  setEffort(effort) {
+  setEffort(effort, { persist = true } = {}) {
     this.effort = effort;
-    this.store.setSetting?.('claude_effort', effort);
+    if (persist) this.store.setSetting?.('claude_effort', effort);
   }
 
   async listModels() {
-    return CLAUDE_MODELS.map((id) => ({ id, efforts: CLAUDE_EFFORTS }));
+    return staticModelEntries(CLAUDE_RUNTIME.id);
   }
 
   _recordActivity(kind, fields = {}) {
@@ -907,8 +970,12 @@ export class ClaudeAgent {
       exited,
       delay(3_000),
     ]);
-    terminateProcessTree(child, 'SIGKILL');
+    if (child.exitCode === null) {
+      terminateProcessTree(child, 'SIGKILL');
+      await Promise.race([exited, delay(1_000)]);
+    }
     this._cleanupMcpConfig();
+    if (child.exitCode === null) throw new Error('claude process did not exit after SIGKILL');
   }
 
   async stop() {

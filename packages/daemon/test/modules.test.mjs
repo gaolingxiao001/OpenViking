@@ -56,7 +56,7 @@ describe('module boundaries', () => {
           dataDir: '/Users/test/.local/share/lark-daemon-beta',
           workspace: '/Users/test/Documents/work/beta-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.beta',
-          model: 'gpt-5.6-terra',
+          model: 'ark',
         },
       ],
     }, null, 2)}\n`);
@@ -65,6 +65,9 @@ describe('module boundaries', () => {
       PATH: '/safe/bin',
       LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
       LARK_DAEMON_LOG_LEVEL: 'debug',
+      ARK_API_KEY: 'system-only-secret',
+      LARK_DAEMON_VOLC_SESSION_ID: 'seed-session-ref',
+      SESSION_ID: 'generic-session-ref',
     };
     const original = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     Object.assign(process.env, env);
@@ -102,6 +105,7 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.LARK_DAEMON_UPGRADE_TARGET, 'alpha');
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
     assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-sol');
+    assert.equal(alpha.env.LARK_DAEMON_MODEL, 'gpt-5.6-sol');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, 'true');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND, '/usr/bin/python3');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE, '/Users/test/.config/lark-daemon/alpha-asr.yaml');
@@ -111,11 +115,20 @@ describe('module boundaries', () => {
     ]);
     assert.equal(alpha.env.LARK_DAEMON_LOG_LEVEL, 'debug');
     assert.equal(alpha.env.LARK_DAEMON_DRY_RUN, 'false');
+    assert.equal(alpha.env.ARK_API_KEY, 'system-only-secret');
     assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
-    assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-terra');
+    assert.equal(beta.env.LARK_DAEMON_MODEL, 'ark');
+    assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, '');
     assert.equal(beta.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, undefined);
     assert.equal(web.env.LARK_WEB_PORT, '3737');
     assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'beta');
+    const effectiveWebEnv = Object.fromEntries(Object.entries({
+      ...env,
+      ...web.env,
+    }).filter(([key]) => !web.filter_env.some((prefix) => key.startsWith(prefix))));
+    assert.equal(effectiveWebEnv.ARK_API_KEY, undefined);
+    assert.equal(effectiveWebEnv.LARK_DAEMON_VOLC_SESSION_ID, undefined);
+    assert.equal(effectiveWebEnv.SESSION_ID, undefined);
     assert.deepEqual(
       JSON.parse(web.env.LARK_WEB_INSTANCES),
       [
@@ -127,6 +140,7 @@ describe('module boundaries', () => {
     assert.match(updater.env.LARK_UPDATER_SOCKET, /updater\.sock$/);
     assert.equal(updater.env.LARK_DAEMON_DEPLOYMENT_MANIFEST, manifestPath);
     assert.equal(updater.env.LARK_DAEMON_LOG_LEVEL, 'debug');
+    assert.equal(updater.env.ARK_API_KEY, 'system-only-secret');
     assert.equal(updater.env.LARK_DAEMON_DRY_RUN, undefined);
     assert.equal(web.env.LARK_DAEMON_LOG_LEVEL, undefined);
     const [manifestOnlyAlpha, , , manifestOnlyUpdater] = manifestOnlyEcosystem.apps;
@@ -197,6 +211,8 @@ describe('module boundaries', () => {
     assert.match(bootstrap, /env -i/);
     assert.match(bootstrap, /LARK_DAEMON_DEPLOYMENT_MANIFEST/);
     assert.match(bootstrap, /LARK_DAEMON_LOG_LEVEL/);
+    assert.match(bootstrap, /ARK_API_KEY/);
+    assert.match(bootstrap, /LARK_DAEMON_VOLC_SESSION_ID/);
     assert.match(bootstrap, /delete lark-updater/);
     assert.match(bootstrap, /start "\$CONFIG" --only lark-updater --update-env/);
     assert.doesNotMatch(bootstrap, /startOrReload/);

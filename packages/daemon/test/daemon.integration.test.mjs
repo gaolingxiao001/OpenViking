@@ -393,14 +393,24 @@ describe('daemon event path', { concurrency: false }, () => {
       createLogger('error', { test: 'command-idle-barrier' }),
     );
     const order = [];
-    daemon.codex = {
+    daemon.agentRuntime = {
       runtime: 'codex',
       threadId: 'thread-active',
       model: 'gpt-5.6-sol',
       effort: 'medium',
       turnInProgress: true,
       async whenIdle() { throw new Error('/help must not wait for the model'); },
-      deliver() { order.push('following-inbound'); },
+      async snapshot() {
+        return {
+          runtime: this.runtime,
+          session: { id: this.threadId, connected: true },
+          model: this.model,
+          effort: this.effort,
+          work: { working: true, connected: true, queued: 0, switching: false },
+          models: [],
+        };
+      },
+      submit() { order.push('following-inbound'); return { accepted: true }; },
     };
     daemon.store = {
       appendCognitionJournal(entry) { order.push(`journal:${entry.kind}`); },
@@ -426,7 +436,7 @@ describe('daemon event path', { concurrency: false }, () => {
     const command = daemon.enqueueIngress(
       () => daemon.handleSlashCommand({ name: 'help', arg: '' }, event, { seq: 1 }),
     );
-    const following = daemon.enqueueIngress(() => daemon.codex.deliver('next', 2));
+    const following = daemon.enqueueIngress(() => daemon.agentRuntime.submit([{ text: 'next', seq: 2 }]));
     await Promise.all([command, following]);
     assert.deepEqual(order, [
       'journal:control',
@@ -447,7 +457,7 @@ describe('/model immediate switch', () => {
       createLogger('error', { test: 'model-no-wait' }),
     );
     const order = [];
-    daemon.codex = {
+    daemon.agentRuntime = {
       runtime: 'codex',
       threadId: 'th-stuck',
       model: '',
@@ -455,10 +465,20 @@ describe('/model immediate switch', () => {
       turnInProgress: true,
       // A stuck turn: /model must never block behind this.
       whenIdle() { order.push('wait-idle'); return new Promise(() => {}); },
-      async listModels() { return []; },
-      async setModel(model) {
-        order.push(`setModel:${model}`);
-        return { runtimeChanged: false, model, threadId: 'th-fresh' };
+      async snapshot() {
+        return {
+          runtime: this.runtime,
+          session: { id: this.threadId, connected: true },
+          model: this.model,
+          effort: this.effort,
+          work: { working: true, connected: true, queued: 0, switching: false },
+          capabilities: { effortControl: 'selectable' },
+          models: [],
+        };
+      },
+      async transition(request) {
+        order.push(`setModel:${request.selector}`);
+        return { ok: true, runtimeChanged: false, model: request.selector, threadId: 'th-fresh' };
       },
     };
     daemon.store = {
@@ -498,15 +518,15 @@ describe('automatic claude fallback', () => {
     const delivered = [];
     const replies = [];
     const activities = [];
-    daemon.codex = {
+    daemon.agentRuntime = {
       runtime,
-      async setModel(model) {
-        calls.push(['setModel', model]);
+      async transition(request) {
+        calls.push(['setModel', request.selector]);
         if (setModelError) throw setModelError;
         this.runtime = 'codex';
-        return { runtimeChanged: true, runtime: 'codex', model };
+        return { ok: true, runtimeChanged: true, runtime: 'codex', model: request.selector };
       },
-      deliverBatch(items) { delivered.push(items); return true; },
+      submit(items) { delivered.push(items); return { accepted: true }; },
     };
     const inboundRows = {
       1: {
@@ -522,6 +542,7 @@ describe('automatic claude fallback', () => {
       },
     };
     daemon.store = {
+      getCognitionState: () => ({ runtime: daemon.agentRuntime.runtime }),
       inboundBySeq: (seq) => inboundRows[seq] ?? null,
       appendCognitionJournal() {},
       settleCognitionJournal() {},
@@ -575,7 +596,7 @@ describe('automatic claude fallback', () => {
     await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom' });
     assert.equal(calls.length, 1);
     // The user switched back to claude, which fails again inside the cooldown.
-    daemon.codex.runtime = 'claude';
+    daemon.agentRuntime.runtime = 'claude';
     await daemon.handleTurnFailure({ inboundSeqs: [1], error: 'boom again' });
     assert.equal(calls.length, 1); // no second automatic switch
     assert.equal(replies.length, 2);

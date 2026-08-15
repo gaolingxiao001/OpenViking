@@ -227,6 +227,120 @@ describe('Store', () => {
     assert.deepEqual(store.getGlobalSession(), before);
   });
 
+  it('atomically advances cognition and publishes a prepared managed session', () => {
+    const before = store.initializeCognition('volc', 'volc-authority');
+    store.setGlobalSession('sesn-old123456', 'old-policy', {
+      runtime: 'volc',
+      epoch: before.epoch,
+      syncedThroughSeq: 7,
+    });
+    const cognition = store.commitCognitionSessionRotation({
+      runtime: 'volc',
+      authorityToken: 'volc-authority',
+      nextAuthorityToken: 'volc-authority-next',
+      sessionId: 'sesn-new123456',
+      policyHash: 'new-policy',
+      expectedEpoch: before.epoch,
+      settings: { volc_model: 'ark' },
+    });
+    assert.equal(cognition.epoch, before.epoch + 1);
+    assert.equal(cognition.authorityToken, 'volc-authority-next');
+    assert.deepEqual(store.getGlobalSession(), {
+      sessionId: 'sesn-new123456',
+      policyHash: 'new-policy',
+      runtime: 'volc',
+      epoch: cognition.epoch,
+      syncedThroughSeq: 0,
+      sessionReady: true,
+    });
+    assert.equal(store.getSetting('volc_model'), 'ark');
+    assert.throws(() => store.commitCognitionSessionRotation({
+      runtime: 'volc',
+      authorityToken: 'stale-authority',
+      sessionId: 'sesn-phantom123',
+      policyHash: 'phantom-policy',
+      expectedEpoch: cognition.epoch,
+    }), /authority changed/);
+    assert.equal(store.getGlobalSession().sessionId, 'sesn-new123456');
+  });
+
+  it('persists the accepted managed turn fence for crash recovery', () => {
+    const cognition = store.initializeCognition('volc', 'volc-authority');
+    store.setGlobalSession('sesn-active1234', 'volc-policy', {
+      runtime: 'volc',
+      epoch: cognition.epoch,
+    });
+    store.beginManagedTurn({
+      runtime: 'volc',
+      sessionId: 'sesn-active1234',
+      epoch: cognition.epoch,
+      inboundSeqs: [7, 7, 8],
+      conversationKey: 'default:tenant:chat:main',
+      deliveredThroughSeq: 11,
+      atMs: 1234,
+    });
+    assert.deepEqual(store.getManagedTurn('volc'), {
+      runtime: 'volc',
+      sessionId: 'sesn-active1234',
+      epoch: cognition.epoch,
+      status: 'POSTING',
+      inboundSeqs: [7, 8],
+      conversationKey: 'default:tenant:chat:main',
+      deliveredThroughSeq: 11,
+      expectedUserEventId: null,
+      atMs: 1234,
+    });
+    store.acceptManagedTurn('volc', 'sesn-active1234', 'sevt-user1234');
+    assert.equal(store.getManagedTurn('volc').status, 'ACCEPTED');
+    assert.equal(store.clearManagedTurn('volc', {
+      sessionId: 'sesn-active1234',
+      expectedUserEventId: 'wrong',
+    }), false);
+    assert.equal(store.clearManagedTurn('volc', {
+      sessionId: 'sesn-active1234',
+      expectedUserEventId: 'sevt-user1234',
+    }), true);
+    assert.equal(store.getManagedTurn('volc'), null);
+  });
+
+  it('quarantines ambiguous sessions and atomically replaces cognition before reuse', () => {
+    const before = store.initializeCognition('volc', 'volc-authority');
+    store.setGlobalSession('sesn-ambiguous12', 'volc-policy', {
+      runtime: 'volc',
+      epoch: before.epoch,
+      syncedThroughSeq: 9,
+    });
+    assert.equal(store.poisonManagedSession(
+      'volc',
+      'sesn-ambiguous12',
+      before.epoch,
+      1234,
+    ), true);
+    assert.deepEqual(store.getManagedSessionPoison('volc'), {
+      runtime: 'volc',
+      sessionId: 'sesn-ambiguous12',
+      epoch: before.epoch,
+      atMs: 1234,
+    });
+    const after = store.replacePoisonedManagedSession({
+      runtime: 'volc',
+      authorityToken: 'volc-authority',
+      nextAuthorityToken: 'replacement-authority',
+      expectedSessionId: 'sesn-ambiguous12',
+      sessionId: 'sesn-clean123456',
+      policyHash: 'volc-policy',
+      expectedEpoch: before.epoch,
+    });
+    assert.deepEqual(after, {
+      runtime: 'volc',
+      epoch: before.epoch + 1,
+      authorityToken: 'replacement-authority',
+    });
+    assert.equal(store.getManagedSessionPoison('volc'), null);
+    assert.equal(store.getGlobalSession().sessionId, 'sesn-clean123456');
+    assert.equal(store.getGlobalSession().syncedThroughSeq, 0);
+  });
+
   it('returns cross-chat DONE history tagged by chat, oldest first', () => {
     const a = event('a', 'from chat A', { conversationKey: 'default:tenant:oc-a:main', chatId: 'oc-a' });
     const b = event('b', 'from chat B', { conversationKey: 'default:tenant:oc-b:main', chatId: 'oc-b' });

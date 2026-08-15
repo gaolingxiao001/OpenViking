@@ -22,6 +22,49 @@ function fakeCodex(overrides = {}) {
     async rotateSession(options) { calls.push(['rotate', options]); return 'th-new'; },
     async setModel(model) { calls.push(['setModel', model]); return 'th-new'; },
     async setEffort(effort) { calls.push(['setEffort', effort]); return 'th-new'; },
+    async snapshot({ catalog = 'cached' } = {}) {
+      const models = catalog === 'refresh' ? await this.listModels?.() ?? [] : [];
+      return {
+        runtime: this.runtime,
+        session: { id: this.threadId, connected: this.state.connected },
+        model: this.model,
+        effort: this.effort,
+        queued: this.state.queued,
+        work: this.workStatus ?? {
+          working: this.turnInProgress,
+          startedAtMs: null,
+          connected: this.state.connected,
+          queued: this.state.queued,
+          switching: false,
+        },
+        capabilities: {
+          effortControl: this.runtime === 'volc' ? 'remote-managed' : 'selectable',
+        },
+        models,
+      };
+    },
+    async transition(request) {
+      if (request.kind === 'new-session') {
+        await this.interruptTurn();
+        return { ok: true, threadId: await this.rotateSession({ resume: false }) };
+      }
+      if (request.kind === 'select-model') {
+        const result = await this.setModel(request.selector);
+        return result && typeof result === 'object'
+          ? { ok: true, ...result }
+          : { ok: true, runtimeChanged: false, model: request.selector, threadId: result };
+      }
+      if (request.kind === 'select-effort') {
+        await this.interruptTurn();
+        await this.setEffort(request.effort);
+        return {
+          ok: true,
+          effort: request.effort,
+          threadId: await this.rotateSession({ resume: false }),
+        };
+      }
+      throw new Error(`unexpected transition ${request.kind}`);
+    },
     ...overrides,
   };
 }
@@ -263,6 +306,40 @@ describe('executeCommand', () => {
     const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.5' }, codex);
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /已切到 gpt-5\.5，已开启新会话：th-fresh/);
+  });
+
+  it('selects Ark as a third runtime and allows a direct Codex name on the way back', async () => {
+    const agent = fakeCodex({
+      runtime: 'codex',
+      model: 'gpt-current',
+      listModels: async () => [
+        { id: 'gpt-current', efforts: ['medium'] },
+        { id: 'ark', efforts: ['managed'] },
+      ],
+      async setModel(model) {
+        calls.push(['setModel', model]);
+        this.runtime = model === 'ark' ? 'volc' : 'codex';
+        return { runtimeChanged: true, runtime: this.runtime, model };
+      },
+    });
+    const { calls } = agent;
+    const switched = await executeCommand({ name: 'model', arg: 'volcengine' }, agent);
+    assert.equal(switched.ok, true);
+    assert.deepEqual(calls.at(-1), ['setModel', 'ark']);
+
+    agent.listModels = async () => [{ id: 'ark', efforts: ['managed'] }, { id: 'sonnet' }];
+    const returned = await executeCommand({ name: 'model', arg: 'gpt-5.6-sol' }, agent);
+    assert.equal(returned.ok, true);
+    assert.deepEqual(calls.at(-1), ['setModel', 'gpt-5.6-sol']);
+  });
+
+  it('explains that Ark effort is managed remotely', async () => {
+    const agent = fakeCodex({ runtime: 'volc', model: 'ark', effort: 'managed' });
+    const { calls } = agent;
+    const result = await executeCommand({ name: 'effort', arg: 'high' }, agent);
+    assert.equal(result.ok, false);
+    assert.match(result.text, /远端 Agent/);
+    assert.equal(calls.some(([name]) => name === 'setEffort'), false);
   });
 
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {

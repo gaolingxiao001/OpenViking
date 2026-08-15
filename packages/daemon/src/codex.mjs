@@ -1,10 +1,13 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { terminateProcessTree } from './process-utils.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
-import { lookupMemberName } from './roster.mjs';
 import { loadSystemPrompt } from './config.mjs';
+import { formatHistoryLine } from './runtime-input.mjs';
+import { getRuntimeDefinition } from './runtime-catalog.mjs';
+
+const CODEX_RUNTIME = getRuntimeDefinition('codex');
 
 function safe(error) {
   return redactSensitive(error instanceof Error ? error.message : String(error));
@@ -155,86 +158,7 @@ function tomlString(value) {
 }
 
 export function sanitizeCodexEnv(environment, profile = '') {
-  const safeEnv = { ...environment, FORCE_COLOR: '0', NO_COLOR: '1' };
-  for (const key of Object.keys(safeEnv)) {
-    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key)) delete safeEnv[key];
-  }
-  if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
-  return safeEnv;
-}
-
-// Shorten a Lark id to a recognisable stub: keep the type prefix (oc_/om_/ou_/...)
-// and the first 8 chars after it. Ids without an underscore prefix are already short.
-export function shortenId(id) {
-  if (!id) return 'unknown';
-  const match = /^([a-z]{1,4}_)(.+)$/.exec(id);
-  if (match) return match[1] + match[2].slice(0, 8);
-  return id.slice(0, 11);
-}
-
-function isoMinute(ms) {
-  return `${new Date(ms).toISOString().slice(0, 16)}Z`;
-}
-
-// from= label: the member's sanitized display name when the roster knows it
-// (resolver param first, then the process-wide roster), else the shortened stub.
-function fromLabel(chatId, senderId, resolveName = null) {
-  if (resolveName) {
-    try {
-      const resolved = resolveName(chatId, senderId);
-      if (resolved) return resolved;
-    } catch { /* fall through to the shared resolver / stub */ }
-  }
-  return lookupMemberName(chatId, senderId) ?? shortenId(senderId);
-}
-
-// Full chat id (codex needs it to send); thread membership rides as a separate
-// `thread=` bracket field so the audience boundary stays salient to the model.
-function chatTag(chatId, threadId) {
-  return threadId ? `${chatId} thread=${shortenId(threadId)}` : chatId;
-}
-
-// One message must stay one physical line: the system prompt promises that only the
-// leading [ … ] bracket is daemon-authenticated, so a literal newline inside untrusted
-// content would let a sender forge a metadata line (or the history separator) of their
-// own. Line breaks render as ⏎; other control chars collapse to spaces.
-export function oneLine(text) {
-  return String(text ?? '')
-    .replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' \u23CE ')
-    .replace(/[\u0000-\u001f\u007f]/g, ' ');
-}
-
-// Compressed one-line-per-message format (see agent/system-prompt.md "Message format").
-// chat= and msg= carry the full id so codex can call lark-cli; from= and the thread=
-// field stay shortened stubs.
-export function formatInboundLine(message, resolveName = null, authenticated = {}) {
-  const idleForMs = Number(authenticated?.idleForMs);
-  const idleTag = Number.isFinite(idleForMs) && idleForMs >= 0
-    ? ` idle=${Math.max(1, Math.floor(idleForMs / 1_000))}s`
-    : '';
-  // Daemon-resolved quote-reply target: reply_to=me means the sender quoted one
-  // of the bot's own messages (strong addressing signal); otherwise the quoted
-  // message author's label, falling back to a shortened id stub.
-  const replyTo = authenticated?.replyTo;
-  const replyTag = replyTo
-    ? ` reply_to=${replyTo.kind === 'me'
-      ? 'me'
-      : replyTo.kind === 'user'
-        ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName)
-        : shortenId(replyTo.id)}`
-    : '';
-  let line = `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}${replyTag}${idleTag}] ${oneLine(message.content)}`;
-  if (Array.isArray(message.mentions) && message.mentions.length > 0) {
-    const names = message.mentions.map((m) => `@${oneLine(m.name) || shortenId(m.id)}`).join(' ');
-    line += ` [mentions: ${names}]`;
-  }
-  return line;
-}
-
-export function formatHistoryLine(item, resolveName = null) {
-  const from = item.direction === 'outbound' ? 'me' : fromLabel(item.chatId, item.actor, resolveName);
-  return `[chat=${chatTag(item.chatId, item.threadId)} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
+  return sanitizeAgentChildEnv(environment, { profile });
 }
 
 const HISTORY_SEPARATOR = '--- history above, new messages below ---';
@@ -257,8 +181,10 @@ export class CodexAgent {
     this.onDeliverySucceeded = options.onDeliverySucceeded ?? null; // ({ inboundSeqs, mode }) => void
     this.onTurnAbandoned = options.onTurnAbandoned ?? null; // ({ inboundSeqs }) => void
     this.onAvailable = options.onAvailable ?? null;   // () => void
-    const cognition = store.getCognitionState?.() ?? { runtime: 'codex', epoch: 1, authorityToken: null };
-    this.runtime = 'codex';
+    const cognition = store.getCognitionState?.()
+      ?? { runtime: CODEX_RUNTIME.id, epoch: 1, authorityToken: null };
+    this.runtime = CODEX_RUNTIME.id;
+    this.capabilities = CODEX_RUNTIME.capabilities;
     this.cognitionEpoch = options.cognitionEpoch ?? cognition.epoch;
     this.authorityToken = options.authorityToken ?? cognition.authorityToken ?? '';
     this.sessionPersistence = options.sessionPersistence !== false;
@@ -298,6 +224,7 @@ export class CodexAgent {
     this.activitySeq = 0;
     this.idleWaiters = [];
     this.primeWaiter = null;
+    this.sessionRotation = null;
   }
 
   developerInstructions(profile) {
@@ -827,6 +754,7 @@ export class CodexAgent {
       const global = this.store.getGlobalSession();
       const resumable = (this.allowResume
         && global.sessionId
+        && global.sessionReady !== false
         && global.policyHash === this.policyHash
         && (global.runtime ?? 'codex') === this.runtime
         && (global.epoch || this.cognitionEpoch) === this.cognitionEpoch);
@@ -948,14 +876,18 @@ export class CodexAgent {
     });
   }
 
-  async _startOrResumeThread() {
-    const params = {
+  _threadParams() {
+    return {
       cwd: this.config.workspace,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       config: { model_reasoning_effort: this.effort },
       ...(this.model ? { model: this.model } : {}),
     };
+  }
+
+  async _startOrResumeThread() {
+    const params = this._threadParams();
     if (this.storedThreadId) {
       try {
         const result = await this._request('thread/resume', { ...params, threadId: this.storedThreadId });
@@ -970,6 +902,60 @@ export class CodexAgent {
     this.threadId = result?.thread?.id;
     if (!this.threadId) throw new Error('thread/start returned no thread id');
     this.needsHistoryPrefix = true;
+  }
+
+  // Prepare a fresh thread without publishing it as the active thread. The
+  // app-server RPC is the only fallible step; coordinator Store state, queued
+  // work and the live thread remain untouched until commitSessionRotation.
+  async prepareSessionRotation() {
+    if (this.turnInProgress) throw new Error('codex session rotation requires an idle runtime');
+    if (this.sessionRotation) throw new Error('codex session rotation is already prepared');
+    if (this.child && !this.threadId) {
+      throw new Error('codex connection is still starting');
+    }
+    if (!this.child) {
+      // Preserve /new while a reconnect is already in progress. The placeholder
+      // is explicitly not resumable; the next handshake replaces it with the
+      // real app-server thread in the newly committed epoch.
+      const id = `pending-${randomUUID()}`;
+      this.sessionRotation = Object.freeze({ id, deferred: true });
+      return Object.freeze({ id, sessionReady: false, deferred: true });
+    }
+    const result = await this._request('thread/start', this._threadParams());
+    const id = result?.thread?.id;
+    if (!id) throw new Error('thread/start returned no thread id');
+    this.sessionRotation = Object.freeze({ id });
+    return Object.freeze({ id, sessionReady: true });
+  }
+
+  commitSessionRotation(prepared, { persist = true } = {}) {
+    if (!prepared?.id || this.sessionRotation?.id !== prepared.id) {
+      throw new Error('prepared codex session is no longer current');
+    }
+    this.threadId = prepared.deferred ? null : prepared.id;
+    this.storedThreadId = null;
+    this.needsHistoryPrefix = false;
+    this.sessionRotation = null;
+    if (persist && this.sessionPersistence) {
+      this.store.setGlobalSession(this.threadId, this.policyHash, {
+        runtime: this.runtime,
+        epoch: this.cognitionEpoch,
+        syncedThroughSeq: this.syncedThroughSeq,
+      });
+    }
+    this._recordActivity('agent.session_rotated', {
+      summary: '已开启新会话',
+      metadata: { resume: false },
+    });
+    this._drain();
+    this._notifyAvailable();
+    return prepared.deferred ? null : this.threadId;
+  }
+
+  cancelSessionRotation() {
+    // Codex has created an empty, unreachable thread only. Dropping the local
+    // candidate restores the exact pre-prepare state; no live thread was swapped.
+    this.sessionRotation = null;
   }
 
   // /m must not wait for a stuck turn: best-effort turn/interrupt on the live
@@ -1101,14 +1087,14 @@ export class CodexAgent {
 
   // Model/effort values ride on the next turn/start (see _startTurn). Command
   // policy decides whether to preserve or rotate the thread after updating them.
-  setModel(model) {
+  setModel(model, { persist = true } = {}) {
     this.model = model;
-    this.store.setSetting?.('codex_model', model);
+    if (persist) this.store.setSetting?.('codex_model', model);
   }
 
-  setEffort(effort) {
+  setEffort(effort, { persist = true } = {}) {
     this.effort = effort;
-    this.store.setSetting?.('codex_effort', effort);
+    if (persist) this.store.setSetting?.('codex_effort', effort);
   }
 
   // Visible models from the app-server with their supported reasoning efforts,

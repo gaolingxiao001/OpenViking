@@ -95,6 +95,25 @@ describe('configuration safety', { concurrency: false }, () => {
     setEnv('LARK_DAEMON_CODEX_EFFORT', 'turbo');
     assert.throws(() => getConfig(), /LARK_DAEMON_CODEX_EFFORT/);
   });
+
+  it('loads the managed-agent seed session without exposing the API key publicly', () => {
+    setEnv('ARK_API_KEY', 'secret-test-key');
+    setEnv('LARK_DAEMON_MODEL', 'ark');
+    setEnv('LARK_DAEMON_CODEX_MODEL', 'ark');
+    setEnv('LARK_DAEMON_VOLC_SESSION_ID', 'sesn-test12345678');
+    setEnv('SESSION_ID', 'sesn-generic-wins-only-as-fallback');
+    const config = getConfig();
+    assert.equal(config.volcApiKey, 'secret-test-key');
+    assert.equal(config.volcSessionId, 'sesn-test12345678');
+    assert.equal(config.volcBaseUrl, 'https://ark.cn-beijing.volces.com/api/v3');
+    assert.equal(config.initialModel, 'ark');
+    assert.equal(config.codexModel, '');
+  });
+
+  it('rejects a non-HTTPS managed-agent endpoint', () => {
+    setEnv('LARK_DAEMON_VOLC_BASE_URL', 'http://ark.example.test/api/v3');
+    assert.throws(() => getConfig(), /valid HTTPS URL/);
+  });
 });
 
 describe('release-owned system prompt', () => {

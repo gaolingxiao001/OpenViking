@@ -127,16 +127,17 @@ export async function runClaudeRuntimeSimulation() {
   await runtime.start();
   const codexGenerationToken = store.cognition.authorityToken;
   const originalCodex = runtime.backend;
-  const switched = await runtime.setModel('sonnet');
+  const switched = await runtime.transition({ kind: 'select-model', selector: 'sonnet' });
   const claude = runtime.backend;
+  const claudeImplementation = instances.at(-1);
   assert.equal(switched.runtimeChanged, true);
   assert.equal(runtime.runtime, 'claude');
-  assert.equal(claude.options.allowResume, false);
-  assert.equal(claude.options.syncedThroughSeq, 0);
+  assert.equal(claudeImplementation.options.allowResume, false);
+  assert.equal(claudeImplementation.options.syncedThroughSeq, 0);
   assert.equal(store.session.syncedThroughSeq, 0);
   assert.equal(store.session.sessionReady, false);
   assert.equal(originalCodex.state.connected, false);
-  assert.notEqual(claude.options.authorityToken, codexGenerationToken);
+  assert.notEqual(claudeImplementation.options.authorityToken, codexGenerationToken);
 
   const committedToken = store.cognition.authorityToken;
   failNextClaude = true;
@@ -150,12 +151,14 @@ export async function runClaudeRuntimeSimulation() {
   await failing.start();
   const failingGenerationToken = failingStore.cognition.authorityToken;
   const stillCodex = failing.backend;
-  await assert.rejects(() => failing.setModel('sonnet'), /unavailable/);
+  await assert.rejects(() => failing.transition({
+    kind: 'select-model', selector: 'sonnet',
+  }), /unavailable/);
   assert.equal(failing.runtime, 'codex');
   assert.equal(failing.backend, stillCodex);
   assert.equal(failingStore.cognition.authorityToken, failingGenerationToken);
 
-  await runtime.setModel('gpt-5.6-sol');
+  await runtime.transition({ kind: 'select-model', selector: 'gpt-5.6-sol' });
   assert.equal(runtime.runtime, 'codex');
   assert.notEqual(runtime.backend, originalCodex);
   assert.equal(store.getGlobalSession().runtime, 'codex');

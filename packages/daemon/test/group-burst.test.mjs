@@ -68,8 +68,9 @@ function newRouter({
   ),
 } = {}) {
   const router = new GroupBurstRouter({
-    deliverBatch,
-    tryStartBatch,
+    submit: (items, { admission = 'enqueue' } = {}) => ({
+      accepted: (admission === 'claim-if-idle' ? tryStartBatch(items) : deliverBatch(items)) !== false,
+    }),
     isConnected: connected,
     isTurnInProgress: busy,
     now: clock.now,
@@ -101,10 +102,9 @@ describe('warm group burst routing', () => {
     let currentTime = 0;
     const deliveries = [];
     const router = new GroupBurstRouter({
-      deliverBatch: (items) => deliveries.push(items),
-      tryStartBatch(items) {
+      submit(items) {
         deliveries.push(items);
-        return true;
+        return { accepted: true };
       },
       isConnected: () => true,
       isTurnInProgress: () => false,
@@ -317,5 +317,36 @@ describe('warm group burst routing', () => {
       router.pending.get('test:tenant:oc_group:main').items.map((item) => item.seq),
       [2, 3],
     );
+  });
+
+  it('retains an immediate input when a runtime transition closes admission', () => {
+    const clock = fakeClock();
+    const deliveries = [];
+    let transitioning = true;
+    const router = new GroupBurstRouter({
+      submit(items) {
+        if (transitioning) return { accepted: false, reason: 'switching' };
+        deliveries.push(items);
+        return { accepted: true, disposition: 'enqueued' };
+      },
+      isConnected: () => true,
+      isTurnInProgress: () => true,
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+    });
+
+    assert.equal(router.route(message({
+      conversationKey: 'test:tenant:oc_p2p:main',
+      chatType: 'p2p',
+      seq: 9,
+    })), true);
+    assert.equal(router.pendingConversations, 1);
+    assert.equal(deliveries.length, 0);
+
+    transitioning = false;
+    router.onAvailable();
+    assert.deepEqual(deliveries.map((batch) => batch.map((item) => item.seq)), [[9]]);
+    assert.equal(router.pendingConversations, 0);
   });
 });

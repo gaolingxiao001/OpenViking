@@ -365,6 +365,48 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.stop();
   });
 
+  it('keeps a prepared process unpublished until session commit', async () => {
+    const { agent, persistent, store } = harness();
+    await agent.start();
+    const previousSessionId = agent.sessionId;
+    const previousGlobal = store.global();
+
+    const prepared = await agent.prepareSessionRotation();
+    assert.equal(persistent.length, 2);
+    assert.notEqual(prepared.id, previousSessionId);
+    assert.deepEqual(store.global(), previousGlobal);
+    assert.equal(persistent[1].writes.length, 0);
+
+    assert.equal(agent.commitSessionRotation(prepared, { persist: false }), prepared.id);
+    assert.deepEqual(store.global(), previousGlobal);
+    await agent.stop();
+  });
+
+  it('restores model and effort before draining queued work after a cancelled prepare', async () => {
+    const { agent, calls, persistent } = harness();
+    await agent.start();
+    agent.model = 'opus';
+    agent.effort = 'max';
+    agent.queue.push([{ text: 'queued during transition', seq: 7 }]);
+
+    await agent.prepareSessionRotation({
+      rollback: { model: 'sonnet', effort: 'medium' },
+    });
+    assert.equal(persistent[1].writes.length, 0);
+    await agent.cancelSessionRotation();
+
+    assert.equal(agent.model, 'sonnet');
+    assert.equal(agent.effort, 'medium');
+    const persistentCalls = calls.filter(({ args }) => args.includes('--print'));
+    const restoredArgs = persistentCalls.at(-1).args;
+    assert.equal(restoredArgs[restoredArgs.indexOf('--model') + 1], 'sonnet');
+    assert.equal(restoredArgs[restoredArgs.indexOf('--effort') + 1], 'medium');
+    await waitFor(() => persistent[2].writes.length > 0);
+    assert.match(persistent[2].writes[0], /queued during transition/);
+    persistent[2].feed({ type: 'result', subtype: 'success', result: 'handled' });
+    await agent.stop();
+  });
+
   it('returns receipt-only active work through the interruption callback', async () => {
     const abandoned = [];
     const { agent, persistent } = harness({
@@ -435,11 +477,17 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
       FEISHU_TOKEN: 'remove',
       LARKSUITE_CLI_PROFILE: 'wrong-profile',
       CLAUDECODE: 'remove',
+      ARK_API_KEY: 'remove',
+      ARK_SESSION_ID: 'remove',
+      SESSION_ID: 'remove',
     }, 'fixed-profile');
     assert.equal(environment.ANTHROPIC_API_KEY, 'keep-for-claude');
     assert.equal(environment.LARK_APP_SECRET, undefined);
     assert.equal(environment.FEISHU_TOKEN, undefined);
     assert.equal(environment.CLAUDECODE, undefined);
+    assert.equal(environment.ARK_API_KEY, undefined);
+    assert.equal(environment.ARK_SESSION_ID, undefined);
+    assert.equal(environment.SESSION_ID, undefined);
     assert.equal(environment.LARKSUITE_CLI_PROFILE, 'fixed-profile');
   });
 });

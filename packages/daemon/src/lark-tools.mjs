@@ -6,6 +6,7 @@ import readline from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
+import { sanitizeNonArkChildEnv } from './process-utils.mjs';
 import { ChatRoster } from './roster.mjs';
 import { meetingContextLines, readMeetingInboxDatabase } from './meeting/index.mjs';
 import { claimDecisionCapability } from './meeting/decision-socket.mjs';
@@ -436,11 +437,15 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
   return options;
 }
 
+export function sanitizeLarkToolEnv(environment) {
+  return sanitizeNonArkChildEnv(environment);
+}
+
 export async function runCommand(command, args, { cwd, timeoutMs }) {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env: sanitizeLarkToolEnv(process.env),
       shell: false,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],

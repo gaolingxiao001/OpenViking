@@ -4,12 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { Store } from './store.mjs';
 import { ProcessRegistry } from './process-utils.mjs';
-import { formatInboundLine } from './codex.mjs';
+import { formatInboundLine } from './runtime-input.mjs';
 import { AgentRuntime } from './agent-runtime.mjs';
 import { GroupBurstRouter } from './group-burst.mjs';
 import { commandCandidate, executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
+import { ManagedAgentOutputPort } from './runtime-output.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
@@ -103,7 +104,7 @@ export class LarkDaemon {
     this.lock = new InstanceLock(config.lockPath);
     this.registry = new ProcessRegistry(logger);
     this.store = null;
-    this.codex = null;
+    this.agentRuntime = null;
     this.groupBurst = null;
     this.lark = null;
     this.meeting = null;
@@ -114,6 +115,7 @@ export class LarkDaemon {
     this.meetingDecisionAuthority = null;
     this.meetingDecisionServer = null;
     this.liveness = null;
+    this.managedOutput = null;
     this.roster = null;
     this.httpServer = null;
     this.startedAt = Date.now();
@@ -252,7 +254,16 @@ export class LarkDaemon {
         enabled: !this.config.dryRun,
       });
 
-      this.codex = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
+      this.managedOutput = new ManagedAgentOutputPort({
+        config: this.config,
+        store: this.store,
+        logger: this.logger.child({ component: 'managed-output' }),
+        roster: this.roster,
+        liveness: this.liveness,
+        isStopping: () => this.shuttingDown,
+      });
+
+      this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           this.meetingAudioRuntime?.onTurnFailed(info);
           void this.handleTurnFailure(info)
@@ -264,21 +275,24 @@ export class LarkDaemon {
           this.meetingAudioRuntime?.onTurnSucceeded(info);
           this.handleTurnSuccess(info);
         },
+        onTurnOutput: (info) => this.managedOutput.deliver(info),
         onTurnAbandoned: (info) => {
           this.meetingAudioRuntime?.onTurnAbandoned(info);
         },
         onDeliverySucceeded: (info) => { void this.liveness?.onDeliverySucceeded(info); },
         onAvailable: () => { this.groupBurst?.onAvailable(); },
+        onAuthorityChanged: ({ authorityToken }) => {
+          this.meetingDecisionAuthority?.setRuntimeToken(authorityToken);
+        },
       });
       this.groupBurst = new GroupBurstRouter({
-        deliverBatch: (items) => this.codex.deliverBatch(items),
-        tryStartBatch: (items) => this.codex.tryStartBatch(items),
-        isConnected: () => this.codex.state.connected,
-        isTurnInProgress: () => this.codex.turnInProgress,
+        submit: (items, options) => this.agentRuntime.submit(items, options),
+        isConnected: () => this.agentRuntime.snapshot().session.connected,
+        isTurnInProgress: () => this.agentRuntime.snapshot().work.turnInProgress,
       });
       this.meetingInboxNotifier = new MeetingInboxNotifier({
         store: this.store.meetings,
-        runtime: this.codex,
+        runtime: this.agentRuntime,
         logger: this.logger.child({ component: 'meeting-inbox' }),
       });
       if (this.meetingAudio) {
@@ -286,13 +300,13 @@ export class LarkDaemon {
           spool: this.meetingAudioSpool,
           generationClock: this.meetingAudio.generationClock,
           flyReferences: this.meetingAudio.flyReferences,
-          runtime: this.codex,
+          runtime: this.agentRuntime,
           submitIngress: (action) => this.enqueueIngress(action),
           flushBufferedIngress: () => this.groupBurst.flushAll(),
           logger: this.logger.child({ component: 'meeting-runtime' }),
         });
       }
-      await this.codex.start();
+      await this.agentRuntime.start();
       if (this.meetingDecisionAuthority) {
         this.meetingDecisionAuthority.setRuntimeToken(
           this.store.getCognitionState().authorityToken,
@@ -301,7 +315,7 @@ export class LarkDaemon {
       this.meetingAudioRuntime?.start();
       this.meetingInboxNotifier.start();
       this.recordSystemActivity('system.subscriber_started', {
-        summary: `${this.codex.runtime} runtime 已连接`,
+        summary: `${this.store.getCognitionState().runtime} runtime 已连接`,
         status: 'RUNNING',
       }, 'codex-connected');
 
@@ -446,7 +460,7 @@ export class LarkDaemon {
     });
     this.enqueueIngress(async () => {
       const idleHint = this.liveness?.beforeInbound(event, result.inbound, {
-        modelBusy: this.codex?.turnInProgress,
+        modelBusy: this.agentRuntime?.snapshot().work.turnInProgress,
       });
       // Bounded roster warm-up so formatInboundLine can resolve from= to a
       // display name. warm() never rejects and races an internal timeout, so a
@@ -454,6 +468,12 @@ export class LarkDaemon {
       await this.roster?.warm(event.chatId);
       this.groupBurst.route({
         conversationKey: event.conversationKey,
+        scope: { kind: 'lark', conversationKey: event.conversationKey },
+        target: {
+          chatId: event.chatId,
+          threadId: event.threadId,
+          messageId: event.messageId,
+        },
         chatType: event.chatType,
         text: formatInboundLine(event, null, { ...(idleHint ?? {}), replyTo: this.replyToHint(event) }),
         seq: result.inbound.seq,
@@ -516,7 +536,7 @@ export class LarkDaemon {
   // claude while it is still broken. Returns true when the fallback owns the
   // failure (no separate failure notice is sent).
   async tryModelFallback({ inboundSeqs, error }) {
-    if (this.shuttingDown || this.codex?.runtime !== 'claude') return false;
+    if (this.shuttingDown || this.store.getCognitionState().runtime !== 'claude') return false;
     if (this.fallbackInProgress) return false;
     const now = Date.now();
     if (now - this.lastFallbackAtMs < MODEL_FALLBACK_COOLDOWN_MS) return false;
@@ -533,7 +553,7 @@ export class LarkDaemon {
     this.fallbackInProgress = true;
     this.lastFallbackAtMs = now;
     try {
-      await this.codex.setModel(model); // hard switch claude -> codex
+      await this.agentRuntime.transition({ kind: 'select-model', selector: model });
     } catch (switchError) {
       this.recordSystemActivity('agent.fallback', {
         summary: safeError(switchError),
@@ -559,9 +579,11 @@ export class LarkDaemon {
     await this.journaledDaemonReply(last, notice, 'daemon_fallback_notice', `fallback-notice:${last.messageId}`);
     // Redeliver the failed turn to the fallback runtime. A failure of the retry
     // surfaces through the normal onTurnFailed path (runtime is codex now).
-    this.codex.deliverBatch(rows.map((row) => ({
+    this.agentRuntime.submit(rows.map((row) => ({
       text: formatInboundLine(row, null, { replyTo: this.replyToHint(row) }),
       seq: row.seq,
+      conversationKey: row.conversationKey,
+      scope: { kind: 'lark', conversationKey: row.conversationKey },
     })));
     return true;
   }
@@ -733,7 +755,7 @@ export class LarkDaemon {
     });
     let outcome;
     try {
-      outcome = await executeCommand(command, this.codex);
+      outcome = await executeCommand(command, this.agentRuntime);
     } catch (error) {
       outcome = { ok: false, text: `命令执行失败：${safeError(error)}` };
     }
@@ -883,7 +905,7 @@ export class LarkDaemon {
       status: ready ? 'ready' : (healthy ? 'starting' : 'unhealthy'),
       subscriber: this.lark?.subscriptionRunning ? 'running' : 'stopped',
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
-      activeTurns: this.codex?.state.activeTurn ?? 0,
+      activeTurns: this.agentRuntime?.snapshot().work.turnInProgress ? 1 : 0,
       scheduledConversations: 0,
     };
     if (includeState) body.state = this.store?.stats() ?? {};
@@ -1033,7 +1055,7 @@ export class LarkDaemon {
         this.logger.warn('meeting_audio_stop_failed', { error });
       }
       this.groupBurst?.stop();
-      try { await this.codex?.stop(); } catch (error) { this.logger.warn('codex_stop_failed', { error }); }
+      try { await this.agentRuntime?.stop(); } catch (error) { this.logger.warn('agent_runtime_stop_failed', { error }); }
       try { this.meetingAudioSpool?.close(); } catch (error) {
         this.logger.warn('meeting_spool_close_failed', { error });
       }

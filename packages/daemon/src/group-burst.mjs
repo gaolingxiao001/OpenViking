@@ -5,8 +5,7 @@ export const GROUP_BURST_DELAY_MS = 400;
 // cognitive thread and keeps its existing live turn/steer behavior.
 export class GroupBurstRouter {
   constructor({
-    deliverBatch,
-    tryStartBatch,
+    submit,
     isConnected,
     isTurnInProgress,
     delayMs = GROUP_BURST_DELAY_MS,
@@ -14,8 +13,7 @@ export class GroupBurstRouter {
     setTimer = setTimeout,
     clearTimer = clearTimeout,
   }) {
-    if (typeof deliverBatch !== 'function') throw new TypeError('deliverBatch must be a function');
-    if (typeof tryStartBatch !== 'function') throw new TypeError('tryStartBatch must be a function');
+    if (typeof submit !== 'function') throw new TypeError('submit must be a function');
     if (typeof isConnected !== 'function') throw new TypeError('isConnected must be a function');
     if (typeof isTurnInProgress !== 'function') {
       throw new TypeError('isTurnInProgress must be a function');
@@ -24,8 +22,7 @@ export class GroupBurstRouter {
       throw new TypeError('delayMs must be a non-negative number');
     }
 
-    this.deliverBatch = deliverBatch;
-    this.tryStartBatch = tryStartBatch;
+    this.submit = submit;
     this.isConnected = isConnected;
     this.isTurnInProgress = isTurnInProgress;
     this.delayMs = delayMs;
@@ -68,11 +65,25 @@ export class GroupBurstRouter {
       || this.isTurnInProgress();
 
     if (immediate) {
-      if (existing) existing.items.push(item);
-      const accepted = this.deliverBatch(existing ? existing.items : [item]) !== false;
-      if (accepted && existing) this.pending.delete(item.conversationKey);
+      if (existing) {
+        existing.items.push(item);
+      } else {
+        existing = {
+          conversationKey: item.conversationKey,
+          dueAtMs: this.now(),
+          order: this.nextOrder++,
+          items: [item],
+        };
+        // Retain ownership before calling into the runtime. A transition may
+        // close admission between the status check and submit.
+        this.pending.set(item.conversationKey, existing);
+      }
+      const accepted = this.submit(existing.items, {
+        admission: 'enqueue',
+      })?.accepted === true;
+      if (accepted) this.pending.delete(item.conversationKey);
       this._schedule();
-      return accepted;
+      return true;
     }
 
     if (existing) {
@@ -104,7 +115,7 @@ export class GroupBurstRouter {
       return false;
     }
 
-    if (!this.tryStartBatch(next.items)) return false;
+    if (this.submit(next.items, { admission: 'claim-if-idle' })?.accepted !== true) return false;
     this.pending.delete(next.conversationKey);
     return true;
   }
@@ -117,7 +128,7 @@ export class GroupBurstRouter {
       .sort((left, right) => left.order - right.order);
     let flushed = 0;
     for (const entry of entries) {
-      if (this.deliverBatch(entry.items) === false) break;
+      if (this.submit(entry.items, { admission: 'enqueue' })?.accepted !== true) break;
       this.pending.delete(entry.conversationKey);
       flushed += 1;
     }
