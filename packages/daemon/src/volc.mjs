@@ -275,10 +275,26 @@ export class VolcAgent {
     this.modelStartedAtMs = this.turnStartedAtMs;
     this.expectedUserEventId = pending.expectedUserEventId;
     this.turnFenceSeen = false;
-    this.deliveredThroughSeq = Math.max(
-      this.deliveredThroughSeq,
-      Number(pending.deliveredThroughSeq) || 0,
-    );
+    const acceptedThroughSeq = Number(pending.deliveredThroughSeq) || 0;
+    const acceptanceAdvanced = this.store.advanceOwnedSessionAcceptance?.({
+      runtime: this.runtime,
+      authorityToken: this.authorityToken,
+      sessionId: this.sessionId,
+      epoch: this.cognitionEpoch,
+      acceptedThroughSeq,
+    }) ?? true;
+    if (!acceptanceAdvanced) {
+      this._poisonSession();
+      this.store.clearManagedTurn?.(this.runtime, {
+        sessionId: this.sessionId,
+        expectedUserEventId: pending.expectedUserEventId,
+      });
+      const error = new Error('Volc managed turn recovery no longer owns its accepted session');
+      queueMicrotask(() => this._failItems(seqs.map((seq) => ({ text: '', seq })), error));
+      return;
+    }
+    this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
+    this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, acceptedThroughSeq);
     this.abortController = new AbortController();
     this._recordActivity('agent.turn_recovered', {
       inboundSeq: seqs.at(-1) ?? null,
@@ -535,6 +551,7 @@ export class VolcAgent {
           try {
             this.store.beginManagedTurn?.({
               runtime: this.runtime,
+              authorityToken: this.authorityToken,
               sessionId: this.sessionId,
               epoch: this.cognitionEpoch,
               inboundSeqs: prepared.seqs,
@@ -575,8 +592,9 @@ export class VolcAgent {
             this.store.setManagedSessionPolicy?.(this.runtime, this.sessionId, this.policyHash);
             this.transportPolicyInjected = true;
           }
+          let accepted;
           try {
-            this.store.acceptManagedTurn?.(
+            accepted = this.store.acceptManagedTurn?.(
               this.runtime,
               this.sessionId,
               this.expectedUserEventId,
@@ -585,7 +603,11 @@ export class VolcAgent {
             error.volcPostUncertain = true;
             throw error;
           }
-          this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, prepared.deliveredThroughSeq);
+          const acceptedThroughSeq = Number.isSafeInteger(accepted?.deliveredThroughSeq)
+            ? accepted.deliveredThroughSeq
+            : prepared.deliveredThroughSeq;
+          this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
+          this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, acceptedThroughSeq);
           first = false;
         } else {
           const history = await this._history();
@@ -1010,6 +1032,19 @@ export class VolcAgent {
   _persistSession() {
     if (!this.sessionPersistence || !this.sessionId) return;
     try {
+      if (this.store.publishOwnedSession) {
+        const published = this.store.publishOwnedSession({
+          runtime: this.runtime,
+          authorityToken: this.authorityToken,
+          sessionId: this.sessionId,
+          policyHash: this.policyHash,
+          epoch: this.cognitionEpoch,
+          acceptedThroughSeq: this.syncedThroughSeq,
+          sessionReady: true,
+        });
+        if (!published) this.logger.info('volc_session_publish_stale');
+        return;
+      }
       this.store.setGlobalSession?.(this.sessionId, this.policyHash, {
         runtime: this.runtime,
         epoch: this.cognitionEpoch,

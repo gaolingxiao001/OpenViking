@@ -1201,10 +1201,16 @@ export class Store {
     syncedThroughSeq = 0,
     sessionReady = true,
     model = '',
+    expectedRuntime,
+    expectedAuthorityToken,
   }) {
     return this.transaction(() => {
       const current = this.getCognitionState();
-      if (current.epoch !== epoch) throw new Error('cognition epoch changed during runtime switch');
+      if (current.runtime !== expectedRuntime
+        || current.authorityToken !== expectedAuthorityToken
+        || current.epoch !== epoch) {
+        throw new Error('cognition authority changed during runtime switch');
+      }
       this.setMetaStatement.run('active_runtime', runtime);
       this.setMetaStatement.run('active_runtime_token', authorityToken);
       this.setMetaStatement.run('global_session_id', sessionId);
@@ -1328,6 +1334,76 @@ export class Store {
     });
   }
 
+  // Runtime adapters may finish work after a model/session switch has already
+  // transferred authority. Publish only while the caller still owns the exact
+  // cognition generation, so a late child cannot restore its retired session.
+  publishOwnedSession({
+    runtime,
+    authorityToken,
+    sessionId,
+    policyHash,
+    epoch,
+    acceptedThroughSeq = 0,
+    sessionReady = true,
+  }) {
+    return this.transaction(() => {
+      const cognition = this.getCognitionState();
+      if (cognition.runtime !== runtime
+        || cognition.authorityToken !== authorityToken
+        || cognition.epoch !== epoch) return false;
+      if (!sessionId || !Number.isSafeInteger(acceptedThroughSeq) || acceptedThroughSeq < 0) {
+        throw new TypeError('owned session publication is invalid');
+      }
+      const current = this.getGlobalSession();
+      const sameSession = current.runtime === runtime
+        && current.epoch === epoch
+        && current.sessionId === sessionId;
+      const cursor = sameSession
+        ? Math.max(current.syncedThroughSeq, acceptedThroughSeq)
+        : acceptedThroughSeq;
+      const ready = sameSession ? current.sessionReady || sessionReady : sessionReady;
+      this.setMetaStatement.run('global_session_id', sessionId);
+      this.setMetaStatement.run('global_policy_hash', policyHash);
+      this.setMetaStatement.run('global_session_runtime', runtime);
+      this.setMetaStatement.run('global_session_epoch', String(epoch));
+      this.setMetaStatement.run('global_session_synced_through_seq', String(cursor));
+      this.setMetaStatement.run('global_session_ready', ready ? '1' : '0');
+      return true;
+    });
+  }
+
+  // `synced_through_seq` is the native-session acceptance watermark: once the
+  // exact runtime/session owner has durably accepted journal input it advances
+  // monotonically, independently of turn success or local Lark delivery.
+  advanceOwnedSessionAcceptance({
+    runtime,
+    authorityToken,
+    sessionId,
+    epoch,
+    acceptedThroughSeq,
+  }) {
+    return this.transaction(() => {
+      if (!Number.isSafeInteger(acceptedThroughSeq) || acceptedThroughSeq < 0) {
+        throw new TypeError('accepted session cursor is invalid');
+      }
+      const cognition = this.getCognitionState();
+      const session = this.getGlobalSession();
+      if (cognition.runtime !== runtime
+        || cognition.authorityToken !== authorityToken
+        || cognition.epoch !== epoch
+        || session.runtime !== runtime
+        || session.epoch !== epoch
+        || session.sessionId !== sessionId) return false;
+      if (acceptedThroughSeq > session.syncedThroughSeq) {
+        this.setMetaStatement.run(
+          'global_session_synced_through_seq',
+          String(acceptedThroughSeq),
+        );
+      }
+      return true;
+    });
+  }
+
   getManagedTurn(runtime) {
     const raw = this.getMetaStatement.get(`managed_turn:${runtime}`)?.value;
     if (!raw) return null;
@@ -1337,6 +1413,7 @@ export class Store {
 
   beginManagedTurn({
     runtime,
+    authorityToken,
     sessionId,
     epoch,
     inboundSeqs,
@@ -1347,13 +1424,16 @@ export class Store {
     return this.transaction(() => {
       const cognition = this.getCognitionState();
       const session = this.getGlobalSession();
-      if (cognition.runtime !== runtime || cognition.epoch !== epoch
+      if (cognition.runtime !== runtime
+        || cognition.authorityToken !== authorityToken
+        || cognition.epoch !== epoch
         || session.runtime !== runtime || session.epoch !== epoch
         || session.sessionId !== sessionId) {
         throw new Error('managed turn no longer owns the active session');
       }
       const turn = {
         runtime,
+        authorityToken,
         sessionId,
         epoch,
         status: 'POSTING',
@@ -1374,8 +1454,27 @@ export class Store {
       if (!turn || turn.sessionId !== sessionId || turn.status !== 'POSTING') {
         throw new Error('managed turn acceptance does not match the pending POST');
       }
+      const cognition = this.getCognitionState();
+      const session = this.getGlobalSession();
+      if (cognition.runtime !== runtime
+        || cognition.authorityToken !== turn.authorityToken
+        || cognition.epoch !== turn.epoch
+        || session.runtime !== runtime
+        || session.epoch !== turn.epoch
+        || session.sessionId !== sessionId) {
+        throw new Error('managed turn acceptance no longer owns the active session');
+      }
       const accepted = { ...turn, status: 'ACCEPTED', expectedUserEventId };
       this.setMetaStatement.run(`managed_turn:${runtime}`, JSON.stringify(accepted));
+      const acceptedThroughSeq = Number.isSafeInteger(turn.deliveredThroughSeq)
+        ? turn.deliveredThroughSeq
+        : 0;
+      if (acceptedThroughSeq > session.syncedThroughSeq) {
+        this.setMetaStatement.run(
+          'global_session_synced_through_seq',
+          String(acceptedThroughSeq),
+        );
+      }
       return accepted;
     });
   }

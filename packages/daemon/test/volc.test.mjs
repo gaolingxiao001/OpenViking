@@ -54,6 +54,14 @@ function store() {
       assert.equal(managedTurn.runtime, runtime);
       assert.equal(managedTurn.sessionId, sessionId);
       managedTurn = { ...managedTurn, status: 'ACCEPTED', expectedUserEventId };
+      globalSession = {
+        ...globalSession,
+        syncedThroughSeq: Math.max(
+          globalSession?.syncedThroughSeq ?? 0,
+          managedTurn.deliveredThroughSeq ?? 0,
+        ),
+      };
+      return managedTurn;
     },
     clearManagedTurn: (runtime, expected = {}) => {
       if (!managedTurn || managedTurn.runtime !== runtime) return false;
@@ -174,6 +182,88 @@ describe('Volc managed-agent runtime', () => {
     assert.match(posted.events[1].content[0].text, /daemon relays only the final agent\.message locally/);
     assert.equal(agent.turnInProgress, false);
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
+  });
+
+  it('does not replay accepted cognition after an idle turn has no agent.message', async () => {
+    const rows = [
+      {
+        seq: 1, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 1,
+        chatId: 'chat-a', actor: 'me', text: 'OLD_HISTORY_MARKER',
+      },
+      {
+        seq: 2, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 2,
+        inboundSeq: 1, chatId: 'chat-a', messageId: 'om_first12345678', actor: 'user', text: 'first',
+      },
+      {
+        seq: 3, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 3,
+        chatId: 'chat-a', actor: 'me', text: 'FIRST_TURN_FAILED',
+      },
+      {
+        seq: 4, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 4,
+        inboundSeq: 2, chatId: 'chat-a', messageId: 'om_second1234567', actor: 'user', text: 'second',
+      },
+    ];
+    const data = store();
+    data.cognitionJournalBeforeInbound = (seq) => (seq === 1 ? 1 : 3);
+    data.cognitionJournalSeqForInbound = (seq) => (seq === 1 ? 2 : 4);
+    data.cognitionJournal = (_epoch, through, after = 0) => rows
+      .filter((row) => row.seq > after && row.seq <= through);
+
+    const posts = [];
+    let streamCount = 0;
+    const turnEvents = [
+      [
+        { id: 'evt-user-1', type: 'user.message' },
+        { id: 'evt-thinking-1', type: 'agent.thinking', content: [{ type: 'text', text: 'hidden' }] },
+        { id: 'evt-idle-1', type: 'session.status_idle', stop_reason: 'end_turn' },
+      ],
+      [
+        { id: 'evt-user-2', type: 'user.message' },
+        { id: 'evt-answer-2', type: 'agent.message', content: [{ type: 'text', text: 'SECOND_OK' }] },
+        { id: 'evt-idle-2', type: 'session.status_idle', stop_reason: 'end_turn' },
+      ],
+    ];
+    const fetch = async (url, options = {}) => {
+      if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+      if (url.endsWith('/sessions') && options.method === 'POST') {
+        return json(templateSession('sesn-incremental-live'));
+      }
+      if (url.endsWith('/events/stream')) {
+        const events = turnEvents[streamCount++] ?? [];
+        const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      if (url.includes('/events?')) return json({ data: [] });
+      if (url.endsWith('/events') && options.method === 'POST') {
+        const request = JSON.parse(options.body);
+        posts.push(request.events[0].content[0].text);
+        return json({ data: [{
+          id: posts.length === 1 ? 'evt-user-1' : 'evt-user-2',
+          type: 'user.message',
+        }] });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    };
+    let agent;
+    const completed = new Promise((resolve) => {
+      agent = new VolcAgent(config(), data, quietLogger, {
+        fetch,
+        onTurnOutput: async () => ({ accepted: true }),
+        onTurnFailed: () => agent.deliver('second', 2),
+        onTurnSucceeded: resolve,
+      });
+    });
+    await agent.start();
+    agent.deliver('first', 1);
+    await completed;
+
+    assert.equal(posts.length, 2);
+    assert.match(posts[0], /OLD_HISTORY_MARKER/);
+    assert.doesNotMatch(posts[1], /OLD_HISTORY_MARKER/);
+    assert.doesNotMatch(posts[1], /\] first(?:\n|$)/);
+    assert.match(posts[1], /FIRST_TURN_FAILED/);
+    assert.match(posts[1], /second$/);
+    await agent.stop();
   });
 
   it('replays unmarked pre-fence stream output after finding the exact fence in history', async () => {

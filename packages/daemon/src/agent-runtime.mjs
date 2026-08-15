@@ -369,6 +369,8 @@ export class AgentRuntime {
         syncedThroughSeq: 0,
         sessionReady: session.sessionReady !== false,
         model: target.model,
+        expectedRuntime: cognition.runtime,
+        expectedAuthorityToken: cognition.authorityToken,
       });
       staged.activate();
       this.backend = staged;

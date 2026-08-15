@@ -31,6 +31,11 @@ class SimulationStore {
     return this.journal.filter((row) => row.seq > after && row.seq <= through);
   }
   commitRuntimeSwitch(fields) {
+    if (this.cognition.runtime !== fields.expectedRuntime
+      || this.cognition.authorityToken !== fields.expectedAuthorityToken
+      || this.cognition.epoch !== fields.epoch) {
+      throw new Error('cognition authority changed during runtime switch');
+    }
     this.cognition = {
       runtime: fields.runtime,
       epoch: fields.epoch,

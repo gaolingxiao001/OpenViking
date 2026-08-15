@@ -264,6 +264,87 @@ describe('Store', () => {
     assert.equal(store.getGlobalSession().sessionId, 'sesn-new123456');
   });
 
+  it('advances accepted session context only for the current cognition owner', () => {
+    const cognition = store.initializeCognition('codex', 'codex-authority');
+    assert.equal(store.publishOwnedSession({
+      runtime: 'codex',
+      authorityToken: cognition.authorityToken,
+      sessionId: 'thread-codex-active',
+      policyHash: 'codex-policy',
+      epoch: cognition.epoch,
+      acceptedThroughSeq: 2,
+    }), true);
+    assert.equal(store.advanceOwnedSessionAcceptance({
+      runtime: 'codex',
+      authorityToken: cognition.authorityToken,
+      sessionId: 'thread-codex-active',
+      epoch: cognition.epoch,
+      acceptedThroughSeq: 7,
+    }), true);
+    assert.equal(store.getGlobalSession().syncedThroughSeq, 7);
+
+    store.commitRuntimeSwitch({
+      runtime: 'claude',
+      authorityToken: 'claude-authority',
+      sessionId: 'session-claude-active',
+      policyHash: 'claude-policy',
+      epoch: cognition.epoch,
+      expectedRuntime: cognition.runtime,
+      expectedAuthorityToken: cognition.authorityToken,
+    });
+    assert.equal(store.advanceOwnedSessionAcceptance({
+      runtime: 'codex',
+      authorityToken: cognition.authorityToken,
+      sessionId: 'thread-codex-active',
+      epoch: cognition.epoch,
+      acceptedThroughSeq: 11,
+    }), false);
+    assert.equal(store.publishOwnedSession({
+      runtime: 'codex',
+      authorityToken: cognition.authorityToken,
+      sessionId: 'thread-codex-late',
+      policyHash: 'codex-policy',
+      epoch: cognition.epoch,
+      acceptedThroughSeq: 11,
+    }), false);
+    assert.deepEqual(store.getGlobalSession(), {
+      sessionId: 'session-claude-active',
+      policyHash: 'claude-policy',
+      runtime: 'claude',
+      epoch: cognition.epoch,
+      syncedThroughSeq: 0,
+      sessionReady: true,
+    });
+  });
+
+  it('rejects a runtime switch staged under a superseded authority token', () => {
+    const cognition = store.initializeCognition('codex', 'codex-old-authority');
+    store.setGlobalSession('thread-codex-active', 'codex-policy', {
+      runtime: 'codex',
+      epoch: cognition.epoch,
+      syncedThroughSeq: 7,
+    });
+    store.initializeCognition('codex', 'codex-new-authority');
+
+    assert.throws(() => store.commitRuntimeSwitch({
+      runtime: 'claude',
+      authorityToken: 'claude-authority',
+      sessionId: 'session-claude-candidate',
+      policyHash: 'claude-policy',
+      epoch: cognition.epoch,
+      expectedRuntime: 'codex',
+      expectedAuthorityToken: 'codex-old-authority',
+    }), /authority changed during runtime switch/);
+    assert.deepEqual(store.getGlobalSession(), {
+      sessionId: 'thread-codex-active',
+      policyHash: 'codex-policy',
+      runtime: 'codex',
+      epoch: cognition.epoch,
+      syncedThroughSeq: 7,
+      sessionReady: true,
+    });
+  });
+
   it('persists the accepted managed turn fence for crash recovery', () => {
     const cognition = store.initializeCognition('volc', 'volc-authority');
     store.setGlobalSession('sesn-active1234', 'volc-policy', {
@@ -272,6 +353,7 @@ describe('Store', () => {
     });
     store.beginManagedTurn({
       runtime: 'volc',
+      authorityToken: cognition.authorityToken,
       sessionId: 'sesn-active1234',
       epoch: cognition.epoch,
       inboundSeqs: [7, 7, 8],
@@ -281,6 +363,7 @@ describe('Store', () => {
     });
     assert.deepEqual(store.getManagedTurn('volc'), {
       runtime: 'volc',
+      authorityToken: cognition.authorityToken,
       sessionId: 'sesn-active1234',
       epoch: cognition.epoch,
       status: 'POSTING',
@@ -292,6 +375,7 @@ describe('Store', () => {
     });
     store.acceptManagedTurn('volc', 'sesn-active1234', 'sevt-user1234');
     assert.equal(store.getManagedTurn('volc').status, 'ACCEPTED');
+    assert.equal(store.getGlobalSession().syncedThroughSeq, 11);
     assert.equal(store.clearManagedTurn('volc', {
       sessionId: 'sesn-active1234',
       expectedUserEventId: 'wrong',
@@ -301,6 +385,65 @@ describe('Store', () => {
       expectedUserEventId: 'sevt-user1234',
     }), true);
     assert.equal(store.getManagedTurn('volc'), null);
+  });
+
+  it('rejects a managed-turn fence after its authority token is superseded', () => {
+    const cognition = store.initializeCognition('volc', 'volc-old-authority');
+    store.setGlobalSession('sesn-active1234', 'volc-policy', {
+      runtime: 'volc',
+      epoch: cognition.epoch,
+    });
+    store.beginManagedTurn({
+      runtime: 'volc',
+      authorityToken: cognition.authorityToken,
+      sessionId: 'sesn-active1234',
+      epoch: cognition.epoch,
+      inboundSeqs: [7],
+      conversationKey: 'default:tenant:chat:main',
+      deliveredThroughSeq: 11,
+    });
+    store.initializeCognition('volc', 'volc-new-authority');
+
+    assert.throws(
+      () => store.acceptManagedTurn('volc', 'sesn-active1234', 'sevt-user1234'),
+      /no longer owns/,
+    );
+    assert.equal(store.getManagedTurn('volc').status, 'POSTING');
+    assert.equal(store.getGlobalSession().syncedThroughSeq, 0);
+  });
+
+  it('atomically rolls back managed acceptance and its cursor', () => {
+    const cognition = store.initializeCognition('volc', 'volc-authority');
+    store.setGlobalSession('sesn-active1234', 'volc-policy', {
+      runtime: 'volc',
+      epoch: cognition.epoch,
+    });
+    store.beginManagedTurn({
+      runtime: 'volc',
+      authorityToken: cognition.authorityToken,
+      sessionId: 'sesn-active1234',
+      epoch: cognition.epoch,
+      inboundSeqs: [7],
+      conversationKey: 'default:tenant:chat:main',
+      deliveredThroughSeq: 11,
+    });
+    const statement = store.setMetaStatement;
+    let writes = 0;
+    store.setMetaStatement = {
+      run(...args) {
+        writes += 1;
+        if (writes === 2) throw new Error('injected acceptance cursor failure');
+        return statement.run(...args);
+      },
+    };
+
+    assert.throws(
+      () => store.acceptManagedTurn('volc', 'sesn-active1234', 'sevt-user1234'),
+      /injected acceptance cursor failure/,
+    );
+    store.setMetaStatement = statement;
+    assert.equal(store.getManagedTurn('volc').status, 'POSTING');
+    assert.equal(store.getGlobalSession().syncedThroughSeq, 0);
   });
 
   it('quarantines ambiguous sessions and atomically replaces cognition before reuse', () => {

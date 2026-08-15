@@ -207,7 +207,9 @@ export class CodexAgent {
     this.modelWorking = false;
     this.modelStartedAtMs = null;
     this.startingItems = [];         // inbound items waiting for turn/started
-    this.startingJournalThroughSeq = 0; // promoted only after turn completion
+    this.startingJournalThroughSeq = 0; // offered cursor, promoted on native acceptance
+    this.startingOwner = null;       // immutable session authority for turn/start
+    this.activeOwner = null;         // immutable session authority for the live turn
     this.activeInboundSeqs = [];     // inbound rows associated with the live app-server turn
     this.activeReceiptIds = [];      // opaque non-DB receipts associated with the live turn
     this.needsHistoryPrefix = false; // fresh thread: prepend history to the first turn
@@ -225,6 +227,7 @@ export class CodexAgent {
     this.idleWaiters = [];
     this.primeWaiter = null;
     this.sessionRotation = null;
+    this.forceFreshThread = false;
   }
 
   developerInstructions(profile) {
@@ -391,6 +394,12 @@ export class CodexAgent {
     this.startingTurn = true;
     this.startingItems = items.map(deliveryItem);
     this.startingJournalThroughSeq = journalThroughSeq;
+    this.startingOwner = Object.freeze({
+      runtime: this.runtime,
+      authorityToken: this.authorityToken,
+      sessionId: this.threadId,
+      epoch: this.cognitionEpoch,
+    });
     // model/effort ride on every turn/start: thread/resume does not re-apply its
     // config to an already-running thread, so per-turn overrides are the only way
     // /model and /effort reliably take effect.
@@ -406,6 +415,7 @@ export class CodexAgent {
       this.modelStartedAtMs = null;
       this.startingItems = [];
       this.startingJournalThroughSeq = 0;
+      this.startingOwner = null;
       if (hadPrefix) this.needsHistoryPrefix = true;
       this.logger.warn('codex_turn_start_failed', { error: safe(error) });
       if (prime && this.primeWaiter) {
@@ -426,6 +436,7 @@ export class CodexAgent {
 
   _steerBatch(items) {
     const expectedTurnId = this.activeTurnId;
+    const owner = this.activeOwner;
     const text = items.map((item) => item.text).join('\n');
     const seqs = [...new Set(
       items.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
@@ -442,6 +453,7 @@ export class CodexAgent {
       for (const receiptId of receipts) {
         if (!this.activeReceiptIds.includes(receiptId)) this.activeReceiptIds.push(receiptId);
       }
+      this._acceptJournal(owner, 0, seqs);
       this._recordActivity('agent.steered', {
         turnId: expectedTurnId,
         inboundSeq: seqs.at(-1) ?? null,
@@ -457,13 +469,19 @@ export class CodexAgent {
 
   // turn/started: the in-flight turn/start is live; steer whatever queued meanwhile.
   _onTurnStarted(turnId) {
+    const owner = this.startingOwner;
+    const journalThroughSeq = this.startingJournalThroughSeq;
     this.startingTurn = false;
     this.activeTurnId = turnId ?? null;
+    this.activeOwner = owner;
     this.activeInboundSeqs = [...new Set(
       this.startingItems.map((item) => item.seq).filter((seq) => seq !== null && seq !== undefined),
     )];
     this.activeReceiptIds = receiptIds(this.startingItems);
+    this._acceptJournal(owner, journalThroughSeq, this.activeInboundSeqs);
     this.startingItems = [];
+    this.startingJournalThroughSeq = 0;
+    this.startingOwner = null;
     this._recordActivity('agent.turn_started', {
       turnId: this.activeTurnId,
       inboundSeq: this.activeInboundSeqs.at(-1) ?? null,
@@ -503,7 +521,14 @@ export class CodexAgent {
     const turnId = this.activeTurnId ?? completedTurnId;
     const inboundSeqs = this._associatedInboundSeqs();
     const receipts = this._associatedReceiptIds();
+    if (!this.activeOwner) {
+      // Some app-server versions may complete a very fast turn without a
+      // turn/started notification. Completion still proves the input entered
+      // the native thread, even when the turn itself failed.
+      this._acceptJournal(this.startingOwner, this.startingJournalThroughSeq, inboundSeqs);
+    }
     this.activeTurnId = null;
+    this.activeOwner = null;
     this.startingTurn = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
@@ -520,23 +545,8 @@ export class CodexAgent {
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     this.startingItems = [];
-    if (!failed) {
-      this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.startingJournalThroughSeq);
-      for (const seq of inboundSeqs) {
-        this.syncedThroughSeq = Math.max(
-          this.syncedThroughSeq,
-          this.store.cognitionJournalSeqForInbound?.(seq, this.cognitionEpoch) ?? 0,
-        );
-      }
-    }
     this.startingJournalThroughSeq = 0;
-    if (this.sessionPersistence && this.threadId) {
-      this.store.setGlobalSession?.(this.threadId, this.policyHash, {
-        runtime: this.runtime,
-        epoch: this.cognitionEpoch,
-        syncedThroughSeq: this.syncedThroughSeq,
-      });
-    }
+    this.startingOwner = null;
     const wasPrime = Boolean(this.primeWaiter);
     if (this.primeWaiter) {
       const waiter = this.primeWaiter;
@@ -566,6 +576,31 @@ export class CodexAgent {
     }
     this._drain();
     this._notifyAvailable();
+  }
+
+  _acceptJournal(owner, journalThroughSeq, inboundSeqs = []) {
+    if (!owner?.sessionId) return false;
+    let acceptedThroughSeq = Number.isSafeInteger(journalThroughSeq) ? journalThroughSeq : 0;
+    for (const seq of inboundSeqs) {
+      acceptedThroughSeq = Math.max(
+        acceptedThroughSeq,
+        this.store.cognitionJournalSeqForInbound?.(seq, owner.epoch) ?? 0,
+      );
+    }
+    let accepted = true;
+    if (this.sessionPersistence && this.store.advanceOwnedSessionAcceptance) {
+      accepted = this.store.advanceOwnedSessionAcceptance({ ...owner, acceptedThroughSeq });
+    }
+    const stillCurrent = owner.runtime === this.runtime
+      && owner.authorityToken === this.authorityToken
+      && owner.sessionId === this.threadId
+      && owner.epoch === this.cognitionEpoch;
+    if (!accepted || !stillCurrent) {
+      this.logger.info('codex_session_acceptance_stale', { acceptedThroughSeq });
+      return false;
+    }
+    this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
+    return true;
   }
 
   // Start a turn with everything queued, if the connection is idle.
@@ -753,6 +788,7 @@ export class CodexAgent {
     return new Promise((resolve, reject) => {
       const global = this.store.getGlobalSession();
       const resumable = (this.allowResume
+        && !this.forceFreshThread
         && global.sessionId
         && global.sessionReady !== false
         && global.policyHash === this.policyHash
@@ -862,13 +898,7 @@ export class CodexAgent {
       }).then(() => {
         this.startedOk = true;
         this.backoffMs = this.reconnectBaseMs;
-        if (this.sessionPersistence) {
-          this.store.setGlobalSession(this.threadId, this.policyHash, {
-            runtime: this.runtime,
-            epoch: this.cognitionEpoch,
-            syncedThroughSeq: this.syncedThroughSeq,
-          });
-        }
+        this._publishSession();
         this._flushQueue();
         this._notifyAvailable();
         finish();
@@ -893,6 +923,7 @@ export class CodexAgent {
         const result = await this._request('thread/resume', { ...params, threadId: this.storedThreadId });
         this.threadId = result?.thread?.id ?? this.storedThreadId;
         this.needsHistoryPrefix = false; // codex retains the resumed thread's context
+        this.forceFreshThread = false;
         return;
       } catch (error) {
         this.logger.warn('codex_resume_failed_fresh_start', { error: safe(error) });
@@ -901,7 +932,12 @@ export class CodexAgent {
     const result = await this._request('thread/start', params);
     this.threadId = result?.thread?.id;
     if (!this.threadId) throw new Error('thread/start returned no thread id');
+    // A fresh native transcript has accepted none of the journal yet. The first
+    // real turn deliberately catches up from zero and advances this cursor when
+    // turn/started (or turn/completed) proves acceptance.
+    this.syncedThroughSeq = 0;
     this.needsHistoryPrefix = true;
+    this.forceFreshThread = false;
   }
 
   // Prepare a fresh thread without publishing it as the active thread. The
@@ -936,13 +972,7 @@ export class CodexAgent {
     this.storedThreadId = null;
     this.needsHistoryPrefix = false;
     this.sessionRotation = null;
-    if (persist && this.sessionPersistence) {
-      this.store.setGlobalSession(this.threadId, this.policyHash, {
-        runtime: this.runtime,
-        epoch: this.cognitionEpoch,
-        syncedThroughSeq: this.syncedThroughSeq,
-      });
-    }
+    if (persist) this._publishSession();
     this._recordActivity('agent.session_rotated', {
       summary: '已开启新会话',
       metadata: { resume: false },
@@ -983,6 +1013,8 @@ export class CodexAgent {
     this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
+    this.startingOwner = null;
+    this.activeOwner = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     if ((inboundSeqs.length > 0 || receipts.length > 0) && this.onTurnAbandoned) {
@@ -1024,6 +1056,8 @@ export class CodexAgent {
     this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
+    this.startingOwner = null;
+    this.activeOwner = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     if ((abandonedInboundSeqs.length > 0 || abandonedReceiptIds.length > 0)
@@ -1049,13 +1083,7 @@ export class CodexAgent {
       throw error;
     }
     if (!resume) this.needsHistoryPrefix = false; // /new means a clean slate
-    if (this.sessionPersistence) {
-      this.store.setGlobalSession(this.threadId, this.policyHash, {
-        runtime: this.runtime,
-        epoch: this.cognitionEpoch,
-        syncedThroughSeq: this.syncedThroughSeq,
-      });
-    }
+    this._publishSession();
     this._recordActivity('agent.session_rotated', {
       summary: resume ? '会话参数已更新' : '已开启新会话',
       metadata: { resume },
@@ -1077,6 +1105,8 @@ export class CodexAgent {
     this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
+    this.startingOwner = null;
+    this.activeOwner = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     for (const pending of this.pending.values()) {
@@ -1125,6 +1155,12 @@ export class CodexAgent {
     // original items. Only a receipt already owned by a live turn is terminal.
     const failedInboundSeqs = [...this.activeInboundSeqs];
     const failedReceiptIds = [...this.activeReceiptIds];
+    if (this.startingTurn && this.startingItems.length > 0) {
+      // turn/start may have reached the server even though no acknowledgement
+      // reached us. Replaying into the same thread could duplicate the input;
+      // rebuild a fresh thread and perform one intentional journal catch-up.
+      this.forceFreshThread = true;
+    }
     this.child = null;
     this.threadId = null;
     this.activeTurnId = null;
@@ -1133,6 +1169,8 @@ export class CodexAgent {
     this.modelStartedAtMs = null;
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
+    this.startingOwner = null;
+    this.activeOwner = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     for (const pending of this.pending.values()) {
@@ -1188,6 +1226,34 @@ export class CodexAgent {
     }
   }
 
+  _publishSession() {
+    if (!this.sessionPersistence || !this.threadId) return false;
+    try {
+      if (this.store.publishOwnedSession) {
+        const published = this.store.publishOwnedSession({
+          runtime: this.runtime,
+          authorityToken: this.authorityToken,
+          sessionId: this.threadId,
+          policyHash: this.policyHash,
+          epoch: this.cognitionEpoch,
+          acceptedThroughSeq: this.syncedThroughSeq,
+          sessionReady: true,
+        });
+        if (!published) this.logger.info('codex_session_publish_stale');
+        return published;
+      }
+      this.store.setGlobalSession?.(this.threadId, this.policyHash, {
+        runtime: this.runtime,
+        epoch: this.cognitionEpoch,
+        syncedThroughSeq: this.syncedThroughSeq,
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn('codex_session_persist_failed', { error: safe(error) });
+      return false;
+    }
+  }
+
   _notifyAvailable() {
     if (this.turnInProgress
       || this.queue.length > 0
@@ -1226,6 +1292,8 @@ export class CodexAgent {
     }
     this.queue = [];
     this.startingItems = [];
+    this.startingOwner = null;
+    this.activeOwner = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     if (this.primeWaiter) {

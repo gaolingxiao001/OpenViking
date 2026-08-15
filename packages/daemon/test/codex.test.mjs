@@ -696,6 +696,52 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(second, 'second turn');
   });
 
+  it('does not replay accepted cognition after a failed native turn', async () => {
+    const rows = [
+      {
+        seq: 1, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 1,
+        chatId: 'oc-old', actor: 'me', text: 'OLD_CODEX_HISTORY',
+      },
+      {
+        seq: 2, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 2,
+        inboundSeq: 10, chatId: 'oc-now', messageId: 'om-first', actor: 'user', text: 'first',
+      },
+      {
+        seq: 3, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 3,
+        chatId: 'oc-now', actor: 'me', text: 'FIRST_CODEX_FAILED',
+      },
+      {
+        seq: 4, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 4,
+        inboundSeq: 11, chatId: 'oc-now', messageId: 'om-second', actor: 'user', text: 'second',
+      },
+    ];
+    const store = makeStore();
+    store.getCognitionState = () => ({ runtime: 'codex', epoch: 1, authorityToken: 'codex-token' });
+    store.cognitionJournalBeforeInbound = (seq) => (seq === 10 ? 1 : 3);
+    store.cognitionJournalSeqForInbound = (seq) => (seq === 10 ? 2 : 4);
+    store.cognitionJournal = (_epoch, through, after = 0) => rows
+      .filter((row) => row.seq > after && row.seq <= through);
+    store.advanceOwnedSessionAcceptance = () => true;
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('first', 10);
+    const first = child.ofMethod('turn/start').at(-1).params.input[0].text;
+    assert.match(first, /OLD_CODEX_HISTORY/);
+    child.feed({ method: 'turn/started', params: { turn: { id: 'turn-failed' } } });
+    child.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 'turn-failed', status: 'failed', error: { message: 'failed' } } },
+    });
+
+    agent.deliver('second', 11);
+    const second = child.ofMethod('turn/start').at(-1).params.input[0].text;
+    assert.doesNotMatch(second, /OLD_CODEX_HISTORY/);
+    assert.doesNotMatch(second, /\] first(?:\n|$)/);
+    assert.match(second, /FIRST_CODEX_FAILED/);
+    assert.match(second, /second$/);
+  });
+
   it('steers into an active turn', async () => {
     const store = makeStore();
     const { agent, children } = newAgent(store);
@@ -766,6 +812,31 @@ describe('CodexAgent turn/steer state machine', () => {
     await flush();
 
     assert.equal(reconnect.ofMethod('turn/start').at(-1).params.input[0].text, 'during-down');
+    agent.stopping = true;
+  });
+
+  it('uses a fresh thread after turn/start acceptance becomes ambiguous', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const first = await handshake(agent, children);
+    agent.deliver('possibly accepted', 51);
+    assert.equal(first.ofMethod('turn/start').length, 1);
+
+    first.simulateExit(1);
+    await waitFor(() => children.length === 2);
+    const reconnect = children[1];
+    await flush();
+    reconnect.feed({ id: 1, result: {} });
+    await flush();
+    assert.equal(reconnect.ofMethod('thread/resume').length, 0);
+    const fresh = reconnect.ofMethod('thread/start').at(-1);
+    assert.ok(fresh);
+    reconnect.feed({ id: fresh.id, result: { thread: { id: 'th-fresh' } } });
+    await waitFor(() => reconnect.ofMethod('turn/start').length === 1);
+    assert.equal(
+      reconnect.ofMethod('turn/start').at(-1).params.input[0].text,
+      'possibly accepted',
+    );
     agent.stopping = true;
   });
 

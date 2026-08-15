@@ -123,6 +123,7 @@ export class ClaudeAgent {
     this.modelStartedAtMs = null;
     this.turnError = null;
     this.activeItems = [];
+    this.activeOwner = null;
     this.queue = [];
     this.stdoutBuffer = '';
     this.stderrBuffer = '';
@@ -492,6 +493,12 @@ export class ClaudeAgent {
     if (this.sessionInitialized || this.resumeRequested) message.session_id = this.sessionId;
 
     const wasActive = this.turnActive;
+    const owner = wasActive ? this.activeOwner : Object.freeze({
+      runtime: this.runtime,
+      authorityToken: this.authorityToken,
+      sessionId: this.sessionId,
+      epoch: this.cognitionEpoch,
+    });
     try {
       this.child.stdin.write(`${JSON.stringify(message)}\n`);
     } catch (error) {
@@ -500,6 +507,7 @@ export class ClaudeAgent {
     }
     this.needsHistoryPrefix = false;
     this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, prepared.deliveredThroughSeq);
+    if (!wasActive) this.activeOwner = owner;
     this.activeItems.push(...items);
     this.turnActive = true;
     if (!wasActive) this.turnStartedAtMs = Date.now();
@@ -666,19 +674,15 @@ export class ClaudeAgent {
     const items = this.activeItems.splice(0);
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
     const receipts = receiptIds(items);
+    const owner = this.activeOwner;
+    this._acceptJournal(owner, this.deliveredThroughSeq);
+    this.activeOwner = null;
     this.turnActive = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
     this.deliveryTools.clear();
-    if (!error) {
-      this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.deliveredThroughSeq);
-      this._persistSession();
-    } else {
-      // A failed result is not a durable acknowledgement of the journal
-      // prefix. Recompute the missing delta before the next real turn.
-      this.deliveredThroughSeq = this.syncedThroughSeq;
-    }
+    this.deliveredThroughSeq = this.syncedThroughSeq;
     this._recordActivity('agent.turn_completed', {
       inboundSeq: seqs.at(-1) ?? null,
       status: error ? 'failed' : 'completed',
@@ -695,6 +699,24 @@ export class ClaudeAgent {
     }
     this._drain();
     this._notifyAvailable();
+  }
+
+  _acceptJournal(owner, acceptedThroughSeq) {
+    if (!owner?.sessionId || !Number.isSafeInteger(acceptedThroughSeq)) return false;
+    let accepted = true;
+    if (this.sessionPersistence && this.store.advanceOwnedSessionAcceptance) {
+      accepted = this.store.advanceOwnedSessionAcceptance({ ...owner, acceptedThroughSeq });
+    }
+    const stillCurrent = owner.runtime === this.runtime
+      && owner.authorityToken === this.authorityToken
+      && owner.sessionId === this.sessionId
+      && owner.epoch === this.cognitionEpoch;
+    if (!accepted || !stillCurrent) {
+      this.logger.info('claude_session_acceptance_stale', { acceptedThroughSeq });
+      return false;
+    }
+    this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
+    return true;
   }
 
   _failItems(items, error) {
@@ -726,6 +748,19 @@ export class ClaudeAgent {
   _persistSession() {
     if (!this.sessionPersistence || !this.sessionId) return;
     try {
+      if (this.store.publishOwnedSession) {
+        const published = this.store.publishOwnedSession({
+          runtime: this.runtime,
+          authorityToken: this.authorityToken,
+          sessionId: this.sessionId,
+          policyHash: this.policyHash,
+          epoch: this.cognitionEpoch,
+          acceptedThroughSeq: this.syncedThroughSeq,
+          sessionReady: this.sessionInitialized,
+        });
+        if (!published) this.logger.info('claude_session_publish_stale');
+        return;
+      }
       this.store.setGlobalSession?.(this.sessionId, this.policyHash, {
         runtime: this.runtime,
         epoch: this.cognitionEpoch,
@@ -743,7 +778,9 @@ export class ClaudeAgent {
     this.connected = false;
     this._cleanupMcpConfig();
     const wasActive = this.turnActive;
+    const acceptanceUnknown = wasActive && this.sessionInitialized;
     const items = this.activeItems.splice(0);
+    this.activeOwner = null;
     this.turnActive = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
@@ -751,12 +788,18 @@ export class ClaudeAgent {
     this.deliveryTools.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this.needsHistoryPrefix = !this.sessionInitialized;
-    if (!this.sessionInitialized && !this.stopping && this.startedOk && this.autoReconnect) {
-      // Claude may have partially created a transcript before emitting
-      // system/init. Reusing the preassigned UUID with --session-id can then
-      // collide forever, so every pre-init reconnect gets a fresh identity.
+    if ((acceptanceUnknown || !this.sessionInitialized)
+      && !this.stopping && this.startedOk && this.autoReconnect) {
+      // No result means the CLI never proved whether the active input reached
+      // the native transcript. Reusing that transcript can duplicate the input;
+      // rebuild it and perform one deliberate journal catch-up instead. The
+      // same fresh-identity rule also avoids pre-init UUID collisions.
       this.sessionId = randomUUID();
+      this.sessionInitialized = false;
       this.resumeRequested = false;
+      this.needsHistoryPrefix = true;
+      this.syncedThroughSeq = 0;
+      this.deliveredThroughSeq = 0;
     }
     if (wasActive) {
       this._failItems(items, processError ?? this.turnError
@@ -882,6 +925,7 @@ export class ClaudeAgent {
     const inboundSeqs = this._activeSeqs();
     const receipts = receiptIds(this.activeItems);
     this.activeItems.splice(0);
+    this.activeOwner = null;
     this.turnActive = false;
     this.turnStartedAtMs = null;
     this.modelWorking = false;
@@ -987,6 +1031,7 @@ export class ClaudeAgent {
       this._failItems(queued, new Error('claude stopped before queued work started'));
     }
     const items = this.activeItems.splice(0);
+    this.activeOwner = null;
     this.turnActive = false;
     if (items.length > 0) this._failItems(items, new Error('claude stopped during an active turn'));
     this._resolveIdleWaiters();

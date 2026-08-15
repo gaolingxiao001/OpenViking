@@ -95,6 +95,25 @@ function makeStore({ globalOverride = {} } = {}) {
     setGlobalSession(sessionId, policyHash, fields) {
       global = { sessionId, policyHash, ...fields };
     },
+    publishOwnedSession({ runtime, sessionId, policyHash, epoch, acceptedThroughSeq, sessionReady }) {
+      global = {
+        sessionId,
+        policyHash,
+        runtime,
+        epoch,
+        syncedThroughSeq: acceptedThroughSeq,
+        sessionReady,
+      };
+      return true;
+    },
+    advanceOwnedSessionAcceptance({ sessionId, acceptedThroughSeq }) {
+      if (global.sessionId !== sessionId) return false;
+      global = {
+        ...global,
+        syncedThroughSeq: Math.max(global.syncedThroughSeq, acceptedThroughSeq),
+      };
+      return true;
+    },
     global: () => global,
     getSetting: () => null,
     setSetting() {},
@@ -286,6 +305,34 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     await agent.stop();
   });
 
+  it('does not replay accepted cognition after an error result', async () => {
+    const store = makeStore();
+    store.advanceOwnedSessionAcceptance = ({ acceptedThroughSeq }) => {
+      const global = store.global();
+      store.setGlobalSession(global.sessionId, global.policyHash, {
+        ...global,
+        syncedThroughSeq: Math.max(global.syncedThroughSeq, acceptedThroughSeq),
+      });
+      return true;
+    };
+    const { agent, persistent } = harness({ store });
+    await agent.start();
+    const child = persistent[0];
+
+    agent.deliver('first', 7);
+    const first = JSON.parse(child.writes[0]).message.content[0].text;
+    assert.match(first, /earlier question/);
+    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
+    child.feed({ type: 'result', subtype: 'error', result: 'failed' });
+
+    agent.deliver('second', 8);
+    const second = JSON.parse(child.writes[1]).message.content[0].text;
+    assert.doesNotMatch(second, /earlier question/);
+    assert.doesNotMatch(second, /current request/);
+    assert.equal(second, 'second');
+    await agent.stop();
+  });
+
   it('still completes a turn when a tool result carried is_error but the run succeeded', async () => {
     const { agent, persistent, failures } = harness();
     await agent.start();
@@ -383,7 +430,9 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
   });
 
   it('restores model and effort before draining queued work after a cancelled prepare', async () => {
-    const { agent, calls, persistent } = harness();
+    const { agent, calls, persistent } = harness({
+      agentOptions: { reconnectBaseMs: 1, reconnectCapMs: 2 },
+    });
     await agent.start();
     agent.model = 'opus';
     agent.effort = 'max';
@@ -460,6 +509,25 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     assert.ok(reconnectArgs.includes('--session-id'));
     assert.ok(!reconnectArgs.includes('--resume'));
     assert.notEqual(reconnectSessionId, firstSessionId);
+    await agent.stop();
+  });
+
+  it('uses a fresh session when an active result becomes ambiguous on disconnect', async () => {
+    const { agent, calls, persistent } = harness({
+      agentOptions: { reconnectBaseMs: 1, reconnectCapMs: 2 },
+    });
+    await agent.start();
+    const first = persistent[0];
+    const oldSessionId = agent.sessionId;
+    agent.deliver('possibly accepted', 7);
+    first.feed({ type: 'system', subtype: 'init', session_id: oldSessionId });
+    first.finish(1);
+
+    await waitFor(() => persistent.length === 2);
+    const reconnectArgs = calls.at(-1).args;
+    assert.ok(reconnectArgs.includes('--session-id'));
+    assert.ok(!reconnectArgs.includes('--resume'));
+    assert.notEqual(agent.sessionId, oldSessionId);
     await agent.stop();
   });
 

@@ -273,6 +273,8 @@ describe('Lark proactive IM tool service', () => {
       policyHash: 'claude-policy',
       epoch: 1,
       sessionReady: false,
+      expectedRuntime: 'codex',
+      expectedAuthorityToken: 'token-old',
     });
     const callsBeforeFence = calls;
     await assert.rejects(() => service.listChats(), /no longer owns/);
