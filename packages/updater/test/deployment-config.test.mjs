@@ -109,6 +109,7 @@ test('system environment overrides manifest daemon env while agent identity stay
       HOME: '/Users/test',
       LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
       LARK_DAEMON_LOG_LEVEL: 'debug',
+      ARK_API_KEY: 'system-only-secret',
       LARK_DAEMON_PORT: '9999',
       LARK_DAEMON_PROFILE: 'wrong',
     };
@@ -119,6 +120,7 @@ test('system environment overrides manifest daemon env while agent identity stay
     assert.equal(env.LARK_DAEMON_LOG_LEVEL, 'debug');
     assert.equal(env.LARK_DAEMON_DRY_RUN, 'false');
     assert.equal(env.TEAM_TASK_BOARD_URL, '');
+    assert.equal(env.ARK_API_KEY, 'system-only-secret');
     assert.equal(env.LARK_DAEMON_PORT, '3738');
     assert.equal(env.LARK_DAEMON_PROFILE, 'cli_alpha');
   });
@@ -128,6 +130,7 @@ test('manifest env accepts only string values from the daemon-wide allowlist', (
   const cases = [
     ['reserved identity', 'LARK_DAEMON_PROFILE', 'cli_wrong', /env field is not allowed: LARK_DAEMON_PROFILE/],
     ['reserved control plane', 'LARK_UPDATER_SOCKET', '/tmp/wrong', /env field is not allowed: LARK_UPDATER_SOCKET/],
+    ['system-only secret', 'ARK_API_KEY', 'must-not-live-in-manifest', /env field is not allowed: ARK_API_KEY/],
     ['unknown key', 'UNRELATED_SETTING', 'value', /env field is not allowed: UNRELATED_SETTING/],
     ['non-string', 'LARK_DAEMON_HISTORY_LIMIT', 30, /env\.LARK_DAEMON_HISTORY_LIMIT must be a string/],
   ];
@@ -158,7 +161,8 @@ test('foreground selection defaults to defaultInstance and pins every identity b
       dataDir: env.LARK_DAEMON_DATA_DIR,
       workspace: env.LARK_DAEMON_WORKSPACE,
       ovConfig: env.OPENVIKING_CLI_CONFIG_FILE,
-      model: env.LARK_DAEMON_CODEX_MODEL,
+      model: env.LARK_DAEMON_MODEL,
+      codexModel: env.LARK_DAEMON_CODEX_MODEL,
     }, {
       id: 'beta',
       target: 'beta',
@@ -170,7 +174,20 @@ test('foreground selection defaults to defaultInstance and pins every identity b
       workspace: '/srv/lark-daemon/workspaces/beta',
       ovConfig: '/srv/lark-daemon/ov/beta.json',
       model: 'gpt-5.6-sol',
+      codexModel: 'gpt-5.6-sol',
     });
+  });
+});
+
+test('pins Ark as a generic initial model without misconfiguring Codex', () => {
+  const manifest = validManifest();
+  manifest.agents[1].model = 'ark';
+  withManifest(manifest, (manifestPath) => {
+    const env = { LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath };
+    const deployment = loadDeploymentManifest(env);
+    applyDeploymentAgentEnv(env, deployment);
+    assert.equal(env.LARK_DAEMON_MODEL, 'ark');
+    assert.equal(env.LARK_DAEMON_CODEX_MODEL, '');
   });
 });
 

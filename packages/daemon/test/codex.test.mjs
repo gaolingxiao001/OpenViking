@@ -265,16 +265,22 @@ describe('formatting helpers', () => {
     assert.equal(spawnOptions[0].env.LARKSUITE_CLI_PROFILE, 'test-profile');
   });
 
-  it('strips only Lark/Feishu credentials from the inherited environment', () => {
+  it('strips Lark and Ark credentials from the inherited environment', () => {
     const env = sanitizeCodexEnv({
       PATH: '/bin',
       OPENAI_API_KEY: 'codex-needs-it',
       LARK_APP_SECRET: 'must-never-leak',
       FEISHU_TOKEN: 'must-never-leak',
       LARKSUITE_CLI_PROFILE: 'wrong-profile',
+      ARK_API_KEY: 'must-never-leak',
+      ARK_SESSION_ID: 'must-never-leak',
+      SESSION_ID: 'must-never-leak',
     }, 'fixed-profile');
     assert.equal(env.LARK_APP_SECRET, undefined);
     assert.equal(env.FEISHU_TOKEN, undefined);
+    assert.equal(env.ARK_API_KEY, undefined);
+    assert.equal(env.ARK_SESSION_ID, undefined);
+    assert.equal(env.SESSION_ID, undefined);
     assert.equal(env.OPENAI_API_KEY, 'codex-needs-it');
     assert.equal(env.LARKSUITE_CLI_PROFILE, 'fixed-profile');
     assert.equal(env.FORCE_COLOR, '0');

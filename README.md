@@ -1,8 +1,8 @@
 # lark-daemon
 
-一个单用户、本机常驻、可横向扩展的飞书 AI Agent 服务。项目拆成三个模块：`daemon` 负责飞书订阅、Codex/Claude、SQLite 与内部 API；`web` 提供本机 Activity 页面并按 manifest 代理各实例；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
+一个单用户、本机常驻、可横向扩展的飞书 AI Agent 服务。项目拆成三个模块：`daemon` 负责飞书订阅、Codex/Claude/火山方舟 Managed Agent、SQLite 与内部 API；`web` 提供本机 Activity 页面并按 manifest 代理各实例；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
 
-daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout；两边都通过同一套 Lark MCP 工具回复。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮；思考中途来的纠正会即时进入当前会话。日常使用不需要 `@`。
+daemon 是一根薄管道：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout，火山方舟使用 Sessions API + SSE；三者共享同一套带 authority/freshness fence 的飞书出站链路。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮。Codex/Claude 支持 turn 内纠正；Ark 为避免云端事件串轮，把活跃 turn 期间的新消息排到下一轮。日常使用不需要 `@`。
 
 ## 安装
 
@@ -12,7 +12,8 @@ daemon 是一根薄管道（steer 模式）：`lark-cli event +subscribe` 收到
 2. `lark-cli` 已安装并完成 bot 登录（权限见「飞书前置条件」；路径默认 `/opt/homebrew/bin/lark-cli`，可用 `LARK_CLI_BIN` 覆盖）。
 3. `codex` CLI 已安装并登录（默认 `/opt/homebrew/bin/codex`，可用 `CODEX_BIN` 覆盖）。
 4. 如需切到 Claude，安装并登录 `claude` CLI；路径可用 `CLAUDE_BIN` 覆盖。
-5. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
+5. 如需切到火山方舟，设置 `ARK_API_KEY`，并用 `LARK_DAEMON_VOLC_SESSION_ID` 指向一个已绑定 Agent 与 Environment 的 seed session。daemon 只读取其中锁定的 Agent/Environment 配置，每个实例会创建独立的新 session，不会共同写 seed session。API key 只放进进程环境，不写入 deployment manifest。新实例可把 `agents[].model` 设为 `ark` 直接以 Ark 启动；已有实例用 `/model ark` 切换。
+6. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
 
 首次运行：
 
@@ -42,10 +43,10 @@ lark-daemon upgrade all
 
 - 所有聊天统一具有工作区写权限，可让 Codex 在配置的工作区里完成任务；因此只应把 Agent 加入你信任的聊天。
 - 所有聊天共享一个全局 runtime/session，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
-- 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn；已有 turn 时继续沿用即时 steer。
+- 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn。Codex/Claude 已有 turn 时使用即时 steer；Ark 的后续消息进入下一 turn。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和音视频会以受限资源引用进入 Agent；图片可按消息中的 image_key 用专用工具查看，内容本身不会直接塞进 prompt。未知消息类型不会触发回复。
-- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。
+- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。Ark 的 model/effort 由远端 Agent 配置管理。
 - 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；只有决定处理且预计是长工作时，才调用 `react_to_lark_message` 的 `temporary: true` 发一个 `OnIt`。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。MCP sidecar 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
@@ -122,15 +123,15 @@ lark-daemon upgrade all
 
 ## 可靠性边界
 
-- 消息先写 SQLite（状态直接 DONE），再喂给当前常驻 runtime。Codex 用 `turn/start` / `turn/steer`，Claude 用 persistent stream-json input。
+- 消息先写 SQLite（状态直接 DONE），再喂给当前常驻 runtime。Codex 用 `turn/start` / `turn/steer`，Claude 用 persistent stream-json input，火山方舟用 session events + SSE，并在断线后以 event history + event id 去重补洞。Ark 会持久化本轮 `user.message` fence；daemon 重启后从远端历史恢复已接受的 turn，不会重复 POST。若 POST 是否被接受无法证明，旧 session 会被持久化隔离，克隆新 session 并原子轮换 epoch/authority 后才恢复队列，避免迟到输出串到下一条消息。
 - 400ms 群聊窗口只做 transport batching，不创建 chat 专属的 Codex session、history 或 memory。进程在窗口内停止或崩溃，仍可能让已落库消息没来得及喂给 Codex；这版没有加入 durable replay 或 delivery ledger。
 - slash command 和后续消息经过同一条全局 ingress barrier，但命令本身不等待模型；只读命令并行回答，会话变更命令先中断旧 turn。runtime switch preflight 目标进程后再原子交接 session 与 Lark tool authority，目标启动失败时仍留在旧 runtime。
 - SQLite 只保留一个 active runtime/session。跨 runtime journal 记录 accepted inbound、Lark outbound/control 与 uncertain side effect；它不保存隐藏思考。journal 超过上限时 switch fail closed，先 `/new` 再切。
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
-- 两个 runtime 都通过 MCP 工具自己发送回复。sidecar 在副作用前校验 active-runtime fence 和 `decision_message_id` freshness，并先写 PENDING journal；成功后 COMMITTED，timeout/crash 保留为 UNCERTAIN。runtime token 是本机单用户进程内的 fencing nonce，不是远程凭证；能读取 daemon SQLite 或进程配置的本机用户，本来就已处于 daemon 的信任边界内。
+- Codex/Claude 通过 MCP 工具发送回复；云端 Ark 无法访问本机 stdio MCP，所以 daemon 注入一次 transport policy，只取一轮最后一条 `agent.message`，再调用同一个 `LarkToolService` 本地投递。两条路径都在副作用前校验产出该结果的 active-runtime token/session/epoch 和 `decision_message_id` freshness，并先写 PENDING journal；成功后 COMMITTED，timeout/crash 保留为 UNCERTAIN。重放遇到 COMMITTED/UNCERTAIN 会 fail closed，不重复发送。Ark 不会把不同 chat/thread 合进同一个远端 turn，避免最终文本跨会话泄漏。runtime token 是本机单用户进程内的 fencing nonce，不是远程凭证；能读取 daemon SQLite 或进程配置的本机用户，本来就已处于 daemon 的信任边界内。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。
 - Activity 账本保留脱敏后的短摘要（含收消息、turn 开始/结束、steer、agent 输出）；老记录由网页折叠，不因业务表的清理而消失。
-- 单个 turn 没有 watchdog，codex 若长时间不结束一轮，该轮会一直 active（后续消息仍会 steer 进来）。
+- 单个 turn 没有总时长 watchdog；Codex/Claude 若长时间不结束一轮，该轮会一直 active。Ark 的 SSE 单次空闲超时默认 15 分钟，随后自动重连并从历史补偿。
 
 当前固定为 raw 事件、text 回复；不支持 compact 订阅。富文本 post 中的图片会作为 image_key 资源引用解析，不解析 markdown 图片语法。
 
@@ -141,5 +142,5 @@ lark-daemon upgrade all
 3. 群里不 `@` 发一个尚未解决的问题；Agent 有增量价值时回复。
 4. 群里发闲聊或人与人的对话，应保持静默。
 5. Codex 空闲时，在同一群聊或话题里快速连发一条任务和一条纠正（间隔小于 400ms）；两条应进入同一个 `turn/start`，最终回复采用纠正后的要求。
-6. Agent 思考时立即补一句纠正；该补充会 steer 进同一轮，最终回复应结合它、不发过时答案。
+6. Codex/Claude 思考时立即补一句纠正；该补充会 steer 进同一轮。Ark 下同样操作时，旧草稿会被 freshness fence 抑制，补充消息在下一轮得到回复。
 7. 私聊要求 Agent 向另一个已加入群发送测试消息；Agent 应先解析群名，再通过专用工具发送，并在当前私聊确认结果。

@@ -157,7 +157,9 @@ function tomlString(value) {
 export function sanitizeCodexEnv(environment, profile = '') {
   const safeEnv = { ...environment, FORCE_COLOR: '0', NO_COLOR: '1' };
   for (const key of Object.keys(safeEnv)) {
-    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key)) delete safeEnv[key];
+    if (/^(?:LARK|FEISHU|LARKSUITE|ARK|VOLCENGINE)_/i.test(key) || key === 'SESSION_ID') {
+      delete safeEnv[key];
+    }
   }
   if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
   return safeEnv;

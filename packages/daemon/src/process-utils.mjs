@@ -1,5 +1,15 @@
 import { spawn } from 'node:child_process';
 
+export function sanitizeNonArkChildEnv(environment) {
+  const safeEnv = { ...environment };
+  for (const key of Object.keys(safeEnv)) {
+    if (/^(?:ARK|VOLCENGINE)_/i.test(key)
+      || /^LARK_DAEMON_VOLC_/i.test(key)
+      || key === 'SESSION_ID') delete safeEnv[key];
+  }
+  return safeEnv;
+}
+
 function appendTail(current, chunk, limit) {
   const next = current + chunk;
   return next.length <= limit ? next : next.slice(next.length - limit);
@@ -32,7 +42,7 @@ export class ProcessRegistry {
   async run(command, args, options = {}) {
     const {
       cwd,
-      env = process.env,
+      env = sanitizeNonArkChildEnv(process.env),
       input,
       timeoutMs = 60_000,
       stdoutLimit = 200_000,

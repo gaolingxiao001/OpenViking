@@ -65,6 +65,44 @@ describe('global Codex/Claude hard switch', () => {
     assert.deepEqual(parseRuntimeModelTarget('codex:gpt-5.6-sol'), {
       runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol',
     });
+    assert.deepEqual(parseRuntimeModelTarget('ark'), {
+      runtime: 'volc', model: 'ark', canonical: 'ark',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('volcengine'), {
+      runtime: 'volc', model: 'ark', canonical: 'ark',
+    });
+  });
+
+  it('starts Ark rather than Codex on a fresh database configured with model ark', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-fresh-ark-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    const selected = [];
+    const runtime = new AgentRuntime({
+      initialModel: 'ark',
+      codexModel: '',
+      cognitionMaxChars: 120_000,
+    }, store, quietLogger, {
+      codexFactory: () => {
+        selected.push('codex');
+        return backend('codex');
+      },
+      volcFactory: (options) => {
+        selected.push('volc');
+        return backend('volc', options);
+      },
+    });
+    try {
+      assert.equal(store.hasCognitionRuntime(), false);
+      await runtime.start();
+      assert.deepEqual(selected, ['volc']);
+      assert.equal(runtime.runtime, 'volc');
+      assert.equal(store.getCognitionState().runtime, 'volc');
+      assert.equal(store.hasCognitionRuntime(), true);
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('reports the root model idle while only an external tool or subagent is running', () => {
@@ -228,6 +266,63 @@ describe('global Codex/Claude hard switch', () => {
       store.close();
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('rotates a prepared Ark session without waiting on queued next-turn input', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-ark-new-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    store.initializeCognition('volc', 'old-token');
+    let instance;
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      volcFactory: (options) => {
+        instance = backend('volc', options);
+        instance.threadId = 'sesn-old123456';
+        instance.policyHash = 'volc-policy';
+        instance.state.queued = 1;
+        instance.whenIdle = () => new Promise(() => {});
+        instance.prepareSessionRotation = async () => ({ id: 'sesn-new123456' });
+        instance.commitSessionRotation = (prepared, commitOptions) => {
+          instance.threadId = prepared.id;
+          instance.commitOptions = commitOptions;
+          return prepared.id;
+        };
+        return instance;
+      },
+    });
+
+    try {
+      await runtime.start();
+      const before = store.getCognitionState();
+      store.setGlobalSession(instance.threadId, instance.policyHash, {
+        runtime: 'volc',
+        epoch: before.epoch,
+      });
+      const sessionId = await runtime.rotateSession({ resume: false });
+      assert.equal(sessionId, 'sesn-new123456');
+      assert.deepEqual(instance.commitOptions, { persist: false });
+      assert.equal(store.getCognitionState().epoch, before.epoch + 1);
+      assert.notEqual(store.getCognitionState().authorityToken, before.authorityToken);
+      assert.equal(instance.authorityToken, store.getCognitionState().authorityToken);
+      assert.equal(store.getGlobalSession().sessionId, 'sesn-new123456');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('releases an Ark rotation fence when remote session preparation fails', async () => {
+    const runtime = new AgentRuntime({}, {
+      getCognitionState: () => ({ runtime: 'volc', epoch: 1, authorityToken: 'token' }),
+    }, quietLogger);
+    let cancelled = 0;
+    runtime.runtime = 'volc';
+    runtime.backend = {
+      async prepareSessionRotation() { throw new Error('remote create failed'); },
+      cancelSessionRotation() { cancelled += 1; },
+    };
+    await assert.rejects(() => runtime.rotateSession({ resume: false }), /remote create failed/);
+    assert.equal(cancelled, 1);
   });
 
   it('rotates process authority on startup so a crash survivor loses read and write access', async () => {

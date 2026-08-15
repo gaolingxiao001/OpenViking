@@ -6,7 +6,14 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createMcpHandler, LARK_TOOLS, LarkToolService, parseServerArgs, runCommand } from '../src/lark-tools.mjs';
+import {
+  createMcpHandler,
+  LARK_TOOLS,
+  LarkToolService,
+  parseServerArgs,
+  runCommand,
+  sanitizeLarkToolEnv,
+} from '../src/lark-tools.mjs';
 import { Store } from '../src/store.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +40,25 @@ function options(overrides = {}) {
 }
 
 describe('Lark proactive IM tool service', () => {
+  it('does not expose Ark credentials to lark-cli', () => {
+    const environment = sanitizeLarkToolEnv({
+      PATH: '/bin',
+      HOME: '/safe/home',
+      LARK_CLI_TOKEN: 'needed-by-lark-cli',
+      ARK_API_KEY: 'remove',
+      ARK_SESSION_ID: 'remove',
+      LARK_DAEMON_VOLC_SESSION_ID: 'remove',
+      SESSION_ID: 'remove',
+    });
+    assert.equal(environment.PATH, '/bin');
+    assert.equal(environment.HOME, '/safe/home');
+    assert.equal(environment.LARK_CLI_TOKEN, 'needed-by-lark-cli');
+    assert.equal(environment.ARK_API_KEY, undefined);
+    assert.equal(environment.ARK_SESSION_ID, undefined);
+    assert.equal(environment.LARK_DAEMON_VOLC_SESSION_ID, undefined);
+    assert.equal(environment.SESSION_ID, undefined);
+  });
+
   it('atomically reads and acknowledges the durable meeting inbox', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-meeting-inbox-tool-'));
     const databasePath = path.join(directory, 'state.sqlite3');

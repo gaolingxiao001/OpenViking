@@ -435,11 +435,17 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
       FEISHU_TOKEN: 'remove',
       LARKSUITE_CLI_PROFILE: 'wrong-profile',
       CLAUDECODE: 'remove',
+      ARK_API_KEY: 'remove',
+      ARK_SESSION_ID: 'remove',
+      SESSION_ID: 'remove',
     }, 'fixed-profile');
     assert.equal(environment.ANTHROPIC_API_KEY, 'keep-for-claude');
     assert.equal(environment.LARK_APP_SECRET, undefined);
     assert.equal(environment.FEISHU_TOKEN, undefined);
     assert.equal(environment.CLAUDECODE, undefined);
+    assert.equal(environment.ARK_API_KEY, undefined);
+    assert.equal(environment.ARK_SESSION_ID, undefined);
+    assert.equal(environment.SESSION_ID, undefined);
     assert.equal(environment.LARKSUITE_CLI_PROFILE, 'fixed-profile');
   });
 });

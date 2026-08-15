@@ -17,10 +17,19 @@ import { publishLatestRelease } from './publisher.mjs';
 
 const execFile = promisify(execFileCallback);
 const require = createRequire(import.meta.url);
-const { DAEMON_ENV_FIELDS } = require('../../../deployment-config.cjs');
+const {
+  DAEMON_ENV_FIELDS,
+  DAEMON_SECRET_ENV_FIELDS,
+} = require('../../../deployment-config.cjs');
 const DAEMON_ENV_FIELD_SET = new Set(DAEMON_ENV_FIELDS);
 const MAX_BODY_BYTES = 4096;
 const MANAGED_DAEMON_APP = /^lark-daemon-[a-z][a-z0-9-]{0,31}$/;
+const WEB_FORBIDDEN_ENV_PREFIXES = Object.freeze([
+  'ARK_',
+  'VOLCENGINE_',
+  'LARK_DAEMON_VOLC_',
+  'SESSION_ID',
+]);
 const PM2_CONTROL_ENV_KEYS = Object.freeze([
   'HOME',
   'USER',
@@ -34,6 +43,7 @@ const PM2_CONTROL_ENV_KEYS = Object.freeze([
   'XDG_RUNTIME_DIR',
   'LARK_DAEMON_DEPLOYMENT_MANIFEST',
   ...DAEMON_ENV_FIELDS,
+  ...DAEMON_SECRET_ENV_FIELDS,
 ]);
 
 export function cleanPm2ControlEnv(source = process.env) {
@@ -41,6 +51,12 @@ export function cleanPm2ControlEnv(source = process.env) {
     .filter((key) => typeof source[key] === 'string'
       && (source[key] !== '' || DAEMON_ENV_FIELD_SET.has(key)))
     .map((key) => [key, source[key]]));
+}
+
+export function cleanWebPm2ControlEnv(source = {}) {
+  return Object.fromEntries(Object.entries(source).filter(([key]) => (
+    !WEB_FORBIDDEN_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
+  )));
 }
 
 function writeJson(response, statusCode, body) {
@@ -191,12 +207,15 @@ async function upgradeApp(spec, {
   readyOptions,
   pm2Env,
 }) {
-  const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env });
+  // The updater must protect Web even when rolling back to an older release
+  // whose ecosystem file predates Ark credential filtering.
+  const appPm2Env = spec.app === SHARED_WEB.app ? cleanWebPm2ControlEnv(pm2Env) : pm2Env;
+  const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env: appPm2Env });
   const previous = processes.find((processInfo) => processInfo?.name === spec.app) || null;
   const previousWasOnline = previous?.pm2_env?.status === 'online';
   const previousConfig = previous ? await previousConfigForProcess(previous, release) : null;
   if (previous) {
-    await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: pm2Env });
+    await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appPm2Env });
   }
 
   try {
@@ -206,11 +225,17 @@ async function upgradeApp(spec, {
       '--only',
       spec.app,
       '--update-env',
-    ], { timeout: 60_000, env: pm2Env });
-    await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env });
+    ], { timeout: 60_000, env: appPm2Env });
+    await verifyPm2App({
+      app: spec.app,
+      release,
+      pm2Bin,
+      execFileImpl,
+      pm2Env: appPm2Env,
+    });
     await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
   } catch (error) {
-    await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: pm2Env }).catch(() => {});
+    await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appPm2Env }).catch(() => {});
     if (previousConfig) {
       await execFileImpl(pm2Bin, [
         'start',
@@ -218,11 +243,11 @@ async function upgradeApp(spec, {
         '--only',
         spec.app,
         '--update-env',
-      ], { timeout: 60_000, env: pm2Env }).catch(() => {});
+      ], { timeout: 60_000, env: appPm2Env }).catch(() => {});
       if (previousWasOnline) {
         await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions).catch(() => {});
       } else {
-        await execFileImpl(pm2Bin, ['stop', spec.app], { timeout: 30_000, env: pm2Env }).catch(() => {});
+        await execFileImpl(pm2Bin, ['stop', spec.app], { timeout: 30_000, env: appPm2Env }).catch(() => {});
       }
     }
     throw error;

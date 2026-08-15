@@ -25,9 +25,22 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'LARK_DAEMON_CODEX_EFFORT',
   'LARK_DAEMON_CLAUDE_EFFORT',
   'LARK_DAEMON_CLAUDE_MODEL',
+  'LARK_DAEMON_VOLC_SESSION_ID',
+  'LARK_DAEMON_VOLC_BASE_URL',
+  'LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS',
+  'LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS',
   'FALLBACK_MODEL',
   'LARK_DAEMON_COGNITION_MAX_CHARS',
   'LARK_DAEMON_HISTORY_LIMIT',
+]);
+// Secrets may flow from the operator environment into daemon/updater PM2
+// processes, but are deliberately excluded from the deployment manifest.
+const DAEMON_SECRET_ENV_FIELDS = Object.freeze([
+  'ARK_API_KEY',
+]);
+const DAEMON_PROCESS_ENV_FIELDS = Object.freeze([
+  ...DAEMON_ENV_FIELDS,
+  ...DAEMON_SECRET_ENV_FIELDS,
 ]);
 const AGENT_FIELDS = Object.freeze([
   'id',
@@ -194,7 +207,7 @@ function loadDeploymentManifest(env) {
 }
 
 function resolvedDeploymentDaemonEnv(deployment, sourceEnv = process.env) {
-  return Object.freeze(Object.fromEntries(DAEMON_ENV_FIELDS.flatMap((key) => {
+  return Object.freeze(Object.fromEntries(DAEMON_PROCESS_ENV_FIELDS.flatMap((key) => {
     if (typeof sourceEnv[key] === 'string') return [[key, sourceEnv[key]]];
     if (Object.hasOwn(deployment.env, key)) return [[key, deployment.env[key]]];
     return [];
@@ -202,7 +215,7 @@ function resolvedDeploymentDaemonEnv(deployment, sourceEnv = process.env) {
 }
 
 function deploymentDaemonEnvOverrides(sourceEnv = process.env) {
-  return Object.freeze(Object.fromEntries(DAEMON_ENV_FIELDS.flatMap((key) => (
+  return Object.freeze(Object.fromEntries(DAEMON_PROCESS_ENV_FIELDS.flatMap((key) => (
     typeof sourceEnv[key] === 'string' ? [[key, sourceEnv[key]]] : []
   ))));
 }
@@ -233,7 +246,8 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     LARK_DAEMON_DATA_DIR: agent.dataDir,
     LARK_DAEMON_WORKSPACE: agent.workspace,
     OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
-    LARK_DAEMON_CODEX_MODEL: agent.model,
+    LARK_DAEMON_MODEL: agent.model,
+    LARK_DAEMON_CODEX_MODEL: agent.model === 'ark' ? '' : agent.model,
   });
   return agent;
 }
@@ -254,6 +268,7 @@ module.exports = {
   AGENT_FIELDS,
   CONTROL_ENV_MAX_BYTES,
   DAEMON_ENV_FIELDS,
+  DAEMON_SECRET_ENV_FIELDS,
   DEPLOYMENT_MANIFEST_MAX_BYTES,
   TOP_LEVEL_FIELDS,
   applyDeploymentAgentEnv,

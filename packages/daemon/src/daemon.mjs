@@ -9,6 +9,7 @@ import { AgentRuntime } from './agent-runtime.mjs';
 import { GroupBurstRouter } from './group-burst.mjs';
 import { commandCandidate, executeCommand, parseCommand } from './commands.mjs';
 import { LarkClient } from './lark.mjs';
+import { LarkToolService } from './lark-tools.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { InstanceLock } from './lock.mjs';
 import { opaqueRef, redactSensitive } from './logger.mjs';
@@ -265,6 +266,7 @@ export class LarkDaemon {
           this.meetingAudioRuntime?.onTurnSucceeded(info);
           this.handleTurnSuccess(info);
         },
+        onTurnOutput: (info) => this.deliverManagedAgentOutput(info),
         onTurnAbandoned: (info) => {
           this.meetingAudioRuntime?.onTurnAbandoned(info);
         },
@@ -486,6 +488,103 @@ export class LarkDaemon {
       let inbound = null;
       try { inbound = this.store.inboundBySeq(seq); } catch { continue; }
       if (inbound?.conversationKey) this.failureNoticeMutes.delete(inbound.conversationKey);
+    }
+  }
+
+  // Cloud managed agents cannot reach the daemon's local stdio MCP server.
+  // Deliver their final agent.message locally through the exact same fenced,
+  // journaled service used by Codex/Claude tool calls.
+  async deliverManagedAgentOutput({
+    inboundSeqs,
+    text,
+    eventId = null,
+    runtime,
+    authorityToken,
+    sessionId,
+    cognitionEpoch,
+  }) {
+    if (this.shuttingDown) return { accepted: true, delivered: false, suppressed: true };
+    if (!text) return { accepted: false, delivered: false };
+    const cognition = this.store.getCognitionState();
+    const session = this.store.getGlobalSession();
+    const ownsAuthority = runtime === 'volc'
+      && cognition.runtime === runtime
+      && cognition.authorityToken === authorityToken
+      && cognition.epoch === cognitionEpoch
+      && session.runtime === runtime
+      && session.sessionId === sessionId
+      && session.epoch === cognitionEpoch;
+    if (!ownsAuthority) {
+      this.logger.warn('managed_agent_output_stale_authority', {
+        runtime: runtime ?? 'unknown',
+        cognitionEpoch: cognitionEpoch ?? undefined,
+      });
+      return { accepted: true, delivered: false, suppressed: true, reason: 'stale_authority' };
+    }
+    const seqs = Array.isArray(inboundSeqs) ? inboundSeqs : [];
+    const seq = seqs.at(-1) ?? null;
+    const inbound = seq === null || seq === undefined ? null : this.store.inboundBySeq(seq);
+    if (!inbound?.messageId) {
+      this.logger.warn('managed_agent_output_has_no_lark_target', { inboundSeq: seq ?? undefined });
+      return { accepted: false, delivered: false };
+    }
+    const limit = this.config.maxReplyChars ?? 30_000;
+    const normalized = String(text).trim();
+    const output = normalized.length <= limit
+      ? normalized
+      : `${normalized.slice(0, Math.max(1, limit - 18))}\n[回复已截断]`;
+    const service = new LarkToolService({
+      larkCliBin: this.config.larkCliBin,
+      profile: this.config.profile,
+      projectDir: this.config.projectDir,
+      databasePath: this.config.databasePath,
+      runtimeToken: authorityToken,
+      timeoutMs: this.config.sendTimeoutMs,
+      maxTextChars: limit,
+      dryRun: this.config.dryRun,
+      tempDir: this.config.tempDir,
+      roster: this.roster,
+    });
+    try {
+      const result = await service.replyMessage({
+        message_id: inbound.messageId,
+        text: output,
+        reply_in_thread: Boolean(inbound.threadId),
+        decision_message_id: inbound.messageId,
+        response_to_message_id: inbound.messageId,
+        ...(eventId ? { idempotency_key: String(eventId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) } : {}),
+      });
+      if (result.sent) {
+        this.liveness?.touch();
+        await this.liveness?.onDeliverySucceeded?.({ inboundSeqs: seqs, mode: 'lark' });
+      }
+      return {
+        accepted: Boolean(result.sent || result.dry_run),
+        delivered: Boolean(result.sent),
+        dryRun: Boolean(result.dry_run),
+      };
+    } catch (error) {
+      // A later message in the same scope is already queued as a separate Ark
+      // turn. Suppress this obsolete draft without turning it into a noisy
+      // failure notice; the next turn owns the reply.
+      if (/newer authenticated message/i.test(error?.message ?? '')) {
+        return { accepted: true, delivered: false, suppressed: true, reason: 'newer_inbound' };
+      }
+      const replay = /identical (?:send|reply) was already attempted \((COMMITTED|UNCERTAIN)\)/i
+        .exec(error?.message ?? '');
+      if (replay) {
+        const status = replay[1].toUpperCase();
+        return {
+          accepted: true,
+          delivered: false,
+          suppressed: true,
+          uncertain: status === 'UNCERTAIN',
+          reason: status === 'COMMITTED' ? 'delivery_already_committed' : 'delivery_uncertain',
+        };
+      }
+      throw error;
+    } finally {
+      await service.close();
     }
   }
 

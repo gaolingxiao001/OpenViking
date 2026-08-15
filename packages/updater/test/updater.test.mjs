@@ -27,7 +27,12 @@ process.env.LARK_UPDATER_TARGETS_JSON = JSON.stringify({
     upgradeSharedWeb: false,
   },
 });
-const { cleanPm2ControlEnv, createUpdaterServer, upgradeTarget } = await import('../src/server.mjs');
+const {
+  cleanPm2ControlEnv,
+  cleanWebPm2ControlEnv,
+  createUpdaterServer,
+  upgradeTarget,
+} = await import('../src/server.mjs');
 
 async function fixtureTempRoot(prefix) {
   return realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
@@ -133,6 +138,9 @@ const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state))
 fs.writeFileSync(path.join(home, 'pm2-env.json'), JSON.stringify({
   manifest: process.env.LARK_DAEMON_DEPLOYMENT_MANIFEST,
   logLevel: process.env.LARK_DAEMON_LOG_LEVEL,
+  arkApiKey: process.env.ARK_API_KEY,
+  volcSessionId: process.env.LARK_DAEMON_VOLC_SESSION_ID,
+  volcStreamIdleTimeoutMs: process.env.LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS,
   profile: process.env.LARK_DAEMON_PROFILE,
 }));
 fs.appendFileSync(eventsPath, JSON.stringify(['pm2', operation, ...args]) + '\\n');
@@ -425,6 +433,7 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     LARK_DAEMON_PROFILE: 'secret-profile',
     LARK_DAEMON_DEPLOYMENT_MANIFEST: '/safe-home/custom/deployment.json',
     LARK_DAEMON_LOG_LEVEL: 'debug',
+    ARK_API_KEY: 'system-only-secret',
     TEAM_TASK_BOARD_URL: '',
   }), {
     HOME: '/safe-home',
@@ -433,6 +442,7 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     LANG: 'C.UTF-8',
     LARK_DAEMON_DEPLOYMENT_MANIFEST: '/safe-home/custom/deployment.json',
     LARK_DAEMON_LOG_LEVEL: 'debug',
+    ARK_API_KEY: 'system-only-secret',
     TEAM_TASK_BOARD_URL: '',
   });
 });
@@ -518,11 +528,94 @@ test('failed replacement restores the app from the release that owned its old ex
   ]);
 });
 
+test('web upgrade and old-release rollback never inherit Ark credentials from PM2 control', async () => {
+  const fixture = await fixtureRelease();
+  const daemonEntry = path.join(fixture.release, 'packages', 'daemon', 'src', 'main.mjs');
+  const webEntry = path.join(fixture.release, 'packages', 'web', 'src', 'main.mjs');
+  const previous = await fixtureAppRelease(
+    fixture,
+    '0.4.0-previous-web',
+    path.join('packages', 'web', 'src', 'main.mjs'),
+  );
+  await mkdir(path.dirname(daemonEntry), { recursive: true });
+  await mkdir(path.dirname(webEntry), { recursive: true });
+  await writeFile(daemonEntry, '');
+  await writeFile(webEntry, '');
+
+  const active = new Map([['lark-web', previous.entry]]);
+  const starts = [];
+  const pm2Env = {
+    HOME: '/safe-home',
+    PATH: '/safe-bin',
+    ARK_API_KEY: 'sentinel-key',
+    ARK_SESSION_ID: 'sentinel-ark-session',
+    VOLCENGINE_API_KEY: 'sentinel-volc-key',
+    LARK_DAEMON_VOLC_SESSION_ID: 'sentinel-seed',
+    SESSION_ID: 'sentinel-generic-session',
+  };
+  const execFileImpl = async (_command, args, options) => {
+    const [operation] = args;
+    if (operation === 'jlist') {
+      return {
+        stdout: JSON.stringify([...active].map(([name, entry]) => ({
+          name,
+          pm2_env: { status: 'online', pm_exec_path: entry },
+        }))),
+      };
+    }
+    if (operation === 'delete') {
+      active.delete(args[1]);
+      return { stdout: '' };
+    }
+    if (operation === 'start') {
+      const app = args[3];
+      const entry = app === 'lark-web'
+        ? (args[1] === previous.config ? previous.entry : webEntry)
+        : daemonEntry;
+      active.set(app, entry);
+      starts.push({ app, config: args[1], env: options.env });
+      return { stdout: '' };
+    }
+    if (operation === 'save') return { stdout: '' };
+    throw new Error(`unexpected PM2 operation: ${operation}`);
+  };
+
+  await assert.rejects(upgradeTarget('all', {
+    releaseLink: fixture.releaseLink,
+    publishReleaseImpl: useFixtureRelease(fixture),
+    pm2Env,
+    execFileImpl,
+    fetchImpl: async (url) => ({
+      ok: !url.endsWith(':3737/ready') || active.get('lark-web') === previous.entry,
+      status: 503,
+    }),
+    readyOptions: { attempts: 1, intervalMs: 0 },
+  }), /did not become ready/);
+
+  const webStarts = starts.filter(({ app }) => app === 'lark-web');
+  assert.deepEqual(webStarts.map(({ config }) => config), [
+    path.join(fixture.release, 'ecosystem.config.cjs'),
+    previous.config,
+  ]);
+  for (const { env } of webStarts) {
+    assert.deepEqual(env, { HOME: '/safe-home', PATH: '/safe-bin' });
+  }
+  assert.ok(starts.some(({ app, env }) => app.startsWith('lark-daemon-')
+    && env.ARK_API_KEY === 'sentinel-key'));
+  assert.deepEqual(cleanWebPm2ControlEnv(pm2Env), {
+    HOME: '/safe-home',
+    PATH: '/safe-bin',
+  });
+});
+
 test('bootstrap replaces the updater from the exact current release config and verifies readiness', async () => {
   const fixture = await fixtureBootstrapUpdater();
   const result = await fixture.run({
     LARK_DAEMON_DEPLOYMENT_MANIFEST: '/custom/deployment.json',
     LARK_DAEMON_LOG_LEVEL: 'debug',
+    ARK_API_KEY: 'system-only-secret',
+    LARK_DAEMON_VOLC_SESSION_ID: 'seed-session-ref',
+    LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS: '120000',
     LARK_DAEMON_PROFILE: 'must-not-pass',
   });
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
@@ -533,6 +626,9 @@ test('bootstrap replaces the updater from the exact current release config and v
   assert.deepEqual(result.pm2Env, {
     manifest: '/custom/deployment.json',
     logLevel: 'debug',
+    arkApiKey: 'system-only-secret',
+    volcSessionId: 'seed-session-ref',
+    volcStreamIdleTimeoutMs: '120000',
   });
 
   const pm2Events = result.events.filter((event) => event[0] === 'pm2');

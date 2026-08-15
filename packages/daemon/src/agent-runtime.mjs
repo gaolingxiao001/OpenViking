@@ -1,11 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { CodexAgent } from './codex.mjs';
 import { ClaudeAgent, CLAUDE_EFFORTS, CLAUDE_MODELS } from './claude.mjs';
+import { VolcAgent, VOLC_EFFORTS, VOLC_MODELS } from './volc.mjs';
 import { cognitionHistoryPrefix } from './cognition.mjs';
 
 const SWITCH_JOURNAL_HEADROOM = 4_096;
 
 function parseTarget(value) {
+  if (['volc', 'volcengine', 'ark'].includes(value)) {
+    return { runtime: 'volc', model: 'ark', canonical: 'ark' };
+  }
+  if (/^(?:volc|volcengine|ark):/.test(value)) {
+    const model = value.slice(value.indexOf(':') + 1) || 'ark';
+    return { runtime: 'volc', model, canonical: model };
+  }
   if (value.startsWith('claude:')) {
     const model = value.slice('claude:'.length);
     return { runtime: 'claude', model, canonical: model || 'claude' };
@@ -26,6 +34,7 @@ export class AgentRuntime {
     this.logger = logger;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
+    this.onTurnOutput = options.onTurnOutput ?? null;
     this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
@@ -35,6 +44,9 @@ export class AgentRuntime {
       )),
       claude: options.claudeFactory ?? ((backendOptions) => new ClaudeAgent(
         config, store, logger.child({ component: 'claude' }), backendOptions,
+      )),
+      volc: options.volcFactory ?? ((backendOptions) => new VolcAgent(
+        config, store, logger.child({ component: 'volc' }), backendOptions,
       )),
     };
     this.backend = null;
@@ -75,6 +87,7 @@ export class AgentRuntime {
     return {
       onTurnFailed: this.onTurnFailed,
       onTurnSucceeded: this.onTurnSucceeded,
+      onTurnOutput: this.onTurnOutput,
       onDeliverySucceeded: this.onDeliverySucceeded,
       onTurnAbandoned: this.onTurnAbandoned,
       onAvailable: this.onAvailable,
@@ -87,7 +100,12 @@ export class AgentRuntime {
   async start() {
     this.stopping = false;
     let cognition = this.store.getCognitionState();
-    this.runtime = ['codex', 'claude'].includes(cognition.runtime) ? cognition.runtime : 'codex';
+    const persistedRuntime = ['codex', 'claude', 'volc'].includes(cognition.runtime)
+      ? cognition.runtime
+      : 'codex';
+    this.runtime = this.store.hasCognitionRuntime?.() === false
+      ? parseTarget(this.config.initialModel || this.config.codexModel || '').runtime
+      : persistedRuntime;
     // A daemon generation must never inherit the previous process's authority.
     // If that process crashed with a detached MCP sidecar still alive, rotating
     // the token here fences it before the replacement backend starts.
@@ -117,9 +135,11 @@ export class AgentRuntime {
 
   async listModels() {
     const current = await this.backend?.listModels?.() ?? [];
-    const models = this.runtime === 'codex'
-      ? [...current, ...CLAUDE_MODELS.map((id) => ({ id, efforts: CLAUDE_EFFORTS }))]
-      : current;
+    const models = [
+      ...current,
+      ...CLAUDE_MODELS.map((id) => ({ id, efforts: CLAUDE_EFFORTS })),
+      ...VOLC_MODELS.map((id) => ({ id, efforts: VOLC_EFFORTS })),
+    ];
     const seen = new Set();
     return models.filter((model) => {
       if (!model?.id || seen.has(model.id)) return false;
@@ -245,6 +265,7 @@ export class AgentRuntime {
       };
     } catch (error) {
       try { await staged?.stop(); } catch {}
+      previous.cancelSessionRotation?.();
       throw error;
     } finally {
       if (this.stagedBackend === staged) this.stagedBackend = null;
@@ -257,13 +278,54 @@ export class AgentRuntime {
 
   async rotateSession({ resume = false } = {}) {
     if (resume) return this.backend.rotateSession({ resume: true });
-    await this.backend.whenIdle();
+    // Managed-agent session creation is an external side effect and may fail.
+    // Prepare it before clearing the current local cognition epoch. Do not wait
+    // on its queued next-turn input: /new has already interrupted the active
+    // turn, and that queue must migrate to the new session rather than deadlock.
+    let prepared = null;
+    try {
+      prepared = this.backend.prepareSessionRotation
+        ? await this.backend.prepareSessionRotation()
+        : null;
+      if (prepared && !prepared.id) throw new Error('managed runtime prepared an invalid session');
+    } catch (error) {
+      this.backend.cancelSessionRotation?.();
+      throw error;
+    }
+    if (!prepared) await this.backend.whenIdle();
+    const current = this.store.getCognitionState();
+    if (prepared && this.backend.commitSessionRotation
+      && this.store.commitCognitionSessionRotation) {
+      let cognition;
+      try {
+        cognition = this.store.commitCognitionSessionRotation({
+          runtime: this.runtime,
+          authorityToken: current.authorityToken,
+          nextAuthorityToken: randomUUID(),
+          sessionId: prepared.id,
+          policyHash: this.backend.policyHash,
+          expectedEpoch: current.epoch,
+          syncedThroughSeq: 0,
+          sessionReady: true,
+        });
+      } catch (error) {
+        this.backend.cancelSessionRotation?.();
+        throw error;
+      }
+      this.backend.cognitionEpoch = cognition.epoch;
+      this.backend.authorityToken = cognition.authorityToken;
+      this.backend.syncedThroughSeq = 0;
+      return this.backend.commitSessionRotation(prepared, { persist: false });
+    }
     const cognition = this.store.bumpCognitionEpoch(
       this.runtime,
-      this.store.getCognitionState().authorityToken,
+      current.authorityToken,
     );
     this.backend.cognitionEpoch = cognition.epoch;
     this.backend.syncedThroughSeq = 0;
+    if (prepared && this.backend.commitSessionRotation) {
+      return this.backend.commitSessionRotation(prepared);
+    }
     return await this.backend.rotateSession({ resume: false });
   }
 

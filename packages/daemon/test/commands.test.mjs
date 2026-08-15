@@ -265,6 +265,40 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /已切到 gpt-5\.5，已开启新会话：th-fresh/);
   });
 
+  it('selects Ark as a third runtime and allows a direct Codex name on the way back', async () => {
+    const agent = fakeCodex({
+      runtime: 'codex',
+      model: 'gpt-current',
+      listModels: async () => [
+        { id: 'gpt-current', efforts: ['medium'] },
+        { id: 'ark', efforts: ['managed'] },
+      ],
+      async setModel(model) {
+        calls.push(['setModel', model]);
+        this.runtime = model === 'ark' ? 'volc' : 'codex';
+        return { runtimeChanged: true, runtime: this.runtime, model };
+      },
+    });
+    const { calls } = agent;
+    const switched = await executeCommand({ name: 'model', arg: 'volcengine' }, agent);
+    assert.equal(switched.ok, true);
+    assert.deepEqual(calls.at(-1), ['setModel', 'ark']);
+
+    agent.listModels = async () => [{ id: 'ark', efforts: ['managed'] }, { id: 'sonnet' }];
+    const returned = await executeCommand({ name: 'model', arg: 'gpt-5.6-sol' }, agent);
+    assert.equal(returned.ok, true);
+    assert.deepEqual(calls.at(-1), ['setModel', 'gpt-5.6-sol']);
+  });
+
+  it('explains that Ark effort is managed remotely', async () => {
+    const agent = fakeCodex({ runtime: 'volc', model: 'ark', effort: 'managed' });
+    const { calls } = agent;
+    const result = await executeCommand({ name: 'effort', arg: 'high' }, agent);
+    assert.equal(result.ok, false);
+    assert.match(result.text, /远端 Agent/);
+    assert.equal(calls.some(([name]) => name === 'setEffort'), false);
+  });
+
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {
     const codex = fakeCodex();
     const high = await executeCommand({ name: 'effort', arg: 'h' }, codex);

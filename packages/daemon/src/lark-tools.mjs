@@ -436,11 +436,21 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
   return options;
 }
 
+export function sanitizeLarkToolEnv(environment) {
+  const safeEnv = { ...environment };
+  for (const key of Object.keys(safeEnv)) {
+    if (/^(?:ARK|VOLCENGINE)_/i.test(key)
+      || /^LARK_DAEMON_VOLC_/i.test(key)
+      || key === 'SESSION_ID') delete safeEnv[key];
+  }
+  return safeEnv;
+}
+
 export async function runCommand(command, args, { cwd, timeoutMs }) {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: process.env,
+      env: sanitizeLarkToolEnv(process.env),
       shell: false,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],

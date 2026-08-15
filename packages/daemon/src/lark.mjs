@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { terminateProcessTree } from './process-utils.mjs';
+import { sanitizeNonArkChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { MEETING_EVENT_TYPES } from './meeting/index.mjs';
 
 export const SUBSCRIBED_EVENT_TYPES = Object.freeze([
@@ -95,7 +95,7 @@ export class LarkClient {
     this.stopping = false;
     const child = this.registry.register(spawn(this.config.larkCliBin, args, {
       cwd: this.config.projectDir,
-      env: process.env,
+      env: sanitizeNonArkChildEnv(process.env),
       shell: false,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],

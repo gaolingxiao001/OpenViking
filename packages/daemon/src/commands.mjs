@@ -4,6 +4,7 @@
 // /m gpt-5.5 → /model gpt-5.5); effort levels match by prefix too.
 
 import { CLAUDE_MODELS } from './claude.mjs';
+import { VOLC_MODELS } from './volc.mjs';
 
 // Static fallback only (offline); when connected, /effort validates against the
 // current model's supportedReasoningEfforts from model/list.
@@ -52,7 +53,7 @@ export function helpText(codex) {
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
     '/status — 查看模型是否在工作以及持续时间',
-    '/model [名称] — 查看或切换模型，如 sonnet、gpt-5.6-sol',
+    '/model [名称] — 查看或切换模型，如 ark、sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
     '',
     `当前会话：${codex.threadId ?? '（未连接）'}`,
@@ -132,9 +133,10 @@ export async function executeCommand(command, codex) {
       lines.push('用法：/model <名称>（支持前缀匹配）');
       return { ok: true, text: lines.join('\n') };
     }
-    const legacy = /^(claude|codex):(.*)$/.exec(command.arg);
+    const legacy = /^(claude|codex|volc|volcengine|ark):(.*)$/.exec(command.arg);
     const providerHint = legacy?.[1] ?? null;
-    const lookupName = legacy?.[2] ?? command.arg;
+    const rawLookupName = legacy?.[2] ?? command.arg;
+    const lookupName = ['volc', 'volcengine'].includes(rawLookupName) ? 'ark' : rawLookupName;
     if (!MODEL_NAME.test(command.arg) || (legacy && !lookupName)) {
       return { ok: false, text: lookupName ? `无效的模型名：${lookupName}` : '无效的模型名' };
     }
@@ -142,8 +144,10 @@ export async function executeCommand(command, codex) {
     if (ids.length > 0) {
       const candidates = providerHint === 'claude'
         ? ids.filter((id) => CLAUDE_MODELS.includes(id))
+        : ['volc', 'volcengine', 'ark'].includes(providerHint)
+          ? ids.filter((id) => VOLC_MODELS.includes(id))
         : providerHint === 'codex'
-          ? ids.filter((id) => !CLAUDE_MODELS.includes(id))
+          ? ids.filter((id) => !CLAUDE_MODELS.includes(id) && !VOLC_MODELS.includes(id))
           : ids;
       const matches = matchPrefix(lookupName, candidates);
       if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
@@ -152,8 +156,10 @@ export async function executeCommand(command, codex) {
         // runtime. Any non-Claude direct name is therefore staged as Codex;
         // AgentRuntime validates its live model list before the switch commits.
         const requestedRuntime = providerHint
-          ?? (CLAUDE_MODELS.includes(lookupName) ? 'claude' : 'codex');
-        if (!(codex.runtime === 'claude' && requestedRuntime === 'codex')) {
+          ?? (CLAUDE_MODELS.includes(lookupName)
+            ? 'claude'
+            : VOLC_MODELS.includes(lookupName) ? 'volc' : 'codex');
+        if (!(codex.runtime !== 'codex' && requestedRuntime === 'codex')) {
           return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}` };
         }
       } else {
@@ -162,7 +168,7 @@ export async function executeCommand(command, codex) {
     }
     const applied = await codex.setModel(target);
     const displayTarget = applied?.model
-      || target.replace(/^(?:claude|codex):/, '')
+      || target.replace(/^(?:claude|codex|volc|volcengine|ark):/, '')
       || target;
     if (applied?.runtimeChanged) {
       return {
@@ -178,6 +184,13 @@ export async function executeCommand(command, codex) {
       text: applied?.threadId
         ? `已切到 ${displayTarget}，已开启新会话：${applied.threadId}`
         : `已切到 ${displayTarget}，已开启新会话`,
+    };
+  }
+
+  if (codex.runtime === 'volc') {
+    return {
+      ok: false,
+      text: 'Ark managed agent 的推理档位由远端 Agent 配置管理，不能通过 /effort 修改',
     };
   }
 

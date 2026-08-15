@@ -73,7 +73,8 @@ function appendBounded(current, chunk, label) {
 export function sanitizeClaudeEnv(environment, profile = '') {
   const safeEnv = { ...environment, FORCE_COLOR: '0', NO_COLOR: '1' };
   for (const key of Object.keys(safeEnv)) {
-    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key) || key === 'CLAUDECODE') delete safeEnv[key];
+    if (/^(?:LARK|FEISHU|LARKSUITE|ARK|VOLCENGINE)_/i.test(key)
+      || key === 'CLAUDECODE' || key === 'SESSION_ID') delete safeEnv[key];
   }
   if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
   return safeEnv;

@@ -1,8 +1,28 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { LarkClient, SUBSCRIBED_EVENT_TYPES } from '../src/lark.mjs';
+import { sanitizeNonArkChildEnv } from '../src/process-utils.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {} };
+
+describe('non-Ark child environment', () => {
+  it('strips every Ark credential and session alias', () => {
+    const environment = sanitizeNonArkChildEnv({
+      PATH: '/bin',
+      LARK_APP_ID: 'keep-for-lark',
+      ARK_API_KEY: 'remove',
+      ARK_SESSION_ID: 'remove',
+      LARK_DAEMON_VOLC_SESSION_ID: 'remove',
+      SESSION_ID: 'remove',
+    });
+    assert.equal(environment.PATH, '/bin');
+    assert.equal(environment.LARK_APP_ID, 'keep-for-lark');
+    assert.equal(environment.ARK_API_KEY, undefined);
+    assert.equal(environment.ARK_SESSION_ID, undefined);
+    assert.equal(environment.LARK_DAEMON_VOLC_SESSION_ID, undefined);
+    assert.equal(environment.SESSION_ID, undefined);
+  });
+});
 
 describe('Lark chat lookup', () => {
   it('gets a group name with the schema-verified bot chat command', async () => {
