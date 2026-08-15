@@ -628,16 +628,20 @@ export class VolcAgent {
           try {
             postAttempted = true;
             const t2 = Date.now();
-            const events = [{
-              type: 'user.message',
-              content: [{ type: 'text', text: prepared.body }],
-            }];
+            // system.message must precede user.message in the batch, or it
+            // lands ordered (and presumably read) after the message it's
+            // meant to govern, undermining it as context for that turn.
+            const events = [];
             if (!this.transportPolicyInjected) {
               events.push({
                 type: 'system.message',
                 content: [{ type: 'text', text: this.transportPolicy }],
               });
             }
+            events.push({
+              type: 'user.message',
+              content: [{ type: 'text', text: prepared.body }],
+            });
             posted = await this._postEvents(events);
             this.logger.info('volc_turn_timing', { stage: 'post_user_message', elapsedMs: Date.now() - t2 });
           } catch (error) {

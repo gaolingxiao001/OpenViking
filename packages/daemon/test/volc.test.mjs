@@ -203,15 +203,17 @@ describe('Volc managed-agent runtime', () => {
     // opening a stream against a session with nothing queued yet.
     assert.ok(postIndex >= 0 && streamIndex > postIndex);
     const posted = JSON.parse(calls[postIndex].body);
-    assert.equal(posted.events[0].type, 'user.message');
-    assert.equal(posted.events[0].content[0].text, 'hello');
-    assert.equal(posted.events[1].type, 'system.message');
-    assert.match(posted.events[1].content[0].text, /daemon relays only the final agent\.message locally/);
+    // system.message must precede user.message in the batch, or it lands
+    // ordered (and presumably read) after the message it governs.
+    assert.equal(posted.events[0].type, 'system.message');
+    assert.match(posted.events[0].content[0].text, /daemon relays only the final agent\.message locally/);
     // The Ark agent template's own system field only carries persona; the
     // injected system.message must also explain the [chat=... msg=...] line
     // format and the reply/silence rules, or MA has no way to know them.
-    assert.match(posted.events[1].content[0].text, /Lark conversation format/);
-    assert.match(posted.events[1].content[0].text, /When to reply/);
+    assert.match(posted.events[0].content[0].text, /Lark conversation format/);
+    assert.match(posted.events[0].content[0].text, /When to reply/);
+    assert.equal(posted.events[1].type, 'user.message');
+    assert.equal(posted.events[1].content[0].text, 'hello');
     assert.equal(agent.turnInProgress, false);
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
   });
@@ -316,8 +318,8 @@ describe('Volc managed-agent runtime', () => {
     await completed;
 
     assert.equal(posts.length, 2);
-    assert.equal(posts[0].events[0].content[0].text, 'hello');
-    assert.match(posts[0].events[1].content[0].text, /lark-daemon-tools\/v1/);
+    assert.match(posts[0].events[0].content[0].text, /lark-daemon-tools\/v1/);
+    assert.equal(posts[0].events[1].content[0].text, 'hello');
     const continuation = JSON.parse(posts[1].events[0].content[0].text);
     assert.equal(continuation.kind, 'tool_result');
     assert.equal(continuation.call_id, 'read_1');
@@ -437,7 +439,8 @@ describe('Volc managed-agent runtime', () => {
       if (url.includes('/events?')) return json({ data: [] });
       if (url.endsWith('/events') && options.method === 'POST') {
         const request = JSON.parse(options.body);
-        posts.push(request.events[0].content[0].text);
+        const userMessage = request.events.find((event) => event.type === 'user.message');
+        posts.push(userMessage.content[0].text);
         return json({ data: [{
           id: posts.length === 1 ? 'evt-user-1' : 'evt-user-2',
           type: 'user.message',
@@ -712,7 +715,8 @@ describe('Volc managed-agent runtime', () => {
     await done;
 
     assert.equal(posts.length, 1);
-    assert.equal(posts[0].events[0].content[0].text, continuationBody);
+    const continuationEvent = posts[0].events.find((event) => event.type === 'user.message');
+    assert.equal(continuationEvent.content[0].text, continuationBody);
     assert.equal(data.getManagedTurn(), null);
     await recovered.stop();
   });
