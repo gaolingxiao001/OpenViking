@@ -735,6 +735,110 @@ assert not module.is_final_result(types.SimpleNamespace(kind="partial", text="no
     assert.equal(result.status, 0, result.stderr);
   });
 
+  it('surfaces a failed ASR sender and never deadlocks on a full audio queue', () => {
+    const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
+    const script = `
+import asyncio, importlib.util, types
+spec = importlib.util.spec_from_file_location("meeting_asr_worker", ${JSON.stringify(workerPath)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Recorder:
+    def __init__(self): self.events = []
+    def emit(self, event_type, session, **fields):
+        value = {"type": event_type, **fields}
+        self.events.append(value)
+        return value
+
+class FakeWebsockets:
+    async def connect(self, *args, **kwargs): return object()
+
+class ProviderError(RuntimeError):
+    code = 450000
+
+def build_worker(backend_type, byteview_type, queue_size=1):
+    worker = module.MeetingAsrWorker.__new__(module.MeetingAsrWorker)
+    worker.VolcStreamingASRClient = backend_type
+    worker.ByteViewClient = byteview_type
+    worker.websockets = FakeWebsockets()
+    worker.config = {"volc_audio_queue_size": queue_size}
+    worker.api_key = "not-a-real-key"
+    worker.protocol = Recorder()
+    worker.session = {
+        "session_epoch": "epoch_worker_test_12345678",
+        "capture_generation": 1,
+        "meeting_id": "meeting_worker_test_1234",
+        "meeting_no": "123456789",
+        "media_endpoint": "wss://media.example.test/token",
+    }
+    worker.stop_event = asyncio.Event()
+    worker.pending_finals = {}
+    worker.final_utterances = module.FinalUtteranceGate()
+    worker.segment_seq = 0
+    worker.last_audio_at_ms = None
+    worker.audio_window_samples = 0
+    worker.audio_window_nonzero = 0
+    worker.audio_window_peak = 0
+    worker.audio_window_sum_squares = 0
+    worker._observe_audio = lambda pcm: None
+    worker._resample = lambda pcm: pcm
+    return worker
+
+class BaseBackend:
+    last = None
+    def __init__(self, *args, **kwargs):
+        type(self).last = self
+        self.audio_origin_at = None
+        self.request_id = "provider-request"
+        self.aborted = False
+        self.finished = False
+    async def start(self, callback): self.callback = callback
+    async def abort(self): self.aborted = True
+    async def finish(self): self.finished = True
+
+class FailedBackend(BaseBackend):
+    async def feed_pcm(self, pcm): raise ProviderError("secret detail")
+
+class FailedByteView:
+    def __init__(self, **kwargs): self.ws = None
+    async def create_session(self, **kwargs): pass
+    async def listen(self, on_audio):
+        await on_audio(b"\\x01\\x00")
+        await asyncio.Event().wait()
+    async def close(self): pass
+
+class WedgedBackend(BaseBackend):
+    async def feed_pcm(self, pcm): await asyncio.Event().wait()
+
+class OverflowByteView:
+    def __init__(self, **kwargs): self.ws = None
+    async def create_session(self, **kwargs): pass
+    async def listen(self, on_audio):
+        await on_audio(b"\\x01\\x00")
+        await on_audio(b"\\x02\\x00")
+        await asyncio.Event().wait()
+    async def close(self): pass
+
+async def verify():
+    failed = build_worker(FailedBackend, FailedByteView)
+    await asyncio.wait_for(failed.run_session(), timeout=0.5)
+    assert [event.get("reason") for event in failed.protocol.events if event["type"] == "degraded"] == ["ProviderError_450000"]
+    assert FailedBackend.last.aborted and not FailedBackend.last.finished
+
+    overflow = build_worker(WedgedBackend, OverflowByteView)
+    await asyncio.wait_for(overflow.run_session(), timeout=0.5)
+    assert [event.get("reason") for event in overflow.protocol.events if event["type"] == "degraded"] == ["audio_queue_overflow"]
+    assert WedgedBackend.last.aborted and not WedgedBackend.last.finished
+
+asyncio.run(verify())
+`;
+    const result = spawnSync('python3', ['-c', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+
   it('loads the legacy private setup ASR token without putting it in worker env', () => {
     const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
     const script = `

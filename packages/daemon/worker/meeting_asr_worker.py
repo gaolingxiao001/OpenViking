@@ -68,7 +68,43 @@ def load_private_config(config_path: Path, yaml: Any) -> dict[str, Any]:
 
 def safe_reason(error: BaseException) -> str:
     value = type(error).__name__
+    code = getattr(error, "code", None)
+    if isinstance(code, (int, str)) and str(code):
+        value = f"{value}_{code}"
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value)[:100]
+
+
+async def stop_audio_feed(
+    audio_queue: asyncio.Queue[bytes | None],
+    audio_task: asyncio.Task[Any],
+    *,
+    drain: bool,
+    timeout: float = 5,
+) -> bool:
+    """Stop the ASR sender without blocking on a dead or wedged consumer."""
+    if not drain:
+        audio_task.cancel()
+        await asyncio.gather(audio_task, return_exceptions=True)
+        return False
+    if audio_task.done():
+        await asyncio.gather(audio_task, return_exceptions=True)
+        return False
+
+    drain_task = asyncio.create_task(audio_queue.join(), name="asr-audio-drain")
+    done, _ = await asyncio.wait(
+        {drain_task, audio_task},
+        timeout=timeout,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if drain_task in done and not audio_task.done():
+        audio_queue.put_nowait(None)
+        await asyncio.gather(audio_task, return_exceptions=True)
+        return True
+
+    drain_task.cancel()
+    audio_task.cancel()
+    await asyncio.gather(drain_task, audio_task, return_exceptions=True)
+    return False
 
 
 def is_final_result(event: Any) -> bool:
@@ -392,6 +428,15 @@ class MeetingAsrWorker:
         retry_task: asyncio.Task[Any] | None = None
         health_task: asyncio.Task[Any] | None = None
         backend_started = False
+        degraded_reason: str | None = None
+
+        def degrade(reason: str) -> None:
+            nonlocal degraded_reason
+            if degraded_reason is not None:
+                return
+            degraded_reason = reason
+            self.protocol.emit("degraded", session, reason=reason)
+            self.stop_event.set()
 
         async def on_result(event: Any) -> None:
             if not is_final_result(event):
@@ -427,8 +472,7 @@ class MeetingAsrWorker:
                 )
                 return
             if len(self.pending_finals) >= MAX_PENDING_FINALS:
-                self.protocol.emit("degraded", session, reason="final_wal_full")
-                self.stop_event.set()
+                degrade("final_wal_full")
                 return
             self.segment_seq += 1
             event_id = self._segment_id(decision["identity"])
@@ -453,12 +497,13 @@ class MeetingAsrWorker:
             }
 
         async def on_audio(pcm24k: bytes) -> None:
+            if self.stop_event.is_set():
+                return
             self.last_audio_at_ms = int(time.time() * 1000)
             self._observe_audio(pcm24k)
             pcm16k = self._resample(pcm24k)
             if audio_queue.full():
-                self.protocol.emit("degraded", session, reason="audio_queue_overflow")
-                self.stop_event.set()
+                degrade("audio_queue_overflow")
                 return
             audio_queue.put_nowait(pcm16k)
 
@@ -480,8 +525,7 @@ class MeetingAsrWorker:
                     if now - pending["sent_at"] < 2:
                         continue
                     if pending["attempts"] >= MAX_FINAL_ATTEMPTS:
-                        self.protocol.emit("degraded", session, reason="final_ack_timeout")
-                        self.stop_event.set()
+                        degrade("final_ack_timeout")
                         return
                     event = pending["event"]
                     # Preserve event_id and segment_seq while assigning a fresh
@@ -522,22 +566,30 @@ class MeetingAsrWorker:
 
             stop_task = asyncio.create_task(self.stop_event.wait(), name="meeting-stop")
             done, _ = await asyncio.wait(
-                {listen_task, stop_task},
+                {listen_task, audio_task, stop_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if listen_task in done and not self.stop_event.is_set():
-                try:
-                    await listen_task
-                except Exception as error:
-                    self.protocol.emit("degraded", session, reason=safe_reason(error))
-                else:
-                    self.protocol.emit("degraded", session, reason="media_stream_closed")
-                self.stop_event.set()
+            if not self.stop_event.is_set():
+                completed = next((
+                    (task, closed_reason)
+                    for task, closed_reason in (
+                        (audio_task, "audio_feed_closed"),
+                        (listen_task, "media_stream_closed"),
+                    )
+                    if task in done
+                ), None)
+                if completed is not None:
+                    completed_task, closed_reason = completed
+                    try:
+                        await completed_task
+                    except Exception as error:
+                        degrade(safe_reason(error))
+                    else:
+                        degrade(closed_reason)
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
         except Exception as error:
-            self.protocol.emit("degraded", session, reason=safe_reason(error))
-            self.stop_event.set()
+            degrade(safe_reason(error))
         finally:
             # Capture closes first; daemon meeting membership remains untouched.
             try:
@@ -550,17 +602,19 @@ class MeetingAsrWorker:
                 await asyncio.gather(listen_task, return_exceptions=True)
 
             if audio_task is not None:
-                try:
-                    await asyncio.wait_for(audio_queue.join(), timeout=5)
-                except asyncio.TimeoutError:
-                    pass
-                await audio_queue.put(None)
-                await asyncio.gather(audio_task, return_exceptions=True)
+                await stop_audio_feed(
+                    audio_queue,
+                    audio_task,
+                    drain=degraded_reason is None,
+                )
             if backend_started:
                 try:
-                    await asyncio.wait_for(backend.finish(), timeout=8)
+                    if degraded_reason is not None:
+                        await asyncio.wait_for(backend.abort(), timeout=3)
+                    else:
+                        await asyncio.wait_for(backend.finish(), timeout=8)
                 except Exception as error:
-                    self.protocol.emit("degraded", session, reason=safe_reason(error))
+                    degrade(safe_reason(error))
 
             deadline = time.monotonic() + 2
             while self.pending_finals and time.monotonic() < deadline:
