@@ -207,6 +207,11 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(posted.events[0].content[0].text, 'hello');
     assert.equal(posted.events[1].type, 'system.message');
     assert.match(posted.events[1].content[0].text, /daemon relays only the final agent\.message locally/);
+    // The Ark agent template's own system field only carries persona; the
+    // injected system.message must also explain the [chat=... msg=...] line
+    // format and the reply/silence rules, or MA has no way to know them.
+    assert.match(posted.events[1].content[0].text, /Lark conversation format/);
+    assert.match(posted.events[1].content[0].text, /When to reply/);
     assert.equal(agent.turnInProgress, false);
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
   });
