@@ -462,7 +462,7 @@ describe('Volc managed-agent runtime', () => {
     await agent.stop();
   });
 
-  it('replays unmarked pre-fence stream output after finding the exact fence in history', async () => {
+  it('finds the fence and replays output via the post-POST history catch-up, without needing the stream', async () => {
     const calls = [];
     let streamCount = 0;
     let historyCount = 0;
@@ -521,7 +521,10 @@ describe('Volc managed-agent runtime', () => {
     clearTimeout(timeout);
     assert.equal(outcome, 'succeeded');
     assert.deepEqual(outputs, ['HISTORY_FENCE_OK']);
-    assert.equal(streamCount, 1);
+    // The post-POST history catch-up (historyCount 2) already contains the
+    // fence, the answer, and the idle event, so the turn completes without
+    // ever needing to attach the live stream.
+    assert.equal(streamCount, 0);
     assert.equal(historyCount, 2);
     assert.equal(agent.seenEventIds.has('evt-answer-no-echo'), true);
     await agent.stop();

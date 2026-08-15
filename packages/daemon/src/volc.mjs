@@ -656,6 +656,17 @@ export class VolcAgent {
           this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
           this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, acceptedThroughSeq);
 
+          // A fast model can already have produced output by the time we
+          // attach a stream. Reconcile against history (which is strictly
+          // ordered, unlike the live buffered replay) before attaching, so
+          // the fence is found on the first try instead of needing a
+          // reconnect once the live stream turns out to start mid-output.
+          const tCatchup = Date.now();
+          const catchup = await this._history();
+          this.logger.info('volc_turn_timing', { stage: 'post_post_history', elapsedMs: Date.now() - tCatchup });
+          for (const event of catchup) this._handleEvent(event);
+          if (!this.turnActive) return;
+
           const tStream = Date.now();
           response = await this._openStream();
           this.logger.info('volc_turn_timing', { stage: 'stream_open', elapsedMs: Date.now() - tStream });
