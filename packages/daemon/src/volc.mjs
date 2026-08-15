@@ -628,20 +628,19 @@ export class VolcAgent {
           try {
             postAttempted = true;
             const t2 = Date.now();
-            // system.message must precede user.message in the batch, or it
-            // lands ordered (and presumably read) after the message it's
-            // meant to govern, undermining it as context for that turn.
-            const events = [];
-            if (!this.transportPolicyInjected) {
-              events.push({
-                type: 'system.message',
-                content: [{ type: 'text', text: this.transportPolicy }],
-              });
-            }
-            events.push({
+            // Fold the policy into the user.message text itself rather than
+            // a separate system.message event: it is unconfirmed whether MA
+            // actually feeds a same-batch system.message into the model's
+            // context the way a real system prompt would, and prepending it
+            // to the message the model is definitely reading removes that
+            // doubt entirely.
+            const messageText = this.transportPolicyInjected
+              ? prepared.body
+              : `${this.transportPolicy}\n\n${prepared.body}`;
+            const events = [{
               type: 'user.message',
-              content: [{ type: 'text', text: prepared.body }],
-            });
+              content: [{ type: 'text', text: messageText }],
+            }];
             posted = await this._postEvents(events);
             this.logger.info('volc_turn_timing', { stage: 'post_user_message', elapsedMs: Date.now() - t2 });
           } catch (error) {
