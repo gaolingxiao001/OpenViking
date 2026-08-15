@@ -145,7 +145,7 @@ function config(overrides = {}) {
 }
 
 describe('Volc managed-agent runtime', () => {
-  it('opens SSE before posting and delivers only the last agent.message on idle', async () => {
+  it('posts before opening SSE and delivers only the last agent.message on idle', async () => {
     const calls = [];
     const events = [
       { id: 'evt-old-final', type: 'agent.message', content: [{ type: 'text', text: 'STALE_OUTPUT' }] },
@@ -198,7 +198,10 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(outputs[0].cognitionEpoch, 1);
     const streamIndex = calls.findIndex((call) => call.url.endsWith('/events/stream'));
     const postIndex = calls.findIndex((call) => call.url.endsWith('/events') && call.method === 'POST');
-    assert.ok(streamIndex >= 0 && postIndex > streamIndex);
+    // Post before attaching the stream: Volc buffers session events until a
+    // stream attaches, so posting first cannot miss output, and it avoids
+    // opening a stream against a session with nothing queued yet.
+    assert.ok(postIndex >= 0 && streamIndex > postIndex);
     const posted = JSON.parse(calls[postIndex].body);
     assert.equal(posted.events[0].type, 'user.message');
     assert.equal(posted.events[0].content[0].text, 'hello');
@@ -1049,6 +1052,10 @@ describe('Volc managed-agent runtime', () => {
         if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
         if (url.endsWith('/sessions') && options.method === 'POST') {
           return json(templateSession('sesn-terminal1234'));
+        }
+        if (url.includes('/events?')) return json({ data: [] });
+        if (url.endsWith('/events') && options.method === 'POST') {
+          return json({ data: [{ id: 'evt-user', type: 'user.message' }] });
         }
         if (url.endsWith('/events/stream')) {
           streamCalls += 1;

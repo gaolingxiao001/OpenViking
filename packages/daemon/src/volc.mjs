@@ -578,10 +578,11 @@ export class VolcAgent {
     while (!this.stopping && this.turnActive) {
       let response;
       try {
-        const t0 = Date.now();
-        response = await this._openStream();
-        this.logger.info('volc_turn_timing', { stage: 'stream_open', elapsedMs: Date.now() - t0 });
         if (first) {
+          // Post before attaching the stream: the Volc API buffers events for a
+          // session until a stream attaches, so posting first does not risk
+          // missing output, and it avoids the extra latency of opening a
+          // stream against a session with nothing queued yet.
           const t1 = Date.now();
           const history = await this._history({ snapshotOnly: true });
           this.logger.info('volc_turn_timing', { stage: 'history_snapshot', elapsedMs: Date.now() - t1 });
@@ -654,8 +655,16 @@ export class VolcAgent {
             : prepared.deliveredThroughSeq;
           this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
           this.deliveredThroughSeq = Math.max(this.deliveredThroughSeq, acceptedThroughSeq);
+
+          const tStream = Date.now();
+          response = await this._openStream();
+          this.logger.info('volc_turn_timing', { stage: 'stream_open', elapsedMs: Date.now() - tStream });
+
           first = false;
         } else {
+          const tStream = Date.now();
+          response = await this._openStream();
+          this.logger.info('volc_turn_timing', { stage: 'stream_open', elapsedMs: Date.now() - tStream });
           const history = await this._history();
           for (const event of history) this._handleEvent(event);
           if (!this.turnActive) return;
