@@ -432,6 +432,9 @@ export class Store {
     `);
     this.getInboundByMessage = this.db.prepare('SELECT * FROM inbound WHERE message_id = ?');
     this.getInboundByEvent = this.db.prepare('SELECT * FROM inbound WHERE event_id = ?');
+    this.getJournalActorByMessage = this.db.prepare(
+      'SELECT actor FROM cognition_journal WHERE message_id = ? ORDER BY seq DESC LIMIT 1',
+    );
     this.getMetaStatement = this.db.prepare('SELECT value FROM meta WHERE key = ?');
     this.setMetaStatement = this.db.prepare(`
       INSERT INTO meta(key, value) VALUES (?, ?)
@@ -1474,6 +1477,18 @@ export class Store {
     if (!messageId) return null;
     const row = this.getInboundByMessage.get(messageId);
     return row ? number(row.seq) : null;
+  }
+
+  // Who authored a message id this daemon has seen: an inbound sender, or the
+  // bot itself (journaled deliveries record actor 'me'). Null when unseen —
+  // e.g. quoted messages older than local history.
+  resolveMessageAuthor(messageId) {
+    if (!messageId) return null;
+    const inbound = this.getInboundByMessage.get(messageId);
+    if (inbound) return { kind: 'user', chatId: inbound.chat_id, senderId: inbound.sender_id };
+    const journal = this.getJournalActorByMessage.get(messageId);
+    if (journal?.actor === 'me') return { kind: 'me' };
+    return null;
   }
 
   latestAcceptedInboundSeq(chatId) {

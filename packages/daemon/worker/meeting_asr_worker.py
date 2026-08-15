@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Media-only stdio adapter for the existing meeting-asr-poc.
+"""Media-only stdio adapter for the release-owned Doubao meeting ASR worker.
 
 The daemon owns meeting membership and passes a short-lived ByteView WSS URL in
 the start command. This process has no join/leave API and never invokes
-lark-cli. stdout is reserved for versioned NDJSON; imported POC logs go to
+lark-cli. stdout is reserved for versioned NDJSON; imported backend logs go to
 stderr.
 """
 
@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -33,15 +34,77 @@ sys.stdout = sys.stderr
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="lark-daemon meeting ASR worker")
-    parser.add_argument("--poc-dir", required=True)
+    parser.add_argument(
+        "--worker-dir", "--poc-dir", dest="worker_dir", required=True,
+        help="release meeting-asr directory",
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--asr", default="volc")
     return parser.parse_args()
 
 
+def load_private_config(config_path: Path, yaml: Any) -> dict[str, Any]:
+    """Load YAML, or the legacy private .setup.md ASR section.
+
+    Supporting the existing private setup file avoids copying a credential
+    into the release or process environment. The value is never logged.
+    """
+    text = config_path.read_text(encoding="utf-8")
+    try:
+        value = yaml.safe_load(text)
+    except yaml.YAMLError:
+        value = None
+    if isinstance(value, dict):
+        return value
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().rstrip(":：").upper() != "ASR":
+            continue
+        token = next((item.strip().strip("`") for item in lines[index + 1:] if item.strip()), "")
+        if token:
+            return {"doubao_api_key": token}
+    raise RuntimeError("invalid_asr_config")
+
+
 def safe_reason(error: BaseException) -> str:
     value = type(error).__name__
+    code = getattr(error, "code", None)
+    if isinstance(code, (int, str)) and str(code):
+        value = f"{value}_{code}"
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value)[:100]
+
+
+async def stop_audio_feed(
+    audio_queue: asyncio.Queue[bytes | None],
+    audio_task: asyncio.Task[Any],
+    *,
+    drain: bool,
+    timeout: float = 5,
+) -> bool:
+    """Stop the ASR sender without blocking on a dead or wedged consumer."""
+    if not drain:
+        audio_task.cancel()
+        await asyncio.gather(audio_task, return_exceptions=True)
+        return False
+    if audio_task.done():
+        await asyncio.gather(audio_task, return_exceptions=True)
+        return False
+
+    drain_task = asyncio.create_task(audio_queue.join(), name="asr-audio-drain")
+    done, _ = await asyncio.wait(
+        {drain_task, audio_task},
+        timeout=timeout,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if drain_task in done and not audio_task.done():
+        audio_queue.put_nowait(None)
+        await asyncio.gather(audio_task, return_exceptions=True)
+        return True
+
+    drain_task.cancel()
+    audio_task.cancel()
+    await asyncio.gather(drain_task, audio_task, return_exceptions=True)
+    return False
 
 
 def is_final_result(event: Any) -> bool:
@@ -71,7 +134,7 @@ def _final_identity_aliases(
 
     Volc responses are cumulative and a later second-pass response may repeat
     or revise an utterance already marked definite.  Provider identity wins;
-    the POC currently exposes the utterance position plus its audio range.  We
+    The provider exposes the utterance position plus its audio range. We
     register both aliases so a correction is still recognized if only one of
     those fields remains stable.  When neither exists we deliberately return
     no alias: dropping equal text would also drop a legitimate repeated phrase.
@@ -207,33 +270,31 @@ class Protocol:
 
 class MeetingAsrWorker:
     def __init__(self, args: argparse.Namespace) -> None:
-        poc_dir = Path(args.poc_dir).resolve()
-        starter_dir = poc_dir / "doubao-voice-meeting-starter"
-        if not (poc_dir / "asr_backends.py").is_file() or not starter_dir.is_dir():
-            raise RuntimeError("invalid_poc_dir")
-        sys.path.insert(0, str(poc_dir))
-        sys.path.insert(0, str(starter_dir))
+        worker_dir = Path(args.worker_dir).resolve()
+        if not (worker_dir / "doubao_asr.py").is_file() or not (worker_dir / "byteview_client.py").is_file():
+            raise RuntimeError("invalid_worker_dir")
+        sys.path.insert(0, str(worker_dir))
 
         import numpy as np  # type: ignore
         import websockets  # type: ignore
         import yaml  # type: ignore
-        import asr_backends  # type: ignore
         from byteview_client import ByteViewClient  # type: ignore
+        from doubao_asr import VolcStreamingASRClient  # type: ignore
 
         config_path = Path(args.config)
         if not config_path.is_absolute():
-            config_path = poc_dir / config_path
-        with config_path.open("r", encoding="utf-8") as stream:
-            config = yaml.safe_load(stream) or {}
-        backend = asr_backends.build(args.asr, config)
-        if not getattr(backend, "streaming", False):
-            raise RuntimeError("production_worker_requires_streaming_backend")
+            config_path = worker_dir / config_path
+        config = load_private_config(config_path, yaml)
+        api_key = str(config.get("doubao_api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("doubao_api_key_required")
 
         self.np = np
         self.websockets = websockets
         self.ByteViewClient = ByteViewClient
+        self.VolcStreamingASRClient = VolcStreamingASRClient
         self.config = config
-        self.backend = backend
+        self.api_key = api_key
         self.protocol = Protocol()
         self.session: dict[str, Any] | None = None
         self.stop_event = asyncio.Event()
@@ -242,6 +303,10 @@ class MeetingAsrWorker:
         self.final_utterances = FinalUtteranceGate()
         self.segment_seq = 0
         self.last_audio_at_ms: int | None = None
+        self.audio_window_samples = 0
+        self.audio_window_nonzero = 0
+        self.audio_window_peak = 0
+        self.audio_window_sum_squares = 0
 
     def _resample(self, pcm: bytes) -> bytes:
         if not pcm:
@@ -272,6 +337,37 @@ class MeetingAsrWorker:
             ).encode("utf-8")
         ).hexdigest()
         return "segment_" + digest[:40]
+
+    def _observe_audio(self, pcm: bytes) -> None:
+        samples = self.np.frombuffer(pcm, dtype=self.np.int16)
+        if not samples.size:
+            return
+        wide = samples.astype(self.np.int64)
+        self.audio_window_samples += int(wide.size)
+        self.audio_window_nonzero += int(self.np.count_nonzero(wide))
+        self.audio_window_peak = max(
+            self.audio_window_peak,
+            int(self.np.max(self.np.abs(wide))),
+        )
+        self.audio_window_sum_squares += int(self.np.dot(wide, wide))
+
+    def _take_audio_health(self) -> dict[str, int | float]:
+        samples = self.audio_window_samples
+        metrics: dict[str, int | float] = {
+            "audio_samples": samples,
+            "audio_peak": self.audio_window_peak,
+            "audio_rms": round(
+                math.sqrt(self.audio_window_sum_squares / samples), 2
+            ) if samples else 0.0,
+            "audio_nonzero_ratio": round(
+                self.audio_window_nonzero / samples, 6
+            ) if samples else 0.0,
+        }
+        self.audio_window_samples = 0
+        self.audio_window_nonzero = 0
+        self.audio_window_peak = 0
+        self.audio_window_sum_squares = 0
+        return metrics
 
     async def handle_command(self, command: dict[str, Any]) -> None:
         name = command.get("command")
@@ -308,6 +404,21 @@ class MeetingAsrWorker:
     async def run_session(self) -> None:
         assert self.session is not None
         session = self.session
+        backend = self.VolcStreamingASRClient(
+            self.api_key,
+            endpoint=str(self.config.get(
+                "doubao_endpoint",
+                "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+            )),
+            resource_id=str(self.config.get(
+                "doubao_resource_id", "volc.seedasr.sauc.duration"
+            )),
+            packet_ms=int(self.config.get("doubao_packet_ms", 200)),
+            end_window_size=int(self.config.get("doubao_end_window_size", 500)),
+            enable_nonstream=bool(self.config.get("doubao_enable_nonstream", True)),
+            enable_ddc=bool(self.config.get("doubao_enable_ddc", False)),
+            hotwords=tuple(str(word) for word in self.config.get("doubao_hotwords", [])),
+        )
         audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
             maxsize=int(self.config.get("volc_audio_queue_size", 256))
         )
@@ -317,11 +428,20 @@ class MeetingAsrWorker:
         retry_task: asyncio.Task[Any] | None = None
         health_task: asyncio.Task[Any] | None = None
         backend_started = False
+        degraded_reason: str | None = None
+
+        def degrade(reason: str) -> None:
+            nonlocal degraded_reason
+            if degraded_reason is not None:
+                return
+            degraded_reason = reason
+            self.protocol.emit("degraded", session, reason=reason)
+            self.stop_event.set()
 
         async def on_result(event: Any) -> None:
             if not is_final_result(event):
                 return
-            origin = self.backend.audio_origin_at
+            origin = backend.audio_origin_at
             start_ms = (
                 int((origin * 1000) + event.start_ms)
                 if origin is not None and event.start_ms is not None
@@ -334,7 +454,7 @@ class MeetingAsrWorker:
             )
             decision = self.final_utterances.accept(
                 event,
-                self.backend.request_id,
+                backend.request_id,
                 session["session_epoch"],
                 start_ms,
                 end_ms,
@@ -352,8 +472,7 @@ class MeetingAsrWorker:
                 )
                 return
             if len(self.pending_finals) >= MAX_PENDING_FINALS:
-                self.protocol.emit("degraded", session, reason="final_wal_full")
-                self.stop_event.set()
+                degrade("final_wal_full")
                 return
             self.segment_seq += 1
             event_id = self._segment_id(decision["identity"])
@@ -378,11 +497,13 @@ class MeetingAsrWorker:
             }
 
         async def on_audio(pcm24k: bytes) -> None:
+            if self.stop_event.is_set():
+                return
             self.last_audio_at_ms = int(time.time() * 1000)
+            self._observe_audio(pcm24k)
             pcm16k = self._resample(pcm24k)
             if audio_queue.full():
-                self.protocol.emit("degraded", session, reason="audio_queue_overflow")
-                self.stop_event.set()
+                degrade("audio_queue_overflow")
                 return
             audio_queue.put_nowait(pcm16k)
 
@@ -392,7 +513,7 @@ class MeetingAsrWorker:
                 try:
                     if pcm is None:
                         return
-                    await self.backend.feed_stream(pcm)
+                    await backend.feed_pcm(pcm)
                 finally:
                     audio_queue.task_done()
 
@@ -404,8 +525,7 @@ class MeetingAsrWorker:
                     if now - pending["sent_at"] < 2:
                         continue
                     if pending["attempts"] >= MAX_FINAL_ATTEMPTS:
-                        self.protocol.emit("degraded", session, reason="final_ack_timeout")
-                        self.stop_event.set()
+                        degrade("final_ack_timeout")
                         return
                     event = pending["event"]
                     # Preserve event_id and segment_seq while assigning a fresh
@@ -426,11 +546,12 @@ class MeetingAsrWorker:
                     audio="healthy",
                     asr="healthy",
                     last_audio_at_ms=self.last_audio_at_ms,
-                    reconnect_count=int(getattr(self.backend, "reconnect_count", 0)),
+                    reconnect_count=0,
+                    **self._take_audio_health(),
                 )
 
         try:
-            await self.backend.start_stream(on_result)
+            await backend.start(on_result)
             backend_started = True
             bv.ws = await self.websockets.connect(
                 session["media_endpoint"],
@@ -445,22 +566,30 @@ class MeetingAsrWorker:
 
             stop_task = asyncio.create_task(self.stop_event.wait(), name="meeting-stop")
             done, _ = await asyncio.wait(
-                {listen_task, stop_task},
+                {listen_task, audio_task, stop_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if listen_task in done and not self.stop_event.is_set():
-                try:
-                    await listen_task
-                except Exception as error:
-                    self.protocol.emit("degraded", session, reason=safe_reason(error))
-                else:
-                    self.protocol.emit("degraded", session, reason="media_stream_closed")
-                self.stop_event.set()
+            if not self.stop_event.is_set():
+                completed = next((
+                    (task, closed_reason)
+                    for task, closed_reason in (
+                        (audio_task, "audio_feed_closed"),
+                        (listen_task, "media_stream_closed"),
+                    )
+                    if task in done
+                ), None)
+                if completed is not None:
+                    completed_task, closed_reason = completed
+                    try:
+                        await completed_task
+                    except Exception as error:
+                        degrade(safe_reason(error))
+                    else:
+                        degrade(closed_reason)
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
         except Exception as error:
-            self.protocol.emit("degraded", session, reason=safe_reason(error))
-            self.stop_event.set()
+            degrade(safe_reason(error))
         finally:
             # Capture closes first; daemon meeting membership remains untouched.
             try:
@@ -473,17 +602,19 @@ class MeetingAsrWorker:
                 await asyncio.gather(listen_task, return_exceptions=True)
 
             if audio_task is not None:
-                try:
-                    await asyncio.wait_for(audio_queue.join(), timeout=5)
-                except asyncio.TimeoutError:
-                    pass
-                await audio_queue.put(None)
-                await asyncio.gather(audio_task, return_exceptions=True)
+                await stop_audio_feed(
+                    audio_queue,
+                    audio_task,
+                    drain=degraded_reason is None,
+                )
             if backend_started:
                 try:
-                    await asyncio.wait_for(self.backend.finish_stream(), timeout=8)
+                    if degraded_reason is not None:
+                        await asyncio.wait_for(backend.abort(), timeout=3)
+                    else:
+                        await asyncio.wait_for(backend.finish(), timeout=8)
                 except Exception as error:
-                    self.protocol.emit("degraded", session, reason=safe_reason(error))
+                    degrade(safe_reason(error))
 
             deadline = time.monotonic() + 2
             while self.pending_finals and time.monotonic() < deadline:

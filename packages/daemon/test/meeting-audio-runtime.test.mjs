@@ -9,7 +9,6 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { LarkDaemon } from '../src/daemon.mjs';
-import { LarkToolService, larkToolsForOptions } from '../src/lark-tools.mjs';
 import {
   FlyReferenceRing,
   GenericDecisionAuthority,
@@ -36,10 +35,6 @@ function envelope(type, id, event, atMs = Date.now()) {
   };
 }
 
-function capabilityFrom(text) {
-  return /decision_capability=([^\s\]]+)/.exec(text)?.[1] ?? null;
-}
-
 async function tick() {
   await new Promise((resolve) => setImmediate(resolve));
 }
@@ -61,8 +56,7 @@ describe('meeting audio runtime vertical slice', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  it('runs join → final spool → start/steer → generic send → ended revoke without polluting MeetingStore', async () => {
-    const targetChatId = 'oc_target12345678';
+  it('runs join → final spool → target-free start/steer → receipt settlement without polluting MeetingStore', async () => {
     const runtimeToken = 'runtime_token_12345678';
     const generations = new MeetingGenerationClock();
     const flyReferences = new FlyReferenceRing();
@@ -84,13 +78,9 @@ describe('meeting audio runtime vertical slice', () => {
     };
     const runtimeAdapter = new MeetingRuntimeAdapter({
       spool,
-      authority,
       generationClock: generations,
       flyReferences,
       runtime,
-      targetChatId,
-      getRuntimeToken: () => runtimeToken,
-      getLatestLarkSeq: () => 0,
       submitIngress: async (action) => await action(),
       flushBufferedIngress() {},
       logger: quietLogger,
@@ -127,7 +117,6 @@ describe('meeting audio runtime vertical slice', () => {
       media,
       flyReferences,
       authority,
-      targetChatId,
       generationClock: generations,
       mediaEndpointProvider: async () => 'wss://media.example.test/short-lived-token',
       onSessionClosed: (closedSession) => spool.retireSession(closedSession.sessionEpoch),
@@ -198,6 +187,10 @@ describe('meeting audio runtime vertical slice', () => {
     assert.match(deliveries[0].text, /Fly-only context/);
     assert.match(deliveries[0].text, /source=local_asr no_source=true/);
     assert.match(deliveries[0].text, /speaker=unknown/);
+    assert.doesNotMatch(deliveries[0].text, /target_chat=/);
+    assert.doesNotMatch(deliveries[0].text, /decision_capability=/);
+    assert.doesNotMatch(deliveries[1].text, /target_chat=/);
+    assert.doesNotMatch(deliveries[1].text, /decision_capability=/);
     assert.deepEqual(spool.stats(), {
       pending: 0,
       inflight: 2,
@@ -208,64 +201,9 @@ describe('meeting audio runtime vertical slice', () => {
     assert.equal(workerAcks.length, 2, 'worker finals are ACKed after durable spool commit');
     assert.equal(store.stats().meetingEvents, 0, 'local ASR never enters the normal meeting database');
 
-    const firstCapability = capabilityFrom(deliveries[0].text);
-    const latestCapability = capabilityFrom(deliveries[1].text);
-    const calls = [];
-    const service = new LarkToolService({
-      larkCliBin: '/fake/lark-cli',
-      profile: 'test-profile',
-      projectDir: directory,
-      timeoutMs: 5_000,
-      maxTextChars: 1_000,
-      dryRun: false,
-      decisionCapabilityClaim: ({ capability, action, target }) => authority.claim(
-        decodeURIComponent(capability),
-        { runtimeToken, action, target },
-      ),
-    }, async (_command, args) => {
-      calls.push(args);
-      return {
-        code: 0,
-        signal: null,
-        stdout: JSON.stringify({ ok: true, data: { message_id: 'om_sentMeeting1234' } }),
-        stderr: '',
-        timedOut: false,
-      };
-    });
-    await assert.rejects(
-      () => service.sendMessage({
-        chat_id: targetChatId,
-        text: 'stale generation',
-        decision_capability: decodeURIComponent(firstCapability),
-      }),
-      /generation is stale/,
-    );
-    await assert.rejects(
-      () => service.sendMessage({
-        chat_id: targetChatId,
-        text: '<at user_id="ou_untrusted1234"></at> bypass',
-        decision_capability: decodeURIComponent(latestCapability),
-      }),
-      /must not contain Lark <at> mention tags/,
-    );
-    assert.equal(calls.length, 0, 'raw mention rejection happens before capability claim or send');
-    const sent = await service.sendMessage({
-      chat_id: targetChatId,
-      text: 'current decision',
-      decision_capability: decodeURIComponent(latestCapability),
-    });
-    assert.equal(sent.sent, true);
-    assert.equal(calls.length, 1);
-    assert.equal(
-      larkToolsForOptions({ decisionCapabilityClaim() {} })
-        .find((tool) => tool.name === 'send_lark_message')
-        .inputSchema.properties.decision_capability.type,
-      'string',
-    );
-
     runtimeAdapter.onTurnSucceeded({ receiptIds: deliveries.map((item) => item.receiptId) });
     assert.equal(spool.stats().consumed, 2);
-    assert.equal(authority.stats().active, 0, 'turn completion revokes every unused capability');
+    assert.equal(authority.stats().active, 0, 'ASR ingress never mints delivery authority');
 
     const stranded = spool.enqueue({
       sessionEpoch: session.sessionEpoch,
@@ -313,7 +251,6 @@ describe('meeting audio runtime vertical slice', () => {
     runtimeAdapter.stop();
     await coordinator.stop();
     await adapter.stop();
-    await service.close();
   });
 
   it('keeps joined ownership and applies bounded exponential worker restart', async () => {
@@ -482,10 +419,79 @@ describe('meeting audio runtime vertical slice', () => {
     await coordinator.stop();
   });
 
+  it('restarts a degraded media worker without waiting on its own event task', async () => {
+    const handlers = [];
+    const timers = [];
+    let stops = 0;
+    let epoch = 0;
+    let coordinator;
+    const media = new MeetingMediaSupervisor({
+      workerFactory: {
+        async start(_session, callbacks) {
+          handlers.push(callbacks);
+          return {
+            ack() {},
+            async stop() { stops += 1; },
+          };
+        },
+      },
+      onFinal() {},
+      onUnavailable: (session, reason) => coordinator.onUnavailable(session, reason),
+      onState: (session) => coordinator?.onMediaState(session),
+      epochFactory: () => `epoch_degraded_${++epoch}_12345678`,
+      logger: quietLogger,
+    });
+    coordinator = new MeetingAudioCoordinator({
+      media,
+      flyReferences: new FlyReferenceRing(),
+      authority: { revokeSession() {} },
+      generationClock: new MeetingGenerationClock(),
+      mediaEndpointProvider: async () => 'wss://media.example.test/degraded',
+      onSessionClosed() {},
+      restartBaseDelayMs: 10,
+      restartMaxDelayMs: 100,
+      restartMaxAttempts: 2,
+      setTimer(callback, delay) {
+        const timer = { callback, delay, unref() {} };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer() {},
+      logger: quietLogger,
+    });
+    const session = await coordinator.onJoined({
+      meetingId: 'meeting_degraded_1234',
+      meetingNumber: '123456789',
+    });
+    handlers[0].onEvent({
+      type: 'ready',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: session.captureGeneration,
+    });
+    await tick();
+    handlers[0].onEvent({
+      type: 'degraded',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: session.captureGeneration,
+      reason: 'media_stream_closed',
+    });
+    await tick();
+    await tick();
+
+    assert.equal(stops, 1);
+    assert.equal(media.state(session.meetingId), null);
+    assert.equal(timers.at(-1).delay, 10);
+    timers.at(-1).callback();
+    await tick();
+    assert.equal(handlers.length, 2, 'the replacement worker starts after degradation');
+    await coordinator.stop();
+  });
+
   it('uses one credential-stripped stdio worker process per meeting session', async () => {
     const children = [];
     const spawnOptions = [];
     const commands = [];
+    const diagnostics = [];
     const spawn = (_command, _args, options) => {
       spawnOptions.push(options);
       const child = new EventEmitter();
@@ -520,6 +526,10 @@ describe('meeting audio runtime vertical slice', () => {
         FEISHU_APP_SECRET: 'must-not-leak',
       },
       spawn,
+      logger: {
+        debug(event, fields) { diagnostics.push({ level: 'debug', event, fields }); },
+        warn(event, fields) { diagnostics.push({ level: 'warn', event, fields }); },
+      },
     });
     const events = [];
     const exits = [];
@@ -551,6 +561,38 @@ describe('meeting audio runtime vertical slice', () => {
     })}\n`);
     await tick();
     assert.equal(events[0].type, 'final');
+    children[0].stdout.write(`${JSON.stringify({
+      v: 1,
+      type: 'health',
+      session_epoch: session.sessionEpoch,
+      capture_generation: 1,
+      audio: 'healthy',
+      asr: 'healthy',
+      last_audio_at_ms: 1_786_730_000_000,
+      audio_samples: 120_000,
+      audio_peak: 321,
+      audio_rms: 12.5,
+      audio_nonzero_ratio: 0.25,
+    })}\n`);
+    await tick();
+    assert.deepEqual(events[1], {
+      type: 'health',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: 1,
+      segmentId: undefined,
+      segmentSeq: undefined,
+      text: undefined,
+      audioStartMs: null,
+      audioEndMs: null,
+      audio: 'healthy',
+      asr: 'healthy',
+      reason: undefined,
+      lastAudioAtMs: 1_786_730_000_000,
+      audioSamples: 120_000,
+      audioPeak: 321,
+      audioRms: 12.5,
+      audioNonzeroRatio: 0.25,
+    });
     await first.ack({
       sessionEpoch: session.sessionEpoch,
       captureGeneration: 1,
@@ -568,6 +610,32 @@ describe('meeting audio runtime vertical slice', () => {
     }, { onEvent() {}, onExit() {} });
     assert.equal(children.length, 2, 'the next meeting gets a fresh isolated process');
     await second.stop({ reason: 'test_complete' });
+
+    const unexpectedExits = [];
+    await factory.start({
+      ...session,
+      meetingId: 'meeting_stdio_9012',
+      sessionEpoch: 'epoch_stdio_11223344',
+    }, { onEvent() {}, onExit: (event) => unexpectedExits.push(event) });
+    children[2].stderr.write('media websocket closed\n');
+    children[2].emit('exit', 2, null);
+    await tick();
+    assert.deepEqual(unexpectedExits, [{
+      reason: 'process_exit',
+      code: 2,
+      signal: null,
+      stderrBytes: 23,
+    }]);
+    assert.deepEqual(diagnostics.at(-1), {
+      level: 'warn',
+      event: 'meeting_worker_exited',
+      fields: {
+        code: 2,
+        signal: null,
+        stderr: 'media websocket closed',
+        stderrBytes: 23,
+      },
+    });
   });
 
   it('claims capabilities through the mode-0600 Unix socket with runtime fencing', async () => {
@@ -659,6 +727,130 @@ spec.loader.exec_module(module)
 assert module.is_final_result(types.SimpleNamespace(kind="definite", text="a"))
 assert module.is_final_result(types.SimpleNamespace(kind="final", text="fallback"))
 assert not module.is_final_result(types.SimpleNamespace(kind="partial", text="no"))
+`;
+    const result = spawnSync('python3', ['-c', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  it('surfaces a failed ASR sender and never deadlocks on a full audio queue', () => {
+    const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
+    const script = `
+import asyncio, importlib.util, types
+spec = importlib.util.spec_from_file_location("meeting_asr_worker", ${JSON.stringify(workerPath)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Recorder:
+    def __init__(self): self.events = []
+    def emit(self, event_type, session, **fields):
+        value = {"type": event_type, **fields}
+        self.events.append(value)
+        return value
+
+class FakeWebsockets:
+    async def connect(self, *args, **kwargs): return object()
+
+class ProviderError(RuntimeError):
+    code = 450000
+
+def build_worker(backend_type, byteview_type, queue_size=1):
+    worker = module.MeetingAsrWorker.__new__(module.MeetingAsrWorker)
+    worker.VolcStreamingASRClient = backend_type
+    worker.ByteViewClient = byteview_type
+    worker.websockets = FakeWebsockets()
+    worker.config = {"volc_audio_queue_size": queue_size}
+    worker.api_key = "not-a-real-key"
+    worker.protocol = Recorder()
+    worker.session = {
+        "session_epoch": "epoch_worker_test_12345678",
+        "capture_generation": 1,
+        "meeting_id": "meeting_worker_test_1234",
+        "meeting_no": "123456789",
+        "media_endpoint": "wss://media.example.test/token",
+    }
+    worker.stop_event = asyncio.Event()
+    worker.pending_finals = {}
+    worker.final_utterances = module.FinalUtteranceGate()
+    worker.segment_seq = 0
+    worker.last_audio_at_ms = None
+    worker.audio_window_samples = 0
+    worker.audio_window_nonzero = 0
+    worker.audio_window_peak = 0
+    worker.audio_window_sum_squares = 0
+    worker._observe_audio = lambda pcm: None
+    worker._resample = lambda pcm: pcm
+    return worker
+
+class BaseBackend:
+    last = None
+    def __init__(self, *args, **kwargs):
+        type(self).last = self
+        self.audio_origin_at = None
+        self.request_id = "provider-request"
+        self.aborted = False
+        self.finished = False
+    async def start(self, callback): self.callback = callback
+    async def abort(self): self.aborted = True
+    async def finish(self): self.finished = True
+
+class FailedBackend(BaseBackend):
+    async def feed_pcm(self, pcm): raise ProviderError("secret detail")
+
+class FailedByteView:
+    def __init__(self, **kwargs): self.ws = None
+    async def create_session(self, **kwargs): pass
+    async def listen(self, on_audio):
+        await on_audio(b"\\x01\\x00")
+        await asyncio.Event().wait()
+    async def close(self): pass
+
+class WedgedBackend(BaseBackend):
+    async def feed_pcm(self, pcm): await asyncio.Event().wait()
+
+class OverflowByteView:
+    def __init__(self, **kwargs): self.ws = None
+    async def create_session(self, **kwargs): pass
+    async def listen(self, on_audio):
+        await on_audio(b"\\x01\\x00")
+        await on_audio(b"\\x02\\x00")
+        await asyncio.Event().wait()
+    async def close(self): pass
+
+async def verify():
+    failed = build_worker(FailedBackend, FailedByteView)
+    await asyncio.wait_for(failed.run_session(), timeout=0.5)
+    assert [event.get("reason") for event in failed.protocol.events if event["type"] == "degraded"] == ["ProviderError_450000"]
+    assert FailedBackend.last.aborted and not FailedBackend.last.finished
+
+    overflow = build_worker(WedgedBackend, OverflowByteView)
+    await asyncio.wait_for(overflow.run_session(), timeout=0.5)
+    assert [event.get("reason") for event in overflow.protocol.events if event["type"] == "degraded"] == ["audio_queue_overflow"]
+    assert WedgedBackend.last.aborted and not WedgedBackend.last.finished
+
+asyncio.run(verify())
+`;
+    const result = spawnSync('python3', ['-c', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+    });
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  it('loads the legacy private setup ASR token without putting it in worker env', () => {
+    const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
+    const script = `
+import importlib.util, pathlib, tempfile, yaml
+spec = importlib.util.spec_from_file_location("meeting_asr_worker", ${JSON.stringify(workerPath)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with tempfile.TemporaryDirectory() as directory:
+    path = pathlib.Path(directory) / ".setup.md"
+    path.write_text("Zayn:\\nignored\\n\\nASR:\\nprivate-token\\n", encoding="utf-8")
+    config = module.load_private_config(path, yaml)
+    assert config == {"doubao_api_key": "private-token"}
 `;
     const result = spawnSync('python3', ['-c', script], {
       encoding: 'utf8',
@@ -768,18 +960,11 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     assert.ok(index('claim-socket-closed') < index('model-stop'));
   });
 
-  it('settles silent, pre-claim failure, abandonment, and post-claim failure receipts safely', async () => {
-    const runtimeToken = 'runtime_settlement_1234';
+  it('settles successful, failed, and abandoned target-free ingress receipts safely', async () => {
     const generations = new MeetingGenerationClock();
-    const authority = new GenericDecisionAuthority({
-      runtimeToken,
-      getCurrentGeneration: (epoch) => generations.current(epoch),
-      getLatestLarkSeq: () => 0,
-    });
     const deliveries = [];
     const adapter = new MeetingRuntimeAdapter({
       spool,
-      authority,
       generationClock: generations,
       flyReferences: new FlyReferenceRing(),
       runtime: {
@@ -788,9 +973,6 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
           return true;
         },
       },
-      targetChatId: 'oc_target12345678',
-      getRuntimeToken: () => runtimeToken,
-      getLatestLarkSeq: () => 0,
       submitIngress: async (action) => await action(),
       retryMs: 1,
       logger: quietLogger,
@@ -810,60 +992,38 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
       await tick();
     };
 
-    // Successful silence consumes the durable input and removes the unspent cap.
+    // A successful turn, including a silent decision, consumes its durable input.
     const silent = enqueue('epoch_silent_12345678', 'segment_silent_1234', 'silent decision');
     adapter.onReady(silent);
     await tick();
-    assert.equal(authority.decisionStatus(silent.sessionEpoch, silent.generation, silent.inputId), 'active');
+    assert.doesNotMatch(deliveries.at(-1).text, /target_chat=|decision_capability=/);
     adapter.onTurnSucceeded({ receiptIds: [silent.inputId] });
     assert.equal(spool.get(silent.inputId).status, 'consumed');
-    assert.equal(authority.decisionStatus(silent.sessionEpoch, silent.generation, silent.inputId), 'missing');
 
-    // Before claim, both failure and abandonment release and reissue the input.
+    // Failures and abandonment release the same ingress receipt for retry. Any
+    // Lark send is an independently fenced Agent action, not ASR adapter state.
     const retried = enqueue('epoch_retry_12345678', 'segment_retry_12345', 'retry decision');
     adapter.onReady(retried);
     await tick();
-    const firstRetryCapability = capabilityFrom(deliveries.at(-1).text);
+    const firstRetryText = deliveries.at(-1).text;
+    const firstRetryDeliveryCount = deliveries.length;
     adapter.onTurnFailed({ receiptIds: [retried.inputId] });
     assert.equal(spool.get(retried.inputId).status, 'pending');
     await settleTick();
-    const secondRetryCapability = capabilityFrom(deliveries.at(-1).text);
-    assert.notEqual(secondRetryCapability, firstRetryCapability);
+    assert.equal(deliveries.length, firstRetryDeliveryCount + 1);
+    assert.equal(deliveries.at(-1).text, firstRetryText);
     assert.equal(spool.get(retried.inputId).status, 'inflight');
     adapter.onTurnAbandoned({ receiptIds: [retried.inputId] });
     await settleTick();
-    const thirdRetryCapability = capabilityFrom(deliveries.at(-1).text);
-    assert.notEqual(thirdRetryCapability, secondRetryCapability);
+    assert.equal(deliveries.length, firstRetryDeliveryCount + 2);
+    assert.equal(deliveries.at(-1).text, firstRetryText);
     adapter.onTurnSucceeded({ receiptIds: [retried.inputId] });
-
-    // Once claim crosses the side-effect boundary, a failed turn consumes and
-    // fail-closes. It must never create a fresh capability or model delivery.
-    const claimed = enqueue('epoch_claimed_12345678', 'segment_claimed_1234', 'claimed decision');
-    adapter.onReady(claimed);
-    await tick();
-    const claimedDeliveryCount = deliveries.length;
-    const claimedCapability = decodeURIComponent(capabilityFrom(deliveries.at(-1).text));
-    authority.claim(claimedCapability, {
-      runtimeToken,
-      action: 'send_lark_message',
-      target: 'oc_target12345678',
-    });
-    adapter.onTurnFailed({ receiptIds: [claimed.inputId] });
-    await settleTick();
-    assert.equal(spool.get(claimed.inputId).status, 'consumed');
-    assert.equal(deliveries.length, claimedDeliveryCount);
-    assert.equal(authority.decisionStatus(claimed.sessionEpoch, claimed.generation, claimed.inputId), 'claimed');
+    assert.equal(spool.get(retried.inputId).status, 'consumed');
     adapter.stop();
   });
 
   it('drains durable backlogs beyond one claim batch and releases an unsubmitted tail', async () => {
-    const runtimeToken = 'runtime_backlog_12345678';
     const generations = new MeetingGenerationClock();
-    const authority = new GenericDecisionAuthority({
-      runtimeToken,
-      getCurrentGeneration: (epoch) => generations.current(epoch),
-      getLatestLarkSeq: () => 0,
-    });
     const deliveries = [];
     const runtime = {
       deliverBatch(items) {
@@ -873,13 +1033,9 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     };
     const adapter = new MeetingRuntimeAdapter({
       spool,
-      authority,
       generationClock: generations,
       flyReferences: new FlyReferenceRing(),
       runtime,
-      targetChatId: 'oc_target12345678',
-      getRuntimeToken: () => runtimeToken,
-      getLatestLarkSeq: () => 0,
       submitIngress: async (action) => await action(),
       retryMs: 7,
       logger: quietLogger,

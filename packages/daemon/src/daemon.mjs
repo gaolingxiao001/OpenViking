@@ -211,7 +211,6 @@ export class LarkDaemon {
           media,
           flyReferences,
           authority: this.meetingDecisionAuthority,
-          targetChatId: audioConfig.targetChatId,
           generationClock,
           mediaEndpointProvider: (meetingId) => this.lark.getMeetingRealtimeEndpoint(meetingId),
           onSessionClosed: (session) => {
@@ -287,12 +286,9 @@ export class LarkDaemon {
       if (this.meetingAudio) {
         this.meetingAudioRuntime = new MeetingRuntimeAdapter({
           spool: this.meetingAudioSpool,
-          authority: this.meetingDecisionAuthority,
           generationClock: this.meetingAudio.generationClock,
           flyReferences: this.meetingAudio.flyReferences,
           runtime: this.codex,
-          targetChatId: this.config.meetingAudio.targetChatId,
-          getRuntimeToken: () => this.store.getCognitionState().authorityToken,
           submitIngress: (action) => this.enqueueIngress(action),
           flushBufferedIngress: () => this.groupBurst.flushAll(),
           logger: this.logger.child({ component: 'meeting-runtime' }),
@@ -303,8 +299,8 @@ export class LarkDaemon {
         this.meetingDecisionAuthority.setRuntimeToken(
           this.store.getCognitionState().authorityToken,
         );
-        this.meetingAudioRuntime.start();
       }
+      this.meetingAudioRuntime?.start();
       this.meetingInboxNotifier.start();
       this.recordSystemActivity('system.subscriber_started', {
         summary: `${this.codex.runtime} runtime 已连接`,
@@ -461,10 +457,21 @@ export class LarkDaemon {
       this.groupBurst.route({
         conversationKey: event.conversationKey,
         chatType: event.chatType,
-        text: formatInboundLine(event, null, idleHint ?? undefined),
+        text: formatInboundLine(event, null, { ...(idleHint ?? {}), replyTo: this.replyToHint(event) }),
         seq: result.inbound.seq,
       });
     });
+  }
+
+  // A quote-reply's target, resolved from local history: 'me' when the sender
+  // quoted one of the bot's own messages (a strong addressing signal). Plain
+  // thread membership (parent == thread root) is not a quote and stays untagged.
+  replyToHint(message) {
+    const parentId = message.parentId;
+    if (!parentId || parentId === message.messageId) return null;
+    if (message.threadRootId && parentId === message.threadRootId) return null;
+    const author = this.store.resolveMessageAuthor?.(parentId);
+    return author ?? { kind: 'unknown', id: parentId };
   }
 
   // A slash command and every later accepted message share one global order.
@@ -651,7 +658,10 @@ export class LarkDaemon {
     await this.journaledDaemonReply(last, notice, 'daemon_fallback_notice', `fallback-notice:${last.messageId}`);
     // Redeliver the failed turn to the fallback runtime. A failure of the retry
     // surfaces through the normal onTurnFailed path (runtime is codex now).
-    this.codex.deliverBatch(rows.map((row) => ({ text: formatInboundLine(row), seq: row.seq })));
+    this.codex.deliverBatch(rows.map((row) => ({
+      text: formatInboundLine(row, null, { replyTo: this.replyToHint(row) }),
+      seq: row.seq,
+    })));
     return true;
   }
 

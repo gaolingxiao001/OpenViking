@@ -141,7 +141,7 @@ describe('release-owned system prompt', () => {
       assert.equal(loadSystemPrompt({ systemPromptPath, meetingAudio: null }), 'base\n');
       assert.match(
         loadSystemPrompt({ systemPromptPath, meetingAudio: {} }),
-        /decision_capability/,
+        /no implicit delivery target/,
       );
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });

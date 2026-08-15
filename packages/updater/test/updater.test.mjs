@@ -792,6 +792,16 @@ test('publisher fetches trusted main, validates once, and reuses the same commit
   const metadata = JSON.parse(await readFile(path.join(first.release, '.lark-release.json'), 'utf8'));
   assert.equal(metadata.commit, first.commit);
   assert.equal(metadata.remoteUrl, remote);
+
+  const aliasedBaseDir = path.join(root, 'installed-alias');
+  await symlink(baseDir, aliasedBaseDir);
+  const viaAlias = await publishLatestRelease({
+    ...options,
+    baseDir: aliasedBaseDir,
+    mirrorDir: path.join(baseDir, 'upstream.git'),
+  });
+  assert.equal(viaAlias.published, false);
+  assert.equal(viaAlias.release, first.release);
 });
 
 test('publisher advances current and keeps the prior release as rollback', async () => {

@@ -257,7 +257,10 @@ async function upgradeApp(spec, {
 export async function resolveRelease(releaseLink) {
   const link = path.resolve(releaseLink);
   const release = await realpath(link);
-  const releasesRoot = path.join(path.dirname(link), 'releases');
+  const releasesRoot = await realpath(path.join(path.dirname(link), 'releases')).catch((error) => {
+    if (error?.code === 'ENOENT') return path.join(path.dirname(link), 'releases');
+    throw error;
+  });
   if (!isInside(releasesRoot, release)) {
     throw new Error(`current release must resolve inside ${releasesRoot}`);
   }

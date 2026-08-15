@@ -33,6 +33,10 @@ function validManifest() {
         workspace: '/srv/lark-daemon/workspaces/alpha',
         ovConfig: '/srv/lark-daemon/ov/alpha.json',
         model: 'gpt-5.6-sol',
+        meetingAudio: {
+          pythonCommand: '/usr/bin/python3',
+          asrConfigFile: '/srv/lark-daemon/secrets/alpha-asr.yaml',
+        },
       },
       {
         id: 'beta',
@@ -85,6 +89,11 @@ test('loads any number of agents from one absolute deployment manifest', () => {
     assert.deepEqual(deployment.agents.map(({ id }) => id), ['alpha', 'beta', 'gamma']);
     assert.equal(selectDeploymentAgent(deployment).id, 'beta');
     assert.equal(selectDeploymentAgent(deployment, 'gamma').profile, 'cli_gamma');
+    assert.deepEqual(selectDeploymentAgent(deployment, 'alpha').meetingAudio, {
+      pythonCommand: '/usr/bin/python3',
+      asrConfigFile: '/srv/lark-daemon/secrets/alpha-asr.yaml',
+    });
+    assert.equal(selectDeploymentAgent(deployment, 'beta').meetingAudio, null);
   });
 });
 
