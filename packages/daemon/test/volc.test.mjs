@@ -206,20 +206,19 @@ describe('Volc managed-agent runtime', () => {
     // opening a stream against a session with nothing queued yet.
     assert.ok(postIndex >= 0 && streamIndex > postIndex);
     const posted = JSON.parse(calls[postIndex].body);
-    // The policy is folded into the user.message text itself (not a separate
-    // system.message event): it is unconfirmed whether MA actually feeds a
-    // same-batch system.message into the model's context, so prepending it
-    // to the message the model is definitely reading removes that doubt.
-    assert.equal(posted.events.length, 1);
-    assert.equal(posted.events[0].type, 'user.message');
-    const firstText = posted.events[0].content[0].text;
-    assert.match(firstText, /daemon relays only the final agent\.message locally/);
+    // system.message must precede user.message in the batch, or it lands
+    // ordered (and presumably read) after the message it governs.
+    assert.equal(posted.events.length, 2);
+    assert.equal(posted.events[0].type, 'system.message');
+    const policyText = posted.events[0].content[0].text;
+    assert.match(policyText, /daemon relays only the final agent\.message locally/);
     // The Ark agent template's own system field only carries persona; the
     // injected policy must also explain the [chat=... msg=...] line format
     // and the reply/silence rules, or MA has no way to know them.
-    assert.match(firstText, /Lark conversation format/);
-    assert.match(firstText, /When to reply/);
-    assert.ok(firstText.endsWith('\n\nhello'));
+    assert.match(policyText, /Lark conversation format/);
+    assert.match(policyText, /When to reply/);
+    assert.equal(posted.events[1].type, 'user.message');
+    assert.equal(posted.events[1].content[0].text, 'hello');
     assert.equal(agent.turnInProgress, false);
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
   });
@@ -324,9 +323,9 @@ describe('Volc managed-agent runtime', () => {
     await completed;
 
     assert.equal(posts.length, 2);
-    assert.equal(posts[0].events.length, 1);
+    assert.equal(posts[0].events.length, 2);
     assert.match(posts[0].events[0].content[0].text, /lark-daemon-tools\/v1/);
-    assert.ok(posts[0].events[0].content[0].text.endsWith('\n\nhello'));
+    assert.equal(posts[0].events[1].content[0].text, 'hello');
     const continuation = JSON.parse(posts[1].events[0].content[0].text);
     assert.equal(continuation.kind, 'tool_result');
     assert.equal(continuation.call_id, 'read_1');
@@ -722,10 +721,11 @@ describe('Volc managed-agent runtime', () => {
     await done;
 
     assert.equal(posts.length, 1);
-    assert.equal(posts[0].events.length, 1);
-    const continuationEvent = posts[0].events[0];
+    assert.equal(posts[0].events.length, 2);
+    assert.equal(posts[0].events[0].type, 'system.message');
+    const continuationEvent = posts[0].events[1];
     assert.equal(continuationEvent.type, 'user.message');
-    assert.ok(continuationEvent.content[0].text.endsWith(continuationBody));
+    assert.equal(continuationEvent.content[0].text, continuationBody);
     assert.equal(data.getManagedTurn(), null);
     await recovered.stop();
   });
