@@ -548,6 +548,40 @@ describe('Volc managed-agent runtime', () => {
     assert.deepEqual(outputs, ['right']);
   });
 
+  it('does not abort the stream when session-lifecycle events arrive before the user.message fence', () => {
+    const data = store();
+    const agent = new VolcAgent(config(), data, quietLogger, { fetch: async () => json({}) });
+    agent.connected = true;
+    agent.turnActive = true;
+    agent.expectedUserEventId = 'user-current';
+    agent.turnFenceSeen = false;
+    let aborted = false;
+    agent.streamAbortController = { abort: () => { aborted = true; } };
+
+    agent._handleEvent({ id: 'status-running', type: 'session.status_running' });
+    agent._handleEvent({ id: 'thread-status-running', type: 'session.thread_status_running' });
+    assert.equal(aborted, false);
+    assert.equal(agent.turnFenceSeen, false);
+
+    agent._handleEvent({ id: 'user-current', type: 'user.message' });
+    assert.equal(agent.turnFenceSeen, true);
+  });
+
+  it('still aborts the stream when agent output arrives before the user.message fence', () => {
+    const data = store();
+    const agent = new VolcAgent(config(), data, quietLogger, { fetch: async () => json({}) });
+    agent.connected = true;
+    agent.turnActive = true;
+    agent.expectedUserEventId = 'user-current';
+    agent.turnFenceSeen = false;
+    let aborted = false;
+    agent.streamAbortController = { abort: () => { aborted = true; } };
+
+    agent._handleEvent({ id: 'stray-message', type: 'agent.message', content: [{ type: 'text', text: 'stale' }] });
+    assert.equal(aborted, true);
+    assert.equal(agent.turnFenceSeen, false);
+  });
+
   it('fails closed for a mixed or targetless conversation batch', () => {
     const data = store();
     const failures = [];

@@ -13,6 +13,8 @@ daemon 是一根薄管道：`lark-cli event +subscribe` 收到的每条消息被
 3. `codex` CLI 已安装并登录（默认 `/opt/homebrew/bin/codex`，可用 `CODEX_BIN` 覆盖）。
 4. 如需切到 Claude，安装并登录 `claude` CLI；路径可用 `CLAUDE_BIN` 覆盖。
 5. 如需切到火山方舟，设置 `ARK_API_KEY`，并用 `LARK_DAEMON_VOLC_SESSION_ID` 指向一个已绑定 Agent 与 Environment 的 seed session。daemon 只读取其中锁定的 Agent/Environment 配置，每个实例会创建独立的新 session，不会共同写 seed session。API key 只放进进程环境，不写入 deployment manifest。新实例可把 `agents[].model` 设为 `ark` 直接以 Ark 启动；已有实例用 `/model ark` 切换。
+
+   **⚠️ 目前 Ark managed agent（MA）还不算 ready，2026-08-15 评估**：MA 自带的 agent sandbox 是跟本地完全隔离的远端执行环境，不是"daemon 跑在 MA 里"——daemon 只把消息 POST 过去、收 `agent.message` 文本回来，MA 自己在它自己的沙箱里跑工具。两个已知限制：(a) MA 不支持挂自定义 MCP server，只有内建工具集，理论上可以改成 CLI 触发本地脚本的方式绕过（`ant beta:worker poll --on-work <script>` 那类模式），这条可解；(b) MA 的 sandbox 本身连不到本地资源（比如这台机器的 SQLite），这是架构上的硬限制，短期内无解。真要接入本地资源，得让"需要碰本地的活"完全留在本地 daemon 侧，MA/沙箱只管纯推理。
 6. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
 
 首次运行：

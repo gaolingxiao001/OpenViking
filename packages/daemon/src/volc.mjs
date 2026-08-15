@@ -681,10 +681,14 @@ export class VolcAgent {
       if (event.type === 'user.message' && event.id === this.expectedUserEventId) {
         this.turnFenceSeen = true;
       } else {
-        // Do not mark pre-fence output as seen. If the exact user.message echo
-        // is missing from this stream, force history reconciliation so those
-        // later events can be replayed after their causal fence is found.
-        if (event.type !== 'user.message') {
+        // Do not mark pre-fence agent output as seen. If the exact user.message
+        // echo is missing from this stream before agent output starts, force
+        // history reconciliation so that output can be replayed after its
+        // causal fence is found. Session-lifecycle events (status/thread
+        // status) routinely arrive alongside or before the user.message echo
+        // and carry no risk of belonging to a prior turn, so they don't
+        // indicate desync and must not trigger a reconnect.
+        if (event.type?.startsWith('agent.')) {
           this.streamAbortController?.abort(new Error('Volc stream output arrived before its user.message fence'));
         }
         return;
