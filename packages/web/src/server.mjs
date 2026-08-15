@@ -6,7 +6,9 @@ const MAX_REQUEST_TARGET_BYTES = 2_048;
 const MAX_UPSTREAM_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 const SECURITY_HEADERS = Object.freeze({
-  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  // style-src allows inline style attributes: the timeline view positions
+  // hundreds of blocks via el.style.left/width/transform. Scripts stay 'self'.
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'cross-origin-resource-policy': 'same-origin',

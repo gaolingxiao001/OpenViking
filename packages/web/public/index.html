@@ -5,93 +5,70 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     >
-    <meta name="color-scheme" content="light dark">
-    <title>Agent Activity</title>
+    <meta name="color-scheme" content="light">
+    <title>Agent Activity · 时间轴</title>
     <link rel="stylesheet" href="/activity.css">
     <script src="/activity.js" defer></script>
   </head>
   <body>
-    <a class="skip-link" href="#activity-feed">跳到活动记录</a>
+    <a class="skip-link" href="#detail">跳到活动详情</a>
 
     <header class="topbar">
-      <div class="topbar-inner">
-        <div class="identity">
-          <label class="instance-picker" for="instance-select">
-            <span class="visually-hidden">选择 Agent</span>
-            <select id="instance-select" aria-label="选择 Agent" disabled>
-              <option>正在读取</option>
-            </select>
-          </label>
-          <span id="service-status" class="service-status" role="status" aria-live="polite">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span id="service-status-text">正在连接</span>
-          </span>
-        </div>
+      <div class="identity">
+        <div class="logo" aria-hidden="true">▦</div>
+        <label class="instance-picker" for="instance-select">
+          <span class="visually-hidden">选择 Agent</span>
+          <select id="instance-select" aria-label="选择 Agent" disabled>
+            <option>正在读取</option>
+          </select>
+        </label>
+        <span id="service-status" class="service-status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="service-status-text">正在连接</span>
+        </span>
+        <span class="crumb" id="crumb"></span>
+      </div>
 
-        <div class="topbar-actions">
-          <details class="runtime-details">
-            <summary>运行状态</summary>
-            <div class="runtime-panel" aria-label="服务状态">
-              <span id="current-state">正在读取活动</span>
-              <span id="subscriber-value">订阅 —</span>
-              <span id="queue-value">队列 —</span>
-              <span id="uptime-value">运行 —</span>
-              <time id="last-updated">等待数据</time>
-            </div>
-          </details>
-
-          <button id="privacy-toggle" class="quiet-button" type="button" aria-pressed="false">
-            隐藏正文
-          </button>
+      <div class="topbar-actions">
+        <span class="pill" id="clock" title="播放头时间">--:--:--</span>
+        <div class="zoom-ctl" role="group" aria-label="时间轴缩放">
+          <button id="z-out" type="button" title="缩小 (-)">−</button>
+          <input type="range" id="z-slider" min="0" max="1000" value="0" aria-label="缩放">
+          <button id="z-in" type="button" title="放大 (+)">＋</button>
+          <button id="z-def" type="button" class="accent" title="默认视窗 (0)">默认</button>
+          <button id="z-fit" type="button" class="accent" title="全览 (9)">全览</button>
+          <span class="span-label" id="span-label"></span>
         </div>
+        <button id="privacy-toggle" class="quiet-button" type="button" aria-pressed="false">隐藏正文</button>
       </div>
     </header>
 
-    <main id="activity-feed" class="activity-feed" tabindex="-1">
-      <div class="controls">
-        <label class="search-box" for="activity-search">
-          <span class="search-icon" aria-hidden="true"></span>
-          <span class="visually-hidden">搜索活动</span>
-          <input
-            id="activity-search"
-            type="search"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="搜索消息、回复或错误"
-          >
-        </label>
+    <main id="main">
+      <section id="detail" aria-label="活动详情">
+        <div id="landing">
+          <h2>正在读取活动</h2>
+          <p>消息、判断、投递和系统事件会显示在这里。</p>
+          <p class="keys">拖动轨道 = 回放 · 滚轮 = 缩放 · ← → 步进 · 0 默认视窗 · 9 全览 · 右键块/轨道名 = 忽略</p>
+        </div>
+      </section>
 
-        <nav id="filters" class="filter-list" aria-label="活动筛选">
-          <button type="button" data-filter="all" aria-pressed="true">全部</button>
-          <button type="button" data-filter="reply" aria-pressed="false">回复</button>
-          <button type="button" data-filter="ignore" aria-pressed="false">忽略</button>
-          <button type="button" data-filter="failed" aria-pressed="false">失败</button>
-          <button type="button" data-filter="system" aria-pressed="false">系统</button>
-        </nav>
-      </div>
+      <div id="divider" title="拖动调整上下比例"></div>
 
-      <div id="connection-notice" class="connection-notice" role="alert" hidden></div>
-
-      <div id="transcript" class="transcript"></div>
-
-      <details id="older-records" class="older-records" hidden>
-        <summary>
-          <span>更早记录</span>
-          <span id="older-records-summary" class="section-meta"></span>
-        </summary>
-        <div id="older-transcript" class="transcript transcript-old"></div>
-      </details>
-
-      <div id="empty-state" class="empty-state" aria-live="polite">
-        <h2>正在读取活动</h2>
-        <p>消息、判断和发送结果会显示在这里。</p>
-      </div>
-
-      <div class="pagination">
-        <button id="load-older" class="load-older" type="button" hidden>加载更早</button>
-      </div>
+      <section id="timeline" aria-label="活动时间轴">
+        <div id="gutter"></div>
+        <div id="viewport">
+          <div class="world" id="world"></div>
+          <div id="playhead"></div>
+        </div>
+      </section>
     </main>
+
+    <footer class="statusbar">
+      <button id="load-older" class="quiet-button" type="button" hidden>加载更早</button>
+      <span id="counts" class="counts"></span>
+      <span id="connection-notice" class="connection-notice" role="alert" hidden></span>
+    </footer>
   </body>
 </html>
