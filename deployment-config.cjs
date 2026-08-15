@@ -71,6 +71,44 @@ function resolveDeploymentManifestPath(env = process.env) {
   return path.join(path.normalize(home), '.lark-daemon', 'deployment.json');
 }
 
+// Secrets (DAEMON_SECRET_ENV_FIELDS) are deliberately kept out of deployment.json
+// so they never land in a file meant to be inspected/versioned. This sibling file
+// is the deterministic fallback: whoever runs `pm2 restart`/`lark-daemon upgrade`
+// no longer needs the secret exported in their own shell for it to take effect.
+function resolveSecretsFilePath(env = process.env) {
+  const override = typeof env.LARK_DAEMON_SECRETS_FILE === 'string'
+    ? env.LARK_DAEMON_SECRETS_FILE.trim()
+    : '';
+  if (override) {
+    if (!path.isAbsolute(override)) {
+      throw new Error('LARK_DAEMON_SECRETS_FILE must be an absolute path');
+    }
+    return path.normalize(override);
+  }
+  const home = typeof env.HOME === 'string' ? env.HOME.trim() : '';
+  if (!home || !path.isAbsolute(home)) return null;
+  return path.join(path.normalize(home), '.lark-daemon', 'secrets.env');
+}
+
+function loadSecretsFile(env = process.env) {
+  const secretsPath = resolveSecretsFilePath(env);
+  if (!secretsPath) return {};
+  let raw;
+  try { raw = fs.readFileSync(secretsPath, 'utf8'); } catch { return {}; }
+  const allowed = new Set(DAEMON_SECRET_ENV_FIELDS);
+  const result = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (!allowed.has(key)) continue;
+    result[key] = trimmed.slice(eq + 1).trim();
+  }
+  return result;
+}
+
 function assertKnownFields(value, allowed, label) {
   const allowedSet = new Set(allowed);
   const unknown = Object.keys(value).find((name) => !allowedSet.has(name));
@@ -228,17 +266,22 @@ function loadDeploymentManifest(env) {
 }
 
 function resolvedDeploymentDaemonEnv(deployment, sourceEnv = process.env) {
+  const secrets = loadSecretsFile(sourceEnv);
   return Object.freeze(Object.fromEntries(DAEMON_PROCESS_ENV_FIELDS.flatMap((key) => {
     if (typeof sourceEnv[key] === 'string') return [[key, sourceEnv[key]]];
     if (Object.hasOwn(deployment.env, key)) return [[key, deployment.env[key]]];
+    if (Object.hasOwn(secrets, key)) return [[key, secrets[key]]];
     return [];
   })));
 }
 
 function deploymentDaemonEnvOverrides(sourceEnv = process.env) {
-  return Object.freeze(Object.fromEntries(DAEMON_PROCESS_ENV_FIELDS.flatMap((key) => (
-    typeof sourceEnv[key] === 'string' ? [[key, sourceEnv[key]]] : []
-  ))));
+  const secrets = loadSecretsFile(sourceEnv);
+  return Object.freeze(Object.fromEntries(DAEMON_PROCESS_ENV_FIELDS.flatMap((key) => {
+    if (typeof sourceEnv[key] === 'string') return [[key, sourceEnv[key]]];
+    if (Object.hasOwn(secrets, key)) return [[key, secrets[key]]];
+    return [];
+  })));
 }
 
 function applyDeploymentDaemonEnv(env, deployment, sourceEnv = env) {
@@ -318,7 +361,9 @@ module.exports = {
   applyDeploymentDaemonEnv,
   deploymentDaemonEnvOverrides,
   loadDeploymentManifest,
+  loadSecretsFile,
   resolveDeploymentManifestPath,
+  resolveSecretsFilePath,
   resolvedDeploymentDaemonEnv,
   selectDeploymentAgent,
   updaterTargetsFor,

@@ -135,6 +135,60 @@ test('system environment overrides manifest daemon env while agent identity stay
   });
 });
 
+test('falls back to a secrets file for daemon-wide secrets missing from the environment', () => {
+  withManifest(validManifest(), (manifestPath) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-secrets-'));
+    const secretsPath = path.join(directory, 'secrets.env');
+    fs.writeFileSync(secretsPath, '# comment\nARK_API_KEY=from-file-secret\n');
+    try {
+      const env = {
+        HOME: '/Users/test',
+        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+        LARK_DAEMON_SECRETS_FILE: secretsPath,
+      };
+      const deployment = loadDeploymentManifest(env);
+      applyDeploymentDaemonEnv(env, deployment);
+      assert.equal(env.ARK_API_KEY, 'from-file-secret');
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+test('the environment still wins over the secrets file', () => {
+  withManifest(validManifest(), (manifestPath) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-secrets-'));
+    const secretsPath = path.join(directory, 'secrets.env');
+    fs.writeFileSync(secretsPath, 'ARK_API_KEY=from-file-secret\n');
+    try {
+      const env = {
+        HOME: '/Users/test',
+        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+        LARK_DAEMON_SECRETS_FILE: secretsPath,
+        ARK_API_KEY: 'from-shell-env',
+      };
+      const deployment = loadDeploymentManifest(env);
+      applyDeploymentDaemonEnv(env, deployment);
+      assert.equal(env.ARK_API_KEY, 'from-shell-env');
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+test('a missing secrets file is not an error', () => {
+  withManifest(validManifest(), (manifestPath) => {
+    const env = {
+      HOME: '/Users/test',
+      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+      LARK_DAEMON_SECRETS_FILE: '/no/such/file/secrets.env',
+    };
+    const deployment = loadDeploymentManifest(env);
+    applyDeploymentDaemonEnv(env, deployment);
+    assert.equal(env.ARK_API_KEY, undefined);
+  });
+});
+
 test('manifest env accepts only string values from the daemon-wide allowlist', () => {
   const cases = [
     ['reserved identity', 'LARK_DAEMON_PROFILE', 'cli_wrong', /env field is not allowed: LARK_DAEMON_PROFILE/],
