@@ -10,6 +10,23 @@ export function sanitizeNonArkChildEnv(environment) {
   return safeEnv;
 }
 
+export function sanitizeAgentChildEnv(environment, {
+  profile = '',
+  stripClaudeCode = false,
+} = {}) {
+  const safeEnv = {
+    ...sanitizeNonArkChildEnv(environment),
+    FORCE_COLOR: '0',
+    NO_COLOR: '1',
+  };
+  for (const key of Object.keys(safeEnv)) {
+    if (/^(?:LARK|FEISHU|LARKSUITE)_/i.test(key)
+      || (stripClaudeCode && key === 'CLAUDECODE')) delete safeEnv[key];
+  }
+  if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
+  return safeEnv;
+}
+
 function appendTail(current, chunk, limit) {
   const next = current + chunk;
   return next.length <= limit ? next : next.slice(next.length - limit);

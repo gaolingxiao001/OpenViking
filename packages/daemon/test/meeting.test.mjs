@@ -347,7 +347,11 @@ describe('TAT meeting adapter', () => {
     const timers = [];
     const runtime = {
       turnInProgress: true,
-      deliver(text, seq) { deliveries.push({ text, seq, active: this.turnInProgress }); return true; },
+      submit(items) {
+        const [{ text, seq }] = items;
+        deliveries.push({ text, seq, active: this.turnInProgress });
+        return { accepted: true, disposition: 'enqueued' };
+      },
     };
     const notifier = new MeetingInboxNotifier({
       store: {

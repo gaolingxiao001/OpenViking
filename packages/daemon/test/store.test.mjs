@@ -241,6 +241,7 @@ describe('Store', () => {
       sessionId: 'sesn-new123456',
       policyHash: 'new-policy',
       expectedEpoch: before.epoch,
+      settings: { volc_model: 'ark' },
     });
     assert.equal(cognition.epoch, before.epoch + 1);
     assert.equal(cognition.authorityToken, 'volc-authority-next');
@@ -252,6 +253,7 @@ describe('Store', () => {
       syncedThroughSeq: 0,
       sessionReady: true,
     });
+    assert.equal(store.getSetting('volc_model'), 'ark');
     assert.throws(() => store.commitCognitionSessionRotation({
       runtime: 'volc',
       authorityToken: 'stale-authority',

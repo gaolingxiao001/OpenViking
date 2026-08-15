@@ -56,7 +56,7 @@ export class MeetingRuntimeAdapter {
     clearTimer = clearTimeout,
   }) {
     if (typeof spool?.claim !== 'function') throw new TypeError('live spool is required');
-    if (typeof runtime?.deliverBatch !== 'function') throw new TypeError('runtime deliverBatch is required');
+    if (typeof runtime?.submit !== 'function') throw new TypeError('runtime submit is required');
     if (typeof submitIngress !== 'function') throw new TypeError('submitIngress is required');
     Object.assign(this, {
       spool,
@@ -123,12 +123,13 @@ export class MeetingRuntimeAdapter {
           const references = this.flyReferences?.snapshot?.({
             meetingId: item.input?.meetingId,
           }) ?? [];
-          const accepted = this.runtime.deliverBatch([{
+          const admission = this.runtime.submit([{
             text: formatMeetingInput(item, references),
             seq: null,
             receiptId: item.inputId,
+            scope: { kind: 'meeting', meetingId: item.input?.meetingId },
           }]);
-          if (accepted === false) {
+          if (admission.accepted !== true) {
             this.spool.release(item.inputId);
             for (const unprocessed of items.slice(itemIndex + 1)) {
               this.spool.release(unprocessed.inputId);

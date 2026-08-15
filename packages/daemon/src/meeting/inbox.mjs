@@ -48,11 +48,13 @@ export class MeetingInboxNotifier {
       return false;
     }
     const ids = [...this.batchIds];
-    const delivered = this.runtime.deliver(
-      `${pending} pending meeting messages; use read_meeting_inbox to read.`,
-      null,
-    );
-    if (delivered === false) {
+    const admission = this.runtime.submit([{
+      text: `${pending} pending meeting messages; use read_meeting_inbox to read.`,
+      seq: null,
+      receiptId: null,
+      scope: { kind: 'meeting-inbox' },
+    }]);
+    if (admission.accepted !== true) {
       this.timer = this.setTimer(() => {
         this.timer = null;
         this.flush();
@@ -65,7 +67,7 @@ export class MeetingInboxNotifier {
     this.logger?.info?.('meeting_inbox_runtime_notified', {
       pending,
       generations: Math.max(1, ids.length),
-      steered: Boolean(this.runtime.turnInProgress),
+      disposition: admission.disposition,
     });
     return true;
   }

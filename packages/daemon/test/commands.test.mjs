@@ -22,6 +22,49 @@ function fakeCodex(overrides = {}) {
     async rotateSession(options) { calls.push(['rotate', options]); return 'th-new'; },
     async setModel(model) { calls.push(['setModel', model]); return 'th-new'; },
     async setEffort(effort) { calls.push(['setEffort', effort]); return 'th-new'; },
+    async snapshot({ catalog = 'cached' } = {}) {
+      const models = catalog === 'refresh' ? await this.listModels?.() ?? [] : [];
+      return {
+        runtime: this.runtime,
+        session: { id: this.threadId, connected: this.state.connected },
+        model: this.model,
+        effort: this.effort,
+        queued: this.state.queued,
+        work: this.workStatus ?? {
+          working: this.turnInProgress,
+          startedAtMs: null,
+          connected: this.state.connected,
+          queued: this.state.queued,
+          switching: false,
+        },
+        capabilities: {
+          effortControl: this.runtime === 'volc' ? 'remote-managed' : 'selectable',
+        },
+        models,
+      };
+    },
+    async transition(request) {
+      if (request.kind === 'new-session') {
+        await this.interruptTurn();
+        return { ok: true, threadId: await this.rotateSession({ resume: false }) };
+      }
+      if (request.kind === 'select-model') {
+        const result = await this.setModel(request.selector);
+        return result && typeof result === 'object'
+          ? { ok: true, ...result }
+          : { ok: true, runtimeChanged: false, model: request.selector, threadId: result };
+      }
+      if (request.kind === 'select-effort') {
+        await this.interruptTurn();
+        await this.setEffort(request.effort);
+        return {
+          ok: true,
+          effort: request.effort,
+          threadId: await this.rotateSession({ resume: false }),
+        };
+      }
+      throw new Error(`unexpected transition ${request.kind}`);
+    },
     ...overrides,
   };
 }

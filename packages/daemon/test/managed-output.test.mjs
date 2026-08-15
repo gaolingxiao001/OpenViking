@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { LarkDaemon } from '../src/daemon.mjs';
+import { ManagedAgentOutputPort } from '../src/runtime-output.mjs';
 import { Store } from '../src/store.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
@@ -51,8 +51,8 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       syncedThroughSeq: 0,
     });
     const first = store.ingest(inbound('om_managedfirst123', 'evt-managed-first')).inbound;
-    const daemon = new LarkDaemon({
-      lockPath: path.join(directory, 'daemon.lock'),
+    const output = new ManagedAgentOutputPort({
+      config: {
       larkCliBin: cliPath,
       profile: 'test-profile',
       projectDir: directory,
@@ -61,11 +61,13 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       maxReplyChars: 30_000,
       dryRun: false,
       tempDir: path.join(directory, 'tmp'),
-    }, quietLogger);
-    daemon.store = store;
-    daemon.liveness = { touch() {}, async onDeliverySucceeded() {} };
+      },
+      store,
+      logger: quietLogger,
+      liveness: { touch() {}, async onDeliverySucceeded() {} },
+    });
     try {
-      const result = await daemon.deliverManagedAgentOutput({
+      const result = await output.deliver({
         inboundSeqs: [first.seq],
         text: 'managed answer',
         eventId: 'sevt-managed-final',
@@ -83,7 +85,7 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       assert.equal(outbound.status, 'COMMITTED');
       assert.equal(outbound.text, 'managed answer');
 
-      const replay = await daemon.deliverManagedAgentOutput({
+      const replay = await output.deliver({
         inboundSeqs: [first.seq],
         text: 'managed answer',
         eventId: 'sevt-managed-final',
@@ -97,7 +99,7 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       assert.equal(fs.readFileSync(logPath, 'utf8').trim().split('\n').length, 1);
 
       store.db.prepare("UPDATE cognition_journal SET status = 'PENDING' WHERE kind = 'outbound'").run();
-      await assert.rejects(() => daemon.deliverManagedAgentOutput({
+      await assert.rejects(() => output.deliver({
         inboundSeqs: [first.seq],
         text: 'managed answer',
         eventId: 'sevt-managed-final',
@@ -107,7 +109,7 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
         cognitionEpoch: 1,
       }), /already attempted \(PENDING\)/);
       store.db.prepare("UPDATE cognition_journal SET status = 'UNCERTAIN' WHERE kind = 'outbound'").run();
-      const uncertain = await daemon.deliverManagedAgentOutput({
+      const uncertain = await output.deliver({
         inboundSeqs: [first.seq],
         text: 'managed answer',
         eventId: 'sevt-managed-final',
@@ -122,7 +124,7 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       store.db.prepare("UPDATE cognition_journal SET status = 'COMMITTED' WHERE kind = 'outbound'").run();
 
       store.ingest(inbound('om_managednewer123', 'evt-managed-newer', 'correction'));
-      const stale = await daemon.deliverManagedAgentOutput({
+      const stale = await output.deliver({
           inboundSeqs: [first.seq],
           text: 'stale answer',
           eventId: 'sevt-managed-stale',
@@ -136,7 +138,7 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       assert.equal(fs.readFileSync(logPath, 'utf8').trim().split('\n').length, 1);
 
       store.initializeCognition('codex', 'replacement-token');
-      const fenced = await daemon.deliverManagedAgentOutput({
+      const fenced = await output.deliver({
         inboundSeqs: [first.seq],
         text: 'late answer',
         eventId: 'sevt-managed-late',

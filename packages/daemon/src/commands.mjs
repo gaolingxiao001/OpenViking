@@ -3,12 +3,17 @@
 // reaches codex. Any unambiguous prefix of a command name works (/h → /help,
 // /m gpt-5.5 → /model gpt-5.5); effort levels match by prefix too.
 
-import { CLAUDE_MODELS } from './claude.mjs';
-import { VOLC_MODELS } from './volc.mjs';
+import {
+  DEFAULT_RUNTIME_ID,
+  getRuntimeDefinition,
+  modelMatchesRuntime,
+  parseRuntimeModelSelector,
+  resolveRuntimeModelTarget,
+} from './runtime-catalog.mjs';
 
 // Static fallback only (offline); when connected, /effort validates against the
 // current model's supportedReasoningEfforts from model/list.
-export const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+export const EFFORT_LEVELS = getRuntimeDefinition(DEFAULT_RUNTIME_ID).efforts;
 
 const COMMANDS = ['new', 'help', 'status', 'model', 'effort'];
 
@@ -47,7 +52,7 @@ export function parseCommand(text) {
   return { name: null, arg, token, matches };
 }
 
-export function helpText(codex) {
+export function helpText(snapshot) {
   return [
     '可用命令（支持前缀匹配，如 /h、/m）：',
     '/new — 开启新会话，丢弃当前上下文',
@@ -56,10 +61,10 @@ export function helpText(codex) {
     '/model [名称] — 查看或切换模型，如 ark、sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
     '',
-    `当前会话：${codex.threadId ?? '（未连接）'}`,
-    `Runtime：${codex.runtime ?? 'codex'}`,
-    `模型：${codex.model || '（默认）'}`,
-    `推理档位：${codex.effort}`,
+    `当前会话：${snapshot.session?.id ?? snapshot.threadId ?? '（未连接）'}`,
+    `Runtime：${snapshot.runtime ?? 'codex'}`,
+    `模型：${snapshot.model || '（默认）'}`,
+    `推理档位：${snapshot.effort}`,
   ].join('\n');
 }
 
@@ -74,12 +79,12 @@ function durationText(milliseconds) {
   return minuteRemainder ? `${hours} 小时 ${minuteRemainder} 分` : `${hours} 小时`;
 }
 
-export function statusText(agent, nowMs = Date.now()) {
-  const status = agent.workStatus ?? {
-    working: Boolean(agent.turnInProgress),
+export function statusText(snapshot, nowMs = Date.now()) {
+  const status = snapshot.work ?? snapshot.workStatus ?? {
+    working: Boolean(snapshot.turnInProgress),
     startedAtMs: null,
-    connected: Boolean(agent.state?.connected ?? true),
-    queued: agent.state?.queued ?? 0,
+    connected: Boolean(snapshot.state?.connected ?? true),
+    queued: snapshot.queued ?? snapshot.state?.queued ?? 0,
     switching: false,
   };
   let headline = '状态：空闲';
@@ -91,8 +96,8 @@ export function statusText(agent, nowMs = Date.now()) {
   } else if (!status.connected) headline = '状态：Runtime 未连接';
   const lines = [
     headline,
-    `Runtime：${agent.runtime ?? 'codex'}`,
-    `模型：${agent.model || '（默认）'}`,
+    `Runtime：${snapshot.runtime ?? 'codex'}`,
+    `模型：${snapshot.model || '（默认）'}`,
   ];
   if ((status.queued ?? 0) > 0) lines.push(`排队消息：${status.queued}`);
   return lines.join('\n');
@@ -101,54 +106,51 @@ export function statusText(agent, nowMs = Date.now()) {
 // Executes one parsed command against the codex agent. Returns { ok, text }; the
 // caller replies with text and records ok as the activity status. Throws only on
 // unexpected agent errors (rotate/apply failures), which the caller reports.
-export async function executeCommand(command, codex) {
+export async function executeCommand(command, runtime) {
+  const cached = await runtime.snapshot({ catalog: 'cached' });
   if (!command.name) {
     const head = command.matches.length > 1
       ? `命令 /${command.token} 有歧义：${command.matches.map((name) => `/${name}`).join('、')}`
       : `未知命令：/${command.token}`;
-    return { ok: false, text: `${head}\n\n${helpText(codex)}` };
+    return { ok: false, text: `${head}\n\n${helpText(cached)}` };
   }
 
-  if (command.name === 'help') return { ok: true, text: helpText(codex) };
+  if (command.name === 'help') return { ok: true, text: helpText(cached) };
 
-  if (command.name === 'status') return { ok: true, text: statusText(codex) };
+  if (command.name === 'status') return { ok: true, text: statusText(cached) };
 
   if (command.name === 'new') {
-    await codex.interruptTurn?.();
-    const threadId = await codex.rotateSession({ resume: false });
+    const result = await runtime.transition({ kind: 'new-session' });
+    const threadId = result.threadId;
     return {
       ok: true,
       text: threadId ? `已开启新会话：${threadId}` : '已清除会话，重连后将开启新会话',
     };
   }
 
-  let models = [];
-  try { models = (await codex.listModels?.()) ?? []; } catch { /* offline: no options */ }
+  let current = cached;
+  try { current = await runtime.snapshot({ catalog: 'refresh' }); } catch { /* offline: cached options */ }
+  const models = current.models ?? [];
 
   if (command.name === 'model') {
     const ids = models.map((model) => model.id);
     if (!command.arg) {
-      const lines = [`当前模型：${codex.model || '（默认）'}`];
+      const lines = [`当前模型：${current.model || '（默认）'}`];
       if (ids.length > 0) lines.push(`可选：${ids.join('、')}`);
       lines.push('用法：/model <名称>（支持前缀匹配）');
       return { ok: true, text: lines.join('\n') };
     }
-    const legacy = /^(claude|codex|volc|volcengine|ark):(.*)$/.exec(command.arg);
-    const providerHint = legacy?.[1] ?? null;
-    const rawLookupName = legacy?.[2] ?? command.arg;
-    const lookupName = ['volc', 'volcengine'].includes(rawLookupName) ? 'ark' : rawLookupName;
-    if (!MODEL_NAME.test(command.arg) || (legacy && !lookupName)) {
+    const selector = parseRuntimeModelSelector(command.arg);
+    const providerHint = selector.runtime;
+    const lookupName = selector.model;
+    if (!MODEL_NAME.test(command.arg) || (selector.qualified && !lookupName)) {
       return { ok: false, text: lookupName ? `无效的模型名：${lookupName}` : '无效的模型名' };
     }
     let target = command.arg;
     if (ids.length > 0) {
-      const candidates = providerHint === 'claude'
-        ? ids.filter((id) => CLAUDE_MODELS.includes(id))
-        : ['volc', 'volcengine', 'ark'].includes(providerHint)
-          ? ids.filter((id) => VOLC_MODELS.includes(id))
-        : providerHint === 'codex'
-          ? ids.filter((id) => !CLAUDE_MODELS.includes(id) && !VOLC_MODELS.includes(id))
-          : ids;
+      const candidates = providerHint
+        ? ids.filter((id) => modelMatchesRuntime(id, providerHint))
+        : ids;
       const matches = matchPrefix(lookupName, candidates);
       if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
       if (matches.length === 0) {
@@ -156,19 +158,17 @@ export async function executeCommand(command, codex) {
         // runtime. Any non-Claude direct name is therefore staged as Codex;
         // AgentRuntime validates its live model list before the switch commits.
         const requestedRuntime = providerHint
-          ?? (CLAUDE_MODELS.includes(lookupName)
-            ? 'claude'
-            : VOLC_MODELS.includes(lookupName) ? 'volc' : 'codex');
-        if (!(codex.runtime !== 'codex' && requestedRuntime === 'codex')) {
+          ?? resolveRuntimeModelTarget(lookupName).runtime;
+        if (!(current.runtime !== DEFAULT_RUNTIME_ID && requestedRuntime === DEFAULT_RUNTIME_ID)) {
           return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}` };
         }
       } else {
-        target = providerHint ? `${providerHint}:${matches[0]}` : matches[0];
+        target = selector.qualifier ? `${selector.qualifier}:${matches[0]}` : matches[0];
       }
     }
-    const applied = await codex.setModel(target);
+    const applied = await runtime.transition({ kind: 'select-model', selector: target });
     const displayTarget = applied?.model
-      || target.replace(/^(?:claude|codex|volc|volcengine|ark):/, '')
+      || resolveRuntimeModelTarget(target).canonical
       || target;
     if (applied?.runtimeChanged) {
       return {
@@ -187,7 +187,8 @@ export async function executeCommand(command, codex) {
     };
   }
 
-  if (codex.runtime === 'volc') {
+  const capabilities = current.capabilities ?? getRuntimeDefinition(current.runtime)?.capabilities;
+  if (capabilities?.effortControl === 'remote-managed') {
     return {
       ok: false,
       text: 'Ark managed agent 的推理档位由远端 Agent 配置管理，不能通过 /effort 修改',
@@ -197,13 +198,13 @@ export async function executeCommand(command, codex) {
   // effort: validate against what the current model actually supports — an
   // unsupported level (e.g. minimal on gpt-5.6) makes every turn fail with a 400.
   // Unknown current model → union across listed models; offline → static list.
-  const current = models.find((model) => model.id === codex.model);
-  const modelEfforts = current?.efforts?.length
-    ? current.efforts
+  const currentModel = models.find((model) => model.id === current.model);
+  const modelEfforts = currentModel?.efforts?.length
+    ? currentModel.efforts
     : [...new Set(models.flatMap((model) => model.efforts ?? []))];
   const supported = modelEfforts.length > 0 ? modelEfforts : EFFORT_LEVELS;
   if (!command.arg) {
-    return { ok: true, text: `当前推理档位：${codex.effort}\n可选：${supported.join('、')}` };
+    return { ok: true, text: `当前推理档位：${current.effort}\n可选：${supported.join('、')}` };
   }
   const levels = matchPrefix(command.arg.toLowerCase(), supported);
   if (levels.length !== 1) {
@@ -212,9 +213,25 @@ export async function executeCommand(command, codex) {
       : `不支持的档位：${command.arg}`;
     return { ok: false, text: `${head}\n可选：${supported.join('、')}` };
   }
-  await codex.interruptTurn?.();
-  codex.setEffort(levels[0]);
-  const threadId = await codex.rotateSession({ resume: false });
+  const applied = await runtime.transition({
+    kind: 'select-effort',
+    effort: levels[0],
+    expectedRuntime: current.runtime,
+    expectedRevision: current.revision,
+  });
+  if (applied.ok === false && ['runtime-changed', 'stale-snapshot'].includes(applied.reason)) {
+    return {
+      ok: false,
+      text: 'Runtime 在命令排队期间已变更，请重试 /effort',
+    };
+  }
+  if (applied.ok === false && applied.reason === 'remote-managed') {
+    return {
+      ok: false,
+      text: '当前 Runtime 的推理档位由远端配置管理，不能通过 /effort 修改',
+    };
+  }
+  const threadId = applied.threadId;
   return {
     ok: true,
     text: threadId

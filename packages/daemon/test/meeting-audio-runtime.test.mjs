@@ -69,11 +69,11 @@ describe('meeting audio runtime vertical slice', () => {
     const modes = [];
     const runtime = {
       turnInProgress: false,
-      deliverBatch(items) {
+      submit(items) {
         modes.push(this.turnInProgress ? 'steer' : 'start');
         this.turnInProgress = true;
         deliveries.push(...items);
-        return true;
+        return { accepted: true };
       },
     };
     const runtimeAdapter = new MeetingRuntimeAdapter({
@@ -942,7 +942,7 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     daemon.meeting = { async stop() { order.push('meeting-stop'); } };
     daemon.meetingAudio = { coordinator: { async stop() { order.push('media-stop'); } } };
     daemon.groupBurst = { stop() { order.push('burst-stop'); } };
-    daemon.codex = { async stop() { order.push('model-stop'); } };
+    daemon.agentRuntime = { async stop() { order.push('model-stop'); } };
     daemon.meetingAudioSpool = { close() { order.push('spool-close'); } };
     daemon.registry = { async stopAll() { order.push('registry-stop'); } };
     daemon.store = { close() { order.push('store-close'); } };
@@ -968,9 +968,9 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
       generationClock: generations,
       flyReferences: new FlyReferenceRing(),
       runtime: {
-        deliverBatch(items) {
+        submit(items) {
           deliveries.push(...items);
-          return true;
+          return { accepted: true };
         },
       },
       submitIngress: async (action) => await action(),
@@ -1026,9 +1026,9 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     const generations = new MeetingGenerationClock();
     const deliveries = [];
     const runtime = {
-      deliverBatch(items) {
+      submit(items) {
         deliveries.push(...items);
-        return true;
+        return { accepted: true };
       },
     };
     const adapter = new MeetingRuntimeAdapter({
@@ -1058,7 +1058,7 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     adapter.onTurnSucceeded({ receiptIds: backlog.map((item) => item.inputId) });
 
     const rejected = enqueueMany('epoch_rejected_12345678', 3);
-    runtime.deliverBatch = () => false;
+    runtime.submit = () => ({ accepted: false, reason: 'busy' });
     assert.equal(await adapter._drain(), 7);
     assert.deepEqual(rejected.map((item) => spool.get(item.inputId).status), [
       'pending',

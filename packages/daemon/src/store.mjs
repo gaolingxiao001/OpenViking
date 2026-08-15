@@ -1159,6 +1159,7 @@ export class Store {
     expectedEpoch,
     syncedThroughSeq = 0,
     sessionReady = true,
+    settings = {},
   }) {
     return this.transaction(() => {
       const current = this.getCognitionState();
@@ -1177,6 +1178,9 @@ export class Store {
       this.setMetaStatement.run('global_session_epoch', String(epoch));
       this.setMetaStatement.run('global_session_synced_through_seq', String(syncedThroughSeq));
       this.setMetaStatement.run('global_session_ready', sessionReady ? '1' : '0');
+      for (const [key, value] of Object.entries(settings)) {
+        this.setMetaStatement.run(`setting:${key}`, String(value));
+      }
       this.db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(
         `managed_turn:${runtime}`,
         `managed_session_poison:${runtime}`,

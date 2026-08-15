@@ -6,6 +6,7 @@ import readline from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
+import { sanitizeNonArkChildEnv } from './process-utils.mjs';
 import { ChatRoster } from './roster.mjs';
 import { meetingContextLines, readMeetingInboxDatabase } from './meeting/index.mjs';
 import { claimDecisionCapability } from './meeting/decision-socket.mjs';
@@ -437,13 +438,7 @@ export function parseServerArgs(argv = process.argv.slice(2)) {
 }
 
 export function sanitizeLarkToolEnv(environment) {
-  const safeEnv = { ...environment };
-  for (const key of Object.keys(safeEnv)) {
-    if (/^(?:ARK|VOLCENGINE)_/i.test(key)
-      || /^LARK_DAEMON_VOLC_/i.test(key)
-      || key === 'SESSION_ID') delete safeEnv[key];
-  }
-  return safeEnv;
+  return sanitizeNonArkChildEnv(environment);
 }
 
 export async function runCommand(command, args, { cwd, timeoutMs }) {

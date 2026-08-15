@@ -4,11 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import {
   CodexAgent,
-  formatHistoryLine,
-  formatInboundLine,
   sanitizeCodexEnv,
-  shortenId,
 } from '../src/codex.mjs';
+import { formatHistoryLine, formatInboundLine, shortenId } from '../src/runtime-input.mjs';
 import { GroupBurstRouter } from '../src/group-burst.mjs';
 import { registerNameResolver } from '../src/roster.mjs';
 
@@ -453,8 +451,11 @@ describe('CodexAgent turn/steer state machine', () => {
     await handshake(agent, children);
     let currentTime = 0;
     const router = new GroupBurstRouter({
-      deliverBatch: (items) => agent.deliverBatch(items),
-      tryStartBatch: (items) => agent.tryStartBatch(items),
+      submit: (items, { admission = 'enqueue' } = {}) => ({
+        accepted: (admission === 'claim-if-idle'
+          ? agent.tryStartBatch(items)
+          : agent.deliverBatch(items)) !== false,
+      }),
       isConnected: () => agent.state.connected,
       isTurnInProgress: () => agent.turnInProgress,
       now: () => currentTime,
@@ -489,8 +490,11 @@ describe('CodexAgent turn/steer state machine', () => {
     const { agent, children } = newAgent(store);
     const child = await handshake(agent, children);
     const router = new GroupBurstRouter({
-      deliverBatch: (items) => agent.deliverBatch(items),
-      tryStartBatch: (items) => agent.tryStartBatch(items),
+      submit: (items, { admission = 'enqueue' } = {}) => ({
+        accepted: (admission === 'claim-if-idle'
+          ? agent.tryStartBatch(items)
+          : agent.deliverBatch(items)) !== false,
+      }),
       isConnected: () => agent.state.connected,
       isTurnInProgress: () => agent.turnInProgress,
       now: () => 0,
@@ -604,8 +608,11 @@ describe('CodexAgent turn/steer state machine', () => {
     });
     const firstChild = await handshake(agent, children);
     router = new GroupBurstRouter({
-      deliverBatch: (items) => agent.deliverBatch(items),
-      tryStartBatch: (items) => agent.tryStartBatch(items),
+      submit: (items, { admission = 'enqueue' } = {}) => ({
+        accepted: (admission === 'claim-if-idle'
+          ? agent.tryStartBatch(items)
+          : agent.deliverBatch(items)) !== false,
+      }),
       isConnected: () => agent.state.connected,
       isTurnInProgress: () => agent.turnInProgress,
       now: () => currentTime,
@@ -960,6 +967,36 @@ describe('CodexAgent turn/steer state machine', () => {
 });
 
 describe('CodexAgent session rotation (slash commands)', () => {
+  it('prepares a non-resumable deferred session while disconnected', async () => {
+    const store = makeStore();
+    const { agent } = newAgent(store);
+    const before = store.getGlobalSession();
+    const prepared = await agent.prepareSessionRotation();
+    assert.equal(prepared.sessionReady, false);
+    assert.match(prepared.id, /^pending-/);
+    assert.equal(agent.commitSessionRotation(prepared, { persist: false }), null);
+    assert.deepEqual(store.getGlobalSession(), before);
+  });
+
+  it('prepares a thread without publishing it, then activates it synchronously', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    const before = store.getGlobalSession();
+
+    const preparing = agent.prepareSessionRotation();
+    await flush();
+    const start = child.ofMethod('thread/start').at(-1);
+    child.feed({ id: start.id, result: { thread: { id: 'th-candidate' } } });
+    const prepared = await preparing;
+    assert.equal(agent.threadId, 'th-1');
+    assert.deepEqual(store.getGlobalSession(), before);
+
+    assert.equal(agent.commitSessionRotation(prepared, { persist: false }), 'th-candidate');
+    assert.equal(agent.threadId, 'th-candidate');
+    assert.deepEqual(store.getGlobalSession(), before);
+  });
+
   it('/new interrupts the active turn, starts an empty thread, and skips the history prefix', async () => {
     const store = makeStore({
       history: [{

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { redactSensitive } from './logger.mjs';
+import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
 
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_CAP_MS = 5_000;
@@ -23,8 +24,9 @@ class VolcApiError extends Error {
   }
 }
 
-export const VOLC_MODELS = ['ark'];
-export const VOLC_EFFORTS = ['managed'];
+const VOLC_RUNTIME = getRuntimeDefinition('volc');
+export const VOLC_MODELS = VOLC_RUNTIME.models;
+export const VOLC_EFFORTS = VOLC_RUNTIME.efforts;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,10 +93,11 @@ export class VolcAgent {
     this.onAvailable = options.onAvailable ?? null;
 
     const cognition = store.getCognitionState?.()
-      ?? { runtime: 'volc', epoch: 1, authorityToken: null };
-    this.runtime = 'volc';
-    this.model = 'ark';
-    this.effort = 'managed';
+      ?? { runtime: VOLC_RUNTIME.id, epoch: 1, authorityToken: null };
+    this.runtime = VOLC_RUNTIME.id;
+    this.capabilities = VOLC_RUNTIME.capabilities;
+    this.model = VOLC_RUNTIME.defaultModel;
+    this.effort = VOLC_RUNTIME.efforts[0];
     this.cognitionEpoch = options.cognitionEpoch ?? cognition.epoch;
     this.authorityToken = options.authorityToken ?? cognition.authorityToken ?? '';
     this.sessionPersistence = options.sessionPersistence !== false;
@@ -993,12 +996,16 @@ export class VolcAgent {
   }
 
   async setModel(model) {
-    if (model && model !== 'ark') throw new Error(`unsupported Volc managed-agent model selector: ${model}`);
+    if (model && !VOLC_RUNTIME.models.includes(model)) {
+      throw new Error(`unsupported Volc managed-agent model selector: ${model}`);
+    }
   }
   setEffort(effort) {
-    if (effort !== 'managed') throw new Error('Volc managed-agent effort is controlled by the remote Agent');
+    if (!VOLC_RUNTIME.efforts.includes(effort)) {
+      throw new Error('Volc managed-agent effort is controlled by the remote Agent');
+    }
   }
-  async listModels() { return VOLC_MODELS.map((id) => ({ id, efforts: VOLC_EFFORTS })); }
+  async listModels() { return staticModelEntries(VOLC_RUNTIME.id); }
 
   _persistSession() {
     if (!this.sessionPersistence || !this.sessionId) return;
