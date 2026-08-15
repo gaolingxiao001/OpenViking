@@ -541,12 +541,17 @@ export class VolcAgent {
     let backoff = this.reconnectBaseMs;
     let first = !this.expectedUserEventId;
     let postAttempted = false;
+    this.logger.info('volc_turn_timing', { stage: 'run_turn_entered', elapsedMs: Date.now() - this.turnStartedAtMs });
     while (!this.stopping && this.turnActive) {
       let response;
       try {
+        const t0 = Date.now();
         response = await this._openStream();
+        this.logger.info('volc_turn_timing', { stage: 'stream_open', elapsedMs: Date.now() - t0 });
         if (first) {
+          const t1 = Date.now();
           const history = await this._history({ snapshotOnly: true });
+          this.logger.info('volc_turn_timing', { stage: 'history_snapshot', elapsedMs: Date.now() - t1 });
           for (const event of history) if (event?.id) this.seenEventIds.add(event.id);
           try {
             this.store.beginManagedTurn?.({
@@ -565,6 +570,7 @@ export class VolcAgent {
           let posted;
           try {
             postAttempted = true;
+            const t2 = Date.now();
             const events = [{
               type: 'user.message',
               content: [{ type: 'text', text: prepared.body }],
@@ -576,6 +582,7 @@ export class VolcAgent {
               });
             }
             posted = await this._postEvents(events);
+            this.logger.info('volc_turn_timing', { stage: 'post_user_message', elapsedMs: Date.now() - t2 });
           } catch (error) {
             error.volcPostUncertain = true;
             throw error;
