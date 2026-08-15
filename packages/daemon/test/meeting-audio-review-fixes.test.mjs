@@ -176,4 +176,71 @@ describe('meeting audio review fixes', () => {
     }]);
     await media.stopAll();
   });
+
+  it('logs bounded audio health and warns after sustained zero-level media', async () => {
+    const diagnostics = [];
+    let callbacks;
+    const media = new MeetingMediaSupervisor({
+      workerFactory: {
+        async start(_session, value) {
+          callbacks = value;
+          return { ack() {}, stop() {} };
+        },
+      },
+      onFinal() {},
+      logger: {
+        debug() {},
+        info(event, fields) { diagnostics.push({ level: 'info', event, fields }); },
+        warn(event, fields) { diagnostics.push({ level: 'warn', event, fields }); },
+      },
+      epochFactory: () => 'epoch_health_12345678',
+    });
+    const session = await media.start({
+      meetingId: 'meeting_health_1234',
+      meetingNumber: '123456789',
+      mediaEndpoint: 'wss://media.example.test/health',
+    });
+    callbacks.onEvent({
+      type: 'ready',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: session.captureGeneration,
+    });
+    for (let index = 0; index < 3; index += 1) {
+      callbacks.onEvent({
+        type: 'health',
+        sessionEpoch: session.sessionEpoch,
+        captureGeneration: session.captureGeneration,
+        audio: 'healthy',
+        asr: 'healthy',
+        audioSamples: 120_000,
+        audioPeak: 0,
+        audioRms: 0,
+        audioNonzeroRatio: 0,
+        lastAudioAtMs: 1_786_730_000_000 + (index * 5_000),
+      });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(
+      diagnostics.filter(({ event }) => event === 'meeting_media_health').length,
+      1,
+      'routine health is logged on the first window instead of every five seconds',
+    );
+    assert.deepEqual(
+      diagnostics.find(({ event }) => event === 'meeting_media_audio_silent'),
+      {
+        level: 'warn',
+        event: 'meeting_media_audio_silent',
+        fields: {
+          audioSamples: 120_000,
+          audioPeak: 0,
+          audioRms: 0,
+          audioNonzeroRatio: 0,
+          lastAudioAtMs: 1_786_730_010_000,
+          silentHealthWindows: 3,
+        },
+      },
+    );
+    await media.stopAll();
+  });
 });

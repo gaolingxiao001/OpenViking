@@ -1,5 +1,14 @@
 import { arraysNamed, firstText, namedValue } from './events.mjs';
 
+function restartReason(value) {
+  if (value instanceof Error) return value.message;
+  if (typeof value === 'string') return value;
+  if (value?.error instanceof Error) return value.error.message;
+  if (typeof value?.error?.message === 'string') return value.error.message;
+  if (typeof value?.reason === 'string') return value.reason;
+  return null;
+}
+
 export class MeetingGenerationClock {
   constructor() {
     this.values = new Map();
@@ -144,7 +153,7 @@ export class MeetingAudioCoordinator {
       this.logger?.warn?.('meeting_media_restart_exhausted', {
         meetingId: entry.session.meetingId,
         attempts: entry.restartAttempts,
-        error: error?.message,
+        error: restartReason(error),
       });
       return false;
     }
@@ -153,6 +162,11 @@ export class MeetingAudioCoordinator {
       this.restartBaseDelayMs * (2 ** entry.restartAttempts),
     );
     entry.restartAttempts += 1;
+    this.logger?.warn?.('meeting_media_restart_scheduled', {
+      attempt: entry.restartAttempts,
+      delayMs,
+      reason: restartReason(error),
+    });
     entry.restartTimer = this.setTimer(() => {
       entry.restartTimer = null;
       void this._start(entry);
@@ -196,7 +210,7 @@ export class MeetingAudioCoordinator {
     entry.unavailableEpoch = session?.sessionEpoch ?? null;
     await this.media.stop(session.meetingId, reason?.reason ?? 'worker_unavailable');
     if (session?.sessionEpoch) await this._closeSession(session, reason);
-    this._scheduleRestart(entry, reason?.error);
+    this._scheduleRestart(entry, reason);
     return true;
   }
 

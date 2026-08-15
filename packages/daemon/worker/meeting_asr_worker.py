@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -266,6 +267,10 @@ class MeetingAsrWorker:
         self.final_utterances = FinalUtteranceGate()
         self.segment_seq = 0
         self.last_audio_at_ms: int | None = None
+        self.audio_window_samples = 0
+        self.audio_window_nonzero = 0
+        self.audio_window_peak = 0
+        self.audio_window_sum_squares = 0
 
     def _resample(self, pcm: bytes) -> bytes:
         if not pcm:
@@ -296,6 +301,37 @@ class MeetingAsrWorker:
             ).encode("utf-8")
         ).hexdigest()
         return "segment_" + digest[:40]
+
+    def _observe_audio(self, pcm: bytes) -> None:
+        samples = self.np.frombuffer(pcm, dtype=self.np.int16)
+        if not samples.size:
+            return
+        wide = samples.astype(self.np.int64)
+        self.audio_window_samples += int(wide.size)
+        self.audio_window_nonzero += int(self.np.count_nonzero(wide))
+        self.audio_window_peak = max(
+            self.audio_window_peak,
+            int(self.np.max(self.np.abs(wide))),
+        )
+        self.audio_window_sum_squares += int(self.np.dot(wide, wide))
+
+    def _take_audio_health(self) -> dict[str, int | float]:
+        samples = self.audio_window_samples
+        metrics: dict[str, int | float] = {
+            "audio_samples": samples,
+            "audio_peak": self.audio_window_peak,
+            "audio_rms": round(
+                math.sqrt(self.audio_window_sum_squares / samples), 2
+            ) if samples else 0.0,
+            "audio_nonzero_ratio": round(
+                self.audio_window_nonzero / samples, 6
+            ) if samples else 0.0,
+        }
+        self.audio_window_samples = 0
+        self.audio_window_nonzero = 0
+        self.audio_window_peak = 0
+        self.audio_window_sum_squares = 0
+        return metrics
 
     async def handle_command(self, command: dict[str, Any]) -> None:
         name = command.get("command")
@@ -418,6 +454,7 @@ class MeetingAsrWorker:
 
         async def on_audio(pcm24k: bytes) -> None:
             self.last_audio_at_ms = int(time.time() * 1000)
+            self._observe_audio(pcm24k)
             pcm16k = self._resample(pcm24k)
             if audio_queue.full():
                 self.protocol.emit("degraded", session, reason="audio_queue_overflow")
@@ -466,6 +503,7 @@ class MeetingAsrWorker:
                     asr="healthy",
                     last_audio_at_ms=self.last_audio_at_ms,
                     reconnect_count=0,
+                    **self._take_audio_health(),
                 )
 
         try:

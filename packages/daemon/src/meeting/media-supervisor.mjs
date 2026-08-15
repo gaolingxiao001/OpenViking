@@ -93,6 +93,8 @@ export class MeetingMediaSupervisor {
       workerStart: null,
       eventTasks: new Set(),
       stopPromise: null,
+      healthCount: 0,
+      silentHealthWindows: 0,
     };
     this.sessions.set(session.meetingId, entry);
     this._state(entry);
@@ -137,6 +139,13 @@ export class MeetingMediaSupervisor {
         entry.state = 'LIVE';
         this._state(entry);
       }
+      if (event.type === 'ready') {
+        this.logger?.info?.('meeting_media_ready', {
+          captureGeneration: entry.captureGeneration,
+        });
+      } else {
+        this._recordHealth(entry, event);
+      }
       return entry.state === 'LIVE';
     }
     if (event.type === 'correction_ignored') {
@@ -160,9 +169,14 @@ export class MeetingMediaSupervisor {
     if (event.type === 'degraded') {
       entry.state = 'DEGRADED';
       this._state(entry);
-      await this.onUnavailable?.(snapshot(entry), {
+      const reason = {
         reason: String(event.reason ?? 'worker_degraded'),
-      });
+      };
+      this.logger?.warn?.('meeting_media_degraded', reason);
+      // onUnavailable stops the session and waits for all tracked event tasks.
+      // Running it inline here makes stop() wait for this same event task,
+      // deadlocking the restart path.
+      void this._notifyUnavailable(entry, reason);
       return true;
     }
     if (event.type !== 'final' || !FINAL_STATES.has(entry.state)) return false;
@@ -189,10 +203,47 @@ export class MeetingMediaSupervisor {
     if (this.sessions.get(entry.session.meetingId) !== entry || entry.state === 'DRAINING') return;
     entry.state = 'DEGRADED';
     this._state(entry);
-    await this.onUnavailable?.(snapshot(entry), {
+    await this._notifyUnavailable(entry, {
       reason: 'worker_exit',
       detail: reason ?? null,
     });
+  }
+
+  _notifyUnavailable(entry, reason) {
+    return Promise.resolve().then(() => this.onUnavailable?.(snapshot(entry), reason)).catch((error) => {
+      this.logger?.warn?.('meeting_media_unavailable_failed', { error: error?.message });
+      return false;
+    });
+  }
+
+  _recordHealth(entry, event) {
+    entry.healthCount += 1;
+    const audioSamples = Number.isSafeInteger(event.audioSamples) && event.audioSamples >= 0
+      ? event.audioSamples : null;
+    const audioPeak = Number.isFinite(event.audioPeak) && event.audioPeak >= 0
+      ? Number(event.audioPeak) : null;
+    const audioRms = Number.isFinite(event.audioRms) && event.audioRms >= 0
+      ? Number(event.audioRms) : null;
+    const audioNonzeroRatio = Number.isFinite(event.audioNonzeroRatio)
+      && event.audioNonzeroRatio >= 0 && event.audioNonzeroRatio <= 1
+      ? Number(event.audioNonzeroRatio) : null;
+    const silent = audioSamples > 0 && audioPeak === 0;
+    entry.silentHealthWindows = silent ? entry.silentHealthWindows + 1 : 0;
+    const fields = {
+      audioSamples,
+      audioPeak,
+      audioRms,
+      audioNonzeroRatio,
+      lastAudioAtMs: Number.isFinite(event.lastAudioAtMs) ? Number(event.lastAudioAtMs) : null,
+      silentHealthWindows: entry.silentHealthWindows,
+    };
+    if (entry.healthCount === 1 || entry.healthCount % 6 === 0) {
+      this.logger?.info?.('meeting_media_health', fields);
+    }
+    if (entry.silentHealthWindows === 3 || (entry.silentHealthWindows > 3
+      && entry.silentHealthWindows % 6 === 0)) {
+      this.logger?.warn?.('meeting_media_audio_silent', fields);
+    }
   }
 
   async stop(meetingId, reason = 'meeting_ended') {

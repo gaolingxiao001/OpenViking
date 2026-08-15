@@ -42,6 +42,11 @@ function normalizeEvent(value) {
     audio: value?.audio,
     asr: value?.asr,
     reason: value?.reason,
+    lastAudioAtMs: value?.last_audio_at_ms,
+    audioSamples: value?.audio_samples,
+    audioPeak: value?.audio_peak,
+    audioRms: value?.audio_rms,
+    audioNonzeroRatio: value?.audio_nonzero_ratio,
   };
 }
 
@@ -118,13 +123,31 @@ export class StdioMeetingWorkerFactory {
       stderr = (stderr + chunk).slice(-2_000);
     });
     child.once('error', (error) => {
-      if (!exited) void onExit({ reason: 'spawn_error', error: error.message });
+      if (!exited) {
+        this.logger?.warn?.('meeting_worker_spawn_error', { error });
+        void onExit({ reason: 'spawn_error', error: error.message });
+      }
     });
     child.once('exit', (code, signal) => {
       exited = true;
       resolveExit({ code, signal });
-      if (!stopping) void onExit({ reason: 'process_exit', code, signal });
-      if (stderr.trim()) this.logger?.debug?.('meeting_worker_stderr', { bytes: stderr.length });
+      if (!stopping) {
+        const detail = stderr.trim();
+        this.logger?.warn?.('meeting_worker_exited', {
+          code,
+          signal,
+          stderr: detail || undefined,
+          stderrBytes: Buffer.byteLength(stderr),
+        });
+        void onExit({
+          reason: 'process_exit',
+          code,
+          signal,
+          stderrBytes: Buffer.byteLength(stderr),
+        });
+      } else if (stderr.trim()) {
+        this.logger?.debug?.('meeting_worker_stderr', { bytes: Buffer.byteLength(stderr) });
+      }
     });
 
     send({

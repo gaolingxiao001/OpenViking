@@ -419,10 +419,79 @@ describe('meeting audio runtime vertical slice', () => {
     await coordinator.stop();
   });
 
+  it('restarts a degraded media worker without waiting on its own event task', async () => {
+    const handlers = [];
+    const timers = [];
+    let stops = 0;
+    let epoch = 0;
+    let coordinator;
+    const media = new MeetingMediaSupervisor({
+      workerFactory: {
+        async start(_session, callbacks) {
+          handlers.push(callbacks);
+          return {
+            ack() {},
+            async stop() { stops += 1; },
+          };
+        },
+      },
+      onFinal() {},
+      onUnavailable: (session, reason) => coordinator.onUnavailable(session, reason),
+      onState: (session) => coordinator?.onMediaState(session),
+      epochFactory: () => `epoch_degraded_${++epoch}_12345678`,
+      logger: quietLogger,
+    });
+    coordinator = new MeetingAudioCoordinator({
+      media,
+      flyReferences: new FlyReferenceRing(),
+      authority: { revokeSession() {} },
+      generationClock: new MeetingGenerationClock(),
+      mediaEndpointProvider: async () => 'wss://media.example.test/degraded',
+      onSessionClosed() {},
+      restartBaseDelayMs: 10,
+      restartMaxDelayMs: 100,
+      restartMaxAttempts: 2,
+      setTimer(callback, delay) {
+        const timer = { callback, delay, unref() {} };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer() {},
+      logger: quietLogger,
+    });
+    const session = await coordinator.onJoined({
+      meetingId: 'meeting_degraded_1234',
+      meetingNumber: '123456789',
+    });
+    handlers[0].onEvent({
+      type: 'ready',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: session.captureGeneration,
+    });
+    await tick();
+    handlers[0].onEvent({
+      type: 'degraded',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: session.captureGeneration,
+      reason: 'media_stream_closed',
+    });
+    await tick();
+    await tick();
+
+    assert.equal(stops, 1);
+    assert.equal(media.state(session.meetingId), null);
+    assert.equal(timers.at(-1).delay, 10);
+    timers.at(-1).callback();
+    await tick();
+    assert.equal(handlers.length, 2, 'the replacement worker starts after degradation');
+    await coordinator.stop();
+  });
+
   it('uses one credential-stripped stdio worker process per meeting session', async () => {
     const children = [];
     const spawnOptions = [];
     const commands = [];
+    const diagnostics = [];
     const spawn = (_command, _args, options) => {
       spawnOptions.push(options);
       const child = new EventEmitter();
@@ -457,6 +526,10 @@ describe('meeting audio runtime vertical slice', () => {
         FEISHU_APP_SECRET: 'must-not-leak',
       },
       spawn,
+      logger: {
+        debug(event, fields) { diagnostics.push({ level: 'debug', event, fields }); },
+        warn(event, fields) { diagnostics.push({ level: 'warn', event, fields }); },
+      },
     });
     const events = [];
     const exits = [];
@@ -488,6 +561,38 @@ describe('meeting audio runtime vertical slice', () => {
     })}\n`);
     await tick();
     assert.equal(events[0].type, 'final');
+    children[0].stdout.write(`${JSON.stringify({
+      v: 1,
+      type: 'health',
+      session_epoch: session.sessionEpoch,
+      capture_generation: 1,
+      audio: 'healthy',
+      asr: 'healthy',
+      last_audio_at_ms: 1_786_730_000_000,
+      audio_samples: 120_000,
+      audio_peak: 321,
+      audio_rms: 12.5,
+      audio_nonzero_ratio: 0.25,
+    })}\n`);
+    await tick();
+    assert.deepEqual(events[1], {
+      type: 'health',
+      sessionEpoch: session.sessionEpoch,
+      captureGeneration: 1,
+      segmentId: undefined,
+      segmentSeq: undefined,
+      text: undefined,
+      audioStartMs: null,
+      audioEndMs: null,
+      audio: 'healthy',
+      asr: 'healthy',
+      reason: undefined,
+      lastAudioAtMs: 1_786_730_000_000,
+      audioSamples: 120_000,
+      audioPeak: 321,
+      audioRms: 12.5,
+      audioNonzeroRatio: 0.25,
+    });
     await first.ack({
       sessionEpoch: session.sessionEpoch,
       captureGeneration: 1,
@@ -505,6 +610,32 @@ describe('meeting audio runtime vertical slice', () => {
     }, { onEvent() {}, onExit() {} });
     assert.equal(children.length, 2, 'the next meeting gets a fresh isolated process');
     await second.stop({ reason: 'test_complete' });
+
+    const unexpectedExits = [];
+    await factory.start({
+      ...session,
+      meetingId: 'meeting_stdio_9012',
+      sessionEpoch: 'epoch_stdio_11223344',
+    }, { onEvent() {}, onExit: (event) => unexpectedExits.push(event) });
+    children[2].stderr.write('media websocket closed\n');
+    children[2].emit('exit', 2, null);
+    await tick();
+    assert.deepEqual(unexpectedExits, [{
+      reason: 'process_exit',
+      code: 2,
+      signal: null,
+      stderrBytes: 23,
+    }]);
+    assert.deepEqual(diagnostics.at(-1), {
+      level: 'warn',
+      event: 'meeting_worker_exited',
+      fields: {
+        code: 2,
+        signal: null,
+        stderr: 'media websocket closed',
+        stderrBytes: 23,
+      },
+    });
   });
 
   it('claims capabilities through the mode-0600 Unix socket with runtime fencing', async () => {
