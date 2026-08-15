@@ -276,6 +276,8 @@ export class LarkDaemon {
           this.handleTurnSuccess(info);
         },
         onTurnOutput: (info) => this.managedOutput.deliver(info),
+        onToolCall: (info) => this.managedOutput.callTool(info),
+        toolDefinitions: this.managedOutput.toolDefinitions,
         onTurnAbandoned: (info) => {
           this.meetingAudioRuntime?.onTurnAbandoned(info);
         },

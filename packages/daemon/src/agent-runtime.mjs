@@ -20,6 +20,8 @@ export class AgentRuntime {
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
     this.onTurnOutput = options.onTurnOutput ?? null;
+    this.onToolCall = options.onToolCall ?? null;
+    this.toolDefinitions = Array.isArray(options.toolDefinitions) ? options.toolDefinitions : [];
     this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
@@ -68,6 +70,8 @@ export class AgentRuntime {
       onTurnFailed: this.onTurnFailed,
       onTurnSucceeded: this.onTurnSucceeded,
       onTurnOutput: this.onTurnOutput,
+      onToolCall: this.onToolCall,
+      toolDefinitions: this.toolDefinitions,
       onDeliverySucceeded: this.onDeliverySucceeded,
       onTurnAbandoned: this.onTurnAbandoned,
       onAvailable: this.onAvailable,

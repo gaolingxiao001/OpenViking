@@ -660,6 +660,11 @@ export class LarkToolService {
     return { messageId: decisionMessageId, row };
   }
 
+  assertFreshDecision(value) {
+    this._assertAuthority();
+    return this._assertFreshDecision(value);
+  }
+
   // Freshness and attribution are deliberately separate. The newest observed
   // inbound fences stale side effects; response_to_message_id only attributes
   // the delivery to the work it actually completes.
