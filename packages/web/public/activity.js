@@ -1,840 +1,762 @@
-const API = '/api/activity';
+/* Agent Activity —— 时间轴模式。
+   数据：/api/activity（daemon activities 表），轮询增量合并。
+   布局：上方全量详情卡片，下方多轨道时间轴（拖动回放 / 滚轮缩放 / 空白折叠 / 右键忽略）。 */
+'use strict';
+
 const INSTANCES_API = '/api/instances';
-const LIMIT = 100;
-const ACTIVE = new Set(['QUEUED', 'RUNNING', 'OUTBOX_PENDING', 'PENDING', 'SENDING', 'RETRY']);
-const REPLIED = new Set(['SENT', 'DRY_RUN']);
-const IGNORED = new Set(['SILENT', 'IGNORED', 'RULE_IGNORED']);
-const STALE = new Set(['STALE', 'CANCELLED', 'CANCELLED_STALE', 'STOPPED']);
-const FAILED = new Set(['DEAD', 'FAILED', 'SEND_FAILED', 'UNCERTAIN', 'INTERRUPTED', 'ERROR']);
-const KNOWN_STATUS = new Set([...ACTIVE, ...REPLIED, ...IGNORED, ...STALE, ...FAILED]);
-const INPUT_KINDS = new Set(['message.received', 'message.ignored', 'message.duplicate']);
+const ACTIVITY_API = '/api/activity';
+const PAGE_LIMIT = 100;
+const POLL_MS = 4000;
+const MAX_ROWS = 5000;
+const GAP_MIN_MS = 120_000;
+const GAP_VIRTUAL_MS = 10_000; // 折叠缝在显示轴上的虚拟宽度
+const MIN_SPAN = 1000;
 
-const kindLabels = {
-  'message.received': '收到消息',
-  'message.ignored': '规则忽略',
-  'message.expired': '消息已过期',
-  'message.duplicate': '重复消息',
-  'agent.turn_started': '开始一轮',
-  'agent.turn_completed': '完成一轮',
-  'agent.steered': '中途追加',
-  'agent.note': 'Agent 输出',
-  'agent.tool': '工具调用',
-  'agent.started': '开始判断',
-  'agent.decided': '决定回复',
-  'agent.silent': '保持静默',
-  'agent.stale': '暂缓回复',
-  'agent.failed': '判断失败',
-  'agent.interrupted': '判断被中断',
-  'agent.session_rotated': '会话已更新',
-  'delivery.queued': '等待发送',
-  'delivery.attempt': '正在发送',
-  'delivery.sent': '已回复',
-  'delivery.dry_run': '模拟发送完成',
-  'delivery.retry': '等待重试',
-  'delivery.failed': '回复发送失败',
-  'delivery.uncertain': '发送结果不确定',
-  'delivery.cancelled': '暂缓发送',
-  'system.starting': '守护进程启动',
-  'system.preflight_ok': '命令行检查通过',
-  'system.subscriber_started': '飞书监听已启动',
-  'system.ready': '守护进程就绪',
-  'system.recovery': '恢复未完成任务',
-  'system.event_dropped': '事件未记录',
-  'system.persist_failed': '事件落库失败',
-  'system.worker_failed': '会话运行失败',
-  'system.subscriber_exit': '飞书监听意外退出',
-  'system.startup_failed': '守护进程启动失败',
-  'system.maintenance': '状态清理完成',
-  'system.stopping': '守护进程停止中',
-  'system.stopped': '守护进程已停止',
-};
+const TRACKS = [
+  { key: 'turn',     label: '回合' },
+  { key: 'message',  label: '消息' },
+  { key: 'agent',    label: '助手' },
+  { key: 'delivery', label: '投递' },
+  { key: 'command',  label: '命令' },
+  { key: 'system',   label: '系统' },
+];
+const TRACK_LABEL = Object.fromEntries(TRACKS.map((t) => [t.key, t.label]));
 
-const reasonLabels = {
-  direct_request: '明确请求',
-  continuation: '有效续聊',
-  useful_intervention: '增量价值',
-  ack: '确认或致谢',
-  ambient: '背景聊天',
-  already_answered: '已有回答',
-  unsupported: '暂不支持',
-  unsafe: '不适合执行',
+const dom = {
+  instance: document.getElementById('instance-select'),
+  status: document.getElementById('service-status'),
+  statusText: document.getElementById('service-status-text'),
+  crumb: document.getElementById('crumb'),
+  clock: document.getElementById('clock'),
+  slider: document.getElementById('z-slider'),
+  spanLabel: document.getElementById('span-label'),
+  detail: document.getElementById('detail'),
+  divider: document.getElementById('divider'),
+  timeline: document.getElementById('timeline'),
+  gutter: document.getElementById('gutter'),
+  viewport: document.getElementById('viewport'),
+  world: document.getElementById('world'),
+  privacy: document.getElementById('privacy-toggle'),
+  loadOlder: document.getElementById('load-older'),
+  counts: document.getElementById('counts'),
+  notice: document.getElementById('connection-notice'),
 };
 
 const state = {
-  rows: new Map(),
-  service: {},
-  overview: {},
+  instance: null,
+  rows: new Map(),       // id -> activity row
   nextCursor: null,
-  initialized: false,
-  loading: false,
-  loadingOlder: false,
-  filter: 'all',
-  query: '',
-  hideText: false,
-  fetchedAt: 0,
-  instance: '',
-  instanceLabel: 'Agent',
-  instanceGeneration: 0,
+  service: null,
+  timer: null,
 };
 
-const $ = (selector) => document.querySelector(selector);
-const dom = {
-  instance: $('#instance-select'),
-  service: $('#service-status'),
-  serviceText: $('#service-status-text'),
-  updated: $('#last-updated'),
-  current: $('#current-state'),
-  subscriber: $('#subscriber-value'),
-  queue: $('#queue-value'),
-  uptime: $('#uptime-value'),
-  search: $('#activity-search'),
-  privacy: $('#privacy-toggle'),
-  filters: $('#filters'),
-  notice: $('#connection-notice'),
-  transcript: $('#transcript'),
-  olderRecords: $('#older-records'),
-  olderRecordsSummary: $('#older-records-summary'),
-  olderTranscript: $('#older-transcript'),
-  empty: $('#empty-state'),
-  loadOlder: $('#load-older'),
+// ---------- 小工具 ----------
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+function fmtClock(ms) {
+  const d = new Date(ms);
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function fmtSpan(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3600000) return `${(ms / 60000).toFixed(1)}min`;
+  return `${(ms / 3600000).toFixed(2)}h`;
+}
+function fmtDur(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3600000) return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+  if (ms < 86400000) return `${(ms / 3600000).toFixed(1)}h`;
+  return `${(ms / 86400000).toFixed(1)}d`;
+}
+
+// ---------- activity 行 → 时间轴模型 ----------
+const KIND_TRACK = {
+  message: 'message',
+  agent: 'agent',
+  delivery: 'delivery',
+  command: 'command',
+  system: 'system',
 };
 
-function el(tag, className, value) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (value !== undefined) node.textContent = String(value);
-  return node;
-}
+function buildModel(rows) {
+  const events = [];
+  const turns = new Map();     // turnId -> { startMs, endMs }
+  const deliveries = new Map(); // outboxId -> queued event
 
-function number(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function activity(raw) {
-  if (!raw || raw.id === undefined) return null;
-  return {
-    id: String(raw.id),
-    kind: String(raw.kind || 'unknown'),
-    category: String(raw.category || 'system'),
-    severity: String(raw.severity || 'info').toLowerCase(),
-    priority: number(raw.priority),
-    title: String(raw.title || ''),
-    summary: String(raw.summary || ''),
-    sourceRef: raw.sourceRef == null ? '' : String(raw.sourceRef),
-    sourceType: raw.sourceType == null ? '' : String(raw.sourceType).toLowerCase(),
-    sourceName: raw.sourceName == null ? '' : String(raw.sourceName),
-    conversationRef: String(raw.conversationRef || ''),
-    turnId: raw.turnId == null ? null : String(raw.turnId),
-    inboundSeq: raw.inboundSeq == null ? null : String(raw.inboundSeq),
-    outboxId: raw.outboxId == null ? null : String(raw.outboxId),
-    status: String(raw.status || '').toUpperCase(),
-    metadata: raw.metadata && typeof raw.metadata === 'object' ? raw.metadata : {},
-    createdAtMs: number(raw.createdAtMs) || Date.now(),
-  };
-}
-
-function eventOrder(a, b) {
-  return a.createdAtMs - b.createdAtMs || Number(a.id) - Number(b.id);
-}
-
-function lastValue(events, selector) {
-  for (const row of [...events].reverse()) {
-    const value = selector(row);
-    if (value !== undefined && value !== null && value !== '') return String(value);
-  }
-  return '';
-}
-
-function isFailure(row) {
-  return row.severity === 'error'
-    || FAILED.has(row.status)
-    || /(?:failed|uncertain|interrupted)$/.test(row.kind);
-}
-
-function eventIsTool(row) {
-  const metadataKeys = Object.keys(row.metadata || {});
-  return /(?:^|\.)(?:tool|command|exec|call)(?:\.|$)/i.test(row.kind)
-    || metadataKeys.some((key) => /(?:tool|command|exec|call)/i.test(key));
-}
-
-function eventIsDiagnostic(row) {
-  return isFailure(row)
-    || row.severity === 'warn'
-    || /(?:retry|expired|cancelled|dropped|recovery)$/.test(row.kind)
-    || Boolean(row.metadata?.error);
-}
-
-function operationalEvents(story) {
-  return story.events.filter((row) => eventIsTool(row) || eventIsDiagnostic(row));
-}
-
-function buildStories() {
-  const rows = [...state.rows.values()].sort(eventOrder);
-  const seqToTurn = new Map();
   for (const row of rows) {
-    if (!row.turnId) continue;
-    const extraSeqs = Array.isArray(row.metadata.inboundSeqs) ? row.metadata.inboundSeqs : [];
-    for (const seq of [row.inboundSeq, ...extraSeqs]) {
-      if (seq !== null && seq !== undefined) seqToTurn.set(String(seq), row.turnId);
+    const t = row.createdAtMs;
+    const track = KIND_TRACK[row.category] || 'system';
+    const ok = row.severity !== 'error';
+    const warn = row.severity === 'warning';
+
+    if (row.kind === 'agent.turn_started' || row.kind === 'agent.turn_completed') {
+      const key = row.turnId ?? row.id;
+      const seg = turns.get(key) || { startMs: t, endMs: null };
+      if (row.kind === 'agent.turn_started') seg.startMs = t;
+      else seg.endMs = t;
+      turns.set(key, seg);
+      continue;
     }
-  }
 
-  const storyRows = new Map();
-  for (const row of rows) {
-    const turn = row.turnId || seqToTurn.get(row.inboundSeq);
-    const key = turn ? `turn:${turn}` : `activity:${row.id}`;
-    if (!storyRows.has(key)) storyRows.set(key, []);
-    storyRows.get(key).push(row);
-  }
-
-  return [...storyRows].map(([key, events]) => {
-    events.sort(eventOrder);
-    const latest = events.at(-1);
-    const status = lastValue(events, (row) => KNOWN_STATUS.has(row.status) ? row.status : '');
-    const rawSourceRef = lastValue(events, (row) => row.sourceRef);
-    const sourceType = lastValue(events, (row) => row.sourceType || row.metadata.chatType);
-    const sourceName = lastValue(events, (row) => row.sourceName);
-    const isSystem = !rawSourceRef || rawSourceRef === 'system' || sourceType === 'system';
-    const sourceRef = isSystem ? '' : rawSourceRef;
-    const failed = events.some(isFailure);
-    const activeSystemListener = isSystem
-      && latest.kind === 'system.subscriber_started'
-      && status === 'RUNNING';
-    const active = !failed && ACTIVE.has(status) && (!isSystem || activeSystemListener);
-    const hasReply = events.some((row) => REPLIED.has(row.status)
-      || row.kind === 'delivery.sent' || row.kind === 'delivery.dry_run');
-    const hasIgnore = events.some((row) => IGNORED.has(row.status)
-      || row.kind === 'message.ignored' || row.kind === 'agent.silent');
-    const stale = STALE.has(status) || events.some((row) =>
-      row.kind === 'agent.stale' || row.kind === 'delivery.cancelled' || row.kind === 'system.stopped');
-
-    let tone = 'neutral';
-    if (failed) tone = 'failed';
-    else if (active) tone = 'active';
-    else if (hasReply) tone = 'reply';
-    else if (hasIgnore) tone = 'ignore';
-    else if (stale) tone = 'stale';
-    else if (isSystem) tone = 'system';
-
-    return {
-      key,
-      events,
-      latest,
-      status,
-      sourceRef,
-      sourceType,
-      sourceName,
-      isSystem,
-      failed,
-      active,
-      tone,
-      at: latest.createdAtMs,
+    const meta = row.metadata && Object.keys(row.metadata).length
+      ? JSON.stringify(row.metadata, null, 2)
+      : '';
+    const ev = {
+      id: `a${row.id}`,
+      t,
+      end: null,
+      track,
+      kind: row.kind,
+      title: row.title || row.kind,
+      body: row.summary || '',
+      output: meta,
+      ok,
+      warn,
+      sourceName: row.sourceName || null,
+      status: row.status || null,
     };
-  }).sort((a, b) => b.at - a.at);
-}
-
-function storyMeta(story, key) {
-  return lastValue(story.events, (row) => row.metadata[key]);
-}
-
-function storyInputs(story) {
-  return story.events
-    .filter((row) => INPUT_KINDS.has(row.kind) && row.summary)
-    .map((row) => ({
-      text: row.summary,
-      sourceName: row.sourceName || story.sourceName,
-      sourceType: row.sourceType || row.metadata.chatType || story.sourceType,
-      isSystem: false,
-    }));
-}
-
-function storyOutputs(story) {
-  const toolTexts = new Set(story.events
-    .filter((row) => row.kind === 'agent.tool' && row.metadata.deliveryMode && REPLIED.has(row.status))
-    .map((row) => row.summary)
-    .filter(Boolean));
-  const outputs = [];
-  const seenLegacy = new Set();
-  for (const row of story.events) {
-    if (!row.summary) continue;
-    if (row.kind === 'agent.tool' && row.metadata.deliveryMode && REPLIED.has(row.status)) {
-      outputs.push(row.summary);
-      continue;
+    if (row.kind === 'delivery.queued' && row.outboxId != null) {
+      deliveries.set(row.outboxId, ev);
+    } else if (row.kind === 'delivery.sent' && row.outboxId != null) {
+      const start = deliveries.get(row.outboxId);
+      if (start) { start.end = t; deliveries.delete(row.outboxId); }
     }
-    if (row.kind !== 'delivery.sent' && row.kind !== 'delivery.dry_run') continue;
-    if (toolTexts.has(row.summary)) continue;
-    const legacyKey = row.outboxId || row.summary;
-    if (seenLegacy.has(legacyKey)) continue;
-    seenLegacy.add(legacyKey);
-    outputs.push(row.summary);
+    events.push(ev);
   }
-  if (outputs.length > 0) return outputs;
-  const rows = [...story.events].reverse();
-  const note = rows.find((row) => row.kind === 'agent.note');
-  const decision = rows.find((row) => row.kind === 'agent.decided');
-  return [note?.summary || decision?.summary || ''].filter(Boolean);
-}
 
-function displayText(value) {
-  return state.hideText && value ? '正文已隐藏' : value;
-}
+  events.sort((a, b) => a.t - b.t);
 
-function clock(ms, seconds = false) {
-  return new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    ...(seconds ? { second: '2-digit' } : {}),
-    hour12: false,
-  }).format(new Date(ms));
-}
-
-function exact(ms) {
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).format(new Date(ms));
-}
-
-function dayNumber(ms) {
-  const date = new Date(ms);
-  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86_400_000;
-}
-
-function isCurrentOrToday(story) {
-  return story.active || dayNumber(story.at) >= dayNumber(Date.now());
-}
-
-function storyLabel(story) {
-  if (story.tone === 'failed') return '失败';
-  if (story.tone === 'active') return '进行中';
-  if (story.tone === 'reply') return '已回复';
-  if (story.tone === 'ignore') return '忽略';
-  if (story.tone === 'stale') return story.status === 'STOPPED' ? '已停止' : '已暂缓';
-  if (story.isSystem) return '系统';
-  return '';
-}
-
-function technicalData(story) {
-  return story.events.map((row) => ({
-    id: row.id,
-    kind: row.kind,
-    status: row.status || undefined,
-    at: new Date(row.createdAtMs).toISOString(),
-    sourceRef: row.sourceRef || undefined,
-    sourceType: row.sourceType || undefined,
-    sourceName: row.sourceName || undefined,
-    conversationRef: row.conversationRef || undefined,
-    turnId: row.turnId,
-    inboundSeq: row.inboundSeq,
-    outboxId: row.outboxId,
-    metadata: row.metadata,
-  }));
-}
-
-function sourceDisplayName(story) {
-  if (story.sourceName) return story.sourceName;
-  if (story.sourceType === 'p2p' || story.sourceType === 'private') return '私聊';
-  if (story.sourceType === 'group' || story.sourceType === 'group_chat') return '未命名群聊';
-  return '聊天';
-}
-
-function messageRow(source, direction, value) {
-  const line = el('div', `message-row ${direction}`);
-  line.dataset.direction = direction;
-  const bubbleClass = direction === 'outgoing'
-    ? 'message-bubble agent-message'
-    : direction === 'note'
-      ? 'message-bubble note-message'
-      : 'message-bubble';
-  const column = el('div', 'message-column');
-  if (direction === 'incoming' && !source.isSystem) {
-    column.append(el('span', 'source-label', sourceDisplayName(source)));
-  }
-  column.append(el('div', bubbleClass, displayText(value)));
-  line.append(column);
-  return line;
-}
-
-function storyCard(story) {
-  const details = el('details', 'story');
-  details.dataset.storyKey = story.key;
-  details.dataset.tone = story.tone;
-
-  const summary = el('summary');
-  const messages = el('div', 'message-stack');
-  const inputs = storyInputs(story);
-  const outputs = storyOutputs(story);
-  const addMessage = (direction, value, source = story) => {
-    if (!value) return;
-    messages.append(messageRow(source, direction, value));
-  };
-  for (const input of inputs) addMessage('incoming', input.text, input);
-  for (const output of outputs) addMessage('outgoing', output);
-  if (!inputs.length && !outputs.length) addMessage('note', story.latest.summary);
-  if (messages.childElementCount) summary.append(messages);
-
-  const meta = el('div', 'turn-meta');
-  const time = el('time', 'story-time', clock(story.at));
-  time.dateTime = new Date(story.at).toISOString();
-  time.title = exact(story.at);
-  meta.append(time);
-  const label = storyLabel(story);
-  if (label) meta.append(el('span', 'turn-status', label));
-  meta.append(el('span', 'turn-disclosure', '详情'));
-  summary.append(meta);
-  details.append(summary);
-
-  const body = el('div', 'story-body');
-  const facts = el('dl', 'turn-facts');
-  const addFact = (labelText, value) => {
-    if (!value) return;
-    facts.append(el('dt', '', labelText), el('dd', '', value));
-  };
-  const mode = storyMeta(story, 'deliveryMode');
-  const reason = storyMeta(story, 'reasonCode');
-  addFact('判断', reasonLabels[reason] || reason);
-  addFact('发送', { chat: '直接发送', reply: '普通引用', thread: 'Thread' }[mode] || mode);
-  addFact('状态', storyLabel(story) || story.status);
-  if (facts.childElementCount) body.append(facts);
-
-  const operations = el('ol', 'operation-list');
-  const visibleTexts = new Set([
-    ...inputs.map((input) => input.text),
-    ...outputs,
-    !inputs.length && !outputs.length ? story.latest.summary : '',
-  ].filter(Boolean));
-  for (const row of operationalEvents(story)) {
-    const stage = el('li', 'stage');
-    const stageTime = el('time', 'stage-time', clock(row.createdAtMs, true));
-    stageTime.dateTime = new Date(row.createdAtMs).toISOString();
-    const copy = el('div');
-    const stageTitle = eventIsTool(row)
-      ? row.metadata.toolLabel || kindLabels[row.kind] || row.kind
-      : row.title || kindLabels[row.kind] || row.kind;
-    const stageSummary = eventIsTool(row)
-      ? (isFailure(row) ? '调用失败' : '')
-      : row.summary;
-    copy.append(el('div', 'stage-title', stageTitle));
-    if (stageSummary && !visibleTexts.has(stageSummary) && stageSummary !== stageTitle) {
-      copy.append(el('div', 'stage-summary', displayText(stageSummary)));
+  const gaps = [];
+  for (let i = 1; i < events.length; i++) {
+    if (events[i].t - events[i - 1].t > GAP_MIN_MS) {
+      gaps.push({ startMs: events[i - 1].t, endMs: events[i].t });
     }
-    stage.append(stageTime, copy);
-    operations.append(stage);
   }
-  if (operations.childElementCount) body.append(operations);
 
-  const tech = el('details', 'technical-details');
-  tech.append(el('summary', '', '技术信息'), el('pre', '', JSON.stringify(technicalData(story), null, 2)));
-  body.append(tech);
-  details.append(body);
-  return details;
+  const startMs = events.length ? events[0].t : Date.now();
+  const endMs = events.length ? events[events.length - 1].t : startMs + 1;
+  return {
+    meta: { startMs, endMs },
+    events,
+    gaps,
+    turns: [...turns.values()].sort((a, b) => a.startMs - b.startMs),
+  };
 }
 
-function isQuietIncoming(story) {
-  return !story.isSystem
-    && storyInputs(story).length > 0
-    && storyOutputs(story).length === 0
-    && !story.active
-    && !story.failed
-    && operationalEvents(story).length === 0;
+// ---------- 时间轴视口状态 ----------
+let S = null;
+let tmap = { segs: [], gapSegs: [], totalDisp: 1 };
+let total = 1;
+let DEFAULT_SPAN = 60000;
+let centerDisp = 0;
+let spanMs = 60000;
+let selectedId = null;
+let blocks = [];
+let blockById = new Map();
+let gutterByTrack = new Map();
+let ignoredIds = new Set();
+let ignoredTracks = new Set();
+let visibleIdx = [];
+let cardEls = [];
+let activeIdx = -1;
+let followTail = true;
+
+const pxPerMs = () => dom.viewport.clientWidth / spanMs;
+const t2x = (t) => realToDisp(t) * pxPerMs();
+
+function buildTimeMap(startMs, endMs, gaps) {
+  const segs = [], gapSegs = [];
+  let d = 0, cur = startMs;
+  for (const g of gaps) {
+    if (g.startMs > cur) { segs.push({ r0: cur, r1: g.startMs, d0: d }); d += g.startMs - cur; }
+    gapSegs.push({ r0: g.startMs, r1: g.endMs, d0: d });
+    d += GAP_VIRTUAL_MS;
+    cur = Math.max(cur, g.endMs);
+  }
+  if (cur < endMs) { segs.push({ r0: cur, r1: endMs, d0: d }); d += endMs - cur; }
+  return { segs, gapSegs, totalDisp: Math.max(1, d) };
+}
+function realToDisp(t) {
+  for (const s of tmap.segs) { if (t <= s.r1) return s.d0 + Math.max(0, t - s.r0); }
+  return tmap.totalDisp;
+}
+function dispToReal(d) {
+  for (const s of tmap.segs) { if (d < s.d0 + (s.r1 - s.r0)) return s.r0 + (d - s.d0); }
+  for (const g of tmap.gapSegs) { if (d < g.d0 + GAP_VIRTUAL_MS) return d - g.d0 < GAP_VIRTUAL_MS / 2 ? g.r0 : g.r1; }
+  return S ? S.meta.endMs : 0;
 }
 
-function quietIncomingCount(stories) {
-  return stories.reduce((count, story) => count + storyInputs(story).length, 0);
-}
+// ---------- 时间轴 DOM ----------
+function buildTimeline() {
+  dom.world.replaceChildren();
+  dom.gutter.replaceChildren();
+  blockById = new Map();
+  gutterByTrack = new Map();
+  const laneEls = new Map();
 
-function isRoutineSystem(story) {
-  return story.isSystem && !story.failed
-    && operationalEvents(story).length === 0;
-}
+  const gRuler = document.createElement('div');
+  gRuler.className = 'gcell ruler';
+  gRuler.textContent = 'TIME';
+  dom.gutter.appendChild(gRuler);
+  const ruler = document.createElement('div');
+  ruler.id = 'ruler';
+  dom.world.appendChild(ruler);
 
-function shouldDisplayStory(story) {
-  return !isRoutineSystem(story)
-    || state.filter === 'system'
-    || Boolean(state.query);
-}
-
-function compactTranscript(stories) {
-  const compacted = [];
-  let run = [];
-  let runType = '';
-  const flush = () => {
-    const shouldBatch = runType === 'quiet-incoming'
-      ? run.length > 0
-      : run.length > 1;
-    if (shouldBatch) {
-      compacted.push({
-        batchType: runType,
-        key: `${runType}:${run[0].key}:${run.at(-1).key}`,
-        stories: run,
+  for (const tr of TRACKS) {
+    const g = document.createElement('div');
+    g.className = `gcell t-${tr.key}`;
+    g.textContent = tr.label;
+    if (tr.key !== 'turn') {
+      g.classList.add('ignorable');
+      g.title = `右键忽略/恢复「${tr.label}」轨道`;
+      g.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        toggleIgnoreTrack(tr.key);
       });
-    } else if (run.length === 1) {
-      compacted.push(run[0]);
     }
-    run = [];
-    runType = '';
-  };
-  for (const story of stories) {
-    const type = isQuietIncoming(story)
-      ? 'quiet-incoming'
-      : isRoutineSystem(story)
-        ? 'system-activity'
-        : '';
-    if (type && type === runType) {
-      run.push(story);
-      continue;
-    }
-    flush();
-    if (type) {
-      runType = type;
-      run.push(story);
-    } else {
-      compacted.push(story);
+    dom.gutter.appendChild(g);
+    gutterByTrack.set(tr.key, g);
+    const lane = document.createElement('div');
+    lane.className = 'lane';
+    lane.dataset.lane = tr.key;
+    dom.world.appendChild(lane);
+    laneEls.set(tr.key, lane);
+  }
+
+  for (const g of S.gaps) {
+    for (const target of [ruler, ...laneEls.values()]) {
+      const el = document.createElement('div');
+      el.className = 'gap';
+      el.dataset.vgap = '1';
+      el.dataset.t0 = g.startMs; el.dataset.t1 = g.endMs;
+      el.textContent = `✂ ${fmtSpan(g.endMs - g.startMs)}`;
+      target.appendChild(el);
     }
   }
-  flush();
-  return compacted;
+
+  for (const tn of S.turns) {
+    const el = document.createElement('div');
+    el.className = 'blk b-turn';
+    el.dataset.t0 = tn.startMs; el.dataset.t1 = tn.endMs || tn.startMs;
+    el.textContent = '▶ 回合';
+    laneEls.get('turn').appendChild(el);
+  }
+
+  for (const ev of S.events) {
+    const el = document.createElement('div');
+    const isSeg = ev.end != null && ev.end > ev.t;
+    el.className = `blk${isSeg ? '' : ' pt'} b-${ev.track}${ev.ok === false ? ' bad' : ''}${ev.warn ? ' warn' : ''}`;
+    el.dataset.t0 = ev.t; el.dataset.t1 = isSeg ? ev.end : ev.t;
+    el.dataset.eid = ev.id;
+    el.textContent = ev.title;
+    el.title = `${fmtClock(ev.t)}  [${TRACK_LABEL[ev.track] || ev.track}] ${ev.title}\n右键忽略此条`;
+    laneEls.get(ev.track).appendChild(el);
+    blockById.set(ev.id, el);
+    el._ev = ev;
+    el.addEventListener('click', () => {
+      if (dragMoved) return;
+      selectedId = ev.id;
+      followTail = false;
+      centerDisp = realToDisp(ev.end != null ? (ev.t + ev.end) / 2 : ev.t);
+      render();
+    });
+    el.addEventListener('pointerdown', (e) => e.stopPropagation());
+  }
+
+  blocks = [...dom.world.querySelectorAll('.blk, .gap')];
 }
 
-function quietIncomingFold(batch, openedFolds) {
-  const fold = el('details', 'quiet-incoming-fold');
-  fold.dataset.foldKey = batch.key;
-  fold.open = openedFolds.has(batch.key)
-    || Boolean(state.query) || state.filter === 'ignore';
+// ---------- 忽略 ----------
+function isIgnored(ev) {
+  return ignoredTracks.has(ev.track) || ignoredIds.has(ev.id);
+}
+function rebuildVisible() {
+  visibleIdx = [];
+  for (let i = 0; i < S.events.length; i++) {
+    if (!isIgnored(S.events[i])) visibleIdx.push(i);
+  }
+}
+function applyIgnoreState() {
+  for (const el of blockById.values()) {
+    if (el._ev) el.classList.toggle('ignored', isIgnored(el._ev));
+  }
+  cardEls.forEach((card, j) => card.classList.toggle('hidden', isIgnored(S.events[j])));
+  for (const [key, g] of gutterByTrack) g.classList.toggle('ignored', ignoredTracks.has(key));
+  rebuildVisible();
+  updateCounts();
+  render();
+}
+function toggleIgnoreEvent(id) {
+  if (ignoredIds.has(id)) ignoredIds.delete(id); else ignoredIds.add(id);
+  applyIgnoreState();
+}
+function toggleIgnoreTrack(track) {
+  if (ignoredTracks.has(track)) ignoredTracks.delete(track); else ignoredTracks.add(track);
+  applyIgnoreState();
+}
+dom.viewport.addEventListener('contextmenu', (e) => {
+  const blk = e.target.closest('.blk');
+  if (!blk || !blk.dataset.eid) return;
+  e.preventDefault();
+  toggleIgnoreEvent(blk.dataset.eid);
+});
 
-  const summary = el('summary');
-  const copy = el('span', 'quiet-fold-copy', `${quietIncomingCount(batch.stories)} 条未回复消息`);
-  const time = el('time', 'story-time', clock(batch.stories[0].at));
-  time.dateTime = new Date(batch.stories[0].at).toISOString();
-  time.title = exact(batch.stories[0].at);
-  summary.append(copy, time, el('span', 'turn-disclosure', '展开'));
-  fold.append(summary);
-
-  const list = el('div', 'quiet-incoming-list');
-  for (const story of batch.stories) {
-    const item = el('div', 'quiet-incoming-item');
-    for (const input of storyInputs(story)) {
-      item.append(messageRow(input, 'incoming', input.text));
+// ---------- 布局 ----------
+function layout() {
+  const k = pxPerMs();
+  for (const el of blocks) {
+    const t0 = +el.dataset.t0, t1 = +el.dataset.t1;
+    el.style.left = t2x(t0) + 'px';
+    let w = 0;
+    if (el.dataset.vgap) w = GAP_VIRTUAL_MS * k;
+    else if (t1 > t0) w = (realToDisp(t1) - realToDisp(t0)) * k;
+    if (w > 0) {
+      el.style.width = Math.max(4, w) + 'px';
+      el.classList.toggle('tiny', w < 44);
     }
-    const itemTime = el('time', 'quiet-incoming-time', clock(story.at, true));
-    itemTime.dateTime = new Date(story.at).toISOString();
-    itemTime.title = exact(story.at);
-    item.append(itemTime);
-    list.append(item);
   }
-  fold.append(list);
-  return fold;
+  dom.world.style.width = total * k + 'px';
+  drawRuler();
 }
 
-function systemActivityFold(batch, openedFolds) {
-  const fold = el('details', 'system-activity-fold');
-  fold.dataset.foldKey = batch.key;
-  fold.open = openedFolds.has(batch.key)
-    || Boolean(state.query) || state.filter === 'system';
-
-  const summary = el('summary');
-  const copy = el('span', 'system-fold-copy', `${batch.stories.length} 条系统记录`);
-  const time = el('time', 'story-time', clock(batch.stories[0].at));
-  time.dateTime = new Date(batch.stories[0].at).toISOString();
-  time.title = exact(batch.stories[0].at);
-  summary.append(copy, time, el('span', 'turn-disclosure', '展开'));
-  fold.append(summary);
-
-  const list = el('div', 'system-activity-list');
-  for (const story of batch.stories) list.append(storyCard(story));
-  fold.append(list);
-  return fold;
-}
-
-function renderTranscript(container, stories, openedFolds = new Set()) {
-  const fragment = document.createDocumentFragment();
-  for (const item of compactTranscript(stories)) {
-    if (item.batchType === 'quiet-incoming') {
-      fragment.append(quietIncomingFold(item, openedFolds));
-    } else if (item.batchType === 'system-activity') {
-      fragment.append(systemActivityFold(item, openedFolds));
-    } else {
-      fragment.append(storyCard(item));
+function drawRuler() {
+  const ruler = document.getElementById('ruler');
+  ruler.querySelectorAll('.tick').forEach((n) => n.remove());
+  const steps = [500, 1000, 2000, 5000, 15000, 30000, 60000, 120000, 300000, 600000, 1800000, 3600000, 21600000];
+  const k = pxPerMs();
+  const step = steps.find((s) => s * k >= 96) || steps[steps.length - 1];
+  const v0 = centerDisp - spanMs / 2, v1 = centerDisp + spanMs / 2;
+  for (const s of tmap.segs) {
+    if (s.d0 + (s.r1 - s.r0) < v0 || s.d0 > v1) continue;
+    for (let t = Math.ceil(s.r0 / step) * step; t <= s.r1; t += step) {
+      const d = s.d0 + (t - s.r0);
+      if (d < v0 || d > v1) continue;
+      const el = document.createElement('div');
+      el.className = 'tick';
+      el.style.left = t2x(t) + 'px';
+      const lbl = document.createElement('span');
+      lbl.className = 'lbl';
+      lbl.textContent = fmtClock(t);
+      el.appendChild(lbl);
+      ruler.appendChild(el);
     }
   }
-  container.replaceChildren(fragment);
 }
 
-function matches(story) {
-  if (state.filter === 'reply' && story.tone !== 'reply') return false;
-  if (state.filter === 'ignore' && story.tone !== 'ignore') return false;
-  if (state.filter === 'failed' && story.tone !== 'failed') return false;
-  if (state.filter === 'system' && !story.isSystem) return false;
-  if (!state.query) return true;
-  const searchable = JSON.stringify({
-    sourceName: story.sourceName,
-    sourceRef: story.sourceRef,
-    sourceType: story.sourceType,
-    events: story.events,
-  }).toLocaleLowerCase();
-  return searchable.includes(state.query);
+function applyPan() {
+  dom.world.style.transform = `translateX(${dom.viewport.clientWidth / 2 - centerDisp * pxPerMs()}px)`;
 }
 
-function openStoryKeys() {
-  return new Set([...document.querySelectorAll('.story[open]')].map((node) => node.dataset.storyKey));
-}
-
-function openCompactFoldKeys() {
-  return new Set([...document.querySelectorAll(
-    '.quiet-incoming-fold[open], .system-activity-fold[open]',
-  )]
-    .map((node) => node.dataset.foldKey));
-}
-
-function updateCurrentState(stories) {
-  if (dom.service.dataset.state === 'offline') return;
-  const active = stories.filter((story) => story.active).length;
-  const failed = stories.filter((story) => story.failed).length;
-  if (active) dom.current.textContent = `运行中 ${active}`;
-  else if (failed) dom.current.textContent = `失败记录 ${failed}`;
-  else dom.current.textContent = state.service.ready ? '空闲' : '正在启动';
-}
-
-function render() {
-  const openedStories = openStoryKeys();
-  const openedCompactFolds = openCompactFoldKeys();
-  const olderRecordsWasOpen = dom.olderRecords.open;
-  const allStories = buildStories();
-  const stories = allStories.filter(matches).filter(shouldDisplayStory);
-  const recent = stories.filter(isCurrentOrToday);
-  const older = stories.filter((story) => !isCurrentOrToday(story));
-
-  renderTranscript(dom.transcript, recent, openedCompactFolds);
-  renderTranscript(dom.olderTranscript, older, openedCompactFolds);
-  dom.olderRecords.hidden = older.length === 0;
-  dom.olderRecordsSummary.textContent = older.length ? `${older.length} 条` : '';
-  dom.olderRecords.open = older.length > 0 && (
-    olderRecordsWasOpen || Boolean(state.query) || state.filter !== 'all'
-  );
-
-  const count = stories.length;
-  dom.empty.hidden = count > 0;
-  if (!count && state.initialized) {
-    const narrowed = Boolean(state.query) || state.filter !== 'all';
-    dom.empty.querySelector('h2').textContent = narrowed ? '没有匹配的活动' : '还没有活动';
-    dom.empty.querySelector('p').textContent = narrowed
-      ? '换个关键词，或切回“全部”查看。'
-      : `给 ${state.instanceLabel} 发一条飞书消息，它会出现在这里。`;
+// ---------- 详情面板（全量渲染） ----------
+function nearestIdx(t) {
+  const evs = S.events;
+  const idx = visibleIdx;
+  if (!idx.length) return -1;
+  let lo = 0, hi = idx.length - 1, best = idx[0], bd = Infinity;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const evI = idx[mid];
+    const d = Math.abs(evs[evI].t - t);
+    if (d < bd) { bd = d; best = evI; }
+    if (evs[evI].t < t) lo = mid + 1; else hi = mid - 1;
   }
-  dom.loadOlder.hidden = !state.nextCursor;
-  updateCurrentState(allStories);
+  return best;
+}
 
-  document.querySelectorAll('.story').forEach((node) => {
-    if (openedStories.has(node.dataset.storyKey)) node.open = true;
+function buildDetail() {
+  const frag = document.createDocumentFragment();
+  cardEls = S.events.map((ev, j) => {
+    const card = document.createElement('div');
+    card.className = `card c-${ev.track}${ev.ok === false ? ' sev-error' : ''}`;
+    card.dataset.t = ev.t;
+    card.dataset.idx = j;
+
+    const head = document.createElement('div');
+    head.className = 'chead';
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = TRACK_LABEL[ev.track] || ev.track;
+    const kind = document.createElement('span');
+    kind.className = 'kind-label';
+    kind.textContent = ev.kind;
+    const ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = fmtClock(ev.t);
+    head.append(chip, kind, ts);
+    if (ev.sourceName) {
+      const src = document.createElement('span');
+      src.className = 'src';
+      src.textContent = `@ ${ev.sourceName}`;
+      head.appendChild(src);
+    }
+    if (ev.end != null && ev.end > ev.t) {
+      const dur = document.createElement('span');
+      dur.className = 'dur';
+      dur.textContent = '⏱ ' + fmtDur(ev.end - ev.t);
+      head.appendChild(dur);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.textContent = ev.body ? `${ev.title}\n${ev.body}` : ev.title;
+    card.append(head, body);
+
+    if (ev.output) {
+      const lbl = document.createElement('div');
+      lbl.className = 'out-label';
+      lbl.textContent = 'METADATA';
+      const out = document.createElement('pre');
+      out.className = 'code output';
+      out.textContent = ev.output;
+      card.append(lbl, out);
+    }
+    card.addEventListener('click', () => {
+      followTail = false;
+      centerDisp = realToDisp(ev.t);
+      render();
+    });
+    frag.appendChild(card);
+    return card;
+  });
+  dom.detail.replaceChildren(frag);
+  activeIdx = -1;
+}
+
+function setActiveCard(i) {
+  if (i === activeIdx) return;
+  if (activeIdx >= 0 && cardEls[activeIdx]) cardEls[activeIdx].classList.remove('active');
+  if (cardEls[i]) cardEls[i].classList.add('active');
+  activeIdx = i;
+}
+
+let syncingDetail = false;
+function syncDetailToPlayhead() {
+  if (!cardEls.length) return;
+  const i = nearestIdx(dispToReal(centerDisp));
+  if (i < 0) return;
+  setActiveCard(i);
+  const el = cardEls[i];
+  const r = el.getBoundingClientRect();
+  const dr = dom.detail.getBoundingClientRect();
+  syncingDetail = true;
+  dom.detail.scrollTop += (r.top + r.height / 2) - (dr.top + dr.height / 2);
+  setTimeout(() => (syncingDetail = false), 80);
+}
+
+// 详情 → 时间轴 反向同步
+let scrollRaf = 0;
+dom.detail.addEventListener('scroll', () => {
+  if (syncingDetail || !S || !S.events.length || scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    const dr = dom.detail.getBoundingClientRect();
+    const mid = dr.top + dr.height / 2;
+    let best = null, bd = Infinity;
+    for (const card of dom.detail.querySelectorAll('.card:not(.hidden)')) {
+      const r = card.getBoundingClientRect();
+      const d = Math.abs(r.top + r.height / 2 - mid);
+      if (d < bd) { bd = d; best = card; }
+    }
+    if (!best) return;
+    const t = +best.dataset.t;
+    if (!Number.isNaN(t)) {
+      followTail = false;
+      centerDisp = realToDisp(t);
+      setActiveCard(+best.dataset.idx);
+      render(false);
+    }
+  });
+});
+
+// ---------- 渲染 ----------
+function renderSelection() {
+  dom.world.querySelectorAll('.blk.selected').forEach((n) => n.classList.remove('selected'));
+  if (selectedId) {
+    const el = dom.world.querySelector(`[data-eid="${selectedId}"]`);
+    if (el) el.classList.add('selected');
+  }
+}
+
+let raf = 0;
+let wantDetail = true;
+function render(withDetail = true) {
+  wantDetail = wantDetail || withDetail;
+  if (raf || !S) return;
+  raf = requestAnimationFrame(() => {
+    raf = 0;
+    const doDetail = wantDetail;
+    wantDetail = false;
+    spanMs = clamp(spanMs, MIN_SPAN, Math.max(total, MIN_SPAN));
+    centerDisp = clamp(centerDisp, 0, total);
+    layout();
+    applyPan();
+    if (doDetail) syncDetailToPlayhead();
+    renderSelection();
+    dom.clock.textContent = fmtClock(dispToReal(centerDisp));
+    dom.spanLabel.textContent = fmtSpan(spanMs);
+    dom.slider.value = String(Math.round(spanToSlider(spanMs)));
   });
 }
 
-function overview(key) {
-  return number(state.overview[key]);
+function spanToSlider(span) {
+  const t = (Math.log(span) - Math.log(MIN_SPAN)) / (Math.log(Math.max(total, MIN_SPAN + 1)) - Math.log(MIN_SPAN));
+  return (1 - clamp(t, 0, 1)) * 1000;
+}
+function sliderToSpan(v) {
+  const t = 1 - v / 1000;
+  return Math.exp(Math.log(MIN_SPAN) + t * (Math.log(Math.max(total, MIN_SPAN + 1)) - Math.log(MIN_SPAN)));
 }
 
-function serviceDisplay(offline = false) {
-  if (offline) {
-    dom.service.dataset.state = 'offline';
-    dom.serviceText.textContent = '连接异常';
-    dom.current.textContent = '无法连接 daemon';
-    dom.subscriber.textContent = '订阅 未知';
-    return;
+function updateCounts() {
+  if (!S) return;
+  const ignored = S.events.length - visibleIdx.length;
+  dom.counts.textContent = [
+    `${S.events.length} 条事件`,
+    S.gaps.length ? `折叠 ${S.gaps.length} 段空白` : null,
+    ignored ? `已忽略 ${ignored}` : null,
+  ].filter(Boolean).join(' · ');
+}
+
+// ---------- 模型装配（支持轮询增量下的视图保持） ----------
+function setModel(model, { preserve }) {
+  S = model;
+  tmap = buildTimeMap(S.meta.startMs, S.meta.endMs, S.gaps);
+  total = tmap.totalDisp;
+  DEFAULT_SPAN = Math.min(total, 10 * 60 * 1000);
+  if (!preserve) {
+    spanMs = DEFAULT_SPAN;
+    centerDisp = total; // 初次进入跟随最新
+    followTail = true;
+  } else if (followTail) {
+    centerDisp = total;
   }
-  const subscriber = state.service.subscriber === 'running';
-  const mode = state.service.ready && subscriber ? 'ready' : subscriber ? 'starting' : 'offline';
-  dom.service.dataset.state = mode;
-  dom.serviceText.textContent = mode === 'ready' ? '正在监听' : mode === 'starting' ? '正在启动' : '订阅已停止';
-  if (mode === 'offline') dom.current.textContent = '订阅已停止';
-  dom.subscriber.textContent = subscriber ? '订阅 运行中' : '订阅 已停止';
-  dom.queue.textContent = `队列 ${overview('queued')}`;
-  const seconds = number(state.service.uptimeSeconds);
-  dom.uptime.textContent = seconds < 3600
-    ? `运行 ${Math.floor(seconds / 60)}m`
-    : `运行 ${Math.floor(seconds / 3600)}h`;
-  dom.updated.textContent = '刚刚';
-  dom.updated.dateTime = new Date(state.fetchedAt).toISOString();
-  dom.updated.title = exact(state.fetchedAt);
-}
-
-async function request(before) {
-  const url = new URL(API, location.origin);
-  url.searchParams.set('instance', state.instance);
-  url.searchParams.set('limit', LIMIT);
-  if (before) url.searchParams.set('before', before);
-  const response = await fetch(url, {
-    headers: { accept: 'application/json' },
-    cache: 'no-store',
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const payload = await response.json();
-  if (!Array.isArray(payload.activities)) throw new Error('活动接口格式不正确');
-  return { ...payload, activities: payload.activities.map(activity).filter(Boolean) };
-}
-
-async function loadInstances() {
-  const response = await fetch(INSTANCES_API, {
-    headers: { accept: 'application/json' },
-    cache: 'no-store',
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const payload = await response.json();
-  if (!Array.isArray(payload.instances) || payload.instances.length === 0) {
-    throw new Error('实例接口格式不正确');
-  }
-  const instances = payload.instances.filter((instance) => (
-    instance
-    && typeof instance.id === 'string'
-    && typeof instance.label === 'string'
-  ));
-  if (instances.length !== payload.instances.length) throw new Error('实例接口格式不正确');
-
-  const requested = new URL(location.href).searchParams.get('instance');
-  const selected = instances.find((instance) => instance.id === requested)
-    || instances.find((instance) => instance.id === payload.defaultInstance)
-    || instances[0];
-  dom.instance.replaceChildren();
-  for (const instance of instances) {
-    const option = document.createElement('option');
-    option.value = instance.id;
-    option.textContent = instance.label;
-    dom.instance.append(option);
-  }
-  dom.instance.disabled = instances.length < 2;
-  dom.instance.value = selected.id;
-  state.instance = selected.id;
-  state.instanceLabel = selected.label;
-  document.title = `${selected.label} Activity`;
-}
-
-function resetForInstance(instance) {
-  state.instance = instance.id;
-  state.instanceLabel = instance.label;
-  state.instanceGeneration += 1;
-  state.rows.clear();
-  state.service = {};
-  state.overview = {};
-  state.nextCursor = null;
-  state.initialized = false;
-  state.loading = false;
-  state.loadingOlder = false;
-  state.fetchedAt = 0;
-  document.title = `${instance.label} Activity`;
-  const url = new URL(location.href);
-  url.searchParams.set('instance', instance.id);
-  history.replaceState(null, '', url);
+  buildTimeline();
+  buildDetail();
+  rebuildVisible();
+  applyIgnoreStateShallow();
+  document.body.classList.add('loaded');
+  updateCounts();
+  dom.crumb.textContent = `${S.events.length} 条 · ${fmtSpan(S.meta.endMs - S.meta.startMs)}`;
   render();
 }
 
-function applyPayload(payload) {
-  state.service = payload.service || {};
-  state.overview = payload.overview || {};
-  state.fetchedAt = Date.now();
-  dom.notice.hidden = true;
-  serviceDisplay();
+// 轮询重建后恢复忽略样式（不触发再次 render 循环）
+function applyIgnoreStateShallow() {
+  for (const el of blockById.values()) {
+    if (el._ev && isIgnored(el._ev)) el.classList.add('ignored');
+  }
+  cardEls.forEach((card, j) => {
+    if (isIgnored(S.events[j])) card.classList.add('hidden');
+  });
+  for (const [key, g] of gutterByTrack) g.classList.toggle('ignored', ignoredTracks.has(key));
 }
 
-async function refresh(initial = false) {
-  if (state.loading || document.hidden) return;
-  state.loading = true;
-  const generation = state.instanceGeneration;
+// ---------- 数据层 ----------
+function activityUrl() {
+  const url = new URL(ACTIVITY_API, window.location.origin);
+  url.searchParams.set('limit', String(PAGE_LIMIT));
+  if (state.instance) url.searchParams.set('instance', state.instance);
+  return url;
+}
+
+async function fetchPage(before) {
+  const url = activityUrl();
+  if (before != null) url.searchParams.set('before', String(before));
+  const res = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function mergeRows(list) {
+  let added = 0;
+  for (const row of list || []) {
+    if (!state.rows.has(row.id)) { state.rows.set(row.id, row); added++; }
+  }
+  if (state.rows.size > MAX_ROWS) {
+    const sorted = [...state.rows.keys()].sort((a, b) => a - b);
+    for (let i = 0; i < sorted.length - MAX_ROWS; i++) state.rows.delete(sorted[i]);
+  }
+  return added;
+}
+
+function rebuildFromRows(preserve) {
+  const rows = [...state.rows.values()].sort((a, b) => a.createdAtMs - b.createdAtMs);
+  setModel(buildModel(rows), { preserve });
+}
+
+function updateService(service) {
+  if (!service) return;
+  state.service = service;
+  const ok = service.ready;
+  dom.status.classList.toggle('ok', Boolean(ok));
+  dom.status.classList.toggle('bad', !ok);
+  dom.statusText.textContent = ok
+    ? `就绪 · 订阅 ${service.subscriber || '—'} · 运行 ${fmtDur((service.uptimeSeconds || 0) * 1000)}`
+    : '服务未就绪';
+}
+
+async function refreshLatest() {
   try {
-    const payload = await request();
-    if (generation !== state.instanceGeneration) return;
-    applyPayload(payload);
-    let changed = initial;
-    for (const row of payload.activities) {
-      const previous = state.rows.get(row.id);
-      if (!previous || JSON.stringify(previous) !== JSON.stringify(row)) changed = true;
-      state.rows.set(row.id, row);
-    }
-    if (!state.initialized) state.nextCursor = payload.nextCursor || null;
-    state.initialized = true;
-    if (changed) render();
+    const data = await fetchPage(null);
+    dom.notice.hidden = true;
+    updateService(data.service);
+    state.nextCursor = data.nextCursor ?? state.nextCursor;
+    const added = mergeRows(data.activities);
+    if (!S && state.rows.size) rebuildFromRows(false);
+    else if (added > 0) rebuildFromRows(true);
+    dom.loadOlder.hidden = !state.nextCursor;
   } catch (error) {
-    if (generation !== state.instanceGeneration) return;
-    dom.notice.textContent = `页面暂时连不上 lark-daemon：${error.message}`;
+    dom.status.classList.add('bad');
+    dom.statusText.textContent = '连接失败';
     dom.notice.hidden = false;
-    serviceDisplay(true);
-    state.initialized = true;
-    render();
-  } finally {
-    if (generation === state.instanceGeneration) state.loading = false;
+    dom.notice.textContent = `无法连接 daemon：${error.message}`;
   }
 }
 
 async function loadOlder() {
-  if (!state.nextCursor || state.loadingOlder) return;
-  state.loadingOlder = true;
+  if (state.nextCursor == null) return;
   dom.loadOlder.disabled = true;
-  dom.loadOlder.textContent = '正在加载…';
   try {
-    const payload = await request(state.nextCursor);
-    applyPayload(payload);
-    for (const row of payload.activities) state.rows.set(row.id, row);
-    state.nextCursor = payload.nextCursor || null;
-    render();
+    const data = await fetchPage(state.nextCursor);
+    state.nextCursor = data.nextCursor ?? null;
+    const added = mergeRows(data.activities);
+    if (added > 0) {
+      followTail = false;
+      rebuildFromRows(true);
+    }
   } catch (error) {
-    dom.notice.textContent = `加载失败：${error.message}`;
     dom.notice.hidden = false;
+    dom.notice.textContent = `加载更早失败：${error.message}`;
   } finally {
-    state.loadingOlder = false;
+    dom.loadOlder.hidden = state.nextCursor == null;
     dom.loadOlder.disabled = false;
-    dom.loadOlder.textContent = '加载更早';
   }
 }
 
-function selectFilter(value) {
-  state.filter = value;
-  dom.filters.querySelectorAll('[data-filter]').forEach((button) => {
-    button.setAttribute('aria-pressed', String(button.dataset.filter === value));
-  });
-  render();
+function startPolling() {
+  clearInterval(state.timer);
+  state.timer = setInterval(refreshLatest, POLL_MS);
 }
 
-dom.filters.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-filter]');
-  if (button) selectFilter(button.dataset.filter);
-});
-dom.search.addEventListener('input', () => {
-  state.query = dom.search.value.trim().toLocaleLowerCase();
-  render();
-});
-dom.privacy.addEventListener('click', () => {
-  state.hideText = !state.hideText;
-  dom.privacy.setAttribute('aria-pressed', String(state.hideText));
-  dom.privacy.textContent = state.hideText ? '显示正文' : '隐藏正文';
-  render();
-});
-dom.loadOlder.addEventListener('click', loadOlder);
-dom.instance.addEventListener('change', () => {
-  const option = dom.instance.selectedOptions[0];
-  if (!option || option.value === state.instance) return;
-  resetForInstance({ id: option.value, label: option.textContent });
-  refresh(true);
-});
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) refresh();
-});
-setInterval(() => {
-  if (!document.hidden) refresh();
-}, 5_000);
-
-async function initialize() {
+// ---------- 实例切换 ----------
+async function loadInstances() {
   try {
-    await loadInstances();
-    await refresh(true);
-  } catch (error) {
-    dom.notice.textContent = `页面暂时无法读取 Agent 列表：${error.message}`;
-    dom.notice.hidden = false;
-    serviceDisplay(true);
+    const data = await (await fetch(INSTANCES_API, { headers: { accept: 'application/json' } })).json();
+    dom.instance.replaceChildren();
+    for (const inst of data.instances) {
+      const opt = document.createElement('option');
+      opt.value = inst.id;
+      opt.textContent = inst.label;
+      dom.instance.appendChild(opt);
+    }
+    const fromUrl = new URL(window.location.href).searchParams.get('instance');
+    state.instance = data.instances.some((i) => i.id === fromUrl) ? fromUrl : data.defaultInstance;
+    dom.instance.value = state.instance;
+    dom.instance.disabled = false;
+  } catch {
+    dom.statusText.textContent = '实例列表读取失败';
   }
 }
 
-initialize();
+dom.instance.addEventListener('change', () => {
+  state.instance = dom.instance.value;
+  state.rows.clear();
+  state.nextCursor = null;
+  S = null;
+  ignoredIds = new Set();
+  ignoredTracks = new Set();
+  selectedId = null;
+  const url = new URL(window.location.href);
+  url.searchParams.set('instance', state.instance);
+  history.replaceState(null, '', url);
+  refreshLatest();
+});
+
+// ---------- 交互：平移 / 缩放 ----------
+let dragging = false, dragMoved = false, dragX = 0;
+dom.viewport.addEventListener('pointerdown', (e) => {
+  dragging = true; dragMoved = false; dragX = e.clientX;
+  dom.viewport.classList.add('dragging');
+  dom.viewport.setPointerCapture(e.pointerId);
+});
+dom.viewport.addEventListener('pointermove', (e) => {
+  if (!dragging || !S) return;
+  const dx = e.clientX - dragX;
+  if (Math.abs(dx) > 3) { dragMoved = true; followTail = false; }
+  dragX = e.clientX;
+  centerDisp -= dx / pxPerMs();
+  render();
+});
+const endDrag = () => {
+  dragging = false;
+  dom.viewport.classList.remove('dragging');
+  setTimeout(() => (dragMoved = false), 0);
+};
+dom.viewport.addEventListener('pointerup', endDrag);
+dom.viewport.addEventListener('pointercancel', endDrag);
+
+dom.viewport.addEventListener('wheel', (e) => {
+  if (!S) return;
+  e.preventDefault();
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) { centerDisp += e.deltaX / pxPerMs(); followTail = false; }
+  else spanMs *= Math.pow(1.0018, e.deltaY);
+  render();
+}, { passive: false });
+
+document.getElementById('z-in').addEventListener('click', () => { spanMs /= 1.6; render(); });
+document.getElementById('z-out').addEventListener('click', () => { spanMs *= 1.6; render(); });
+document.getElementById('z-def').addEventListener('click', () => { spanMs = DEFAULT_SPAN; render(); });
+document.getElementById('z-fit').addEventListener('click', () => {
+  if (S) { spanMs = total; centerDisp = total / 2; followTail = false; render(); }
+});
+dom.slider.addEventListener('input', () => { spanMs = sliderToSpan(+dom.slider.value); render(); });
+
+window.addEventListener('keydown', (e) => {
+  if (!S || e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if (e.key === '+' || e.key === '=') { spanMs /= 1.6; render(); }
+  else if (e.key === '-') { spanMs *= 1.6; render(); }
+  else if (e.key === '0') { spanMs = DEFAULT_SPAN; render(); }
+  else if (e.key === '9') { spanMs = total; centerDisp = total / 2; followTail = false; render(); }
+  else if (e.key === 'ArrowLeft') { centerDisp -= spanMs * 0.08; followTail = false; render(); }
+  else if (e.key === 'ArrowRight') { centerDisp += spanMs * 0.08; render(); }
+  else if (e.key === 'i') {
+    const i = nearestIdx(dispToReal(centerDisp));
+    if (i >= 0) toggleIgnoreEvent(S.events[i].id);
+  }
+});
+
+window.addEventListener('resize', () => render());
+
+// ---------- 分隔条 ----------
+{
+  let on = false, y0 = 0, h0 = 0;
+  dom.divider.addEventListener('pointerdown', (e) => {
+    on = true; y0 = e.clientY; h0 = dom.timeline.offsetHeight;
+    dom.divider.setPointerCapture(e.pointerId);
+  });
+  dom.divider.addEventListener('pointermove', (e) => {
+    if (!on) return;
+    dom.timeline.style.flexBasis = clamp(h0 + (y0 - e.clientY), 140, window.innerHeight - 200) + 'px';
+    render();
+  });
+  dom.divider.addEventListener('pointerup', () => (on = false));
+}
+
+// ---------- 隐私开关 ----------
+dom.privacy.addEventListener('click', () => {
+  const on = document.body.classList.toggle('privacy');
+  dom.privacy.setAttribute('aria-pressed', String(on));
+  dom.privacy.textContent = on ? '显示正文' : '隐藏正文';
+});
+
+// ---------- 加载更早 ----------
+dom.loadOlder.addEventListener('click', loadOlder);
+
+// ---------- 启动 ----------
+(async () => {
+  await loadInstances();
+  await refreshLatest();
+  startPolling();
+})();
