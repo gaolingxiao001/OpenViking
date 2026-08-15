@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
+import { loadSystemPrompt } from './config.mjs';
 import { redactSensitive } from './logger.mjs';
 import {
   MANAGED_TOOL_MAX_CALLS,
@@ -29,6 +30,23 @@ function volcConversationPolicy(agentName) {
     'When to reply: in a one-on-one chat, reply to a real question, request, correction, or substantive continuation; for a bare greeting or presence check, a short acknowledgement is enough and you should not answer at length. Stay silent for a bare acknowledgement, emoji, thanks, or a message with no open question.',
     `In a group chat, no @ mention is required. Reply only if you are clearly being asked or expected to continue, there is an unresolved question you can concretely answer, you hold context needed to unblock something, or a high-impact error needs correcting. Treat a message that directly names "${agentName}" (case-insensitive) as an intentional invocation even without @. Stay silent when people are talking to each other, someone else already answered, or your reply would only repeat or agree with no new information. When unsure in a group, prefer silence.`,
   ].join(' ');
+}
+
+// The Ark agent template's own system field carries a separately maintained
+// copy of the persona (edited by hand in the Volc console), which can drift
+// from the canonical one in system-prompt.md that Claude/Codex always use
+// verbatim. Pull the same "## Persona and voice" section from that file so
+// MA gets the current source of truth instead of a stale duplicate.
+function personaSection(config) {
+  try {
+    const prompt = loadSystemPrompt(config);
+    const marker = '## Persona and voice';
+    const index = prompt.indexOf(marker);
+    if (index < 0) return '';
+    return prompt.slice(index).trim();
+  } catch {
+    return '';
+  }
 }
 const LEGACY_VOLC_TRANSPORT_POLICY = [
   'lark-daemon transport contract:',
@@ -117,9 +135,12 @@ export class VolcAgent {
     this.toolDefinitions = Array.isArray(options.toolDefinitions) ? options.toolDefinitions : [];
     this.toolBridgeEnabled = typeof this.onToolCall === 'function' && this.toolDefinitions.length > 0;
     this.agentName = config.agentName || 'the bot';
-    this.transportPolicy = `${volcConversationPolicy(this.agentName)} ${
-      this.toolBridgeEnabled ? managedToolPolicy(this.toolDefinitions) : LEGACY_VOLC_TRANSPORT_POLICY
-    }`;
+    const persona = personaSection(config);
+    this.transportPolicy = [
+      volcConversationPolicy(this.agentName),
+      this.toolBridgeEnabled ? managedToolPolicy(this.toolDefinitions) : LEGACY_VOLC_TRANSPORT_POLICY,
+      persona,
+    ].filter(Boolean).join(' ');
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
 

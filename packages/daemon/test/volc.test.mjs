@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { VolcAgent } from '../src/volc.mjs';
 
@@ -857,6 +860,49 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(agent.turnActive, false);
     assert.equal(succeeded, 1);
     assert.deepEqual(outputs, ['right']);
+  });
+
+  it('pulls the canonical persona from system-prompt.md instead of relying on a separately maintained copy', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-volc-persona-'));
+    const promptPath = path.join(directory, 'system-prompt.md');
+    fs.writeFileSync(promptPath, [
+      '# Lark conversation policy',
+      '',
+      '## Message format',
+      '',
+      'irrelevant filler the Volc policy already covers on its own.',
+      '',
+      '## Persona and voice',
+      '',
+      'CANONICAL_PERSONA_MARKER: friendly and terse.',
+    ].join('\n'));
+    try {
+      const agent = new VolcAgent(
+        config({ systemPromptPath: promptPath, agentName: 'Zayn' }),
+        store(),
+        quietLogger,
+        { fetch: async () => json({}) },
+      );
+      assert.match(agent.transportPolicy, /## Persona and voice/);
+      assert.match(agent.transportPolicy, /CANONICAL_PERSONA_MARKER/);
+      // Only the persona section is pulled in, not the whole file (that
+      // would duplicate the message-format/reply rules already composed
+      // above it).
+      assert.doesNotMatch(agent.transportPolicy, /irrelevant filler/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades gracefully when system-prompt.md is unavailable, without breaking the rest of the policy', () => {
+    const agent = new VolcAgent(
+      config({ systemPromptPath: '/no/such/file/system-prompt.md' }),
+      store(),
+      quietLogger,
+      { fetch: async () => json({}) },
+    );
+    assert.match(agent.transportPolicy, /Lark conversation format/);
+    assert.doesNotMatch(agent.transportPolicy, /## Persona and voice/);
   });
 
   it('does not abort the stream when session-lifecycle events arrive before the user.message fence', () => {
