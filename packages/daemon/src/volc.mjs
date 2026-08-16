@@ -649,21 +649,19 @@ export class VolcAgent {
           try {
             postAttempted = true;
             const t2 = Date.now();
-            // system.message must precede user.message in the batch (also
-            // keeps the prompt's stable prefix in the same position across
-            // turns for KV-cache reuse), or it lands ordered after the
-            // message it's meant to govern.
-            const events = [];
-            if (!this.transportPolicyInjected) {
-              events.push({
-                type: 'system.message',
-                content: [{ type: 'text', text: this.transportPolicy }],
-              });
-            }
-            events.push({
+            // "system.message" is not a valid event type on this API: a
+            // fresh session posting only a system.message event gets back
+            // 400 InvalidPayload every time (verified directly against the
+            // Ark Sessions API outside the daemon on 2026-08-16, session
+            // sesn-20260816023728-k8fz5 and others). Fold the policy into
+            // the user.message text itself instead.
+            const messageText = this.transportPolicyInjected
+              ? prepared.body
+              : `${this.transportPolicy}\n\n${prepared.body}`;
+            const events = [{
               type: 'user.message',
-              content: [{ type: 'text', text: prepared.body }],
-            });
+              content: [{ type: 'text', text: messageText }],
+            }];
             posted = await this._postEvents(events);
             this.logger.info('volc_turn_timing', { stage: 'post_user_message', elapsedMs: Date.now() - t2 });
           } catch (error) {
