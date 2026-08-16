@@ -569,6 +569,56 @@ describe('Lark proactive IM tool service', () => {
     assert.equal(memberCalls, 1);
   });
 
+  it('substitutes an inline "@Name" occurrence in place instead of only prefixing every mention', async () => {
+    const calls = [];
+    const service = new LarkToolService(options(), async (_command, args) => {
+      calls.push(args);
+      if (args.includes('+chat-members-list')) {
+        return ok({
+          users: [
+            { name: 'Zayn', open_id: 'ou_zayn12345678' },
+            { name: '张 三', open_id: 'ou_zhang1234567' },
+          ],
+          bots: [],
+        });
+      }
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    const sent = await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      markdown: '#1 @Zayn owns this\n\n#2 @张_三 owns that',
+      mention_names: ['Zayn', '张_三'],
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    // The outbound mention_user_ids field is unaffected: both are still real
+    // Lark mentions on the message, just placed where the text put them.
+    assert.deepEqual(sent.mention_user_ids, ['ou_zayn12345678', 'ou_zhang1234567']);
+    const sendArgs = calls.find((args) => args.includes('+messages-send'));
+    const rendered = sendArgs[sendArgs.indexOf('--markdown') + 1];
+    assert.equal(
+      rendered,
+      '#1 <at user_id="ou_zayn12345678"></at> owns this\n\n#2 <at user_id="ou_zhang1234567"></at> owns that',
+    );
+    // No leftover ids to prefix, since every resolved name was referenced inline.
+    assert.ok(!rendered.startsWith('<at'));
+  });
+
+  it('still prefixes a resolved mention that the text never references inline', async () => {
+    const service = new LarkToolService(options(), async (_command, args) => {
+      if (args.includes('+chat-members-list')) {
+        return ok({ users: [{ name: 'Zayn', open_id: 'ou_zayn12345678' }], bots: [] });
+      }
+      return ok({ message_id: 'om_sent12345678' });
+    });
+    const sent = await service.sendMessage({
+      chat_id: 'oc_memorize123456',
+      text: 'no inline mention of that person here',
+      mention_names: ['Zayn'],
+      decision_message_id: DECISION_MESSAGE_ID,
+    });
+    assert.deepEqual(sent.mention_user_ids, ['ou_zayn12345678']);
+  });
+
   it('resolves reply mention_names via the target chat and rejects unknown chats', async () => {
     const service = new LarkToolService(
       options({ dryRun: true, chatLookup: (messageId) => (messageId === 'om_target1234567' ? 'oc_memorize123456' : null) }),

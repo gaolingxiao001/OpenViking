@@ -73,10 +73,25 @@ function mergeMentionIds(mentionUserIds, resolvedIds) {
   return merged;
 }
 
-function renderMessageText(value, mentionUserIds) {
-  const text = typeof value === 'string' ? neutralizeMassMention(value.trim()) : '';
+// A caller that writes "@Name" inline (next to the specific item that person
+// owns) gets that occurrence replaced with a real mention in place; any
+// resolved id never referenced inline still gets prefixed as one block, so a
+// mention_names entry never silently disappears just because the text didn't
+// happen to repeat the name verbatim.
+function renderMessageText(value, mentionUserIds, mentionPairs = []) {
+  let text = typeof value === 'string' ? neutralizeMassMention(value.trim()) : '';
   if (!text) throw new Error('text must not be empty');
-  const prefix = mentionUserIds.map((id) => `<at user_id="${id}"></at>`).join(' ');
+  const usedInline = new Set();
+  const byNameLengthDesc = [...mentionPairs].sort((a, b) => b.name.length - a.name.length);
+  for (const { name, id } of byNameLengthDesc) {
+    const token = `@${name}`;
+    if (text.includes(token)) {
+      text = text.split(token).join(`<at user_id="${id}"></at>`);
+      usedInline.add(id);
+    }
+  }
+  const remaining = mentionUserIds.filter((id) => !usedInline.has(id));
+  const prefix = remaining.map((id) => `<at user_id="${id}"></at>`).join(' ');
   return prefix ? `${prefix} ${text}` : text;
 }
 
@@ -813,15 +828,20 @@ export class LarkToolService {
     return null;
   }
 
+  // Returns both the flat id list (for the outbound mention_user_ids field)
+  // and the name/id pairs behind any mention_names entry (so renderMessageText
+  // can substitute a matching "@Name" occurrence in place instead of only
+  // being able to prefix every id as one block).
   async _resolveMentions(input, chatId) {
     const mentionUserIds = normalizeMentionUserIds(input.mention_user_ids);
     const mentionNames = normalizeMentionNames(input.mention_names);
-    if (mentionNames.length === 0) return mentionUserIds;
+    if (mentionNames.length === 0) return { ids: mentionUserIds, pairs: [] };
     if (!chatId) {
       throw new Error('mention_names could not be resolved: the target chat is unknown; use mention_user_ids with full ou_ IDs from trusted metadata');
     }
-    const resolved = await this.roster.resolveNames(chatId, mentionNames);
-    return mergeMentionIds(mentionUserIds, resolved);
+    const pairs = await this.roster.resolveNames(chatId, mentionNames);
+    const ids = mergeMentionIds(mentionUserIds, pairs.map((pair) => pair.id));
+    return { ids, pairs };
   }
 
   async close() {
@@ -1039,6 +1059,7 @@ export class LarkToolService {
     }
 
     let mentionUserIds;
+    let mentionPairs = [];
     let body;
     let fresh = null;
     let responseToMessageId = null;
@@ -1063,10 +1084,10 @@ export class LarkToolService {
         throw new Error('decision_capability plain text must not contain Lark <at> mention tags');
       }
     } else {
-      mentionUserIds = await this._resolveMentions(input, chatId);
+      ({ ids: mentionUserIds, pairs: mentionPairs } = await this._resolveMentions(input, chatId));
       body = resolveMessageBody(input);
     }
-    const text = renderMessageText(body.raw, mentionUserIds);
+    const text = renderMessageText(body.raw, mentionUserIds, mentionPairs);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }
@@ -1161,12 +1182,12 @@ export class LarkToolService {
     const messageId = typeof input.message_id === 'string' ? input.message_id.trim() : '';
     const replyInThread = input.reply_in_thread === true;
     if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId)) throw new Error('message_id must be a full om_ Lark message ID');
-    const mentionUserIds = await this._resolveMentions(
+    const { ids: mentionUserIds, pairs: mentionPairs } = await this._resolveMentions(
       input,
       this._chatIdForMessage(messageId, input.decision_message_id),
     );
     const body = resolveMessageBody(input);
-    const text = renderMessageText(body.raw, mentionUserIds);
+    const text = renderMessageText(body.raw, mentionUserIds, mentionPairs);
     if (text.length > this.options.maxTextChars) {
       throw new Error(`text exceeds the ${this.options.maxTextChars}-character limit`);
     }

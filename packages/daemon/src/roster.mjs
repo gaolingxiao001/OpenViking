@@ -161,7 +161,11 @@ export class ChatRoster {
       const candidates = ambiguous.matches.map((member) => `${member.name} (${member.id})`).join(', ');
       throw new Error(`mention_names entry "${ambiguous.name}" is ambiguous in this chat; candidates: ${candidates}. Use mention_user_ids with the intended open_id.`);
     }
-    return [...new Set(results.map((result) => result.matches[0].id))];
+    // Pair each requested name with its resolved id (not deduplicated to ids
+    // alone) so callers can substitute an inline "@Name" occurrence in the
+    // message text with that specific person's mention, rather than only
+    // being able to prefix every resolved id as one block up front.
+    return results.map((result) => ({ name: result.name, id: result.matches[0].id }));
   }
 }
 
