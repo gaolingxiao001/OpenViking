@@ -127,6 +127,12 @@ lark-daemon upgrade all
 
 daemon 和 slash commands 只通过 `AgentRuntime` 的 `start`、`submit`、`snapshot`、`transition`、`stop` 接口控制模型。`runtime-catalog` 统一 model alias、effort 与 capability；`runtime-adapter` 把 Codex、Claude、Ark 的 transport lifecycle 归一；`runtime-input` 生成认证过的输入 envelope；`runtime-output` 为云端 runtime 执行本地工具，并在副作用前做 authority/freshness/journal 校验。具体 Adapter 只保留协议差异：Codex JSON-RPC、Claude stream-json、Ark Sessions/SSE。`submit` 返回 `accepted: false` 时 caller 仍持有整批消息；返回 `accepted: true` 后 ownership 才交给 runtime。
 
+### MCP 与 CLI 的取舍
+
+当前继续使用 MCP，不另外分发 Agent 专用 CLI。这层 MCP 已经承担了 CLI wrapper 的工作：它收窄工具面、校验参数，并统一进入 `LarkToolService` 的 authority、freshness 和幂等链路。Codex/Claude 可以直接挂 stdio MCP；Ark 暂时由 daemon 通过 JSON bridge 调用同一 MCP handler。这样少一个需要打包、分发和升级的 CLI，现阶段更简单。
+
+等 Managed Agent 支持客户自有 Environment 后，可以重新评估 Ark 的工具入口：把同一组窄工具包装成 CLI，分发到客户 Environment 内，由 Ark 直接调用。这只是替换模型侧的调用协议；CLI 仍应复用现有工具语义，不应绕过 authority/freshness/journal 校验。Codex/Claude 的 stdio MCP 可以独立保留。
+
 ## 可靠性边界
 
 - 消息先写 SQLite（状态直接 DONE），再喂给当前常驻 runtime。Codex 用 `turn/start` / `turn/steer`，Claude 用 persistent stream-json input，火山方舟用 session events + SSE，并在断线后以 event history + event id 去重补洞。Ark 会持久化本轮 `user.message` fence；daemon 重启后从远端历史恢复已接受的 turn，不会重复 POST。若 POST 是否被接受无法证明，旧 session 会被持久化隔离，克隆新 session 并原子轮换 epoch/authority 后才恢复队列，避免迟到输出串到下一条消息。
@@ -135,6 +141,7 @@ daemon 和 slash commands 只通过 `AgentRuntime` 的 `start`、`submit`、`sna
 - SQLite 只保留一个 active runtime/session。跨 runtime journal 记录 accepted inbound、Lark outbound/control 与 uncertain side effect；它不保存隐藏思考。journal 超过上限时 switch fail closed，先 `/new` 再切。
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
 - Codex/Claude 通过 MCP 工具执行飞书动作；云端 Ark 无法访问本机 stdio MCP，所以 daemon 把允许的工具 schema 与严格 `lark-daemon-tools/v1` JSON 协议注入 system policy。Ark 返回 `tool_call` 或 `finish:silent` 决策，daemon 校验完整 JSON/schema、在进程内调用同一个 MCP handler，并把只读结果作为下一 remote subturn 的受限 `tool_result` 送回；成功的 send/reply/reaction/retract 直接结束逻辑 turn，不再自动发送 `agent.message` 文本。工具结果和调用计数会随 managed-turn fence 持久化，重启可继续已生成的结果而不重跑只读工具；无法证明 POST acceptance 时仍隔离旧 session。两条路径都在副作用前校验 active-runtime token/session/epoch 和 freshness，并先写 PENDING journal；成功后 COMMITTED，timeout/crash 保留为 UNCERTAIN。副作用重放遇到 COMMITTED/UNCERTAIN 会 fail closed，不重复发送。Ark 不会把不同 chat/thread 合进同一个远端逻辑 turn，避免工具结果或投递跨会话泄漏。runtime token 是本机单用户进程内的 fencing nonce，不是远程凭证；能读取 daemon SQLite 或进程配置的本机用户，本来就已处于 daemon 的信任边界内。
+- Ark 的多工具循环是 daemon 拼出的逻辑 turn，不是一次 Ark 原生 turn。每个 `agent.message` 只能放一个 plain-text JSON `tool_call`；等远端 `end_turn` 后 daemon 才执行工具，再把只读 `tool_result` POST 回去，开启下一个 remote subturn。同一逻辑 turn 最多可串行 8 次工具调用，但一次远端 response 里不能批量或并行发出多个原生 tool call。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。
 - Activity 账本保留脱敏后的短摘要（含收消息、turn 开始/结束、steer、agent 输出）；老记录由网页折叠，不因业务表的清理而消失。
 - 单个 turn 没有总时长 watchdog；Codex/Claude 若长时间不结束一轮，该轮会一直 active。Ark 的 SSE 单次空闲超时默认 15 分钟，随后自动重连并从历史补偿。
