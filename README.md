@@ -1,8 +1,8 @@
 # lark-daemon
 
-一个单用户、本机常驻、可横向扩展的飞书 AI Agent 服务。项目拆成三个模块：`daemon` 负责飞书订阅、Codex/Claude/火山方舟 Managed Agent、SQLite 与内部 API；`web` 提供本机 Activity 页面并按 manifest 代理各实例；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
+一个单用户、本机常驻、可横向扩展的飞书 AI Agent 服务。项目拆成三个模块：`daemon` 负责飞书订阅、Codex/Claude/Pi/火山方舟 Managed Agent、SQLite 与内部 API；`web` 提供本机 Activity 页面并按 manifest 代理各实例；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
 
-daemon 是一根薄管道：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout，火山方舟使用 Sessions API + SSE；三者共享同一套带 authority/freshness fence 的飞书出站链路。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮。Codex/Claude 支持 turn 内纠正；Ark 为避免云端事件串轮，把活跃 turn 期间的新消息排到下一轮。日常使用不需要 `@`。
+daemon 是一根薄管道：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout，Pi 使用常驻 `--mode rpc` JSONL，火山方舟使用 Sessions API + SSE；它们共享同一套带 authority/freshness fence 的飞书出站链路。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮。Codex/Claude/Pi 支持 turn 内纠正；Ark 为避免云端事件串轮，把活跃 turn 期间的新消息排到下一轮。日常使用不需要 `@`。
 
 ## 安装
 
@@ -12,10 +12,11 @@ daemon 是一根薄管道：`lark-cli event +subscribe` 收到的每条消息被
 2. `lark-cli` 已安装并完成 bot 登录（权限见「飞书前置条件」；路径默认 `/opt/homebrew/bin/lark-cli`，可用 `LARK_CLI_BIN` 覆盖）。
 3. `codex` CLI 已安装并登录（默认 `/opt/homebrew/bin/codex`，可用 `CODEX_BIN` 覆盖）。
 4. 如需切到 Claude，安装并登录 `claude` CLI；路径可用 `CLAUDE_BIN` 覆盖。
-5. 如需切到火山方舟，设置 `ARK_API_KEY`，并用 `LARK_DAEMON_VOLC_SESSION_ID` 指向一个已绑定 Agent 与 Environment 的 seed session。daemon 只读取其中锁定的 Agent/Environment 配置，每个实例会创建独立的新 session，不会共同写 seed session。API key 只放进进程环境，不写入 deployment manifest。新实例可把 `agents[].model` 设为 `ark` 直接以 Ark 启动；已有实例用 `/model ark` 切换。
+5. 如需切到 Pi，安装并登录 `pi` CLI（`@earendil-works/pi-coding-agent`）；路径可用 `PI_BIN` 覆盖。daemon 以 `pi --mode rpc` 常驻，并用仓库内的 Pi extension 把同一套 Lark 工具挂进该进程。
+6. 如需切到火山方舟，设置 `ARK_API_KEY`，并用 `LARK_DAEMON_VOLC_SESSION_ID` 指向一个已绑定 Agent 与 Environment 的 seed session。daemon 只读取其中锁定的 Agent/Environment 配置，每个实例会创建独立的新 session，不会共同写 seed session。API key 只放进进程环境，不写入 deployment manifest。新实例可把 `agents[].model` 设为 `ark` 直接以 Ark 启动；已有实例用 `/model ark` 切换。
 
    **⚠️ 目前 Ark managed agent（MA）还不算 ready，2026-08-15 评估**：MA 自带的 agent sandbox 是跟本地完全隔离的远端执行环境，不是"daemon 跑在 MA 里"——daemon 只把消息 POST 过去、收 `agent.message` 文本回来，MA 自己在它自己的沙箱里跑工具。两个已知限制：(a) MA 不支持挂自定义 MCP server，只有内建工具集，理论上可以改成 CLI 触发本地脚本的方式绕过（`ant beta:worker poll --on-work <script>` 那类模式），这条可解；(b) MA 的 sandbox 本身连不到本地资源（比如这台机器的 SQLite），这是架构上的硬限制，短期内无解。真要接入本地资源，得让"需要碰本地的活"完全留在本地 daemon 侧，MA/沙箱只管纯推理。
-6. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
+7. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
 
 首次运行：
 
@@ -45,14 +46,14 @@ lark-daemon upgrade all
 
 - 所有聊天统一具有工作区写权限，可让 Codex 在配置的工作区里完成任务；因此只应把 Agent 加入你信任的聊天。
 - 所有聊天共享一个全局 runtime/session，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
-- 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn。Codex/Claude 已有 turn 时使用即时 steer；Ark 的后续消息进入下一 turn。
+- 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn。Codex/Claude/Pi 已有 turn 时使用即时 steer；Ark 的后续消息进入下一 turn。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
-- 图片、文件和音视频会以受限资源引用进入 Agent；Codex/Claude 可按消息中的 image_key 用专用工具查看图片，内容本身不会直接塞进 prompt。Ark 的字符串工具桥目前不传 MCP image content，因此不会向它暴露看图工具。未知消息类型不会触发回复。
-- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。Ark 的 model/effort 由远端 Agent 配置管理。
-- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/Claude 只有决定处理且预计是长工作时，才调用 `react_to_lark_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的进程内桥不暴露临时 reaction，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。MCP sidecar 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
+- 图片、文件和音视频会以受限资源引用进入 Agent；Codex/Claude/Pi 可按消息中的 image_key 用专用工具查看图片，内容本身不会直接塞进 prompt。Ark 的字符串工具桥目前不传 MCP image content，因此不会向它暴露看图工具。未知消息类型不会触发回复。
+- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model pi` 切到 Pi（`/model pi:provider/id` 指定模型），用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。Ark 的 model/effort 由远端 Agent 配置管理。
+- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_lark_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的进程内桥不暴露临时 reaction，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。MCP sidecar 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
-所有出站动作走同一套 Lark 工具契约：Codex/Claude 原生调用 MCP，Ark 在 `agent.message` 中返回严格 JSON 决策，由 daemon 进程内调用同一个 MCP handler。工具包括 `react_to_lark_message`（没有新增信息时用表情轻量回应；原生 MCP 在可信 `idle=` 场景下还可用 `temporary: true` 发工作中提示）、`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`retract_lark_message`（撤回机器人自己的消息）。send/reply/react 必须携带最新 authenticated `decision_message_id` 作为 freshness fence；Ark 不接触这些受保护参数，由 host 注入，撤回也在 host 边界做同样的 freshness 预检。sidecar 在执行副作用前读取 SQLite，若同一 chat/thread 已有更高序号的 accepted inbound 就 fail closed。可选的 `response_to_message_id` 只记录这次 delivery 实际完成了哪条 inbound，供 activity 归属使用，不参与消息分类、路由或回复优先级；它必须属于同一 chat/thread，且不能晚于 freshness fence。只读定位上下文用 `list_lark_chats`（解析群名）、`list_lark_chat_messages`（读单个 chat 最近消息，可 `as:"user"` 读机器人不在的会话）、`search_lark_messages`（user 身份跨会话搜索）、`list_lark_thread_messages`（按 thread 读完整话题）；user 身份读到的内容属于用户私有数据，只用于服务发起请求的用户。Ark 首版桥接不暴露非重放安全的 `read_meeting_inbox`、MCP 图片内容和临时 reaction。工具只接受完整 id；发送工具只接受纯文本和可选的可信 `mention_user_ids`，后者会生成真正的飞书 @。Codex 默认不通过 shell 调用 `lark-cli`；仅当用户明确要求、且对应可信工具尚未加载时，才按 system prompt 的 fallback 规则执行等价的单条命令（auth/config/admin 操作始终禁止）。
+所有出站动作走同一套 Lark 工具契约：Codex/Claude 原生调用 MCP，Pi 通过 daemon 拥有的 `--extension` 把同一套工具注册进 RPC 进程并调用同一个 MCP handler，Ark 在 `agent.message` 中返回严格 JSON 决策，由 daemon 进程内调用同一个 MCP handler。工具包括 `react_to_lark_message`（没有新增信息时用表情轻量回应；原生 MCP 在可信 `idle=` 场景下还可用 `temporary: true` 发工作中提示）、`reply_lark_message`（引用回复/话题）、`send_lark_message`（整聊天，含明确要求的跨 chat 主动发送）、`retract_lark_message`（撤回机器人自己的消息）。send/reply/react 必须携带最新 authenticated `decision_message_id` 作为 freshness fence；Ark 不接触这些受保护参数，由 host 注入，撤回也在 host 边界做同样的 freshness 预检。sidecar 在执行副作用前读取 SQLite，若同一 chat/thread 已有更高序号的 accepted inbound 就 fail closed。可选的 `response_to_message_id` 只记录这次 delivery 实际完成了哪条 inbound，供 activity 归属使用，不参与消息分类、路由或回复优先级；它必须属于同一 chat/thread，且不能晚于 freshness fence。只读定位上下文用 `list_lark_chats`（解析群名）、`list_lark_chat_messages`（读单个 chat 最近消息，可 `as:"user"` 读机器人不在的会话）、`search_lark_messages`（user 身份跨会话搜索）、`list_lark_thread_messages`（按 thread 读完整话题）；user 身份读到的内容属于用户私有数据，只用于服务发起请求的用户。Ark 首版桥接不暴露非重放安全的 `read_meeting_inbox`、MCP 图片内容和临时 reaction。工具只接受完整 id；发送工具只接受纯文本和可选的可信 `mention_user_ids`，后者会生成真正的飞书 @。Codex 默认不通过 shell 调用 `lark-cli`；仅当用户明确要求、且对应可信工具尚未加载时，才按 system prompt 的 fallback 规则执行等价的单条命令（auth/config/admin 操作始终禁止）。
 
 ## 飞书前置条件
 

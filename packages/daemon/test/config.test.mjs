@@ -97,6 +97,19 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.throws(() => getConfig(), /LARK_DAEMON_CODEX_EFFORT/);
   });
 
+  it('accepts Pi CLI path and thinking-level effort', () => {
+    setEnv('PI_BIN', '/opt/homebrew/bin/pi');
+    setEnv('LARK_DAEMON_PI_MODEL', 'openai/gpt-4o');
+    setEnv('LARK_DAEMON_PI_EFFORT', 'xhigh');
+    const config = getConfig();
+    assert.equal(config.piBin, '/opt/homebrew/bin/pi');
+    assert.equal(config.piModel, 'openai/gpt-4o');
+    assert.equal(config.piEffort, 'xhigh');
+    assert.match(config.piExtensionPath, /pi-lark-extension\.mjs$/);
+    setEnv('LARK_DAEMON_PI_EFFORT', 'turbo');
+    assert.throws(() => getConfig(), /LARK_DAEMON_PI_EFFORT/);
+  });
+
   it('loads the managed-agent seed session without exposing the API key publicly', () => {
     setEnv('ARK_API_KEY', 'secret-test-key');
     setEnv('LARK_DAEMON_MODEL', 'ark');

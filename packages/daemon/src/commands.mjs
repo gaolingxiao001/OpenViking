@@ -6,6 +6,7 @@
 import {
   DEFAULT_RUNTIME_ID,
   getRuntimeDefinition,
+  isDirectRuntimeAlias,
   modelMatchesRuntime,
   parseRuntimeModelSelector,
   resolveRuntimeModelTarget,
@@ -17,7 +18,7 @@ export const EFFORT_LEVELS = getRuntimeDefinition(DEFAULT_RUNTIME_ID).efforts;
 
 const COMMANDS = ['new', 'help', 'status', 'model', 'effort'];
 
-const MODEL_NAME = /^[A-Za-z0-9._:\/-]{1,64}$/;
+const MODEL_NAME = /^[A-Za-z0-9._:\/-]{1,128}$/;
 
 // All candidates the token is a prefix of; an exact match wins outright so a
 // short name can never be shadowed by a longer one added later.
@@ -58,7 +59,7 @@ export function helpText(snapshot) {
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
     '/status — 查看模型是否在工作以及持续时间',
-    '/model [名称] — 查看或切换模型，如 ark、sonnet、gpt-5.6-sol',
+    '/model [名称] — 查看或切换模型，如 pi、ark、sonnet、gpt-5.6-sol',
     `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
     '',
     `当前会话：${snapshot.session?.id ?? snapshot.threadId ?? '（未连接）'}`,
@@ -147,19 +148,32 @@ export async function executeCommand(command, runtime) {
       return { ok: false, text: lookupName ? `无效的模型名：${lookupName}` : '无效的模型名' };
     }
     let target = command.arg;
-    if (ids.length > 0) {
+    if (isDirectRuntimeAlias(command.arg)) {
+      // /model pi, /model ark: the token is a runtime switch, not a live-list
+      // prefix. Empty default models (Pi) keep the alias; others use the
+      // catalog default (volcengine → ark).
+      const resolved = resolveRuntimeModelTarget(command.arg);
+      target = resolved.model || command.arg;
+    } else if (ids.length > 0) {
       const candidates = providerHint
         ? ids.filter((id) => modelMatchesRuntime(id, providerHint))
         : ids;
       const matches = matchPrefix(lookupName, candidates);
       if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
       if (matches.length === 0) {
-        // Claude cannot enumerate Codex models without starting a second
-        // runtime. Any non-Claude direct name is therefore staged as Codex;
-        // AgentRuntime validates its live model list before the switch commits.
+        // The live snapshot only lists the current runtime plus static ids.
+        // Codex and other dynamic catalogs are staged here; AgentRuntime
+        // validates the target's live list before the switch commits.
         const requestedRuntime = providerHint
           ?? resolveRuntimeModelTarget(lookupName).runtime;
-        if (!(current.runtime !== DEFAULT_RUNTIME_ID && requestedRuntime === DEFAULT_RUNTIME_ID)) {
+        const requested = getRuntimeDefinition(requestedRuntime);
+        const canStage = requestedRuntime
+          && requestedRuntime !== current.runtime
+          && (
+            requestedRuntime === DEFAULT_RUNTIME_ID
+            || requested?.capabilities.modelCatalog === 'dynamic'
+          );
+        if (!canStage) {
           return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}` };
         }
       } else {

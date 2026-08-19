@@ -1,13 +1,14 @@
 import { CodexAgent } from './codex.mjs';
 import { ClaudeAgent } from './claude.mjs';
 import { VolcAgent } from './volc.mjs';
+import { PiAgent } from './pi.mjs';
 import { RUNTIME_IDS, getRuntimeDefinition } from './runtime-catalog.mjs';
 
 // Composition root for transport implementations. The coordinator depends on
 // factories and the adapter contract, never on provider classes.
 export function createRuntimeFactories(config, store, logger, overrides = {}) {
   const definitions = RUNTIME_IDS.map(getRuntimeDefinition);
-  const constructors = { codex: CodexAgent, claude: ClaudeAgent, volc: VolcAgent };
+  const constructors = { codex: CodexAgent, claude: ClaudeAgent, volc: VolcAgent, pi: PiAgent };
   return Object.fromEntries(definitions.map((definition) => {
     const override = overrides[`${definition.id}Factory`];
     if (override) return [definition.id, override];

@@ -167,6 +167,8 @@ export function getConfig() {
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
+    piBin: process.env.PI_BIN || 'pi',
+    piExtensionPath: path.join(sourceDir, 'pi-lark-extension.mjs'),
     initialModel: process.env.LARK_DAEMON_MODEL || process.env.LARK_DAEMON_CODEX_MODEL || '',
     codexModel: process.env.LARK_DAEMON_MODEL === 'ark'
       ? ''
@@ -174,6 +176,12 @@ export function getConfig() {
     codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
     claudeModel: process.env.LARK_DAEMON_CLAUDE_MODEL || '',
     claudeEffort: enumEnv('LARK_DAEMON_CLAUDE_EFFORT', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']),
+    piModel: process.env.LARK_DAEMON_PI_MODEL || '',
+    piEffort: enumEnv(
+      'LARK_DAEMON_PI_EFFORT',
+      'medium',
+      ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    ),
     volcApiKey: process.env.ARK_API_KEY || '',
     volcSessionId: process.env.LARK_DAEMON_VOLC_SESSION_ID
       || process.env.ARK_SESSION_ID
