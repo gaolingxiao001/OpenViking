@@ -340,20 +340,20 @@ describe('PiAgent persistent rpc runtime', () => {
     await agent.stop();
   });
 
-  it('strips Lark secrets from the child env', () => {
+  it('strips Lark secrets but preserves the configured Pi model credential', () => {
     const environment = sanitizePiEnv({
       PATH: '/bin',
       OPENAI_API_KEY: 'keep-for-pi',
       LARK_APP_SECRET: 'remove',
       FEISHU_TOKEN: 'remove',
       LARKSUITE_CLI_PROFILE: 'wrong-profile',
-      ARK_API_KEY: 'remove',
+      ARK_API_KEY: 'keep-for-pi',
       SESSION_ID: 'remove',
     }, 'fixed-profile');
     assert.equal(environment.OPENAI_API_KEY, 'keep-for-pi');
     assert.equal(environment.LARK_APP_SECRET, undefined);
     assert.equal(environment.FEISHU_TOKEN, undefined);
-    assert.equal(environment.ARK_API_KEY, undefined);
+    assert.equal(environment.ARK_API_KEY, 'keep-for-pi');
     assert.equal(environment.SESSION_ID, undefined);
     assert.equal(environment.LARKSUITE_CLI_PROFILE, 'fixed-profile');
   });

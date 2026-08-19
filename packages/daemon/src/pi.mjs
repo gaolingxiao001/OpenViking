@@ -38,7 +38,14 @@ function appendBounded(current, chunk, label) {
 }
 
 export function sanitizePiEnv(environment, profile = '') {
-  return sanitizeAgentChildEnv(environment, { profile });
+  const safeEnv = sanitizeAgentChildEnv(environment, { profile });
+  // Pi may use the locally configured Volcengine Ark provider. Unlike the
+  // other agent runtimes, its model client runs in this child process, so it
+  // needs that provider credential to make inference requests.
+  if (typeof environment.ARK_API_KEY === 'string' && environment.ARK_API_KEY) {
+    safeEnv.ARK_API_KEY = environment.ARK_API_KEY;
+  }
+  return safeEnv;
 }
 
 export function parsePiModelSelector(value) {
