@@ -21,24 +21,36 @@ test('页面骨架是时间轴模式：详情区 + 分隔条 + 多轨道区 + �
   assert.match(html, /id="clock"/);
 });
 
-test('保留实例切换与隐私开关', () => {
+test('保留实例切换、会话选择与隐私开关', () => {
   assert.match(html, /id="instance-select"/);
+  assert.match(html, /id="session-select"/);
+  assert.match(html, /id="session-prev"/);
+  assert.match(html, /id="session-next"/);
+  assert.match(html, /id="follow-live"/);
   assert.match(html, /id="privacy-toggle"/);
   assert.match(js, /const INSTANCES_API = '\/api\/instances'/);
   assert.match(js, /url\.searchParams\.set\('instance', state\.instance\)/);
+  assert.match(js, /url\.searchParams\.set\('epoch'/);
+  assert.match(js, /function selectSession\(/);
+  assert.match(js, /function stepSession\(/);
   assert.match(js, /dom\.instance\.addEventListener\('change'/);
+  assert.match(js, /dom\.session\.addEventListener\('change'/);
   assert.match(js, /state\.rows\.clear\(\)/);
   assert.match(js, /history\.replaceState/);
   assert.match(js, /classList\.toggle\('privacy'\)/);
   assert.match(css, /body\.privacy \.card \.body/);
+  assert.match(css, /\.session-picker/);
 });
 
-test('activity 行按 category 映射到六条轨道', () => {
+test('activity 行按 category 映射到六条轨道，命令 kind 单独进命令轨', () => {
   assert.match(js, /message: 'message'/);
   assert.match(js, /agent: 'agent'/);
   assert.match(js, /delivery: 'delivery'/);
   assert.match(js, /command: 'command'/);
   assert.match(js, /system: 'system'/);
+  assert.match(js, /function eventTrack\(/);
+  assert.match(js, /startsWith\('command\.'\)/);
+  assert.match(js, /startsWith\('agent\.'\)/);
   for (const label of ['回合', '消息', '助手', '投递', '命令', '系统']) {
     assert.match(js, new RegExp(`label: '${label}'`));
   }
@@ -57,6 +69,7 @@ test('回合与投递配对成时间段，空白折叠', () => {
 
 test('详情区全量渲染，双向同步，忽略功能齐备', () => {
   assert.match(js, /function buildDetail\(\)/);
+  assert.match(js, /createElement\('details'\)/);
   assert.match(js, /cardEls = S\.events\.map/); // 全量，不再切片
   assert.match(js, /function syncDetailToPlayhead\(\)/);
   assert.match(js, /dom\.detail\.addEventListener\('scroll'/);

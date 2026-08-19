@@ -80,28 +80,37 @@ export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
       }
 
       if (url.pathname === '/api/activity') {
-        const allowed = new Set(['limit', 'before']);
+        const allowed = new Set(['limit', 'before', 'epoch']);
         if ([...url.searchParams.keys()].some((key) => !allowed.has(key))
           || url.searchParams.getAll('limit').length > 1
-          || url.searchParams.getAll('before').length > 1) {
+          || url.searchParams.getAll('before').length > 1
+          || url.searchParams.getAll('epoch').length > 1) {
           send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_query' });
           return;
         }
         const limitText = url.searchParams.get('limit');
         const beforeText = url.searchParams.get('before');
+        const epochText = url.searchParams.get('epoch');
         if ((limitText !== null && !/^[1-9]\d*$/.test(limitText))
-          || (beforeText !== null && !/^[1-9]\d*$/.test(beforeText))) {
+          || (beforeText !== null && !/^[1-9]\d*$/.test(beforeText))
+          || (epochText !== null && epochText !== 'current' && !/^[1-9]\d{0,8}$/.test(epochText))) {
           send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_query' });
           return;
         }
         const limit = limitText === null ? 100 : Number(limitText);
         const beforeId = beforeText === null ? null : Number(beforeText);
+        const epoch = epochText === null
+          ? null
+          : epochText === 'current'
+            ? store.getCognitionState().epoch
+            : Number(epochText);
         if (!Number.isSafeInteger(limit) || limit > 100
-          || (beforeId !== null && !Number.isSafeInteger(beforeId))) {
+          || (beforeId !== null && !Number.isSafeInteger(beforeId))
+          || (epoch !== null && !Number.isSafeInteger(epoch))) {
           send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_query' });
           return;
         }
-        const feed = store.listActivities({ limit, beforeId });
+        const feed = store.listActivities({ limit, beforeId, epoch });
         const service = serviceSnapshot({ includeState: false });
         send(response, 200, 'application/json; charset=utf-8', {
           generatedAt: Date.now(),
@@ -111,6 +120,8 @@ export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
             uptimeSeconds: service.body.uptimeSeconds,
           },
           overview: store.activityOverview(),
+          sessions: store.listActivitySessions(),
+          epoch,
           activities: feed.activities,
           nextCursor: feed.nextCursor,
         });

@@ -26,6 +26,9 @@ const STATIC_FILES = Object.freeze({
 
 const PROXY_PATHS = new Set(['/api/activity', '/health', '/ready']);
 const INSTANCE_QUERY_KEY = 'instance';
+const EPOCH_QUERY_KEY = 'epoch';
+const PAGE_QUERY_KEYS = new Set([INSTANCE_QUERY_KEY, EPOCH_QUERY_KEY]);
+const EPOCH_QUERY_VALUE = /^(?:all|current|[1-9]\d{0,8})$/;
 
 function noop() {}
 
@@ -253,10 +256,15 @@ export class ActivityWebServer {
   isSafePageQuery(url) {
     if (url.search === '') return true;
     if (url.pathname !== '/' && url.pathname !== '/activity') return false;
-    const values = url.searchParams.getAll(INSTANCE_QUERY_KEY);
-    return values.length === 1
-      && [...url.searchParams.keys()].every((key) => key === INSTANCE_QUERY_KEY)
-      && this.instances.has(values[0]);
+    const keys = [...url.searchParams.keys()];
+    if (keys.some((key) => !PAGE_QUERY_KEYS.has(key))) return false;
+    const instances = url.searchParams.getAll(INSTANCE_QUERY_KEY);
+    if (instances.length > 1) return false;
+    if (instances.length === 1 && !this.instances.has(instances[0])) return false;
+    const epochs = url.searchParams.getAll(EPOCH_QUERY_KEY);
+    if (epochs.length > 1) return false;
+    if (epochs.length === 1 && !EPOCH_QUERY_VALUE.test(epochs[0])) return false;
+    return instances.length === 1 || epochs.length === 1;
   }
 
   selectInstance(url) {

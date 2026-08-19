@@ -345,6 +345,75 @@ describe('activity store', { concurrency: false }, () => {
       first.map((item) => item.id),
     );
   });
+
+  it('lists cognition epochs as selectable activity sessions without native ids', () => {
+    store.initializeCognition('codex', 'tok-1');
+    store.recordActivity({
+      eventKey: 'boot',
+      kind: 'system.starting',
+      summary: 'daemon starting',
+      occurredAtMs: 1_000,
+    }, 1_000);
+    store.appendCognitionJournal({
+      kind: 'inbound', text: 'hello', atMs: 2_000, epoch: 1, inboundSeq: 1,
+    });
+    store.recordActivity({
+      eventKey: 'msg-1',
+      kind: 'message.received',
+      summary: 'hello',
+      occurredAtMs: 2_000,
+    }, 2_000);
+
+    store.bumpCognitionEpoch('claude', 'tok-2');
+    store.appendCognitionJournal({
+      kind: 'inbound', text: 'after /new', atMs: 5_000, epoch: 2, inboundSeq: 2,
+    });
+    store.recordActivity({
+      eventKey: 'rotate',
+      kind: 'agent.session_rotated',
+      summary: '已开启新会话',
+      occurredAtMs: 5_000,
+    }, 5_000);
+    store.recordActivity({
+      eventKey: 'msg-2',
+      kind: 'message.received',
+      summary: 'after /new',
+      occurredAtMs: 5_500,
+    }, 5_500);
+
+    const sessions = store.listActivitySessions();
+    assert.deepEqual(sessions.map((session) => session.epoch), [2, 1]);
+    assert.equal(sessions[0].current, true);
+    assert.equal(sessions[0].runtime, 'claude');
+    assert.equal(sessions[1].current, false);
+    assert.equal(sessions[1].runtime, null);
+    assert.equal(sessions[0].activityCount, 2);
+    assert.equal(sessions[1].activityCount, 2);
+    assert.equal(JSON.stringify(sessions).includes('tok-'), false);
+
+    const current = store.listActivities({ limit: 10, epoch: 2 }).activities;
+    assert.deepEqual(current.map((item) => item.kind), ['message.received', 'agent.session_rotated']);
+    const previous = store.listActivities({ limit: 10, epoch: 1 }).activities;
+    assert.deepEqual(previous.map((item) => item.kind), ['message.received', 'system.starting']);
+    assert.deepEqual(store.listActivities({ limit: 10, epoch: 99 }), {
+      activities: [],
+      nextCursor: null,
+    });
+  });
+
+  it('keeps a current session row after /new before the next journal entry', () => {
+    store.initializeCognition('codex', 'tok-1');
+    store.appendCognitionJournal({ kind: 'inbound', text: 'old', atMs: 10, epoch: 1 });
+    store.recordActivity({
+      eventKey: 'old', kind: 'message.received', summary: 'old', occurredAtMs: 10,
+    }, 10);
+    store.bumpCognitionEpoch('codex', 'tok-2');
+    const sessions = store.listActivitySessions();
+    assert.equal(sessions[0].epoch, 2);
+    assert.equal(sessions[0].current, true);
+    assert.equal(sessions[0].activityCount, 0);
+    assert.equal(store.listActivities({ limit: 10, epoch: 1 }).activities.length, 1);
+  });
 });
 
 describe('daemon activity API', { concurrency: false }, () => {
@@ -409,6 +478,38 @@ describe('daemon activity API', { concurrency: false }, () => {
     assert.equal(payload.activities[0].kind, 'system.ready');
     assert.match(payload.activities[0].conversationRef, /^[a-f0-9]{12}$/);
     assert.equal(api.body.includes('profile:tenant:oc-http-private:main'), false);
+    assert.equal(payload.epoch, null);
+    assert.ok(Array.isArray(payload.sessions));
+    assert.equal(payload.sessions[0].current, true);
+    assert.equal(JSON.stringify(payload.sessions).includes('sessionId'), false);
+  });
+
+  it('filters the activity feed by cognition epoch, including epoch=current', async () => {
+    daemon.store.initializeCognition('codex', 'tok-1');
+    daemon.store.appendCognitionJournal({
+      kind: 'inbound', text: 'old', atMs: 10, epoch: 1,
+    });
+    daemon.store.recordActivity({
+      eventKey: 'old', kind: 'message.received', summary: 'old line', occurredAtMs: 10,
+    }, 10);
+    daemon.store.bumpCognitionEpoch('claude', 'tok-2');
+    daemon.store.appendCognitionJournal({
+      kind: 'inbound', text: 'new', atMs: 50, epoch: 2,
+    });
+    daemon.store.recordActivity({
+      eventKey: 'new', kind: 'message.received', summary: 'new line', occurredAtMs: 50,
+    }, 50);
+
+    const current = JSON.parse((await request(port, '/api/activity?epoch=current')).body);
+    assert.equal(current.epoch, 2);
+    assert.equal(current.activities.some((item) => item.summary === 'new line'), true);
+    assert.equal(current.activities.some((item) => item.summary === 'old line'), false);
+    assert.equal(current.sessions[0].runtime, 'claude');
+
+    const previous = JSON.parse((await request(port, '/api/activity?epoch=1')).body);
+    assert.equal(previous.epoch, 1);
+    assert.equal(previous.activities.some((item) => item.summary === 'old line'), true);
+    assert.equal(previous.activities.some((item) => item.summary === 'new line'), false);
   });
 
   it('rejects invalid queries, path traversal, non-loopback hosts, and cross-origin requests', async () => {
@@ -418,6 +519,9 @@ describe('daemon activity API', { concurrency: false }, () => {
       '/api/activity?before=nope',
       '/api/activity?limit=1&limit=2',
       '/api/activity?unknown=1',
+      '/api/activity?epoch=nope',
+      '/api/activity?epoch=0',
+      '/api/activity?epoch=current&epoch=1',
     ]) {
       const response = await request(port, pathname);
       assert.equal(response.status, 400, pathname);

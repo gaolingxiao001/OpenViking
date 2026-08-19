@@ -24,6 +24,16 @@
             <option>正在读取</option>
           </select>
         </label>
+        <div class="session-picker" role="group" aria-label="选择会话">
+          <button id="session-prev" type="button" title="更早的会话 ([)" disabled>‹</button>
+          <label class="session-select-wrap" for="session-select">
+            <span class="visually-hidden">选择会话</span>
+            <select id="session-select" aria-label="选择会话" disabled>
+              <option>正在读取</option>
+            </select>
+          </label>
+          <button id="session-next" type="button" title="更新的会话 (])" disabled>›</button>
+        </div>
         <span id="service-status" class="service-status" role="status" aria-live="polite">
           <span class="status-dot" aria-hidden="true"></span>
           <span id="service-status-text">正在连接</span>
@@ -50,7 +60,7 @@
         <div id="landing">
           <h2>正在读取活动</h2>
           <p>消息、判断、投递和系统事件会显示在这里。</p>
-          <p class="keys">拖动轨道 = 回放 · 滚轮 = 缩放 · ← → 步进 · 0 默认视窗 · 9 全览 · 右键块/轨道名 = 忽略</p>
+          <p class="keys">会话 [ ] · 拖动轨道 = 回放 · 滚轮 = 缩放 · ← → 步进 · 0 默认视窗 · 9 全览 · L 回到最新 · 右键块/轨道名 = 忽略</p>
         </div>
       </section>
 
@@ -66,6 +76,7 @@
     </main>
 
     <footer class="statusbar">
+      <button id="follow-live" class="quiet-button" type="button" hidden>回到最新</button>
       <button id="load-older" class="quiet-button" type="button" hidden>加载更早</button>
       <span id="counts" class="counts"></span>
       <span id="connection-notice" class="connection-notice" role="alert" hidden></span>

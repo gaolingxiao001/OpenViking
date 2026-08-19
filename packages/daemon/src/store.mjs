@@ -890,15 +890,115 @@ export class Store {
     });
   }
 
-  listActivities({ limit = 100, beforeId = null } = {}) {
+  // Cognition epochs are the durable "sessions" the Activity page can pick:
+  // /new, effort changes, and runtime switches. Native thread/session ids stay
+  // out of the public payload; the UI only gets epoch + time window + counts.
+  listActivitySessions() {
+    const cognition = this.getCognitionState();
+    const journalRows = this.db.prepare(`
+      SELECT epoch AS epoch,
+             MIN(at_ms) AS start_ms,
+             MAX(at_ms) AS last_ms,
+             COUNT(*) AS journal_count
+      FROM cognition_journal
+      GROUP BY epoch
+      ORDER BY epoch ASC
+    `).all();
+    const byEpoch = new Map();
+    for (const row of journalRows) {
+      byEpoch.set(number(row.epoch), {
+        startMs: number(row.start_ms),
+        lastMs: number(row.last_ms),
+        journalCount: number(row.journal_count),
+      });
+    }
+    if (!byEpoch.has(cognition.epoch)) {
+      const previous = [...byEpoch.keys()].sort((left, right) => left - right).at(-1);
+      const previousLast = previous != null ? byEpoch.get(previous).lastMs : null;
+      const latestActivity = number(
+        this.db.prepare('SELECT MAX(occurred_at_ms) AS t FROM activities').get()?.t,
+      );
+      const startMs = previousLast != null
+        ? previousLast + 1
+        : (Number.isFinite(latestActivity) ? latestActivity : Date.now());
+      byEpoch.set(cognition.epoch, {
+        startMs,
+        lastMs: startMs,
+        journalCount: 0,
+      });
+    }
+
+    const firstActivity = number(
+      this.db.prepare('SELECT MIN(occurred_at_ms) AS t FROM activities').get()?.t,
+    );
+    const epochs = [...byEpoch.keys()].sort((left, right) => left - right);
+    if (epochs.length > 0 && Number.isFinite(firstActivity)) {
+      const first = byEpoch.get(epochs[0]);
+      if (firstActivity < first.startMs) first.startMs = firstActivity;
+    }
+
+    const countOpen = this.db.prepare(
+      'SELECT COUNT(*) AS count FROM activities WHERE occurred_at_ms >= ?',
+    );
+    const countClosed = this.db.prepare(
+      'SELECT COUNT(*) AS count FROM activities WHERE occurred_at_ms >= ? AND occurred_at_ms < ?',
+    );
+    const sessions = [];
+    for (let index = 0; index < epochs.length; index += 1) {
+      const epoch = epochs[index];
+      const current = epoch === cognition.epoch;
+      const startMs = byEpoch.get(epoch).startMs;
+      const next = epochs[index + 1];
+      const endMs = next != null ? byEpoch.get(next).startMs : null;
+      const activityCount = endMs == null
+        ? number(countOpen.get(startMs).count)
+        : number(countClosed.get(startMs, endMs).count);
+      sessions.push({
+        epoch,
+        current,
+        startMs,
+        endMs,
+        activityCount,
+        runtime: current ? cognition.runtime : null,
+      });
+    }
+    sessions.reverse();
+    return sessions;
+  }
+
+  activitySessionWindow(epoch) {
+    if (!Number.isSafeInteger(epoch) || epoch < 1) return null;
+    return this.listActivitySessions().find((session) => session.epoch === epoch) ?? null;
+  }
+
+  listActivities({ limit = 100, beforeId = null, epoch = null } = {}) {
     const safeLimit = Math.max(1, Math.min(100, Number(limit) || 100));
-    const rows = beforeId === null
-      ? this.db.prepare(`
-        SELECT * FROM activities ORDER BY id DESC LIMIT ?
-      `).all(safeLimit + 1)
-      : this.db.prepare(`
-        SELECT * FROM activities WHERE id < ? ORDER BY id DESC LIMIT ?
-      `).all(beforeId, safeLimit + 1);
+    let startMs = null;
+    let endMs = null;
+    if (epoch != null) {
+      const session = this.activitySessionWindow(epoch);
+      if (!session) {
+        return { activities: [], nextCursor: null };
+      }
+      startMs = session.startMs;
+      endMs = session.endMs;
+    }
+    const rows = this.db.prepare(`
+      SELECT * FROM activities
+      WHERE (? IS NULL OR id < ?)
+        AND (? IS NULL OR occurred_at_ms >= ?)
+        AND (? IS NULL OR occurred_at_ms < ?)
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(
+      beforeId,
+      beforeId,
+      startMs,
+      startMs,
+      endMs,
+      endMs,
+      safeLimit + 1,
+    );
     const hasMore = rows.length > safeLimit;
     const visible = hasMore ? rows.slice(0, safeLimit) : rows;
     return {
