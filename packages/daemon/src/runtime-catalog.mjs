@@ -151,11 +151,16 @@ export function modelMatchesRuntime(model, runtimeOrAlias) {
   const definition = getRuntimeDefinition(runtimeOrAlias);
   if (!definition) return false;
   const owner = staticModelRuntime(model);
-  if (definition.id === DEFAULT_RUNTIME_ID) return owner === null || owner === DEFAULT_RUNTIME_ID;
+  // Dynamic catalogs (Codex, Pi) share the unowned leftover; static catalogs
+  // only match ids they published. Otherwise `pi:openai/gpt-4o` cannot see
+  // the live Pi list and unprefixed live ids look like Codex names.
+  if (definition.capabilities.modelCatalog === 'dynamic') {
+    return owner === null || owner === definition.id;
+  }
   return owner === definition.id;
 }
 
-export function resolveRuntimeModelTarget(value) {
+export function resolveRuntimeModelTarget(value, currentRuntime = null) {
   const selector = parseRuntimeModelSelector(value);
   if (selector.qualified) {
     const definition = RUNTIME_CATALOG[selector.runtime];
@@ -178,6 +183,17 @@ export function resolveRuntimeModelTarget(value) {
     };
   }
 
-  const runtime = staticModelRuntime(selector.model) ?? DEFAULT_RUNTIME_ID;
-  return { runtime, model: selector.model, canonical: selector.model };
+  const owner = staticModelRuntime(selector.model);
+  if (owner) {
+    return { runtime: owner, model: selector.model, canonical: selector.model };
+  }
+  const current = getRuntimeDefinition(currentRuntime);
+  if (current?.capabilities.modelCatalog === 'dynamic') {
+    return {
+      runtime: current.id,
+      model: selector.model,
+      canonical: selector.model || current.canonicalDefault,
+    };
+  }
+  return { runtime: DEFAULT_RUNTIME_ID, model: selector.model, canonical: selector.model };
 }

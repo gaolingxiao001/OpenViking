@@ -364,6 +364,44 @@ describe('executeCommand', () => {
     assert.match(qualified.text, /已切到 openai\/gpt-4o/);
   });
 
+  it('stays on Pi for pi:<id> and an unprefixed live-list id', async () => {
+    const agent = fakeCodex({
+      runtime: 'pi',
+      model: 'google/gemini-pro',
+      listModels: async () => [
+        { id: 'openai/gpt-4o', efforts: ['medium'] },
+        { id: 'google/gemini-pro', efforts: ['medium'] },
+        { id: 'sonnet', efforts: ['medium'] },
+      ],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        const runtimeChanged = !(model === 'pi' || String(model).startsWith('pi:')
+          || model === 'openai/gpt-4o' || model === 'google/gemini-pro');
+        if (runtimeChanged) this.runtime = 'codex';
+        return {
+          runtimeChanged,
+          runtime: this.runtime,
+          model: String(model).replace(/^pi:/, ''),
+          threadId: 'pi-fresh',
+        };
+      },
+    });
+
+    const qualified = await executeCommand({ name: 'model', arg: 'pi:openai/gpt-4o' }, agent);
+    assert.equal(qualified.ok, true);
+    assert.equal(agent.runtime, 'pi');
+    assert.deepEqual(agent.calls.at(-1), ['setModel', 'pi:openai/gpt-4o']);
+    assert.match(qualified.text, /已切到 openai\/gpt-4o，已开启新会话：pi-fresh/);
+    assert.doesNotMatch(qualified.text, /历史对话会接上/);
+
+    const live = await executeCommand({ name: 'model', arg: 'openai/gpt-4o' }, agent);
+    assert.equal(live.ok, true);
+    assert.equal(agent.runtime, 'pi');
+    assert.deepEqual(agent.calls.at(-1), ['setModel', 'openai/gpt-4o']);
+    assert.match(live.text, /已切到 openai\/gpt-4o，已开启新会话：pi-fresh/);
+    assert.doesNotMatch(live.text, /历史对话会接上/);
+  });
+
   it('explains that Ark effort is managed remotely', async () => {
     const agent = fakeCodex({ runtime: 'volc', model: 'ark', effort: 'managed' });
     const { calls } = agent;
