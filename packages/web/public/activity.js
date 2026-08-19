@@ -24,6 +24,9 @@ const TRACK_LABEL = Object.fromEntries(TRACKS.map((t) => [t.key, t.label]));
 
 const dom = {
   instance: document.getElementById('instance-select'),
+  session: document.getElementById('session-select'),
+  sessionPrev: document.getElementById('session-prev'),
+  sessionNext: document.getElementById('session-next'),
   status: document.getElementById('service-status'),
   statusText: document.getElementById('service-status-text'),
   crumb: document.getElementById('crumb'),
@@ -37,6 +40,7 @@ const dom = {
   viewport: document.getElementById('viewport'),
   world: document.getElementById('world'),
   privacy: document.getElementById('privacy-toggle'),
+  followLive: document.getElementById('follow-live'),
   loadOlder: document.getElementById('load-older'),
   counts: document.getElementById('counts'),
   notice: document.getElementById('connection-notice'),
@@ -44,10 +48,14 @@ const dom = {
 
 const state = {
   instance: null,
+  epoch: 'current',      // 'current' | number | null (all)
+  currentEpoch: null,
+  sessions: [],
   rows: new Map(),       // id -> activity row
   nextCursor: null,
   service: null,
   timer: null,
+  filling: false,
 };
 
 // ---------- 小工具 ----------
@@ -70,6 +78,43 @@ function fmtDur(ms) {
   if (ms < 86400000) return `${(ms / 3600000).toFixed(1)}h`;
   return `${(ms / 86400000).toFixed(1)}d`;
 }
+function fmtDay(ms) {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function viewingHistorical() {
+  return typeof state.epoch === 'number' && state.epoch !== state.currentEpoch;
+}
+function selectedSession() {
+  if (state.epoch === null) return null;
+  const epoch = state.epoch === 'current' ? state.currentEpoch : state.epoch;
+  return state.sessions.find((session) => session.epoch === epoch) ?? null;
+}
+
+function lastInterestingMs(model) {
+  for (let i = model.events.length - 1; i >= 0; i -= 1) {
+    if (model.events[i].track !== 'system') return model.events[i].end || model.events[i].t;
+  }
+  return model.meta.endMs;
+}
+
+function frameSession(model) {
+  if (viewingHistorical() || state.epoch === null) {
+    spanMs = Math.max(total, MIN_SPAN);
+    centerDisp = total / 2;
+    followTail = false;
+    return;
+  }
+  spanMs = DEFAULT_SPAN;
+  const interesting = lastInterestingMs(model);
+  if (model.meta.endMs - interesting <= DEFAULT_SPAN) {
+    centerDisp = total;
+    followTail = true;
+  } else {
+    centerDisp = realToDisp(interesting);
+    followTail = false;
+  }
+}
 
 // ---------- activity 行 → 时间轴模型 ----------
 const KIND_TRACK = {
@@ -80,6 +125,15 @@ const KIND_TRACK = {
   system: 'system',
 };
 
+function eventTrack(row) {
+  const kind = String(row.kind || '');
+  if (kind.startsWith('command.')) return 'command';
+  if (kind.startsWith('agent.')) return 'agent';
+  if (kind.startsWith('message.')) return 'message';
+  if (kind.startsWith('delivery.')) return 'delivery';
+  return KIND_TRACK[row.category] || 'system';
+}
+
 function buildModel(rows) {
   const events = [];
   const turns = new Map();     // turnId -> { startMs, endMs }
@@ -87,7 +141,7 @@ function buildModel(rows) {
 
   for (const row of rows) {
     const t = row.createdAtMs;
-    const track = KIND_TRACK[row.category] || 'system';
+    const track = eventTrack(row);
     const ok = row.severity !== 'error';
     const warn = row.severity === 'warning';
 
@@ -404,13 +458,15 @@ function buildDetail() {
     card.append(head, body);
 
     if (ev.output) {
-      const lbl = document.createElement('div');
-      lbl.className = 'out-label';
-      lbl.textContent = 'METADATA';
+      const details = document.createElement('details');
+      details.className = 'meta';
+      const summary = document.createElement('summary');
+      summary.textContent = 'METADATA';
       const out = document.createElement('pre');
       out.className = 'code output';
       out.textContent = ev.output;
-      card.append(lbl, out);
+      details.append(summary, out);
+      card.append(details);
     }
     card.addEventListener('click', () => {
       followTail = false;
@@ -494,6 +550,7 @@ function render(withDetail = true) {
     applyPan();
     if (doDetail) syncDetailToPlayhead();
     renderSelection();
+    updateFollowButton();
     dom.clock.textContent = fmtClock(dispToReal(centerDisp));
     dom.spanLabel.textContent = fmtSpan(spanMs);
     dom.slider.value = String(Math.round(spanToSlider(spanMs)));
@@ -512,11 +569,22 @@ function sliderToSpan(v) {
 function updateCounts() {
   if (!S) return;
   const ignored = S.events.length - visibleIdx.length;
+  const session = selectedSession();
+  const scope = state.epoch === null ? '全部' : viewingHistorical() ? '历史会话' : '本会话';
+  const remaining = session && session.activityCount > state.rows.size
+    ? session.activityCount - state.rows.size
+    : 0;
   dom.counts.textContent = [
-    `${S.events.length} 条事件`,
+    `${S.events.length} 条${scope}事件`,
+    remaining ? `还可加载 ${remaining}` : null,
     S.gaps.length ? `折叠 ${S.gaps.length} 段空白` : null,
     ignored ? `已忽略 ${ignored}` : null,
   ].filter(Boolean).join(' · ');
+  if (remaining > 0) {
+    dom.loadOlder.textContent = `加载更早（${remaining}）`;
+  } else {
+    dom.loadOlder.textContent = '加载更早';
+  }
 }
 
 // ---------- 模型装配（支持轮询增量下的视图保持） ----------
@@ -525,20 +593,21 @@ function setModel(model, { preserve }) {
   tmap = buildTimeMap(S.meta.startMs, S.meta.endMs, S.gaps);
   total = tmap.totalDisp;
   DEFAULT_SPAN = Math.min(total, 10 * 60 * 1000);
-  if (!preserve) {
-    spanMs = DEFAULT_SPAN;
-    centerDisp = total; // 初次进入跟随最新
-    followTail = true;
-  } else if (followTail) {
-    centerDisp = total;
-  }
+  if (!preserve) frameSession(model);
+  else if (followTail) centerDisp = total;
   buildTimeline();
   buildDetail();
   rebuildVisible();
   applyIgnoreStateShallow();
   document.body.classList.add('loaded');
   updateCounts();
-  dom.crumb.textContent = `${S.events.length} 条 · ${fmtSpan(S.meta.endMs - S.meta.startMs)}`;
+  const session = selectedSession();
+  const scope = state.epoch === null
+    ? '全部会话'
+    : session
+      ? (session.current ? '当前会话' : '历史会话')
+      : '会话';
+  dom.crumb.textContent = `${scope} · ${S.events.length} 条 · ${fmtSpan(S.meta.endMs - S.meta.startMs)}`;
   render();
 }
 
@@ -554,10 +623,107 @@ function applyIgnoreStateShallow() {
 }
 
 // ---------- 数据层 ----------
+function epochFromUrl() {
+  const value = new URL(window.location.href).searchParams.get('epoch');
+  if (value === 'all') return null;
+  if (value && /^[1-9]\d{0,8}$/.test(value)) return Number(value);
+  return 'current';
+}
+
+function syncUrl() {
+  const url = new URL(window.location.href);
+  if (state.instance) url.searchParams.set('instance', state.instance);
+  else url.searchParams.delete('instance');
+  if (state.epoch === null) url.searchParams.set('epoch', 'all');
+  else if (typeof state.epoch === 'number') url.searchParams.set('epoch', String(state.epoch));
+  else url.searchParams.delete('epoch');
+  history.replaceState(null, '', url);
+}
+
+function sessionLabel(session) {
+  const d = new Date(session.startMs);
+  const when = `${d.getMonth() + 1}月${d.getDate()}日`;
+  if (session.current) {
+    const runtime = session.runtime ? `${session.runtime} · ` : '';
+    return `当前 · ${runtime}${when}至今`;
+  }
+  return `${when} · ${session.activityCount} 条`;
+}
+
+function sessionTitle(session) {
+  const range = session.endMs
+    ? `${fmtDay(session.startMs)} – ${fmtDay(session.endMs)}`
+    : `${fmtDay(session.startMs)} 至今`;
+  return `${range} · ${session.activityCount} 条`;
+}
+
+function renderSessions() {
+  const selected = state.epoch === null
+    ? 'all'
+    : String(state.epoch === 'current' ? (state.currentEpoch ?? '') : state.epoch);
+  const fragment = document.createDocumentFragment();
+  for (const session of state.sessions) {
+    const option = document.createElement('option');
+    option.value = String(session.epoch);
+    option.textContent = sessionLabel(session);
+    option.title = sessionTitle(session);
+    fragment.appendChild(option);
+  }
+  const all = document.createElement('option');
+  all.value = 'all';
+  all.textContent = '全部会话';
+  fragment.appendChild(all);
+  dom.session.replaceChildren(fragment);
+  if ([...dom.session.options].some((option) => option.value === selected)) {
+    dom.session.value = selected;
+  } else if (state.sessions.length) {
+    dom.session.value = String(state.sessions[0].epoch);
+  }
+  dom.session.disabled = false;
+  const epochs = state.sessions.map((session) => session.epoch);
+  const index = epochs.indexOf(Number(dom.session.value));
+  const viewingAll = state.epoch === null;
+  dom.sessionPrev.disabled = viewingAll || index < 0 || index >= epochs.length - 1;
+  dom.sessionNext.disabled = viewingAll || index <= 0;
+  document.body.classList.toggle('historical', viewingHistorical());
+}
+
+function applySessions(sessions) {
+  const previousCurrent = state.currentEpoch;
+  state.sessions = Array.isArray(sessions) ? sessions : [];
+  const current = state.sessions.find((session) => session.current);
+  state.currentEpoch = current ? current.epoch : null;
+  if (typeof state.epoch === 'number' && !state.sessions.some((session) => session.epoch === state.epoch)) {
+    state.epoch = 'current';
+  }
+  if (state.epoch === 'current' && previousCurrent != null
+    && state.currentEpoch != null && previousCurrent !== state.currentEpoch) {
+    state.rows.clear();
+    state.nextCursor = null;
+  }
+  renderSessions();
+}
+
+function updateFollowButton() {
+  if (viewingHistorical()) {
+    dom.followLive.hidden = false;
+    dom.followLive.textContent = '回到当前会话';
+    return;
+  }
+  if (!followTail && S) {
+    dom.followLive.hidden = false;
+    dom.followLive.textContent = '回到最新';
+    return;
+  }
+  dom.followLive.hidden = true;
+}
+
 function activityUrl() {
   const url = new URL(ACTIVITY_API, window.location.origin);
   url.searchParams.set('limit', String(PAGE_LIMIT));
   if (state.instance) url.searchParams.set('instance', state.instance);
+  if (state.epoch === 'current') url.searchParams.set('epoch', 'current');
+  else if (typeof state.epoch === 'number') url.searchParams.set('epoch', String(state.epoch));
   return url;
 }
 
@@ -590,23 +756,32 @@ function updateService(service) {
   if (!service) return;
   state.service = service;
   const ok = service.ready;
-  dom.status.classList.toggle('ok', Boolean(ok));
+  dom.status.classList.toggle('ok', Boolean(ok) && !viewingHistorical());
   dom.status.classList.toggle('bad', !ok);
-  dom.statusText.textContent = ok
-    ? `就绪 · 订阅 ${service.subscriber || '—'} · 运行 ${fmtDur((service.uptimeSeconds || 0) * 1000)}`
-    : '服务未就绪';
+  if (!ok) {
+    dom.statusText.textContent = '服务未就绪';
+    return;
+  }
+  if (viewingHistorical()) {
+    dom.statusText.textContent = '历史会话 · 不跟随实时';
+    return;
+  }
+  dom.statusText.textContent = `就绪 · 订阅 ${service.subscriber || '—'} · 运行 ${fmtDur((service.uptimeSeconds || 0) * 1000)}`;
 }
 
 async function refreshLatest() {
   try {
     const data = await fetchPage(null);
     dom.notice.hidden = true;
+    applySessions(data.sessions);
     updateService(data.service);
     state.nextCursor = data.nextCursor ?? state.nextCursor;
     const added = mergeRows(data.activities);
     if (!S && state.rows.size) rebuildFromRows(false);
     else if (added > 0) rebuildFromRows(true);
+    else updateFollowButton();
     dom.loadOlder.hidden = !state.nextCursor;
+    updateCounts();
   } catch (error) {
     dom.status.classList.add('bad');
     dom.statusText.textContent = '连接失败';
@@ -615,24 +790,78 @@ async function refreshLatest() {
   }
 }
 
-async function loadOlder() {
-  if (state.nextCursor == null) return;
+async function loadOlder({ silent = false } = {}) {
+  if (state.nextCursor == null) return 0;
   dom.loadOlder.disabled = true;
   try {
     const data = await fetchPage(state.nextCursor);
+    applySessions(data.sessions);
     state.nextCursor = data.nextCursor ?? null;
     const added = mergeRows(data.activities);
-    if (added > 0) {
+    if (added > 0 && !silent) {
       followTail = false;
       rebuildFromRows(true);
     }
+    return added;
   } catch (error) {
     dom.notice.hidden = false;
     dom.notice.textContent = `加载更早失败：${error.message}`;
+    return 0;
   } finally {
     dom.loadOlder.hidden = state.nextCursor == null;
     dom.loadOlder.disabled = false;
+    if (!silent) updateCounts();
   }
+}
+
+async function fillOlder() {
+  if (state.filling) return;
+  state.filling = true;
+  try {
+    let added = 0;
+    while (state.nextCursor != null && state.rows.size < MAX_ROWS) {
+      added += await loadOlder({ silent: true });
+    }
+    if (added > 0) rebuildFromRows(false);
+    else updateCounts();
+  } finally {
+    state.filling = false;
+    dom.loadOlder.hidden = state.nextCursor == null;
+  }
+}
+
+function resetView() {
+  state.rows.clear();
+  state.nextCursor = null;
+  S = null;
+  ignoredIds = new Set();
+  ignoredTracks = new Set();
+  selectedId = null;
+}
+
+async function selectSession(value) {
+  if (value === 'all') state.epoch = null;
+  else if (value === 'current') state.epoch = 'current';
+  else {
+    const epoch = Number(value);
+    state.epoch = epoch === state.currentEpoch ? 'current' : epoch;
+  }
+  resetView();
+  followTail = !viewingHistorical();
+  syncUrl();
+  renderSessions();
+  await refreshLatest();
+  if (state.epoch !== null) await fillOlder();
+}
+
+function stepSession(delta) {
+  if (state.epoch === null || !state.sessions.length) return;
+  const epochs = state.sessions.map((session) => session.epoch);
+  const current = state.epoch === 'current' ? state.currentEpoch : state.epoch;
+  const index = epochs.indexOf(current);
+  const next = epochs[index + delta];
+  if (next == null) return;
+  void selectSession(String(next));
 }
 
 function startPolling() {
@@ -653,6 +882,7 @@ async function loadInstances() {
     }
     const fromUrl = new URL(window.location.href).searchParams.get('instance');
     state.instance = data.instances.some((i) => i.id === fromUrl) ? fromUrl : data.defaultInstance;
+    state.epoch = epochFromUrl();
     dom.instance.value = state.instance;
     dom.instance.disabled = false;
   } catch {
@@ -662,17 +892,18 @@ async function loadInstances() {
 
 dom.instance.addEventListener('change', () => {
   state.instance = dom.instance.value;
-  state.rows.clear();
-  state.nextCursor = null;
-  S = null;
-  ignoredIds = new Set();
-  ignoredTracks = new Set();
-  selectedId = null;
-  const url = new URL(window.location.href);
-  url.searchParams.set('instance', state.instance);
-  history.replaceState(null, '', url);
-  refreshLatest();
+  state.epoch = 'current';
+  resetView();
+  followTail = true;
+  syncUrl();
+  void refreshLatest();
 });
+
+dom.session.addEventListener('change', () => {
+  void selectSession(dom.session.value);
+});
+dom.sessionPrev.addEventListener('click', () => stepSession(1));
+dom.sessionNext.addEventListener('click', () => stepSession(-1));
 
 // ---------- 交互：平移 / 缩放 ----------
 let dragging = false, dragMoved = false, dragX = 0;
@@ -724,7 +955,9 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'i') {
     const i = nearestIdx(dispToReal(centerDisp));
     if (i >= 0) toggleIgnoreEvent(S.events[i].id);
-  }
+  } else if (e.key === '[') stepSession(1);
+  else if (e.key === ']') stepSession(-1);
+  else if (e.key === 'l' || e.key === 'L') dom.followLive.click();
 });
 
 window.addEventListener('resize', () => render());
@@ -751,12 +984,26 @@ dom.privacy.addEventListener('click', () => {
   dom.privacy.textContent = on ? '显示正文' : '隐藏正文';
 });
 
+// ---------- 回到最新 / 当前会话 ----------
+dom.followLive.addEventListener('click', () => {
+  if (viewingHistorical()) {
+    void selectSession('current');
+    return;
+  }
+  followTail = true;
+  if (S) {
+    centerDisp = total;
+    render();
+  }
+});
+
 // ---------- 加载更早 ----------
-dom.loadOlder.addEventListener('click', loadOlder);
+dom.loadOlder.addEventListener('click', () => { void loadOlder(); });
 
 // ---------- 启动 ----------
 (async () => {
   await loadInstances();
   await refreshLatest();
+  if (state.epoch !== null) await fillOlder();
   startPolling();
 })();

@@ -91,7 +91,11 @@ describe('independent activity web server', { concurrency: false }, () => {
     assert.match(page.body, /instance-select/);
     assert.equal((await request(port, '/activity')).status, 200);
     assert.equal((await request(port, '/?instance=zayn')).status, 200);
+    assert.equal((await request(port, '/?instance=zayn&epoch=2')).status, 200);
+    assert.equal((await request(port, '/?epoch=current')).status, 200);
+    assert.equal((await request(port, '/?epoch=all')).status, 200);
     assert.equal((await request(port, '/?instance=missing')).status, 404);
+    assert.equal((await request(port, '/?epoch=nope')).status, 404);
     assert.match((await request(port, '/activity.css')).headers['content-type'], /^text\/css/);
     assert.match((await request(port, '/activity.js')).headers['content-type'], /^text\/javascript/);
     assert.equal((await request(port, '/package.json')).status, 404);
@@ -176,6 +180,10 @@ describe('independent activity web server', { concurrency: false }, () => {
     assert.deepEqual(
       JSON.parse((await request(port, '/api/activity?instance=sally&limit=7')).body),
       { instance: 'sally', path: '/api/activity?limit=7' },
+    );
+    assert.deepEqual(
+      JSON.parse((await request(port, '/api/activity?instance=sally&epoch=current&limit=7')).body),
+      { instance: 'sally', path: '/api/activity?epoch=current&limit=7' },
     );
     assert.deepEqual(
       JSON.parse((await request(port, '/api/activity?limit=7')).body),

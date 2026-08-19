@@ -49,10 +49,49 @@ button { font: inherit; cursor: pointer; }
   background: var(--coral); color: #fff;
   display: flex; align-items: center; justify-content: center; font-size: 15px;
 }
-.instance-picker select {
+.instance-picker select,
+.session-select-wrap select {
   border: 1px solid var(--line); border-radius: 8px;
   background: var(--panel); color: var(--ink);
   padding: 5px 8px; font: inherit; font-size: 13px; font-weight: 600;
+  max-width: min(360px, 42vw);
+}
+.session-picker {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0;
+}
+.session-picker button {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 8px; width: 28px; height: 28px;
+  font-size: 16px; line-height: 1; font-weight: 600;
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), background 140ms ease;
+}
+.session-picker button:disabled { opacity: .35; cursor: default; }
+.session-select-wrap select { font-weight: 650; }
+body.historical .session-select-wrap select {
+  border-color: #cfd8e6; background: #f7fafd;
+}
+@media (hover: hover) and (pointer: fine) {
+  .session-picker button:hover:not(:disabled),
+  .zoom-ctl button:hover,
+  .quiet-button:hover { background: #f2f6fc; }
+}
+.session-picker button:active:not(:disabled),
+.zoom-ctl button:active,
+.quiet-button:active { transform: scale(0.97); }
+@media (prefers-reduced-motion: reduce) {
+  .session-picker button,
+  .zoom-ctl button,
+  .quiet-button { transition: none; }
+  .session-picker button:active:not(:disabled),
+  .zoom-ctl button:active,
+  .quiet-button:active { transform: none; }
+}
+.session-picker button:focus-visible,
+.instance-picker select:focus-visible,
+.session-select-wrap select:focus-visible,
+.zoom-ctl button:focus-visible,
+.quiet-button:focus-visible {
+  outline: 2px solid var(--sky); outline-offset: 2px;
 }
 .service-status {
   display: inline-flex; align-items: center; gap: 6px;
@@ -75,17 +114,20 @@ button { font: inherit; cursor: pointer; }
   border: 1px solid var(--line); background: var(--panel); color: var(--ink);
   border-radius: 8px; padding: 4px 10px; font-size: 12px; font-weight: 600;
 }
-.zoom-ctl button:hover { background: #f2f6fc; }
+.zoom-ctl button { transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), background 140ms ease; }
 .zoom-ctl button.accent { background: var(--sky); border-color: var(--sky); color: #fff; }
-.zoom-ctl button.accent:hover { background: #5b7df5; }
+@media (hover: hover) and (pointer: fine) {
+  .zoom-ctl button.accent:hover { background: #5b7df5; }
+}
 .zoom-ctl input[type=range] { width: 100px; accent-color: var(--sky); }
 .span-label { color: var(--dim); font-size: 11px; min-width: 62px; text-align: right; font-family: ui-monospace, Menlo, monospace; }
 .quiet-button {
   border: 1px solid var(--line); background: var(--panel); color: var(--dim);
   border-radius: 8px; padding: 5px 12px; font-size: 12px;
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), background 140ms ease, color 140ms ease;
 }
-.quiet-button:hover { background: #f2f6fc; color: var(--ink); }
 .quiet-button[aria-pressed="true"] { background: #eef3ff; border-color: var(--sky); color: var(--sky); }
+#follow-live { color: var(--pink); border-color: #f4c9d3; background: #fdedf1; }
 
 /* ---------- 主区 ---------- */
 #main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -116,7 +158,14 @@ button { font: inherit; cursor: pointer; }
 .card .kind-label { color: var(--dim); }
 .card .src { color: var(--dim); }
 .card .body { white-space: pre-wrap; word-break: break-word; }
-.card .out-label { color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: 2px; margin-top: 8px; }
+.card .meta { margin-top: 8px; }
+.card .meta summary {
+  color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: 2px;
+  cursor: pointer; list-style: none; user-select: none;
+}
+.card .meta summary::-webkit-details-marker { display: none; }
+.card .meta summary::before { content: "▸ "; }
+.card .meta[open] summary::before { content: "▾ "; }
 .card pre.code {
   font: 12px/1.6 ui-monospace, SF Mono, Menlo, Consolas, monospace;
   background: #f6f8fc;
