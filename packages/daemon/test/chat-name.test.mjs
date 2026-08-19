@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { LarkDaemon } from '../src/daemon.mjs';
+import { ChatNameTracker } from '../src/chat-names.mjs';
 
 const quietLogger = {
   debug() {},
@@ -10,28 +10,33 @@ const quietLogger = {
   child() { return this; },
 };
 
-function daemonHarness(source, getChatName) {
+function trackerHarness(source, getChatName) {
   const saved = [];
   const deferred = [];
-  const daemon = new LarkDaemon({}, quietLogger);
-  daemon.lark = { profile: 'test-profile', getChatName };
-  daemon.store = {
-    chatNameLookupCandidate(chatId) {
-      return chatId === source.chatId ? source : null;
+  // Like the real store: once a lookup persisted a result, the chat stops
+  // being a due candidate until its next refresh window.
+  const settled = () => saved.length > 0 || deferred.length > 0;
+  const tracker = new ChatNameTracker({
+    lark: { profile: 'test-profile', getChatName },
+    store: {
+      chatNameLookupCandidate(chatId) {
+        return !settled() && chatId === source.chatId ? source : null;
+      },
+      dueChatNameLookups() {
+        return settled() ? [] : [source];
+      },
+      saveChatSourceName(...args) {
+        saved.push(args);
+        return true;
+      },
+      deferChatSourceName(...args) {
+        deferred.push(args);
+        return true;
+      },
     },
-    dueChatNameLookups() {
-      return [source];
-    },
-    saveChatSourceName(...args) {
-      saved.push(args);
-      return true;
-    },
-    deferChatSourceName(...args) {
-      deferred.push(args);
-      return true;
-    },
-  };
-  return { daemon, saved, deferred };
+    logger: quietLogger,
+  });
+  return { tracker, saved, deferred };
 }
 
 describe('non-blocking group name enrichment', () => {
@@ -44,15 +49,15 @@ describe('non-blocking group name enrichment', () => {
     };
     let finish;
     let calls = 0;
-    const { daemon, saved, deferred } = daemonHarness(source, () => {
+    const { tracker, saved, deferred } = trackerHarness(source, () => {
       calls += 1;
       return new Promise((resolve) => { finish = resolve; });
     });
 
-    assert.equal(daemon.scheduleChatNameLookup(source.chatId), true);
-    assert.equal(daemon.scheduleChatNameLookup(source.chatId), false);
+    assert.equal(tracker.schedule(source.chatId), true);
+    assert.equal(tracker.schedule(source.chatId), false);
     assert.equal(calls, 1);
-    const lookup = daemon.chatNameLookups.get(source.chatId);
+    const lookup = tracker.lookups.get(source.chatId);
     finish('研发同步群');
     await lookup;
 
@@ -61,7 +66,7 @@ describe('non-blocking group name enrichment', () => {
     assert.equal(saved[0][1], '研发同步群');
     assert.ok(saved[0][2] > saved[0][3]);
     assert.equal(deferred.length, 0);
-    assert.equal(daemon.chatNameLookups.size, 0);
+    assert.equal(tracker.lookups.size, 0);
   });
 
   it('turns permission or network failure into bounded retry state', async () => {
@@ -71,12 +76,12 @@ describe('non-blocking group name enrichment', () => {
       chatType: 'group',
       failureCount: 2,
     };
-    const { daemon, saved, deferred } = daemonHarness(source, async () => {
+    const { tracker, saved, deferred } = trackerHarness(source, async () => {
       throw new Error('permission denied');
     });
     const before = Date.now();
-    assert.equal(daemon.scheduleChatNameLookup(source.chatId), true);
-    await daemon.chatNameLookups.get(source.chatId);
+    assert.equal(tracker.schedule(source.chatId), true);
+    await tracker.lookups.get(source.chatId);
 
     assert.equal(saved.length, 0);
     assert.equal(deferred.length, 1);
@@ -93,9 +98,9 @@ describe('non-blocking group name enrichment', () => {
       chatType: 'group',
       failureCount: 0,
     };
-    const { daemon, saved } = daemonHarness(source, async () => '历史群聊');
-    daemon.refreshChatNames();
-    await daemon.chatNameLookups.get(source.chatId);
+    const { tracker, saved } = trackerHarness(source, async () => '历史群聊');
+    tracker.refresh();
+    await tracker.lookups.get(source.chatId);
     assert.equal(saved[0][1], '历史群聊');
   });
 });

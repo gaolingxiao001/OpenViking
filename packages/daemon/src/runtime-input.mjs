@@ -2,14 +2,32 @@ import { lookupMemberName } from './roster.mjs';
 
 // Runtime-neutral authenticated envelope shared by every adapter. Untrusted
 // content stays on one physical line so it cannot forge metadata.
+
+// The submit-item contract shared by every runtime backend: a text line with an
+// optional inbound seq and delivery receipt id.
+export function deliveryItem({ text, seq = null, receiptId }) {
+  return receiptId === null || receiptId === undefined
+    ? { text, seq }
+    : { text, seq, receiptId };
+}
+
+export function receiptIds(items) {
+  return [...new Set(items
+    .map((item) => item.receiptId)
+    .filter((receiptId) => receiptId !== null && receiptId !== undefined))];
+}
+
+export function withReceiptIds(fields, ids) {
+  return ids.length > 0 ? { ...fields, receiptIds: ids } : fields;
+}
 export function shortenId(id) {
   if (!id) return 'unknown';
   const match = /^([a-z]{1,4}_)(.+)$/.exec(id);
   if (match) return match[1] + match[2].slice(0, 8);
-  return id.slice(0, 11);
+  return String(id).slice(0, 11);
 }
 
-function isoMinute(ms) {
+export function isoMinute(ms) {
   return `${new Date(ms).toISOString().slice(0, 16)}Z`;
 }
 
@@ -23,8 +41,9 @@ function fromLabel(chatId, senderId, resolveName = null) {
   return lookupMemberName(chatId, senderId) ?? shortenId(senderId);
 }
 
-function chatTag(chatId, threadId) {
-  return threadId ? `${chatId} thread=${shortenId(threadId)}` : chatId;
+export function chatTag(chatId, threadId) {
+  const chat = chatId || 'unknown';
+  return threadId ? `${chat} thread=${shortenId(threadId)}` : chat;
 }
 
 export function oneLine(text) {
@@ -53,6 +72,17 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     line += ` [mentions: ${names}]`;
   }
   return line;
+}
+
+// A quote-reply's target, resolved from local history: 'me' when the sender
+// quoted one of the bot's own messages (a strong addressing signal). Plain
+// thread membership (parent == thread root) is not a quote and stays untagged.
+export function resolveReplyTarget(store, message) {
+  const parentId = message.parentId;
+  if (!parentId || parentId === message.messageId) return null;
+  if (message.threadRootId && parentId === message.threadRootId) return null;
+  const author = store.resolveMessageAuthor?.(parentId);
+  return author ?? { kind: 'unknown', id: parentId };
 }
 
 export function formatHistoryLine(item, resolveName = null) {

@@ -926,7 +926,11 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     daemon.recordSystemActivity = () => false;
     daemon.lark = { async stop() { order.push('lark-stop'); } };
     let releaseIngress;
-    daemon.ingressBarrier = new Promise((resolve) => { releaseIngress = resolve; });
+    const ingressBarrier = new Promise((resolve) => { releaseIngress = resolve; });
+    daemon.harness = {
+      ingressBarrier,
+      stop() { order.push('burst-stop'); },
+    };
     daemon.meeting = {
       async stop({ drainIngress }) {
         order.push('plugin-stop-start');
@@ -938,7 +942,6 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
         order.push('plugin-stop-done');
       },
     };
-    daemon.groupBurst = { stop() { order.push('burst-stop'); } };
     daemon.agentRuntime = { async stop() { order.push('model-stop'); } };
     daemon.registry = { async stopAll() { order.push('registry-stop'); } };
     daemon.store = { close() { order.push('store-close'); } };
