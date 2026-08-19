@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { LarkClient, SUBSCRIBED_EVENT_TYPES } from '../src/lark.mjs';
 import { sanitizeNonArkChildEnv } from '../src/process-utils.mjs';
@@ -147,5 +150,66 @@ describe('Lark meeting transport', () => {
       '--profile', 'test-profile', 'vc', '+meeting-leave', '--as', 'bot',
       '--meeting-id', '734000000000000001', '--format', 'json',
     ]);
+  });
+});
+
+describe('Lark subscriber process group', () => {
+  async function waitUntilDead(pid, timeoutMs = 4_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try { process.kill(pid, 0); } catch (error) {
+        if (error.code === 'ESRCH') return true;
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return false;
+  }
+
+  it('reaps leftover group members when the subscriber leader exits', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-subscriber-tree-'));
+    const pidFile = path.join(directory, 'child.pid');
+    const fakeLark = path.join(directory, 'fake-lark.mjs');
+    fs.writeFileSync(fakeLark, `#!/usr/bin/env node
+      import { spawn } from 'node:child_process';
+      import fs from 'node:fs';
+      const args = process.argv.slice(2);
+      if (args.includes('event')) {
+        const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+        fs.writeFileSync(${JSON.stringify(pidFile)}, String(child.pid));
+        setTimeout(() => process.exit(0), 50);
+      } else {
+        process.exit(0);
+      }
+    `, { mode: 0o700 });
+
+    const unexpected = [];
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: fakeLark,
+      projectDir: directory,
+      maxEventBytes: 1_000_000,
+    }, { register: (child) => child }, quietLogger);
+
+    let descendantPid = 0;
+    try {
+      client.startSubscription(() => {}, (exit) => unexpected.push(exit));
+      const deadline = Date.now() + 4_000;
+      while (unexpected.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(unexpected.length, 1, 'subscriber leader should exit on its own');
+      assert.ok(fs.existsSync(pidFile), 'leader must have spawned a descendant');
+      descendantPid = Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+      assert.equal(await waitUntilDead(descendantPid), true, 'descendant should die with the leader group');
+    } finally {
+      if (descendantPid) {
+        try { process.kill(descendantPid, 'SIGKILL'); } catch {}
+      }
+      await client.stop();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

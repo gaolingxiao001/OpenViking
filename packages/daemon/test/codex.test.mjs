@@ -38,7 +38,7 @@ async function waitFor(predicate, timeoutMs = 2_000) {
 class FakeChild extends EventEmitter {
   constructor() {
     super();
-    this.pid = 4242;
+    this.pid = 987_654_321;
     this.exitCode = null;
     this.writes = [];
     this.stdin = {

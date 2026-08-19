@@ -45,6 +45,17 @@ function cleanValue(value, seen = new WeakSet(), depth = 0) {
   return value;
 }
 
+export function safeError(error) {
+  return redactSensitive(error instanceof Error ? error.message : String(error));
+}
+
+// For errors that may embed Lark identifiers (chat/message/user ids) in their
+// text: redact them alongside the generic sensitive patterns.
+export function safeChatLookupError(error) {
+  return safeError(error)
+    .replace(/\b(?:om|oc|ou|on|omt|cli)_[A-Za-z0-9_-]{6,}\b/g, '[LARK_ID]');
+}
+
 export function opaqueRef(value) {
   if (!value) return undefined;
   return createHash('sha256').update(String(value)).digest('hex').slice(0, 12);

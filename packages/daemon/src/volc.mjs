@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { assembleVolcConversationPolicy } from './conversation-policy.mjs';
-import { redactSensitive } from './logger.mjs';
+import { safeError as safe } from './logger.mjs';
+import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import {
   MANAGED_TOOL_MAX_CALLS,
   MANAGED_TOOL_MAX_PROTOCOL_ERRORS,
@@ -39,26 +40,6 @@ export const VOLC_EFFORTS = VOLC_RUNTIME.efforts;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function safe(error) {
-  return redactSensitive(error instanceof Error ? error.message : String(error));
-}
-
-function deliveryItem({ text, seq = null, receiptId }) {
-  return receiptId === null || receiptId === undefined
-    ? { text, seq }
-    : { text, seq, receiptId };
-}
-
-function receiptIds(items) {
-  return [...new Set(items
-    .map((item) => item.receiptId)
-    .filter((receiptId) => receiptId !== null && receiptId !== undefined))];
-}
-
-function withReceiptIds(fields, ids) {
-  return ids.length > 0 ? { ...fields, receiptIds: ids } : fields;
 }
 
 function textContent(event) {

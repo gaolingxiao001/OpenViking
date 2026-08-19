@@ -8,9 +8,8 @@ const FRESHNESS_FENCED_TOOLS = new Set([
   'react_to_lark_message',
   'retract_lark_message',
 ]);
-const FINAL_DELIVERY_TOOLS = new Set([
-  ...FRESHNESS_FENCED_TOOLS,
-]);
+// Every freshness-fenced delivery tool also ends the logical turn.
+const FINAL_DELIVERY_TOOLS = FRESHNESS_FENCED_TOOLS;
 
 function managedToolErrorResult(value) {
   const error = String(value ?? 'managed MCP tool call failed');

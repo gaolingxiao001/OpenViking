@@ -3,7 +3,8 @@ import { afterEach, describe, it } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getConfig, loadSystemPrompt, projectDir } from '../src/config.mjs';
+import { getConfig, projectDir } from '../src/config.mjs';
+import { assembleConversationPolicy as loadSystemPrompt } from '../src/conversation-policy.mjs';
 
 const saved = new Map();
 

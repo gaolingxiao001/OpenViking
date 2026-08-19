@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { LarkDaemon } from '../src/daemon.mjs';
+import { startHttpApi } from '../src/http-api.mjs';
 import { Store } from '../src/store.mjs';
 
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -368,7 +369,12 @@ describe('daemon activity API', { concurrency: false }, () => {
       conversationKey: 'profile:tenant:oc-http-private:main',
       status: 'READY',
     });
-    await daemon.startHttpServer();
+    daemon.httpServer = await startHttpApi({
+      config: daemon.config,
+      store: daemon.store,
+      logger: quietLogger,
+      serviceSnapshot: (options) => daemon.serviceSnapshot(options),
+    });
     port = daemon.httpServer.address().port;
   });
 

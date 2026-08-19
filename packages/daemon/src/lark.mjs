@@ -130,7 +130,12 @@ export class LarkClient {
     child.once('exit', (code, signal) => {
       this.subscriber = null;
       if (buffer.trim()) onLine(buffer);
-      if (!this.stopping) onUnexpectedExit({ code, signal, stderr: stderrTail });
+      if (!this.stopping) {
+        // Leader is gone; stop() will not see this handle. Reap the group so
+        // grandchildren that ignored the leader's death do not leak.
+        terminateProcessTree(child, 'SIGKILL');
+        onUnexpectedExit({ code, signal, stderr: stderrTail });
+      }
     });
     return child;
   }
@@ -296,12 +301,14 @@ export class LarkClient {
   async stop() {
     this.stopping = true;
     const child = this.subscriber;
-    if (!child || child.exitCode !== null) return;
+    if (!child?.pid) return;
     terminateProcessTree(child, 'SIGTERM');
-    await Promise.race([
-      new Promise((resolve) => child.once('exit', resolve)),
-      new Promise((resolve) => setTimeout(resolve, 3_000)),
-    ]);
+    if (child.exitCode === null) {
+      await Promise.race([
+        new Promise((resolve) => child.once('exit', resolve)),
+        new Promise((resolve) => setTimeout(resolve, 3_000)),
+      ]);
+    }
     terminateProcessTree(child, 'SIGKILL');
   }
 }

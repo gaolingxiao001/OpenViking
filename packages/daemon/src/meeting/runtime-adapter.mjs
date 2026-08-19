@@ -1,8 +1,9 @@
+import { oneLine as collapseLine } from '../runtime-input.mjs';
+
+// One physical line, bounded: a lone \r or U+2028/U+2029 in untrusted ASR text
+// must never survive into the authenticated turn envelope.
 function oneLine(value, maxLength = 8_000) {
-  return String(value ?? '')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(/\r?\n/g, ' ⏎ ')
-    .slice(0, maxLength);
+  return collapseLine(value).slice(0, maxLength);
 }
 
 function field(value) {

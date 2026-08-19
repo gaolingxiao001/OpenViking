@@ -8,16 +8,19 @@ daemon 是一根薄管道,核心数据流:
 
 ```
 lark-cli event +subscribe (lark.mjs 子进程, NDJSON)
-  → daemon.mjs handleEventLine
+  → harness.mjs handleEventLine(入站管线:解析 → meeting 分流 → normalize →
+      deterministicFilter → slash 识别 → ingest 去重落库 → burst/直送)
   → event.mjs normalizeEvent + deterministicFilter(确定性过滤:类型/发送者/时效)
   → commands.mjs(`/` 开头 = 本机 slash 命令:/new /help /model /effort,
-      前缀匹配,daemon 直接执行并经 lark.replyMessage 回信,不进 codex 也不进 history)
+      前缀匹配,daemon 直接执行并经 notices.mjs journaledReply 回信,不进 codex 也不进 history)
   → store.mjs ingest(SQLite 去重,inbound 表分配 seq)
   → codex.mjs CodexAgent.deliver(formatInboundLine 压缩成一行)
       空闲 → turn/start;思考中 → turn/steer;启动中 → queue
   → 常驻 codex app-server(JSON-RPC over stdio,全局唯一 thread)
   → codex 自己通过 MCP 工具回飞书(lark-tools.mjs 作为 stdio MCP server 挂进 codex)
 ```
+
+`daemon.mjs` 只是 composition root + 进程生命周期。各真模块:`harness.mjs`(入站管线 + ingress barrier + group burst)、`notices.mjs`(journaledReply + FailurePolicy:失败通知静音 / claude→codex 回退)、`chat-names.mjs`(后台群名解析)、`http-api.mjs`(loopback /api/activity + /health)。管线的 e2e 测试面是 `test/mock-env.mjs`(假 lark-cli 动态喂事件 + 假 codex app-server 可脚本化 turn 结果 + 安静 OV,详见 `test/daemon.integration.test.mjs`)。
 
 - **运行时可变 model/effort**:`/model`、`/effort` 写入 meta 表(`setting:codex_model` / `setting:codex_effort`),优先于 env 配置;值随每次 `turn/start` 以 per-turn override 下发(thread/resume 的 config 对运行中的 thread 不生效,别改回去);`/model` 下一轮生效并保留上下文，`/effort` 切换后自动开空 thread，避免旧档位的失败状态污染后续轮次;`/model` 的可选项来自 app-server `model/list`,参数按列表前缀解析。`/new` 走 `rotateSession()`:开空 thread 且不带 history 前缀。
 

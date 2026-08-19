@@ -1181,10 +1181,7 @@ export class Store {
       for (const [key, value] of Object.entries(settings)) {
         this.setMetaStatement.run(`setting:${key}`, String(value));
       }
-      this.db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(
-        `managed_turn:${runtime}`,
-        `managed_session_poison:${runtime}`,
-      );
+      this.clearManagedMeta(runtime);
       return { runtime, epoch, authorityToken: nextAuthorityToken };
     });
   }
@@ -1600,12 +1597,18 @@ export class Store {
       this.setMetaStatement.run('global_session_epoch', String(epoch));
       this.setMetaStatement.run('global_session_synced_through_seq', '0');
       this.setMetaStatement.run('global_session_ready', '1');
-      this.db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(
-        `managed_turn:${runtime}`,
-        `managed_session_poison:${runtime}`,
-      );
+      this.clearManagedMeta(runtime);
       return { runtime, epoch, authorityToken: nextAuthorityToken };
     });
+  }
+
+  // A fresh session or authority hand-off invalidates the managed runtime's
+  // persisted turn fence and poison marker. Single owner of that key namespace.
+  clearManagedMeta(runtime) {
+    this.db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(
+      `managed_turn:${runtime}`,
+      `managed_session_poison:${runtime}`,
+    );
   }
 
   settleCognitionJournal(dedupeKey, status, { messageId = null, metadata = {} } = {}) {

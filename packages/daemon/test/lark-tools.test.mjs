@@ -931,9 +931,12 @@ describe('Lark proactive IM tool service', () => {
 
     try {
       const startedAt = Date.now();
-      const result = await runCommand(wrapper, [pidFile], { cwd: directory, timeoutMs: 1_000 });
+      // 3s budget: under full-suite load the wrapper's node startup can exceed
+      // 1s, and a wrapper killed before writing child.pid makes the test flaky.
+      const result = await runCommand(wrapper, [pidFile], { cwd: directory, timeoutMs: 3_000 });
       assert.equal(result.timedOut, true);
-      assert.ok(Date.now() - startedAt >= 2_800, 'timeout should wait for SIGKILL escalation before returning');
+      assert.ok(Date.now() - startedAt >= 4_800, 'timeout should wait for SIGKILL escalation before returning');
+      assert.ok(fs.existsSync(pidFile), 'wrapper must have spawned its descendant before the timeout');
       const descendantPid = Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
       const deadline = Date.now() + 4_000;
       let alive = true;

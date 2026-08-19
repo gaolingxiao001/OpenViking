@@ -483,5 +483,3 @@ export class AgentRuntime {
     this.stagedBackend = null;
   }
 }
-
-export { resolveRuntimeModelTarget as parseRuntimeModelTarget } from './runtime-catalog.mjs';

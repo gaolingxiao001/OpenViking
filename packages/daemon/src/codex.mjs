@@ -1,33 +1,13 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
-import { redactSensitive } from './logger.mjs';
-import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
+import { safeError as safe } from './logger.mjs';
+import { cognitionHistoryPrefix, CognitionLimitError, HISTORY_SEPARATOR } from './cognition.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
-import { formatHistoryLine } from './runtime-input.mjs';
+import { deliveryItem, formatHistoryLine, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
 
 const CODEX_RUNTIME = getRuntimeDefinition('codex');
-
-function safe(error) {
-  return redactSensitive(error instanceof Error ? error.message : String(error));
-}
-
-function deliveryItem({ text, seq = null, receiptId }) {
-  return receiptId === null || receiptId === undefined
-    ? { text, seq }
-    : { text, seq, receiptId };
-}
-
-function receiptIds(items) {
-  return [...new Set(items
-    .map((item) => item.receiptId)
-    .filter((receiptId) => receiptId !== null && receiptId !== undefined))];
-}
-
-function withReceiptIds(fields, ids) {
-  return ids.length > 0 ? { ...fields, receiptIds: ids } : fields;
-}
 
 // turn/completed carries error as an object whose .message is often a JSON blob
 // wrapping the upstream API error; unwrap to the innermost human-readable message.
@@ -160,8 +140,6 @@ function tomlString(value) {
 export function sanitizeCodexEnv(environment, profile = '') {
   return sanitizeAgentChildEnv(environment, { profile });
 }
-
-const HISTORY_SEPARATOR = '--- history above, new messages below ---';
 
 // The daemon is a thin pipe: inbound Lark lines are fed to one persistent codex
 // app-server thread via turn/start (idle) or turn/steer (mid-turn). Codex sends its
@@ -1158,6 +1136,7 @@ export class CodexAgent {
       this.forceFreshThread = true;
     }
     this.child = null;
+    if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
     this.threadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;
@@ -1300,12 +1279,14 @@ export class CodexAgent {
     for (const resolve of waiters) resolve();
     if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
     const child = this.child;
-    if (!child || child.exitCode !== null) return;
+    if (!child?.pid) return;
     terminateProcessTree(child, 'SIGTERM');
-    await Promise.race([
-      new Promise((resolve) => child.once('exit', resolve)),
-      delay(3_000),
-    ]);
+    if (child.exitCode === null) {
+      await Promise.race([
+        new Promise((resolve) => child.once('exit', resolve)),
+        delay(3_000),
+      ]);
+    }
     terminateProcessTree(child, 'SIGKILL');
   }
 }

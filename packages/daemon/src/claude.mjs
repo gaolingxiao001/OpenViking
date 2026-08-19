@@ -4,9 +4,10 @@ import path from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
-import { redactSensitive } from './logger.mjs';
+import { safeError as safe } from './logger.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
+import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
@@ -21,26 +22,6 @@ export const CLAUDE_EFFORTS = CLAUDE_RUNTIME.efforts;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function safe(error) {
-  return redactSensitive(error instanceof Error ? error.message : String(error));
-}
-
-function deliveryItem({ text, seq = null, receiptId }) {
-  return receiptId === null || receiptId === undefined
-    ? { text, seq }
-    : { text, seq, receiptId };
-}
-
-function receiptIds(items) {
-  return [...new Set(items
-    .map((item) => item.receiptId)
-    .filter((receiptId) => receiptId !== null && receiptId !== undefined))];
-}
-
-function withReceiptIds(fields, ids) {
-  return ids.length > 0 ? { ...fields, receiptIds: ids } : fields;
 }
 
 const LARK_DELIVERY_TOOLS = new Set([
@@ -372,6 +353,7 @@ export class ClaudeAgent {
         if (stabilityTimer) clearTimeout(stabilityTimer);
         this.child = null;
         this.connected = false;
+        terminateProcessTree(child, 'SIGKILL');
         this._cleanupMcpConfig();
         reject(error);
       };
@@ -777,6 +759,7 @@ export class ClaudeAgent {
     if (this.child !== child) return;
     this.child = null;
     this.connected = false;
+    if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
     this._cleanupMcpConfig();
     const wasActive = this.turnActive;
     const acceptanceUnknown = wasActive && this.sessionInitialized;
@@ -1005,7 +988,12 @@ export class ClaudeAgent {
     const child = this.child;
     this.child = null;
     this.connected = false;
-    if (!child || child.exitCode !== null) {
+    if (!child?.pid) {
+      this._cleanupMcpConfig();
+      return;
+    }
+    if (child.exitCode !== null) {
+      terminateProcessTree(child, 'SIGKILL');
       this._cleanupMcpConfig();
       return;
     }
