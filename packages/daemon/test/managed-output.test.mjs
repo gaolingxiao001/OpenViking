@@ -85,7 +85,7 @@ describe('managed-agent local Lark delivery', { concurrency: false }, () => {
       ...common,
       callId: 'reply_1',
       name: 'reply_lark_message',
-      arguments: { message_id: 'om_target12345678', text: 'answer' },
+      arguments: { message_id: 'om_target12345678', markdown: 'answer' },
     });
     assert.equal(reply.ok, true);
     assert.equal(reply.terminal, true);

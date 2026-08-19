@@ -120,14 +120,18 @@ describe('release-owned system prompt', () => {
   it('loads the single prompt file and substitutes release configuration', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
+    const empty = path.join(directory, 'empty.md');
     fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{LARK_DAEMON_UPGRADE_TARGET}}\n');
+    fs.writeFileSync(empty, '');
     try {
       assert.equal(loadSystemPrompt({
         systemPromptPath,
+        openVikingPromptPath: empty,
+        harnessPromptPath: empty,
         teamTaskBoardUrl: 'https://board.example',
         agentName: '斯斯',
         upgradeTarget: 'sisi',
-      }), 'policy\n\nhttps://board.example\n\n斯斯\n\nsisi\n');
+      }), 'policy\n\nhttps://board.example\n\n斯斯\n\nsisi');
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -136,11 +140,18 @@ describe('release-owned system prompt', () => {
   it('adds meeting capability policy only when the feature is enabled', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-audio-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
+    const empty = path.join(directory, 'empty.md');
     fs.writeFileSync(systemPromptPath, 'base\n');
+    fs.writeFileSync(empty, '');
     try {
-      assert.equal(loadSystemPrompt({ systemPromptPath, meetingAudio: null }), 'base\n');
+      const baseConfig = {
+        systemPromptPath,
+        openVikingPromptPath: empty,
+        harnessPromptPath: empty,
+      };
+      assert.equal(loadSystemPrompt({ ...baseConfig, meetingAudio: null }), 'base');
       assert.match(
-        loadSystemPrompt({ systemPromptPath, meetingAudio: {} }),
+        loadSystemPrompt({ ...baseConfig, meetingAudio: {} }),
         /no implicit delivery target/,
       );
     } finally {

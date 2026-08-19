@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { applyOpenVikingChildEnv } from './openviking.mjs';
 
 export function sanitizeNonArkChildEnv(environment) {
   const safeEnv = { ...environment };
@@ -24,7 +25,7 @@ export function sanitizeAgentChildEnv(environment, {
       || (stripClaudeCode && key === 'CLAUDECODE')) delete safeEnv[key];
   }
   if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
-  return safeEnv;
+  return applyOpenVikingChildEnv(safeEnv, environment);
 }
 
 function appendTail(current, chunk, limit) {

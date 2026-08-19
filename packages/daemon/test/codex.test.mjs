@@ -293,6 +293,7 @@ describe('formatting helpers', () => {
     const env = sanitizeCodexEnv({
       PATH: '/bin',
       OPENAI_API_KEY: 'codex-needs-it',
+      OPENVIKING_CLI_CONFIG_FILE: '/tmp/ov.conf',
       LARK_APP_SECRET: 'must-never-leak',
       FEISHU_TOKEN: 'must-never-leak',
       LARKSUITE_CLI_PROFILE: 'wrong-profile',
@@ -306,6 +307,7 @@ describe('formatting helpers', () => {
     assert.equal(env.ARK_SESSION_ID, undefined);
     assert.equal(env.SESSION_ID, undefined);
     assert.equal(env.OPENAI_API_KEY, 'codex-needs-it');
+    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/tmp/ov.conf');
     assert.equal(env.LARKSUITE_CLI_PROFILE, 'fixed-profile');
     assert.equal(env.FORCE_COLOR, '0');
     assert.equal(env.NO_COLOR, '1');

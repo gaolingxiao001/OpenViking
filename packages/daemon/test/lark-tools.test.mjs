@@ -163,8 +163,8 @@ describe('Lark proactive IM tool service', () => {
       });
 
       assert.equal(calls.length, 3);
-      assert.equal(calls[0][calls[0].indexOf('--text') + 1], 'fast answer B');
-      assert.equal(calls[1][calls[1].indexOf('--text') + 1], 'finished answer A');
+      assert.equal(calls[0][calls[0].indexOf('--markdown') + 1], 'fast answer B');
+      assert.equal(calls[1][calls[1].indexOf('--markdown') + 1], 'finished answer A');
       const outbound = store.cognitionJournal().filter((row) => row.kind === 'outbound');
       assert.deepEqual(outbound.map((row) => row.metadata.decisionMessageId), [
         LATEST_DECISION_MESSAGE_ID,
@@ -386,7 +386,7 @@ describe('Lark proactive IM tool service', () => {
     assert.deepEqual(call.args.slice(0, 3), ['--profile', 'fixed-profile', 'im']);
     assert.ok(call.args.includes('+messages-send'));
     assert.equal(call.args[call.args.indexOf('--chat-id') + 1], 'oc_memorize123456');
-    assert.equal(call.args[call.args.indexOf('--text') + 1], 'hi');
+    assert.equal(call.args[call.args.indexOf('--markdown') + 1], 'hi');
     assert.match(result.idempotency_key, /^ld_[a-f0-9]{40}$/);
     assert.equal(call.args[call.args.indexOf('--idempotency-key') + 1], result.idempotency_key);
   });
@@ -416,11 +416,11 @@ describe('Lark proactive IM tool service', () => {
         markdown: '**hi**',
         decision_message_id: DECISION_MESSAGE_ID,
       }),
-      /only one of text or markdown/,
+      /provide only markdown/,
     );
     await assert.rejects(
       () => service.sendMessage({ chat_id: 'oc_memorize123456', decision_message_id: DECISION_MESSAGE_ID }),
-      /text or markdown must not be empty/,
+      /markdown must not be empty/,
     );
   });
 
@@ -488,7 +488,7 @@ describe('Lark proactive IM tool service', () => {
       text: 'hello <at user_id="all">all</at>',
       decision_message_id: DECISION_MESSAGE_ID,
     });
-    const sentText = args[args.indexOf('--text') + 1];
+    const sentText = args[args.indexOf('--markdown') + 1];
     assert.equal(sentText, 'hello 所有人');
     assert.doesNotMatch(sentText, /user_id|<at/i);
   });
@@ -516,11 +516,11 @@ describe('Lark proactive IM tool service', () => {
     assert.deepEqual(sent.mention_user_ids, [mentionUserId]);
     assert.deepEqual(replied.mention_user_ids, [mentionUserId]);
     assert.equal(
-      calls[0][calls[0].indexOf('--text') + 1],
+      calls[0][calls[0].indexOf('--markdown') + 1],
       `<at user_id="${mentionUserId}"></at> please handle this`,
     );
     assert.equal(
-      calls[1][calls[1].indexOf('--text') + 1],
+      calls[1][calls[1].indexOf('--markdown') + 1],
       `<at user_id="${mentionUserId}"></at> please follow up`,
     );
     await assert.rejects(
@@ -556,7 +556,7 @@ describe('Lark proactive IM tool service', () => {
     assert.deepEqual(sent.mention_user_ids, ['ou_zayn12345678', 'ou_zhang1234567']);
     const sendArgs = calls.find((args) => args.includes('+messages-send'));
     assert.match(
-      sendArgs[sendArgs.indexOf('--text') + 1],
+      sendArgs[sendArgs.indexOf('--markdown') + 1],
       /^<at user_id="ou_zayn12345678"><\/at> <at user_id="ou_zhang1234567"><\/at> please handle this$/,
     );
     // Second send within the TTL reuses the cached roster.
@@ -1014,9 +1014,9 @@ describe('Lark proactive IM MCP protocol', () => {
     assert.match(threaded.result.content[0].text, /omt_topic1234567[\s\S]*thread reply/);
     const inbox = await handle({ jsonrpc: '2.0', id: 42, method: 'tools/call', params: { name: 'read_meeting_inbox', arguments: {} } });
     assert.equal(inbox.result.structuredContent.remaining, 0);
-    const sent = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', text: 'hi', decision_message_id: DECISION_MESSAGE_ID } } });
+    const sent = await handle({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'send_lark_message', arguments: { chat_id: 'oc_memorize123456', markdown: 'hi', decision_message_id: DECISION_MESSAGE_ID } } });
     assert.equal(sent.result.structuredContent.sent, true);
-    const replied = await handle({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', text: 'hi', reply_in_thread: true, decision_message_id: DECISION_MESSAGE_ID } } });
+    const replied = await handle({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'reply_lark_message', arguments: { message_id: 'om_target1234567', markdown: 'hi', reply_in_thread: true, decision_message_id: DECISION_MESSAGE_ID } } });
     assert.equal(replied.result.structuredContent.sent, true);
     assert.match(replied.result.content[0].text, /om_target1234567/);
     const reacted = await handle({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'react_to_lark_message', arguments: { message_id: 'om_target1234567', emoji_type: 'OK', decision_message_id: DECISION_MESSAGE_ID } } });

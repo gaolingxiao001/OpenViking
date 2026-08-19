@@ -38,13 +38,13 @@ describe('managed-agent text tool bridge protocol', () => {
       kind: 'tool_call',
       call_id: 'call_1',
       name: 'reply_lark_message',
-      arguments: { message_id: 'om_message123456', text: 'answer' },
+      arguments: { message_id: 'om_message123456', markdown: 'answer' },
     }), tools);
     assert.deepEqual(call, {
       kind: 'tool_call',
       callId: 'call_1',
       name: 'reply_lark_message',
-      arguments: { message_id: 'om_message123456', text: 'answer' },
+      arguments: { message_id: 'om_message123456', markdown: 'answer' },
     });
     assert.deepEqual(parseManagedToolDecision(JSON.stringify({
       protocol: MANAGED_TOOL_PROTOCOL,
@@ -72,7 +72,7 @@ describe('managed-agent text tool bridge protocol', () => {
       name: 'reply_lark_message',
       arguments: {
         message_id: 'om_message123456',
-        text: 'answer',
+        markdown: 'answer',
         decision_message_id: 'om_attacker123456',
       },
     }), tools), /daemon-owned|not supported/);
@@ -81,7 +81,7 @@ describe('managed-agent text tool bridge protocol', () => {
       kind: 'tool_call',
       call_id: 'call_1',
       name: 'reply_lark_message',
-      arguments: { message_id: 'short', text: 'answer' },
+      arguments: { message_id: 'short', markdown: 'answer' },
     }), tools), /invalid format/);
   });
 

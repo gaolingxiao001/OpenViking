@@ -1,4 +1,5 @@
 export { MeetingAdapter } from './adapter.mjs';
+export { MeetingPlugin } from './plugin.mjs';
 export { MeetingInboxNotifier, readMeetingInboxDatabase } from './inbox.mjs';
 export {
   MEETING_EVENT_TYPES,

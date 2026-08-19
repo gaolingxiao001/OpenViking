@@ -1,13 +1,12 @@
 # Lark 消息格式参考
 
-只在真的要发文本以外的格式时才读这份文档，短消息直接用 `send_lark_message`/`reply_lark_message` 的 `text` 就够了，别为了看这份文档浪费一轮。
+只在真的要发 markdown 以外的格式时才读这份文档。短消息也用 `send_lark_message`/`reply_lark_message` 的 `markdown` 参数，别为了看这份文档浪费一轮。
 
-底层都是同一个 `lark-cli`(`im +messages-send` / `+messages-reply`),MCP 工具目前原生透出的是其中两种 `--text`/`--markdown`,其余的仍要走 fallback。
+底层都是同一个 `lark-cli`(`im +messages-send` / `+messages-reply`)。MCP 工具只透出 `--markdown`，其余仍走 fallback。
 
 ## MCP 原生支持
 
-- **text**(默认): 纯文本,走 `send_lark_message`/`reply_lark_message` 的 `text` 参数。绝大多数场景用这个。
-- **markdown**: 需要加粗/链接/嵌图时用 `markdown` 参数代替 `text`(二者互斥,只能给一个)。会被 lark-cli 自动包成 post 格式,图片 URL 会自动解析。@提及仍用同一套 `<at user_id="ou_xxx"></at>` 标签,写法不变。
+- **markdown**(唯一出站正文): 走 `send_lark_message`/`reply_lark_message` 的 `markdown` 参数。引用用 `"双引号"`，不要用 `'单引号'`。会被 lark-cli 自动包成 post 格式,图片 URL 会自动解析。@提及仍用同一套 `<at user_id="ou_xxx"></at>` 标签。
 
 示例:
 ```
