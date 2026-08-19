@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { redactSensitive } from './logger.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
-import { loadSystemPrompt } from './config.mjs';
+import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
@@ -103,8 +103,8 @@ export class ClaudeAgent {
     this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
     this.deliveredThroughSeq = this.syncedThroughSeq;
 
-    this.systemPrompt = loadSystemPrompt(config);
-    this.developerInstructionsText = `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${config.profile}. Shell fallbacks inherit this profile through LARKSUITE_CLI_PROFILE. Never pass --profile and never override or unset that environment variable.`;
+    this.systemPrompt = assembleConversationPolicy(config);
+    this.developerInstructionsText = this.systemPrompt;
     this.model = options.model ?? store.getSetting?.('claude_model') ?? config.claudeModel ?? '';
     this.effort = options.effort
       ?? store.getSetting?.('claude_effort')
@@ -320,8 +320,9 @@ export class ClaudeAgent {
         '--verbose',
         '--output-format', 'stream-json',
         '--input-format', 'stream-json',
-        // No --strict-mcp-config: user-scope and plugin MCP servers (e.g. the
-        // openviking-memory plugin's OV proxy) load alongside lark_daemon_im.
+        // No --strict-mcp-config: user-scope skill/MCP servers (OpenViking via
+        // OPENVIKING_* env) load alongside lark_daemon_im. The daemon does not
+        // own an OV client.
         '--mcp-config', mcpConfigPath,
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
         '--append-system-prompt', this.developerInstructionsText,

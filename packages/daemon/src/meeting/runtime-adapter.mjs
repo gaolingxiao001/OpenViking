@@ -48,6 +48,7 @@ export class MeetingRuntimeAdapter {
     generationClock,
     flyReferences,
     runtime,
+    insertText = null,
     submitIngress,
     flushBufferedIngress = null,
     logger = null,
@@ -56,13 +57,16 @@ export class MeetingRuntimeAdapter {
     clearTimer = clearTimeout,
   }) {
     if (typeof spool?.claim !== 'function') throw new TypeError('live spool is required');
-    if (typeof runtime?.submit !== 'function') throw new TypeError('runtime submit is required');
+    if (typeof runtime?.submit !== 'function' && typeof insertText !== 'function') {
+      throw new TypeError('runtime submit or insertText is required');
+    }
     if (typeof submitIngress !== 'function') throw new TypeError('submitIngress is required');
     Object.assign(this, {
       spool,
       generationClock,
       flyReferences,
       runtime,
+      insertText,
       submitIngress,
       flushBufferedIngress,
       logger,
@@ -123,12 +127,15 @@ export class MeetingRuntimeAdapter {
           const references = this.flyReferences?.snapshot?.({
             meetingId: item.input?.meetingId,
           }) ?? [];
-          const admission = this.runtime.submit([{
+          const textItem = {
             text: formatMeetingInput(item, references),
             seq: null,
             receiptId: item.inputId,
             scope: { kind: 'meeting', meetingId: item.input?.meetingId },
-          }]);
+          };
+          const admission = typeof this.insertText === 'function'
+            ? this.insertText(textItem)
+            : this.runtime.submit([textItem]);
           if (admission.accepted !== true) {
             this.spool.release(item.inputId);
             for (const unprocessed of items.slice(itemIndex + 1)) {

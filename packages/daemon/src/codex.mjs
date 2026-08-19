@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { redactSensitive } from './logger.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
-import { loadSystemPrompt } from './config.mjs';
+import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { formatHistoryLine } from './runtime-input.mjs';
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
 
@@ -191,8 +191,8 @@ export class CodexAgent {
     this.allowResume = options.allowResume !== false;
     this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
 
-    this.systemPrompt = loadSystemPrompt(config);
-    this.developerInstructionsText = this.developerInstructions(config.profile);
+    this.systemPrompt = assembleConversationPolicy(config);
+    this.developerInstructionsText = this.systemPrompt;
     // Model/effort start from env config but can be switched at runtime via the
     // /model and /effort slash commands; overrides persist in the store's meta table.
     this.model = options.model ?? store.getSetting?.('codex_model') ?? config.codexModel ?? '';
@@ -228,10 +228,6 @@ export class CodexAgent {
     this.primeWaiter = null;
     this.sessionRotation = null;
     this.forceFreshThread = false;
-  }
-
-  developerInstructions(profile) {
-    return `${this.systemPrompt.trim()}\n\nDaemon-authenticated: lark-cli profile is ${profile}. Shell fallbacks inherit this profile through LARKSUITE_CLI_PROFILE. Never pass --profile and never override or unset that environment variable.`;
   }
 
   // One global thread is shared across every chat; policyHash only detects when the

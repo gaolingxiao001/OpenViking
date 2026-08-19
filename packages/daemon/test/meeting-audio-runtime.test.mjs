@@ -917,7 +917,7 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     assert.equal(result.status, 0, result.stderr);
   });
 
-  it('closes meeting claim authority before stopping the model runtime', async () => {
+  it('closes the meeting plugin before stopping the model runtime', async () => {
     const order = [];
     const daemon = new LarkDaemon({
       lockPath: path.join(directory, 'unused.lock'),
@@ -925,25 +925,21 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
     }, quietLogger);
     daemon.recordSystemActivity = () => false;
     daemon.lark = { async stop() { order.push('lark-stop'); } };
-    daemon.meetingInboxNotifier = { stop() { order.push('inbox-stop'); } };
     let releaseIngress;
     daemon.ingressBarrier = new Promise((resolve) => { releaseIngress = resolve; });
-    daemon.meetingAudioRuntime = {
-      stop() {
-        order.push('runtime-drain-stop');
+    daemon.meeting = {
+      async stop({ drainIngress }) {
+        order.push('plugin-stop-start');
         queueMicrotask(() => {
           order.push('ingress-drained');
           releaseIngress();
         });
+        await drainIngress();
+        order.push('plugin-stop-done');
       },
     };
-    daemon.meetingDecisionAuthority = { revokeAll() { order.push('authority-revoked'); } };
-    daemon.meetingDecisionServer = { async close() { order.push('claim-socket-closed'); } };
-    daemon.meeting = { async stop() { order.push('meeting-stop'); } };
-    daemon.meetingAudio = { coordinator: { async stop() { order.push('media-stop'); } } };
     daemon.groupBurst = { stop() { order.push('burst-stop'); } };
     daemon.agentRuntime = { async stop() { order.push('model-stop'); } };
-    daemon.meetingAudioSpool = { close() { order.push('spool-close'); } };
     daemon.registry = { async stopAll() { order.push('registry-stop'); } };
     daemon.store = { close() { order.push('store-close'); } };
     daemon.lock = { release() { order.push('lock-release'); } };
@@ -954,10 +950,9 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
       process.exitCode = priorExitCode;
     }
     const index = (event) => order.indexOf(event);
-    assert.ok(index('runtime-drain-stop') < index('ingress-drained'));
-    assert.ok(index('ingress-drained') < index('authority-revoked'));
-    assert.ok(index('authority-revoked') < index('claim-socket-closed'));
-    assert.ok(index('claim-socket-closed') < index('model-stop'));
+    assert.ok(index('plugin-stop-start') < index('ingress-drained'));
+    assert.ok(index('ingress-drained') < index('plugin-stop-done'));
+    assert.ok(index('plugin-stop-done') < index('model-stop'));
   });
 
   it('settles successful, failed, and abandoned target-free ingress receipts safely', async () => {

@@ -120,14 +120,20 @@ describe('release-owned system prompt', () => {
   it('loads the single prompt file and substitutes release configuration', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
+    const empty = path.join(directory, 'empty.md');
     fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{LARK_DAEMON_UPGRADE_TARGET}}\n');
+    fs.writeFileSync(empty, '');
     try {
-      assert.equal(loadSystemPrompt({
+      const text = loadSystemPrompt({
         systemPromptPath,
+        openVikingPromptPath: empty,
+        harnessPromptPath: empty,
         teamTaskBoardUrl: 'https://board.example',
         agentName: '斯斯',
         upgradeTarget: 'sisi',
-      }), 'policy\n\nhttps://board.example\n\n斯斯\n\nsisi\n');
+      });
+      assert.match(text, /^policy\n\nhttps:\/\/board\.example\n\n斯斯\n\nsisi/);
+      assert.match(text, /<context-workdir>/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -136,11 +142,21 @@ describe('release-owned system prompt', () => {
   it('adds meeting capability policy only when the feature is enabled', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-audio-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
+    const empty = path.join(directory, 'empty.md');
     fs.writeFileSync(systemPromptPath, 'base\n');
+    fs.writeFileSync(empty, '');
     try {
-      assert.equal(loadSystemPrompt({ systemPromptPath, meetingAudio: null }), 'base\n');
+      const baseConfig = {
+        systemPromptPath,
+        openVikingPromptPath: empty,
+        harnessPromptPath: empty,
+      };
+      const withoutAudio = loadSystemPrompt({ ...baseConfig, meetingAudio: null });
+      assert.match(withoutAudio, /^base/);
+      assert.match(withoutAudio, /<context-workdir>/);
+      assert.doesNotMatch(withoutAudio, /no implicit delivery target/);
       assert.match(
-        loadSystemPrompt({ systemPromptPath, meetingAudio: {} }),
+        loadSystemPrompt({ ...baseConfig, meetingAudio: {} }),
         /no implicit delivery target/,
       );
     } finally {

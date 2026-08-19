@@ -95,15 +95,15 @@ function renderMessageText(value, mentionUserIds, mentionPairs = []) {
   return prefix ? `${prefix} ${text}` : text;
 }
 
-// text and markdown share the same at-tag mention syntax and length limit; markdown
-// is auto-wrapped into Lark's post format by lark-cli, everything else stays the same.
+// Outbound delivery is markdown-only. Lark wraps --markdown into post format.
+// A legacy `text` field is accepted as markdown so older callers keep working.
 function resolveMessageBody(input) {
   const hasText = typeof input.text === 'string' && input.text.trim() !== '';
   const hasMarkdown = typeof input.markdown === 'string' && input.markdown.trim() !== '';
-  if (hasText && hasMarkdown) throw new Error('provide only one of text or markdown, not both');
+  if (hasText && hasMarkdown) throw new Error('provide only markdown, not text and markdown');
   if (hasMarkdown) return { flag: '--markdown', raw: input.markdown };
-  if (hasText) return { flag: '--text', raw: input.text };
-  throw new Error('text or markdown must not be empty');
+  if (hasText) return { flag: '--markdown', raw: input.text };
+  throw new Error('markdown must not be empty');
 }
 
 function stableActionKey(...parts) {
@@ -220,14 +220,13 @@ export const LARK_TOOLS = [
   {
     name: 'send_lark_message',
     title: 'Send a Lark message',
-    description: 'Send a message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. Provide exactly one of text or markdown: text for the plain short replies that cover most chat turns; markdown when you actually need bold/links/embedded images (auto-wrapped into a rich post). For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
+    description: 'Send a message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. Body is markdown only (--markdown): use it for short replies and for bold/links/embedded images. Quote with "double quotes", not single quotes, so formatting is preserved. For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         chat_id: { type: 'string', pattern: '^oc_[A-Za-z0-9_-]{8,}$', description: 'Full Lark chat ID (oc_...). Never guess or reconstruct a shortened ID.' },
-        text: { type: 'string', minLength: 1, description: 'Plain-text message body. Use this by default; mutually exclusive with markdown.' },
-        markdown: { type: 'string', minLength: 1, description: 'Markdown message body (bold, links, embedded image URLs); sent as a rich post instead of plain text. Only when text formatting is actually needed. Mutually exclusive with text.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown message body. Always use this field. Wrap quotes and multiline text in "double quotes", not \'single quotes\': single quotes make Lark render \\n as raw text. Bold, links, and embedded image URLs are sent as a rich post.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -246,7 +245,7 @@ export const LARK_TOOLS = [
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the send is blocked if anything newer has arrived.' },
         response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. This is attribution only, not routing or priority; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
-      required: ['chat_id', 'decision_message_id'],
+      required: ['chat_id', 'markdown', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -258,14 +257,13 @@ export const LARK_TOOLS = [
   {
     name: 'reply_lark_message',
     title: 'Reply to a Lark message',
-    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. Provide exactly one of text or markdown: text for the plain short replies that cover most chat turns; markdown when you actually need bold/links/embedded images (auto-wrapped into a rich post). For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
+    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. Body is markdown only (--markdown). Quote with "double quotes", not single quotes, so formatting is preserved. For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to reply to. Never guess or reconstruct a shortened ID.' },
-        text: { type: 'string', minLength: 1, description: 'Plain-text reply body. Use this by default; mutually exclusive with markdown.' },
-        markdown: { type: 'string', minLength: 1, description: 'Markdown reply body (bold, links, embedded image URLs); sent as a rich post instead of plain text. Only when text formatting is actually needed. Mutually exclusive with text.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown reply body. Always use this field. Wrap quotes and multiline text in "double quotes", not \'single quotes\': single quotes make Lark render \\n as raw text. Bold, links, and embedded image URLs are sent as a rich post.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -285,7 +283,7 @@ export const LARK_TOOLS = [
         decision_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. This is the freshness fence: the reply is blocked if anything newer has arrived.' },
         response_to_message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. This is attribution only, not routing or priority; it must be in the same chat/thread and no newer than decision_message_id.' },
       },
-      required: ['message_id', 'decision_message_id'],
+      required: ['message_id', 'markdown', 'decision_message_id'],
     },
     annotations: {
       readOnlyHint: false,
@@ -1071,15 +1069,14 @@ export class LarkToolService {
       if (!this.decisionCapabilityClaim) {
         throw new Error('decision_capability is unavailable in this daemon configuration');
       }
-      if (input.markdown !== undefined
-        || input.mention_names !== undefined
+      if (input.mention_names !== undefined
         || input.mention_user_ids !== undefined
         || input.response_to_message_id !== undefined
         || input.idempotency_key !== undefined) {
-        throw new Error('decision_capability authorizes only one plain-text send without mentions, markdown, attribution, or a caller idempotency key');
+        throw new Error('decision_capability authorizes only one markdown send without mentions, attribution, or a caller idempotency key');
       }
       mentionUserIds = [];
-      body = resolveMessageBody({ text: input.text });
+      body = resolveMessageBody(input);
       if (/<\/?at\b/i.test(body.raw)) {
         throw new Error('decision_capability plain text must not contain Lark <at> mention tags');
       }
