@@ -3,35 +3,26 @@ import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { createMcpHandler, LARK_TOOLS, larkToolsForOptions } from '../src/lark-tools.mjs';
 import {
   PI_EFFORTS,
   PiAgent,
   sanitizePiEnv,
 } from '../src/pi.mjs';
-import {
-  isPiLarkDeliveryToolName,
-  registerLarkPiTools,
-} from '../src/pi-lark-extension.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
-const piExtensionPath = fileURLToPath(new URL('../src/pi-lark-extension.mjs', import.meta.url));
-const larkToolServerPath = fileURLToPath(new URL('../src/lark-tools.mjs', import.meta.url));
 
 const baseConfig = {
   systemPromptPath,
   piBin: 'pi',
   piModel: 'openai/gpt-4o',
   piEffort: 'medium',
-  piExtensionPath,
   workspace: '/tmp/lark-agent-workspace',
   projectDir: '/release',
   dataDir: '/tmp/lark-daemon-pi-data',
   databasePath: '/tmp/lark-daemon-test.sqlite3',
   profile: 'test-profile',
   larkCliBin: '/fake/lark-cli',
-  larkToolServerPath,
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
   cognitionMaxChars: 120_000,
@@ -64,8 +55,7 @@ class FakeChild extends EventEmitter {
 }
 
 const helpFlags = [
-  '--mode', '--extension', '--append-system-prompt', '--thinking',
-  '--session-id', '--no-extensions', '--model', 'rpc',
+  '--mode', '--append-system-prompt', '--thinking', '--session-id', '--model', 'rpc',
 ].join('\n');
 
 function parsedWrites(child) {
@@ -196,9 +186,6 @@ describe('PiAgent persistent rpc runtime', () => {
     const args = calls.at(-1).args;
     assert.equal(args[args.indexOf('--mode') + 1], 'rpc');
     assert.ok(args.includes('--mode'));
-    assert.ok(args.includes('--extension'));
-    assert.equal(args[args.indexOf('--extension') + 1], piExtensionPath);
-    assert.ok(args.includes('--no-extensions'));
     assert.ok(args.includes('--append-system-prompt'));
     assert.equal(args[args.indexOf('--thinking') + 1], 'medium');
     assert.equal(args[args.indexOf('--model') + 1], 'openai/gpt-4o');
@@ -206,10 +193,11 @@ describe('PiAgent persistent rpc runtime', () => {
     const env = calls.at(-1).options.env;
     assert.equal(env.LARKSUITE_CLI_PROFILE, 'test-profile');
     assert.equal(env.LARK_APP_SECRET, undefined);
-    assert.match(env.PI_LARK_TOOLS_CONFIG, /lark-tools\.json$/);
-    const toolsConfig = JSON.parse(fs.readFileSync(env.PI_LARK_TOOLS_CONFIG, 'utf8'));
-    assert.equal(toolsConfig.serviceOptions.runtimeToken, 'token-pi');
-    assert.equal(toolsConfig.larkToolsModule, larkToolServerPath);
+    assert.equal(env.PI_LARK_TOOLS_CONFIG, undefined);
+    const promptPath = args[args.indexOf('--append-system-prompt') + 1];
+    const runtimePrompt = fs.readFileSync(promptPath, 'utf8');
+    assert.match(runtimePrompt, /Pi delivery runtime/);
+    assert.match(runtimePrompt, /\/fake\/lark-cli im \+messages-reply/);
 
     agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
     const prompt = parsedWrites(persistent[0]).find((message) => message.type === 'prompt');
@@ -368,48 +356,5 @@ describe('PiAgent persistent rpc runtime', () => {
     assert.equal(environment.ARK_API_KEY, undefined);
     assert.equal(environment.SESSION_ID, undefined);
     assert.equal(environment.LARKSUITE_CLI_PROFILE, 'fixed-profile');
-  });
-});
-
-describe('Pi Lark extension', () => {
-  it('recognises unprefixed delivery tools', () => {
-    assert.equal(isPiLarkDeliveryToolName('send_lark_message'), true);
-    assert.equal(isPiLarkDeliveryToolName('reply_lark_message'), true);
-    assert.equal(isPiLarkDeliveryToolName('mcp__lark_daemon_im__send_lark_message'), false);
-    assert.equal(isPiLarkDeliveryToolName('view_lark_image'), false);
-  });
-
-  it('registers the existing Lark MCP tools and dispatches execute through createMcpHandler', async () => {
-    const registered = [];
-    const pi = {
-      registerTool(definition) { registered.push(definition); },
-      on() {},
-    };
-    const sent = [];
-    class FakeService {
-      constructor() { this.tools = larkToolsForOptions(); }
-      async sendMessage(input) {
-        sent.push(input);
-        return { chat_id: input.chat_id, message_id: 'om_sent12345678', dry_run: false };
-      }
-      async close() {}
-    }
-    await registerLarkPiTools(pi, { serviceOptions: {} }, {
-      Type: { Unsafe: (schema) => schema },
-      tools: { LarkToolService: FakeService, createMcpHandler },
-    });
-    assert.deepEqual(
-      registered.map((tool) => tool.name).sort(),
-      LARK_TOOLS.map((tool) => tool.name).sort(),
-    );
-    const send = registered.find((tool) => tool.name === 'send_lark_message');
-    assert.equal(send.parameters.type, 'object');
-    const result = await send.execute('call-1', {
-      chat_id: 'oc_now12345678',
-      markdown: 'hello',
-      decision_message_id: 'om_now12345678',
-    });
-    assert.equal(sent.length, 1);
-    assert.match(result.content[0].text, /Sent Lark message/);
   });
 });

@@ -120,6 +120,22 @@ export function assembleConversationPolicy(config = {}, options = {}) {
   ]);
 }
 
+// Pi has no MCP client configuration surface. It already has a restricted shell
+// tool, so its local Lark integration is the pinned lark-cli binary rather than
+// a Pi extension which re-implements the MCP bridge.
+export function assemblePiConversationPolicy(config = {}, options = {}) {
+  const cli = String(config.larkCliBin || 'lark-cli');
+  const runtimeInstructions = [
+    '## Pi delivery runtime',
+    '',
+    'This Pi process has no Lark MCP tools. For a Lark delivery, use your bash tool to invoke the pinned local CLI directly; do not call a nonexistent send_lark_message/reply_lark_message tool and do not put the reply only in your final text.',
+    `Use \`${cli} im +messages-reply --as bot --message-id <om_...> --markdown \"<body>\" --idempotency-key <stable-key>\` for a normal reply. Add \`--reply-in-thread\` only when the authenticated inbound line contains \`thread=\`. Use \`${cli} im +messages-send --as bot --chat-id <oc_...> --markdown \"<body>\" --idempotency-key <stable-key>\` only for a standalone or explicitly requested cross-chat send.`,
+    'Use only full IDs from authenticated inbound metadata or trusted CLI output. Never pass --profile: the daemon supplies the authenticated profile. Make at most one final Lark delivery per decision and use a stable idempotency key (50 characters or less). Do not run lark-cli auth, login, config, or profile commands.',
+    'The CLI path and bot identity are already configured. A successful CLI command is the only user-visible delivery; your final answer text is internal telemetry.',
+  ].join('\n');
+  return joinSections([assembleConversationPolicy(config, options), runtimeInstructions]);
+}
+
 // Volc cannot load local MCP/skills. It still gets inbound grammar + persona
 // from this module so those strings are not restated inside volc.mjs.
 export function assembleVolcConversationPolicy(config = {}, extra = []) {

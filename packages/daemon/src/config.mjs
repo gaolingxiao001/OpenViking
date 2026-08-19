@@ -168,7 +168,6 @@ export function getConfig() {
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
     piBin: process.env.PI_BIN || 'pi',
-    piExtensionPath: path.join(sourceDir, 'pi-lark-extension.mjs'),
     initialModel: process.env.LARK_DAEMON_MODEL || process.env.LARK_DAEMON_CODEX_MODEL || '',
     codexModel: process.env.LARK_DAEMON_MODEL === 'ark'
       ? ''

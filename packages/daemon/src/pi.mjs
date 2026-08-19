@@ -6,10 +6,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { safeError as safe } from './logger.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
-import { assembleConversationPolicy } from './conversation-policy.mjs';
+import { assemblePiConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
-import { isPiLarkDeliveryToolName } from './pi-lark-extension.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -22,8 +21,8 @@ const PI_RUNTIME = getRuntimeDefinition('pi');
 export const PI_EFFORTS = PI_RUNTIME.efforts;
 
 const PREFLIGHT_FLAGS = [
-  '--mode', '--extension', '--append-system-prompt', '--thinking',
-  '--session-id', '--no-extensions', '--model',
+  '--mode', '--append-system-prompt', '--thinking',
+  '--session-id', '--model',
 ];
 
 function delay(ms) {
@@ -60,9 +59,9 @@ export function formatPiModelId(model) {
   return String(model.id ?? '');
 }
 
-// Persistent `pi --mode rpc` adapter. Protocol state stays here; the coordinator
-// only sees the RuntimeAdapter surface. Lark outbound is a spawn-time extension
-// that calls the existing MCP handler — not a host-owned JSON bridge.
+// Persistent `pi --mode rpc` adapter. Pi's built-in bash tool invokes the
+// daemon-pinned lark-cli directly; unlike Codex and Claude, Pi has no MCP
+// client configuration surface to connect to the daemon's tool server.
 export class PiAgent {
   constructor(config, store, logger, options = {}) {
     this.config = config;
@@ -92,7 +91,7 @@ export class PiAgent {
     this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
     this.deliveredThroughSeq = this.syncedThroughSeq;
 
-    this.systemPrompt = assembleConversationPolicy(config);
+    this.systemPrompt = assemblePiConversationPolicy(config);
     this.developerInstructionsText = this.systemPrompt;
     this.model = options.model ?? store.getSetting?.('pi_model') ?? config.piModel ?? '';
     this.effort = options.effort
@@ -124,8 +123,6 @@ export class PiAgent {
     this.rpcSeq = 0;
     this.pendingRpc = new Map();
     this.idleWaiters = [];
-    this.deliveryTools = new Map();
-    this.toolsTempDir = null;
     this.sessionRotation = null;
   }
 
@@ -256,42 +253,6 @@ export class PiAgent {
     });
   }
 
-  _writeToolsConfig() {
-    this._cleanupToolsConfig();
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-pi-'));
-    try { fs.chmodSync(directory, 0o700); } catch {}
-    const configPath = path.join(directory, 'lark-tools.json');
-    const promptPath = path.join(directory, 'system-prompt.md');
-    const serviceOptions = {
-      larkCliBin: this.config.larkCliBin,
-      profile: this.config.profile,
-      projectDir: this.config.projectDir,
-      databasePath: this.config.databasePath,
-      tempDir: this.config.tempDir,
-      timeoutMs: this.config.sendTimeoutMs,
-      maxTextChars: this.config.maxReplyChars,
-      dryRun: Boolean(this.config.dryRun),
-      runtimeToken: this.authorityToken,
-    };
-    if (this.config.meetingAudio?.authoritySocketPath) {
-      serviceOptions.decisionAuthoritySocketPath = this.config.meetingAudio.authoritySocketPath;
-    }
-    fs.writeFileSync(configPath, `${JSON.stringify({
-      larkToolsModule: this.config.larkToolServerPath,
-      serviceOptions,
-    })}\n`, { encoding: 'utf8', mode: 0o600 });
-    fs.writeFileSync(promptPath, this.developerInstructionsText, { encoding: 'utf8', mode: 0o600 });
-    this.toolsTempDir = directory;
-    return { configPath, promptPath, extensionPath: this.config.piExtensionPath };
-  }
-
-  _cleanupToolsConfig() {
-    const directory = this.toolsTempDir;
-    this.toolsTempDir = null;
-    if (!directory) return;
-    try { fs.rmSync(directory, { recursive: true, force: true }); } catch {}
-  }
-
   _sessionDir() {
     const root = this.config.dataDir || os.tmpdir();
     const directory = path.join(root, 'pi-sessions');
@@ -299,13 +260,16 @@ export class PiAgent {
     return directory;
   }
 
+  _promptPath() {
+    return path.join(this._sessionDir(), 'system-prompt.md');
+  }
+
   _spawnPersistent() {
     return new Promise((resolve, reject) => {
-      const { configPath, promptPath, extensionPath } = this._writeToolsConfig();
+      const promptPath = this._promptPath();
+      fs.writeFileSync(promptPath, this.developerInstructionsText, { encoding: 'utf8', mode: 0o600 });
       const args = [
         '--mode', 'rpc',
-        '--no-extensions',
-        '--extension', extensionPath,
         '--append-system-prompt', promptPath,
         '--thinking', this.effort,
         '--session-id', this.sessionId,
@@ -315,7 +279,6 @@ export class PiAgent {
       if (this.model) args.push('--model', this.model);
 
       const env = sanitizePiEnv(process.env, this.config.profile);
-      env.PI_LARK_TOOLS_CONFIG = configPath;
 
       let child;
       try {
@@ -327,7 +290,6 @@ export class PiAgent {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (error) {
-        this._cleanupToolsConfig();
         reject(error);
         return;
       }
@@ -343,7 +305,6 @@ export class PiAgent {
         settled = true;
         this.child = null;
         terminateProcessTree(child, 'SIGKILL');
-        this._cleanupToolsConfig();
         reject(new Error('pi rpc process start timed out'));
       }, this.startTimeoutMs);
       timer.unref?.();
@@ -356,7 +317,6 @@ export class PiAgent {
         this.child = null;
         this.connected = false;
         terminateProcessTree(child, 'SIGKILL');
-        this._cleanupToolsConfig();
         reject(error);
       };
 
@@ -641,12 +601,6 @@ export class PiAgent {
       this.modelWorking = false;
       this.modelStartedAtMs = null;
       const name = String(message.toolName ?? '');
-      if (isPiLarkDeliveryToolName(name) && typeof message.toolCallId === 'string') {
-        this.deliveryTools.set(message.toolCallId, {
-          tool: name,
-          input: message.args && typeof message.args === 'object' ? message.args : {},
-        });
-      }
       this._recordActivity('agent.tool_called', {
         inboundSeq: this._activeSeqs().at(-1) ?? null,
         summary: name || 'unknown tool',
@@ -656,33 +610,12 @@ export class PiAgent {
     }
 
     if (message.type === 'tool_execution_end') {
-      const delivery = this.deliveryTools.get(message.toolCallId) ?? null;
-      this.deliveryTools.delete(message.toolCallId);
       this._recordActivity('agent.tool_completed', {
         inboundSeq: this._activeSeqs().at(-1) ?? null,
         status: message.isError === true ? 'FAILED' : 'COMPLETED',
         summary: message.isError === true ? 'Pi tool failed' : 'Pi tool completed',
         metadata: { runtime: PI_RUNTIME.id, toolId: message.toolCallId },
       });
-      if (delivery && message.isError !== true && this.onDeliverySucceeded) {
-        const responseMessageId = delivery.input.response_to_message_id
-          ?? (['react_to_lark_message', 'reply_lark_message'].includes(delivery.tool)
-            ? delivery.input.message_id
-            : delivery.input.decision_message_id);
-        const resolvedSeq = responseMessageId
-          ? this.store.inboundSeqForMessageId?.(responseMessageId)
-          : null;
-        try {
-          this.onDeliverySucceeded({
-            inboundSeqs: resolvedSeq === null || resolvedSeq === undefined
-              ? this._activeSeqs()
-              : [resolvedSeq],
-            mode: 'lark',
-          });
-        } catch (error) {
-          this.logger.warn('delivery_success_notify_failed', { error: safe(error) });
-        }
-      }
       this.modelWorking = true;
       this.modelStartedAtMs = Date.now();
       return;
@@ -714,7 +647,6 @@ export class PiAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    this.deliveryTools.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this._recordActivity('agent.turn_completed', {
       inboundSeq: seqs.at(-1) ?? null,
@@ -817,7 +749,6 @@ export class PiAgent {
     this.connected = false;
     this._rejectPendingRpc(processError ?? new Error('pi connection lost'));
     if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
-    this._cleanupToolsConfig();
     const wasActive = this.turnActive;
     const acceptanceUnknown = wasActive && this.sessionInitialized;
     const items = this.activeItems.splice(0);
@@ -826,7 +757,6 @@ export class PiAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    this.deliveryTools.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this.needsHistoryPrefix = !this.sessionInitialized;
     if ((acceptanceUnknown || !this.sessionInitialized)
@@ -959,7 +889,6 @@ export class PiAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    this.deliveryTools.clear();
     if ((inboundSeqs.length > 0 || receipts.length > 0) && this.onTurnAbandoned) {
       try { this.onTurnAbandoned(withReceiptIds({ inboundSeqs }, receipts)); } catch (error) {
         this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });
@@ -1059,12 +988,10 @@ export class PiAgent {
     this.connected = false;
     this._rejectPendingRpc(new Error('pi process replaced'));
     if (!child?.pid) {
-      this._cleanupToolsConfig();
       return;
     }
     if (child.exitCode !== null) {
       terminateProcessTree(child, 'SIGKILL');
-      this._cleanupToolsConfig();
       return;
     }
     const exited = new Promise((resolve) => child.once('exit', resolve));
@@ -1077,7 +1004,6 @@ export class PiAgent {
       terminateProcessTree(child, 'SIGKILL');
       await Promise.race([exited, delay(1_000)]);
     }
-    this._cleanupToolsConfig();
     if (child.exitCode === null) throw new Error('pi process did not exit after SIGKILL');
   }
 
