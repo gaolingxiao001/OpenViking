@@ -6,7 +6,6 @@ import { describe, it } from 'node:test';
 import {
   assembleConversationPolicy,
   assembleVolcConversationPolicy,
-  loadSystemPrompt,
 } from '../src/conversation-policy.mjs';
 
 function writePrompt(name, body) {
@@ -49,24 +48,6 @@ describe('conversation policy assemble', () => {
         meetingAudio: {},
       });
       assert.match(withAudio, /meeting-audio plugin/);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('keeps loadSystemPrompt as the native assemble', () => {
-    const { directory, filePath } = writePrompt('system-prompt.md', 'policy {{TEAM_TASK_BOARD_URL}}\n');
-    const empty = path.join(directory, 'empty.md');
-    fs.writeFileSync(empty, '');
-    try {
-      const text = loadSystemPrompt({
-        systemPromptPath: filePath,
-        openVikingPromptPath: empty,
-        harnessPromptPath: empty,
-        teamTaskBoardUrl: 'https://board.example',
-      });
-      assert.match(text, /^policy https:\/\/board\.example/);
-      assert.match(text, /<context-workdir>/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

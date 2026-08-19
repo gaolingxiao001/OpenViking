@@ -104,13 +104,9 @@ function joinSections(parts) {
   return parts.map((part) => String(part || '').trim()).filter(Boolean).join('\n\n');
 }
 
-export const CONTEXT_WORKDIR_PROMPT = `<context-workdir>
+const CONTEXT_WORKDIR_PROMPT = `<context-workdir>
 treat ov and it's viking:// as your only working directory to save and retrive long-term, cross-session context. Use OpenViking MCPs to navigate cloud filesystem. Use OV viking:// as your only context workspace. When things need to be saved for long-term retrival, MUST save in viking:// with MCP tools. Anything not saved will be lost after session restart. Check workspace content before write with OV MCP. Use short sentence to notify things retrived from and added to OV.
 </context-workdir>`;
-
-export function contextWorkdirPromptSection() {
-  return CONTEXT_WORKDIR_PROMPT;
-}
 
 // Native runtimes get the release markdown plus harness/OV/meeting plugins.
 export function assembleConversationPolicy(config = {}, options = {}) {
@@ -118,7 +114,7 @@ export function assembleConversationPolicy(config = {}, options = {}) {
     renderBasePrompt(config),
     openVikingPromptSection(config),
     openVikingIdentityPromptSection(config, options),
-    contextWorkdirPromptSection(),
+    CONTEXT_WORKDIR_PROMPT,
     meetingAudioPromptSection(config),
     harnessPromptSection(config),
   ]);
@@ -137,9 +133,4 @@ export function assembleVolcConversationPolicy(config = {}, extra = []) {
     .map((part) => String(part || '').trim())
     .filter(Boolean)
     .join(' ');
-}
-
-// Kept for existing callers. Native assemble is the source of truth.
-export function loadSystemPrompt(config = {}, options = {}) {
-  return assembleConversationPolicy(config, options);
 }

@@ -34,13 +34,17 @@ function appendTail(current, chunk, limit) {
 }
 
 export function terminateProcessTree(child, signal = 'SIGTERM') {
-  if (!child || child.exitCode !== null || !child.pid) return;
-  try {
-    if (process.platform !== 'win32') process.kill(-child.pid, signal);
-    else child.kill(signal);
-  } catch {
-    try { child.kill(signal); } catch {}
+  if (!child?.pid) return;
+  if (process.platform !== 'win32') {
+    try {
+      // The group may outlive its leader, so always signal by the original pgid
+      // even after the leader exited — otherwise grandchildren leak.
+      process.kill(-child.pid, signal);
+      return;
+    } catch {}
   }
+  if (child.exitCode !== null) return;
+  try { child.kill(signal); } catch {}
 }
 
 export class ProcessRegistry {

@@ -6,7 +6,7 @@ import readline from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { redactSensitive } from './logger.mjs';
-import { sanitizeNonArkChildEnv } from './process-utils.mjs';
+import { sanitizeNonArkChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { ChatRoster } from './roster.mjs';
 import { meetingContextLines, readMeetingInboxDatabase } from './meeting/index.mjs';
 import { claimDecisionCapability } from './meeting/decision-socket.mjs';
@@ -391,19 +391,6 @@ function appendBounded(current, chunk) {
   return next;
 }
 
-function terminateChildTree(child, signal) {
-  if (!child?.pid) return;
-  if (process.platform !== 'win32') {
-    try {
-      // The group may outlive its leader, so always signal by the original pgid.
-      process.kill(-child.pid, signal);
-      return;
-    } catch {}
-  }
-  if (child.exitCode !== null) return;
-  try { child.kill(signal); } catch {}
-}
-
 export function parseServerArgs(argv = process.argv.slice(2)) {
   const options = {
     larkCliBin: '/opt/homebrew/bin/lark-cli',
@@ -479,10 +466,10 @@ export async function runCommand(command, args, { cwd, timeoutMs }) {
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      terminateChildTree(child, 'SIGTERM');
+      terminateProcessTree(child, 'SIGTERM');
       escalationTimer = setTimeout(() => {
         escalationComplete = true;
-        terminateChildTree(child, 'SIGKILL');
+        terminateProcessTree(child, 'SIGKILL');
         if (pendingExit) finish(pendingExit);
       }, 2_000);
     }, timeoutMs);
@@ -493,7 +480,7 @@ export async function runCommand(command, args, { cwd, timeoutMs }) {
       settled = true;
       clearTimeout(timer);
       if (escalationTimer) clearTimeout(escalationTimer);
-      terminateChildTree(child, 'SIGKILL');
+      terminateProcessTree(child, 'SIGKILL');
       reject(error);
     };
     child.stdout?.setEncoding('utf8');

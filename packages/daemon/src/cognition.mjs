@@ -1,4 +1,5 @@
 import { lookupMemberName } from './roster.mjs';
+import { chatTag, isoMinute, oneLine, shortenId } from './runtime-input.mjs';
 
 const HISTORY_SEPARATOR = '--- history above, new messages below ---';
 
@@ -12,31 +13,9 @@ export class CognitionLimitError extends Error {
   }
 }
 
-function oneLine(value) {
-  return String(value ?? '')
-    .replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' \u23CE ')
-    .replace(/[\u0000-\u001f\u007f]/g, ' ');
-}
-
-function isoMinute(ms) {
-  return `${new Date(ms).toISOString().slice(0, 16)}Z`;
-}
-
-function chatTag(chatId, threadId) {
-  if (!threadId) return chatId || 'unknown';
-  const short = /^([a-z]{1,4}_)(.+)$/.exec(threadId);
-  return `${chatId || 'unknown'} thread=${short ? short[1] + short[2].slice(0, 8) : threadId.slice(0, 11)}`;
-}
-
-function shortId(id) {
-  if (!id) return 'unknown';
-  const match = /^([a-z]{1,4}_)(.+)$/.exec(id);
-  return match ? match[1] + match[2].slice(0, 8) : String(id).slice(0, 11);
-}
-
 export function formatCognitionJournalLine(item) {
   if (item.kind === 'inbound') {
-    const from = lookupMemberName(item.chatId, item.actor) ?? shortId(item.actor);
+    const from = lookupMemberName(item.chatId, item.actor) ?? shortenId(item.actor);
     return `[chat=${chatTag(item.chatId, item.threadId)} msg=${item.messageId}`
       + ` time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
   }

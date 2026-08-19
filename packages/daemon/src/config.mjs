@@ -82,8 +82,6 @@ function pathsOverlap(left, right) {
   return !reverse.startsWith('..') && !path.isAbsolute(reverse);
 }
 
-export { loadSystemPrompt } from './conversation-policy.mjs';
-
 export function getConfig() {
   const dataDir = path.resolve(
     process.env.LARK_DAEMON_DATA_DIR || path.join(os.homedir(), '.local', 'share', 'lark-daemon'),
