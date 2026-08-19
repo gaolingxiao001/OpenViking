@@ -16,13 +16,14 @@ import {
 describe('runtime catalog', () => {
   it('owns runtime ids, aliases, static models, efforts, and capabilities', () => {
     assert.equal(DEFAULT_RUNTIME_ID, 'codex');
-    assert.deepEqual(RUNTIME_IDS, ['codex', 'claude', 'volc']);
+    assert.deepEqual(RUNTIME_IDS, ['codex', 'claude', 'volc', 'pi']);
     assert.deepEqual(RUNTIME_ALIASES, {
       codex: 'codex',
       claude: 'claude',
       volc: 'volc',
       volcengine: 'volc',
       ark: 'volc',
+      pi: 'pi',
     });
     assert.deepEqual(getRuntimeDefinition('claude').models, ['sonnet', 'opus', 'haiku', 'fable']);
     assert.deepEqual(getRuntimeDefinition('claude').efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
@@ -37,6 +38,18 @@ describe('runtime catalog', () => {
       scopePolicy: 'single-conversation',
       outputOwnership: 'host',
       sessionAuthority: 'rotate',
+    });
+    assert.deepEqual(getRuntimeDefinition('pi').directAliases, ['pi']);
+    assert.deepEqual(getRuntimeDefinition('pi').efforts, [
+      'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+    ]);
+    assert.deepEqual(getRuntimeDefinition('pi').capabilities, {
+      modelCatalog: 'dynamic',
+      effortControl: 'selectable',
+      activeInput: 'steer',
+      scopePolicy: 'any',
+      outputOwnership: 'runtime',
+      sessionAuthority: 'preserve-process',
     });
     assert.equal(Object.isFrozen(RUNTIME_CATALOG), true);
     assert.equal(Object.isFrozen(getRuntimeDefinition('codex').capabilities), true);
@@ -77,6 +90,9 @@ describe('runtime catalog', () => {
       ['volc:', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
       ['volcengine:custom', { runtime: 'volc', model: 'custom', canonical: 'custom' }],
       ['ark:model:variant', { runtime: 'volc', model: 'model:variant', canonical: 'model:variant' }],
+      ['pi', { runtime: 'pi', model: '', canonical: 'pi' }],
+      ['pi:', { runtime: 'pi', model: '', canonical: 'pi' }],
+      ['pi:openai/gpt-4o', { runtime: 'pi', model: 'openai/gpt-4o', canonical: 'openai/gpt-4o' }],
       ['foo:bar', { runtime: 'codex', model: 'foo:bar', canonical: 'foo:bar' }],
       ['Sonnet', { runtime: 'codex', model: 'Sonnet', canonical: 'Sonnet' }],
       ['ARK', { runtime: 'codex', model: 'ARK', canonical: 'ARK' }],
@@ -111,6 +127,20 @@ describe('runtime catalog', () => {
       runtime: null,
       model: 'unknown:model',
     });
+    assert.deepEqual(parseRuntimeModelSelector('pi'), {
+      raw: 'pi',
+      qualified: false,
+      qualifier: null,
+      runtime: null,
+      model: '',
+    });
+    assert.deepEqual(parseRuntimeModelSelector('pi:openai/gpt-4o'), {
+      raw: 'pi:openai/gpt-4o',
+      qualified: true,
+      qualifier: 'pi',
+      runtime: 'pi',
+      model: 'openai/gpt-4o',
+    });
   });
 
   it('filters live model ids using the same ownership rules as target resolution', () => {
@@ -138,14 +168,14 @@ describe('runtime catalog dependency direction', () => {
     const coordinator = source('agent-runtime.mjs');
     const compositionRoot = source('runtime-factory.mjs');
     assert.match(commands, /from ['"]\.\/runtime-catalog\.mjs['"]/);
-    assert.doesNotMatch(commands, /from ['"]\.\/(?:claude|volc)\.mjs['"]/);
+    assert.doesNotMatch(commands, /from ['"]\.\/(?:claude|volc|pi)\.mjs['"]/);
     assert.doesNotMatch(commands, /\.(?:setModel|setEffort|rotateSession|interruptTurn|deliverBatch)\s*\(/);
-    assert.doesNotMatch(coordinator, /\b(?:CLAUDE|VOLC)_(?:MODELS|EFFORTS)\b/);
-    assert.doesNotMatch(coordinator, /from ['"]\.\/(?:codex|claude|volc)\.mjs['"]/);
-    for (const adapter of ['codex', 'claude', 'volc']) {
+    assert.doesNotMatch(coordinator, /\b(?:CLAUDE|VOLC|PI)_(?:MODELS|EFFORTS)\b/);
+    assert.doesNotMatch(coordinator, /from ['"]\.\/(?:codex|claude|volc|pi)\.mjs['"]/);
+    for (const adapter of ['codex', 'claude', 'volc', 'pi']) {
       assert.match(compositionRoot, new RegExp(`from ['"]\\./${adapter}\\.mjs['"]`));
     }
-    for (const adapter of ['codex.mjs', 'claude.mjs', 'volc.mjs']) {
+    for (const adapter of ['codex.mjs', 'claude.mjs', 'volc.mjs', 'pi.mjs']) {
       assert.match(source(adapter), /from ['"]\.\/runtime-catalog\.mjs['"]/, adapter);
     }
   });

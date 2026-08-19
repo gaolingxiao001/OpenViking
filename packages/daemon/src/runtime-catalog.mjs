@@ -71,6 +71,21 @@ export const RUNTIME_CATALOG = Object.freeze({
       sessionAuthority: 'rotate',
     },
   }),
+  pi: runtimeDefinition({
+    id: 'pi',
+    aliases: ['pi'],
+    directAliases: ['pi'],
+    canonicalDefault: 'pi',
+    efforts: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    capabilities: {
+      modelCatalog: 'dynamic',
+      effortControl: 'selectable',
+      activeInput: 'steer',
+      scopePolicy: 'any',
+      outputOwnership: 'runtime',
+      sessionAuthority: 'preserve-process',
+    },
+  }),
 });
 
 export const RUNTIME_IDS = frozenStrings(Object.keys(RUNTIME_CATALOG));
@@ -84,6 +99,11 @@ export function getRuntimeDefinition(runtimeOrAlias) {
     ? RUNTIME_ALIASES[runtimeOrAlias]
     : runtimeOrAlias;
   return Object.hasOwn(RUNTIME_CATALOG, id) ? RUNTIME_CATALOG[id] : null;
+}
+
+export function isDirectRuntimeAlias(value) {
+  const raw = String(value ?? '');
+  return RUNTIME_IDS.some((id) => RUNTIME_CATALOG[id].directAliases.includes(raw));
 }
 
 export function staticModelEntries(runtime = null) {

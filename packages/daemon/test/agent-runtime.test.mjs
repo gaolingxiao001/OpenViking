@@ -83,6 +83,43 @@ describe('global Codex/Claude hard switch', () => {
     assert.deepEqual(parseRuntimeModelTarget('volcengine'), {
       runtime: 'volc', model: 'ark', canonical: 'ark',
     });
+    assert.deepEqual(parseRuntimeModelTarget('pi'), {
+      runtime: 'pi', model: '', canonical: 'pi',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('pi:openai/gpt-4o'), {
+      runtime: 'pi', model: 'openai/gpt-4o', canonical: 'openai/gpt-4o',
+    });
+  });
+
+  it('starts Pi rather than Codex on a fresh database configured with model pi', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-fresh-pi-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    const selected = [];
+    const runtime = new AgentRuntime({
+      initialModel: 'pi',
+      codexModel: '',
+      cognitionMaxChars: 120_000,
+    }, store, quietLogger, {
+      codexFactory: () => {
+        selected.push('codex');
+        return backend('codex');
+      },
+      piFactory: (options) => {
+        selected.push('pi');
+        return backend('pi', options);
+      },
+    });
+    try {
+      assert.equal(store.hasCognitionRuntime(), false);
+      await runtime.start();
+      assert.deepEqual(selected, ['pi']);
+      assert.equal(runtime.runtime, 'pi');
+      assert.equal(store.getCognitionState().runtime, 'pi');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('starts Ark rather than Codex on a fresh database configured with model ark', async () => {

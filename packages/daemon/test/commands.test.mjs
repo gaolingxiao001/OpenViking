@@ -135,7 +135,7 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /th-42/);
     assert.match(outcome.text, /gpt-x/);
     assert.match(outcome.text, /high/);
-    assert.match(outcome.text, /sonnet、gpt-5\.6-sol/);
+    assert.match(outcome.text, /pi、ark、sonnet、gpt-5\.6-sol/);
     assert.doesNotMatch(outcome.text, /claude:|codex:/);
     assert.doesNotMatch(outcome.text, /restart/);
     assert.equal(codex.calls.length, 0);
@@ -331,6 +331,37 @@ describe('executeCommand', () => {
     const returned = await executeCommand({ name: 'model', arg: 'gpt-5.6-sol' }, agent);
     assert.equal(returned.ok, true);
     assert.deepEqual(calls.at(-1), ['setModel', 'gpt-5.6-sol']);
+  });
+
+  it('selects Pi as a first-class runtime via /model pi and pi:<model>', async () => {
+    const agent = fakeCodex({
+      runtime: 'codex',
+      model: 'gpt-current',
+      listModels: async () => [
+        { id: 'gpt-current', efforts: ['medium'] },
+        { id: 'ark', efforts: ['managed'] },
+      ],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        const runtime = model === 'pi' || String(model).startsWith('pi:') ? 'pi' : this.runtime;
+        this.runtime = runtime;
+        return {
+          runtimeChanged: runtime === 'pi',
+          runtime,
+          model: model === 'pi' ? 'pi' : model.replace(/^pi:/, ''),
+        };
+      },
+    });
+    const switched = await executeCommand({ name: 'model', arg: 'pi' }, agent);
+    assert.equal(switched.ok, true);
+    assert.deepEqual(agent.calls.at(-1), ['setModel', 'pi']);
+    assert.match(switched.text, /已切到 pi/);
+
+    agent.runtime = 'codex';
+    const qualified = await executeCommand({ name: 'model', arg: 'pi:openai/gpt-4o' }, agent);
+    assert.equal(qualified.ok, true);
+    assert.deepEqual(agent.calls.at(-1), ['setModel', 'pi:openai/gpt-4o']);
+    assert.match(qualified.text, /已切到 openai\/gpt-4o/);
   });
 
   it('explains that Ark effort is managed remotely', async () => {
