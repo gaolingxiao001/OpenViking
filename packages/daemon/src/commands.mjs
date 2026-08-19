@@ -176,13 +176,21 @@ export async function executeCommand(command, runtime) {
         if (!canStage) {
           return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}` };
         }
+        // Unprefixed leftovers resolve to the current dynamic runtime (Pi).
+        // Force a Codex qualifier so `/model gpt-5.6-sol` still leaves Pi.
+        if (!selector.qualified
+          && requestedRuntime === DEFAULT_RUNTIME_ID
+          && current.runtime !== DEFAULT_RUNTIME_ID
+          && getRuntimeDefinition(current.runtime)?.capabilities.modelCatalog === 'dynamic') {
+          target = `${DEFAULT_RUNTIME_ID}:${lookupName}`;
+        }
       } else {
         target = selector.qualifier ? `${selector.qualifier}:${matches[0]}` : matches[0];
       }
     }
     const applied = await runtime.transition({ kind: 'select-model', selector: target });
     const displayTarget = applied?.model
-      || resolveRuntimeModelTarget(target).canonical
+      || resolveRuntimeModelTarget(target, current.runtime).canonical
       || target;
     if (applied?.runtimeChanged) {
       return {

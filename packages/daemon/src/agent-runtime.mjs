@@ -271,7 +271,7 @@ export class AgentRuntime {
 
   async _selectModel(value) {
     if (this.stopping) throw new Error('agent runtime is stopping');
-    const target = resolveRuntimeModelTarget(value);
+    const target = resolveRuntimeModelTarget(value, this.runtime);
     if (target.runtime === this.runtime) {
       // /m must not wait for a stuck turn, and every model change opens a
       // fresh session: interrupt the in-flight turn (its inbound rows stay in

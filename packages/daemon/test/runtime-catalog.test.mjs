@@ -147,9 +147,23 @@ describe('runtime catalog', () => {
     assert.equal(modelMatchesRuntime('sonnet', 'claude'), true);
     assert.equal(modelMatchesRuntime('ark', 'volcengine'), true);
     assert.equal(modelMatchesRuntime('gpt-5.6-sol', 'codex'), true);
+    assert.equal(modelMatchesRuntime('openai/gpt-4o', 'pi'), true);
     assert.equal(modelMatchesRuntime('sonnet', 'codex'), false);
+    assert.equal(modelMatchesRuntime('sonnet', 'pi'), false);
     assert.equal(modelMatchesRuntime('gpt-5.6-sol', 'claude'), false);
     assert.equal(modelMatchesRuntime('anything', 'missing'), false);
+    assert.deepEqual(
+      resolveRuntimeModelTarget('openai/gpt-4o', 'pi'),
+      { runtime: 'pi', model: 'openai/gpt-4o', canonical: 'openai/gpt-4o' },
+    );
+    assert.deepEqual(
+      resolveRuntimeModelTarget('openai/gpt-4o'),
+      { runtime: 'codex', model: 'openai/gpt-4o', canonical: 'openai/gpt-4o' },
+    );
+    assert.deepEqual(
+      resolveRuntimeModelTarget('sonnet', 'pi'),
+      { runtime: 'claude', model: 'sonnet', canonical: 'sonnet' },
+    );
     assert.deepEqual(staticModelEntries(), [
       { id: 'sonnet', efforts: getRuntimeDefinition('claude').efforts },
       { id: 'opus', efforts: getRuntimeDefinition('claude').efforts },

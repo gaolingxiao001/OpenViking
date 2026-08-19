@@ -91,6 +91,71 @@ describe('global Codex/Claude hard switch', () => {
     });
   });
 
+  it('stays on Pi for qualified and unprefixed live-list model selectors', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-pi-select-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    store.initializeCognition('pi', 'pi-authority');
+    let instance;
+    const selected = [];
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      codexFactory: (options) => {
+        selected.push('codex');
+        return backend('codex', options);
+      },
+      piFactory: (options) => {
+        selected.push('pi');
+        instance = backend('pi', options);
+        instance.model = options.model || 'google/gemini-pro';
+        instance.calls = [];
+        instance.interruptTurn = async function interruptTurn() {
+          this.calls.push('interrupt');
+        };
+        instance.setModel = async function setModel(model) {
+          this.calls.push(`setModel:${model}`);
+          this.model = model;
+        };
+        instance.prepareSessionRotation = async function prepareSessionRotation() {
+          this.calls.push('prepare');
+          return { id: 'pi-fresh', sessionReady: true };
+        };
+        instance.commitSessionRotation = function commitSessionRotation(prepared, options) {
+          this.calls.push(`commit:${options.persist}`);
+          this.threadId = prepared.id;
+          return this.threadId;
+        };
+        return instance;
+      },
+    });
+
+    try {
+      await runtime.start();
+      assert.equal(runtime.runtime, 'pi');
+
+      const qualified = await runtime.transition({
+        kind: 'select-model', selector: 'pi:openai/gpt-4o',
+      });
+      assert.equal(qualified.runtimeChanged, false);
+      assert.equal(qualified.runtime, 'pi');
+      assert.equal(qualified.model, 'openai/gpt-4o');
+      assert.equal(runtime.runtime, 'pi');
+      assert.equal(runtime.model, 'openai/gpt-4o');
+      assert.equal(store.getCognitionState().runtime, 'pi');
+
+      const live = await runtime.transition({
+        kind: 'select-model', selector: 'openai/gpt-4o',
+      });
+      assert.equal(live.runtimeChanged, false);
+      assert.equal(live.runtime, 'pi');
+      assert.equal(runtime.runtime, 'pi');
+      assert.equal(selected.filter((id) => id === 'codex').length, 0);
+      assert.ok(instance.calls.includes('setModel:openai/gpt-4o'));
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('starts Pi rather than Codex on a fresh database configured with model pi', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-fresh-pi-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
