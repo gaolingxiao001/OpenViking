@@ -37,6 +37,8 @@ describe('conversation policy assemble', () => {
       });
       assert.match(withoutAudio, /base 斯斯/);
       assert.match(withoutAudio, /ov via skill and MCP/);
+      assert.match(withoutAudio, /<context-workdir>/);
+      assert.match(withoutAudio, /only context workspace/);
       assert.match(withoutAudio, /profile=cli_alpha/);
       assert.doesNotMatch(withoutAudio, /meeting-audio plugin/);
 
@@ -63,7 +65,8 @@ describe('conversation policy assemble', () => {
         harnessPromptPath: empty,
         teamTaskBoardUrl: 'https://board.example',
       });
-      assert.equal(text, 'policy https://board.example');
+      assert.match(text, /^policy https:\/\/board\.example/);
+      assert.match(text, /<context-workdir>/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

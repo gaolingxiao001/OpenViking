@@ -124,14 +124,16 @@ describe('release-owned system prompt', () => {
     fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{LARK_DAEMON_UPGRADE_TARGET}}\n');
     fs.writeFileSync(empty, '');
     try {
-      assert.equal(loadSystemPrompt({
+      const text = loadSystemPrompt({
         systemPromptPath,
         openVikingPromptPath: empty,
         harnessPromptPath: empty,
         teamTaskBoardUrl: 'https://board.example',
         agentName: '斯斯',
         upgradeTarget: 'sisi',
-      }), 'policy\n\nhttps://board.example\n\n斯斯\n\nsisi');
+      });
+      assert.match(text, /^policy\n\nhttps:\/\/board\.example\n\n斯斯\n\nsisi/);
+      assert.match(text, /<context-workdir>/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -149,7 +151,10 @@ describe('release-owned system prompt', () => {
         openVikingPromptPath: empty,
         harnessPromptPath: empty,
       };
-      assert.equal(loadSystemPrompt({ ...baseConfig, meetingAudio: null }), 'base');
+      const withoutAudio = loadSystemPrompt({ ...baseConfig, meetingAudio: null });
+      assert.match(withoutAudio, /^base/);
+      assert.match(withoutAudio, /<context-workdir>/);
+      assert.doesNotMatch(withoutAudio, /no implicit delivery target/);
       assert.match(
         loadSystemPrompt({ ...baseConfig, meetingAudio: {} }),
         /no implicit delivery target/,

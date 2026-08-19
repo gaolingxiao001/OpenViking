@@ -226,7 +226,7 @@ export const LARK_TOOLS = [
       additionalProperties: false,
       properties: {
         chat_id: { type: 'string', pattern: '^oc_[A-Za-z0-9_-]{8,}$', description: 'Full Lark chat ID (oc_...). Never guess or reconstruct a shortened ID.' },
-        markdown: { type: 'string', minLength: 1, description: 'Markdown message body. Always use this field. Quote with "double quotes", not single quotes. Bold, links, and embedded image URLs are sent as a rich post.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown message body. Always use this field. Wrap quotes and multiline text in "double quotes", not \'single quotes\': single quotes make Lark render \\n as raw text. Bold, links, and embedded image URLs are sent as a rich post.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
@@ -263,7 +263,7 @@ export const LARK_TOOLS = [
       additionalProperties: false,
       properties: {
         message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$', description: 'Full Lark message ID (om_...) to reply to. Never guess or reconstruct a shortened ID.' },
-        markdown: { type: 'string', minLength: 1, description: 'Markdown reply body. Always use this field. Quote with "double quotes", not single quotes. Bold, links, and embedded image URLs are sent as a rich post.' },
+        markdown: { type: 'string', minLength: 1, description: 'Markdown reply body. Always use this field. Wrap quotes and multiline text in "double quotes", not \'single quotes\': single quotes make Lark render \\n as raw text. Bold, links, and embedded image URLs are sent as a rich post.' },
         mention_names: {
           type: 'array',
           maxItems: 10,
