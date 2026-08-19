@@ -11,6 +11,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
   it('persists a raw event and steers the formatted line into the codex app-server', async () => {
     const env = await startMockEnv();
     try {
+      assert.equal(env.config.meetingAudio, null);
       env.receive(textMessage({ messageId: 'om-e2e', text: '请回复我' }));
       await env.waitForCodexInput(/om-e2e/);
 

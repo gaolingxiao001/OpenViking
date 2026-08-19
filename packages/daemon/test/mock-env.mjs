@@ -237,6 +237,10 @@ export async function startMockEnv({
     httpEnabled: false,
     dryRun: false,
     logLevel: 'error',
+    // getConfig() freezes meetingAudio paths under the live dataDir. Overriding
+    // dataDir does not rebuild that object, so a developer shell with
+    // LARK_DAEMON_MEETING_AUDIO_ENABLED would bind the production socket.
+    meetingAudio: null,
     ...configOverrides,
   };
   const daemon = new LarkDaemon(config, createLogger('error', { test: 'mock-env' }));
