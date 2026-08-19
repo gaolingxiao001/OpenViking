@@ -353,6 +353,7 @@ export class ClaudeAgent {
         if (stabilityTimer) clearTimeout(stabilityTimer);
         this.child = null;
         this.connected = false;
+        terminateProcessTree(child, 'SIGKILL');
         this._cleanupMcpConfig();
         reject(error);
       };
@@ -758,6 +759,7 @@ export class ClaudeAgent {
     if (this.child !== child) return;
     this.child = null;
     this.connected = false;
+    if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
     this._cleanupMcpConfig();
     const wasActive = this.turnActive;
     const acceptanceUnknown = wasActive && this.sessionInitialized;
@@ -986,7 +988,12 @@ export class ClaudeAgent {
     const child = this.child;
     this.child = null;
     this.connected = false;
-    if (!child || child.exitCode !== null) {
+    if (!child?.pid) {
+      this._cleanupMcpConfig();
+      return;
+    }
+    if (child.exitCode !== null) {
+      terminateProcessTree(child, 'SIGKILL');
       this._cleanupMcpConfig();
       return;
     }

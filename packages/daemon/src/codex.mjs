@@ -1136,6 +1136,7 @@ export class CodexAgent {
       this.forceFreshThread = true;
     }
     this.child = null;
+    if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
     this.threadId = null;
     this.activeTurnId = null;
     this.startingTurn = false;
@@ -1278,12 +1279,14 @@ export class CodexAgent {
     for (const resolve of waiters) resolve();
     if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
     const child = this.child;
-    if (!child || child.exitCode !== null) return;
+    if (!child?.pid) return;
     terminateProcessTree(child, 'SIGTERM');
-    await Promise.race([
-      new Promise((resolve) => child.once('exit', resolve)),
-      delay(3_000),
-    ]);
+    if (child.exitCode === null) {
+      await Promise.race([
+        new Promise((resolve) => child.once('exit', resolve)),
+        delay(3_000),
+      ]);
+    }
     terminateProcessTree(child, 'SIGKILL');
   }
 }
