@@ -397,6 +397,37 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.match(failures[0].error, /above the 1-char handoff limit/);
   });
 
+  it('demotes the stored thread when stopped mid-turn, not after a clean stop', async () => {
+    const store = makeStore();
+    const demotions = [];
+    store.markOwnedSessionUnresumable = (owner) => { demotions.push(owner); return true; };
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    agent.deliver('active request', 10);
+    child.feed({ method: 'turn/started', params: { turn: { id: 't-active' } } });
+    const stopping = agent.stop();
+    child.simulateExit(0, null);
+    await stopping;
+    assert.equal(demotions.length, 1);
+    assert.equal(demotions[0].sessionId, 'th-1');
+
+    const idleStore = makeStore();
+    const idleDemotions = [];
+    idleStore.markOwnedSessionUnresumable = () => { idleDemotions.push(1); return true; };
+    const idle = newAgent(idleStore);
+    const idleChild = await handshake(idle.agent, idle.children);
+    idle.agent.deliver('quick request', 11);
+    idleChild.feed({ method: 'turn/started', params: { turn: { id: 't-quick' } } });
+    idleChild.feed({
+      method: 'turn/completed',
+      params: { turn: { id: 't-quick', status: 'completed' } },
+    });
+    const idleStopping = idle.agent.stop();
+    idleChild.simulateExit(0, null);
+    await idleStopping;
+    assert.equal(idleDemotions.length, 0);
+  });
+
   it('keeps a receipt on the fresh turn when steer falls back', async () => {
     const successes = [];
     const store = makeStore();

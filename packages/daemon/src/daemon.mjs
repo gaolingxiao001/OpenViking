@@ -352,6 +352,17 @@ export class LarkDaemon {
         this.logger.warn('meeting_stop_failed', { error });
       }
       this.harness?.stop();
+      // Give an in-flight turn a bounded chance to finish before the backends
+      // are killed. A mid-turn kill poisons the native transcript: resuming it
+      // later patches the interrupted tool call, which mutates the message
+      // history and forces a full prompt-cache rewrite at write price. Inbound
+      // is already stopped above, so no new work can start during the drain.
+      // Budget stays inside main.mjs's shutdownTimeoutMs + 2s force-exit timer.
+      const drainMs = Math.max(0, Math.min((this.config.shutdownTimeoutMs ?? 20_000) - 8_000, 12_000));
+      if (drainMs > 0 && this.agentRuntime?.turnInProgress) {
+        this.logger.info('shutdown_turn_drain', { drainMs });
+        await Promise.race([this.agentRuntime.whenIdle(), delay(drainMs)]);
+      }
       try { await this.agentRuntime?.stop(); } catch (error) { this.logger.warn('agent_runtime_stop_failed', { error }); }
       try { await this.registry.stopAll(Math.min(3_000, this.config.shutdownTimeoutMs)); } catch {}
       if (this.httpServer) {

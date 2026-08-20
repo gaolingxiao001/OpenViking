@@ -121,6 +121,11 @@ function makeStore({ globalOverride = {} } = {}) {
       };
       return true;
     },
+    markOwnedSessionUnresumable({ sessionId }) {
+      if (global.sessionId !== sessionId) return false;
+      global = { ...global, sessionReady: false };
+      return true;
+    },
     global: () => global,
     getSetting: () => null,
     setSetting() {},
@@ -229,6 +234,21 @@ describe('PiAgent persistent rpc runtime', () => {
     child.feed({ type: 'agent_settled' });
     assert.equal(agent.turnInProgress, false);
     await agent.stop();
+  });
+
+  it('demotes the stored session when stopped mid-turn, keeps it after a clean stop', async () => {
+    const clean = harness();
+    await clean.agent.start();
+    clean.agent.deliver('quick request', 7);
+    clean.persistent[0].feed({ type: 'agent_settled' });
+    await clean.agent.stop();
+    assert.equal(clean.store.global().sessionReady, true);
+
+    const killed = harness();
+    await killed.agent.start();
+    killed.agent.deliver('long request', 7);
+    await killed.agent.stop();
+    assert.equal(killed.store.global().sessionReady, false);
   });
 
   it('keeps queued work across disconnect and writes it after respawn', async () => {

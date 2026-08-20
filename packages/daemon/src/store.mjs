@@ -1361,7 +1361,22 @@ export class Store {
     epoch = this.getCognitionState().epoch,
     throughSeq = Number.MAX_SAFE_INTEGER,
     afterSeq = 0,
+    { excludeCommittedOutboundFrom = null } = {},
   ) {
+    // A same-session delta catch-up may skip COMMITTED outbound rows the active
+    // runtime authored itself: its native transcript already contains that
+    // delivery as a successful tool call, so echoing the text back is pure
+    // duplicate input. PENDING/UNCERTAIN outbound rows are always included.
+    if (excludeCommittedOutboundFrom) {
+      return this.db.prepare(`
+        SELECT * FROM cognition_journal
+        WHERE epoch = ? AND seq > ? AND seq <= ?
+          AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
+          AND NOT (kind = 'outbound' AND status = 'COMMITTED' AND runtime_token = ?)
+        ORDER BY seq
+      `).all(epoch, afterSeq, throughSeq, excludeCommittedOutboundFrom)
+        .map(rowToCognitionJournal);
+    }
     return this.db.prepare(`
       SELECT * FROM cognition_journal
       WHERE epoch = ? AND seq > ? AND seq <= ?
@@ -1465,6 +1480,27 @@ export class Store {
       this.setMetaStatement.run('global_session_epoch', String(epoch));
       this.setMetaStatement.run('global_session_synced_through_seq', String(cursor));
       this.setMetaStatement.run('global_session_ready', ready ? '1' : '0');
+      return true;
+    });
+  }
+
+  // A runtime stopped while a turn was still in flight cannot prove whether the
+  // native transcript accepted that input. Resuming such a transcript risks
+  // duplicated input, and (for Claude) resume rewrites the dangling tool call,
+  // which invalidates the entire cached prompt prefix at cache-write price.
+  // Demote the stored session so the next start opens a fresh one behind a
+  // journal catch-up instead.
+  markOwnedSessionUnresumable({ runtime, authorityToken, sessionId, epoch }) {
+    return this.transaction(() => {
+      const cognition = this.getCognitionState();
+      const session = this.getGlobalSession();
+      if (cognition.runtime !== runtime
+        || cognition.authorityToken !== authorityToken
+        || cognition.epoch !== epoch
+        || session.runtime !== runtime
+        || session.epoch !== epoch
+        || session.sessionId !== sessionId) return false;
+      this.setMetaStatement.run('global_session_ready', '0');
       return true;
     });
   }

@@ -114,6 +114,11 @@ function makeStore({ globalOverride = {} } = {}) {
       };
       return true;
     },
+    markOwnedSessionUnresumable({ sessionId }) {
+      if (global.sessionId !== sessionId) return false;
+      global = { ...global, sessionReady: false };
+      return true;
+    },
     global: () => global,
     getSetting: () => null,
     setSetting() {},
@@ -239,6 +244,26 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     assert.equal(agent.turnInProgress, false);
     assert.equal(store.global().syncedThroughSeq, 4);
     await agent.stop();
+  });
+
+  it('demotes the stored session when stopped mid-turn, keeps it after a clean stop', async () => {
+    const clean = harness();
+    await clean.agent.start();
+    clean.agent.deliver('quick request', 7);
+    clean.persistent[0].feed({ type: 'system', subtype: 'init', session_id: clean.agent.sessionId });
+    clean.persistent[0].feed({ type: 'result', subtype: 'success', result: 'done' });
+    await clean.agent.stop();
+    // Turn completed before shutdown: the transcript is intact and resumable.
+    assert.equal(clean.store.global().sessionReady, true);
+
+    const killed = harness();
+    await killed.agent.start();
+    killed.agent.deliver('long request', 7);
+    killed.persistent[0].feed({ type: 'system', subtype: 'init', session_id: killed.agent.sessionId });
+    await killed.agent.stop();
+    // Killed with the turn still active: resuming would patch the interrupted
+    // tool call and rewrite the whole cached prefix — never resume it.
+    assert.equal(killed.store.global().sessionReady, false);
   });
 
   it('returns active receipt-only items and preserves the legacy success shape otherwise', async () => {

@@ -51,6 +51,8 @@ pm2 logs lark-daemon --lines 100
 - **模型侧真相**:codex rollout 在 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,记录模型实际看到的输入和工具调用顺序,是 daemon activity 之外的第二证据源。
 - **effort 校验与失败通知**:`/effort` 按 `model/list` 里当前模型的 `supportedReasoningEfforts` 校验(不支持的档位如 minimal 会让每个 turn 都 400);turn failed 时 daemon 解包 API 错误(`turnErrorText`)记入 activity,并经 `notifyTurnFailure` 引用回复发信人。
 - **禁止自部署**:system-prompt 明确禁止 Lark 里的 codex 对 lark-daemon 自身执行 deploy.sh/pm2 操作——`pm2 delete` 会连带杀掉它自己所在的进程树,部署会死在 `pm2 start` 之前(2026-07-17 发生过)。
+- **关机排水与 mid-turn 会话降级**:shutdown 先有界等待活跃 turn 完成(≤12s,预算含在 shutdownTimeoutMs 内)再杀 backend;若仍在 turn 中被杀,runtime 会 `store.markOwnedSessionUnresumable` 把已存 session durably 降级,下次启动开 fresh session + journal catch-up,而不是 resume。原因:resume 被 mid-turn 打断的 transcript 时 Claude CLI 会给悬空 tool call 补拒绝标记,消息历史被改写,整个 prompt cache 前缀按 cache-write 价全量重写(2026-08 实测单实例一天烧掉 ~9M write tokens);codex 同理还有重复输入风险。
+- **journal delta 不回喂自己的出站**:同一 native session 的 delta catch-up 跳过本 runtime 自己 COMMITTED 的 outbound 行(native transcript 已含那次工具调用),delta 为空时省掉整个 journal 头;fresh session 的全量 history prefix 不受影响,PENDING/UNCERTAIN 行始终保留。
 - **steer 语义(已知且接受)**:`turn/steer` RPC 成功只代表 codex 收下了消息,实际注入要等当前推理步(reasoning + tool call)结束,还有约 6s 每轮的注入开销。所以 turn 进行中来的消息,竞态窗口约一个模型步(10-15s),模型正在发的回复拦不住。除非明确要求改成 turn/interrupt + 合并重发,否则不要"修"这个。
 
 ## 约定

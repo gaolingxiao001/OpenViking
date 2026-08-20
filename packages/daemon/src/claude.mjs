@@ -447,9 +447,13 @@ export class ClaudeAgent {
         throughSeq,
         this.config.cognitionMaxChars,
         this.needsHistoryPrefix ? 0 : this.deliveredThroughSeq,
+        // Same-session delta only: this transcript already contains its own
+        // committed sends as tool calls, so skip their journal echo. A fresh
+        // transcript (history prefix) still receives everything.
+        this.needsHistoryPrefix ? {} : { excludeCommittedOutboundFrom: this.authorityToken },
       );
       prefixThroughSeq = catchup.throughSeq;
-      body = `${catchup.text}\n${body}`;
+      if (catchup.text) body = `${catchup.text}\n${body}`;
     }
     let deliveredThroughSeq = prefixThroughSeq;
     for (const seq of seqs) {
@@ -728,6 +732,21 @@ export class ClaudeAgent {
     while (this.queue.length > 0) this._writeBatch(this.queue.shift());
   }
 
+  _markSessionUnresumable() {
+    if (!this.sessionPersistence || !this.sessionId || !this.sessionInitialized) return;
+    try {
+      const marked = this.store.markOwnedSessionUnresumable?.({
+        runtime: this.runtime,
+        authorityToken: this.authorityToken,
+        sessionId: this.sessionId,
+        epoch: this.cognitionEpoch,
+      });
+      if (marked === false) this.logger.info('claude_session_unresumable_stale');
+    } catch (error) {
+      this.logger.warn('claude_session_unresumable_failed', { error: safe(error) });
+    }
+  }
+
   _persistSession() {
     if (!this.sessionPersistence || !this.sessionId) return;
     try {
@@ -778,6 +797,11 @@ export class ClaudeAgent {
       // the native transcript. Reusing that transcript can duplicate the input;
       // rebuild it and perform one deliberate journal catch-up instead. The
       // same fresh-identity rule also avoids pre-init UUID collisions.
+      // Demote the stored session too: if this daemon dies before the fresh
+      // session publishes, the next generation must not resume the transcript
+      // either (resume patches the dangling tool call and rewrites the whole
+      // cached prompt prefix).
+      if (acceptanceUnknown) this._markSessionUnresumable();
       this.sessionId = randomUUID();
       this.sessionInitialized = false;
       this.resumeRequested = false;
@@ -1014,6 +1038,7 @@ export class ClaudeAgent {
   async stop() {
     this.stopping = true;
     this.autoReconnect = false;
+    const midTurn = this.turnActive;
     const queued = this.queue.flat();
     this.queue = [];
     if (receiptIds(queued).length > 0) {
@@ -1023,6 +1048,10 @@ export class ClaudeAgent {
     this.activeOwner = null;
     this.turnActive = false;
     if (items.length > 0) this._failItems(items, new Error('claude stopped during an active turn'));
+    // Killed mid-turn: the next daemon generation must build a fresh session.
+    // Resuming this transcript makes the CLI patch the interrupted tool call,
+    // which mutates the message history and forces a full-prefix cache rewrite.
+    if (midTurn) this._markSessionUnresumable();
     this._resolveIdleWaiters();
     await this._terminateCurrent();
   }

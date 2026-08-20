@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.mjs';
+import { cognitionHistoryPrefix } from '../src/cognition.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
@@ -225,6 +226,69 @@ describe('Store', () => {
     }), /injected session tuple failure/);
     store.setMetaStatement = statement;
     assert.deepEqual(store.getGlobalSession(), before);
+  });
+
+  it('marks the owned session unresumable only under the current authority', () => {
+    const cognition = store.initializeCognition('claude', 'claude-authority');
+    store.setGlobalSession('sess-live1234', 'policy-hash', {
+      runtime: 'claude',
+      epoch: cognition.epoch,
+      syncedThroughSeq: 4,
+      sessionReady: true,
+    });
+
+    assert.equal(store.markOwnedSessionUnresumable({
+      runtime: 'claude',
+      authorityToken: 'stale-authority',
+      sessionId: 'sess-live1234',
+      epoch: cognition.epoch,
+    }), false);
+    assert.equal(store.getGlobalSession().sessionReady, true);
+
+    assert.equal(store.markOwnedSessionUnresumable({
+      runtime: 'claude',
+      authorityToken: 'claude-authority',
+      sessionId: 'sess-live1234',
+      epoch: cognition.epoch,
+    }), true);
+    const session = store.getGlobalSession();
+    assert.equal(session.sessionReady, false);
+    assert.equal(session.sessionId, 'sess-live1234');
+    assert.equal(session.syncedThroughSeq, 4);
+  });
+
+  it('lets a delta catch-up skip the runtime own committed outbound rows', () => {
+    const { epoch } = store.initializeCognition('claude', 'token-own');
+    store.appendCognitionJournal({ kind: 'inbound', actor: 'ou_user123456', chatId: 'oc-chat', messageId: 'om-q1', text: 'question' });
+    store.appendCognitionJournal({ kind: 'outbound', chatId: 'oc-chat', actor: 'me', text: 'own committed answer', runtimeToken: 'token-own' });
+    store.appendCognitionJournal({ kind: 'outbound', chatId: 'oc-chat', actor: 'me', status: 'UNCERTAIN', text: 'own uncertain send', runtimeToken: 'token-own' });
+    store.appendCognitionJournal({ kind: 'outbound', chatId: 'oc-chat', actor: 'me', text: 'other runtime send', runtimeToken: 'token-other' });
+    store.appendCognitionJournal({ kind: 'control', actor: 'daemon', text: 'effort changed' });
+
+    const all = store.cognitionJournal(epoch);
+    assert.equal(all.length, 5);
+    const filtered = store.cognitionJournal(epoch, Number.MAX_SAFE_INTEGER, 0, {
+      excludeCommittedOutboundFrom: 'token-own',
+    });
+    assert.deepEqual(filtered.map((row) => row.text), [
+      'question',
+      'own uncertain send',
+      'other runtime send',
+      'effort changed',
+    ]);
+
+    // A delta that only contained the runtime's own committed sends produces no
+    // prefix text at all, while still advancing the cursor.
+    const head = store.cognitionJournalHead(epoch);
+    const emptyDelta = cognitionHistoryPrefix(store, epoch, 2, 120_000, 1, {
+      excludeCommittedOutboundFrom: 'token-own',
+    });
+    assert.equal(emptyDelta.text, '');
+    assert.equal(emptyDelta.throughSeq, 2);
+    const fullPrefix = cognitionHistoryPrefix(store, epoch, head, 120_000, 0, {
+      excludeCommittedOutboundFrom: null,
+    });
+    assert.match(fullPrefix.text, /own committed answer/);
   });
 
   it('atomically advances cognition and publishes a prepared managed session', () => {

@@ -352,9 +352,12 @@ export class CodexAgent {
           throughSeq,
           this.config.cognitionMaxChars,
           hadPrefix ? 0 : this.syncedThroughSeq,
+          // Same-thread delta only: this thread already observed its own
+          // committed sends as tool calls; a fresh thread receives everything.
+          hadPrefix ? {} : { excludeCommittedOutboundFrom: this.authorityToken },
         );
         journalThroughSeq = catchup.throughSeq;
-        body = `${catchup.text}\n${text}`;
+        if (catchup.text) body = `${catchup.text}\n${text}`;
       } else if (hadPrefix) {
         // Compatibility fallback for isolated tests and pre-journal stores.
         const history = this.store.history(this.config.historyLimit, beforeSeq).map(formatHistoryLine);
@@ -1133,7 +1136,10 @@ export class CodexAgent {
       // turn/start may have reached the server even though no acknowledgement
       // reached us. Replaying into the same thread could duplicate the input;
       // rebuild a fresh thread and perform one intentional journal catch-up.
+      // Demote the stored thread durably too, so a daemon restart in this
+      // window cannot resume it either.
       this.forceFreshThread = true;
+      this._markSessionUnresumable();
     }
     this.child = null;
     if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
@@ -1201,6 +1207,21 @@ export class CodexAgent {
     }
   }
 
+  _markSessionUnresumable() {
+    if (!this.sessionPersistence || !this.threadId) return;
+    try {
+      const marked = this.store.markOwnedSessionUnresumable?.({
+        runtime: this.runtime,
+        authorityToken: this.authorityToken,
+        sessionId: this.threadId,
+        epoch: this.cognitionEpoch,
+      });
+      if (marked === false) this.logger.info('codex_session_unresumable_stale');
+    } catch (error) {
+      this.logger.warn('codex_session_unresumable_failed', { error: safe(error) });
+    }
+  }
+
   _publishSession() {
     if (!this.sessionPersistence || !this.threadId) return false;
     try {
@@ -1245,6 +1266,7 @@ export class CodexAgent {
 
   async stop() {
     this.stopping = true;
+    const midTurn = Boolean(this.activeTurnId || this.startingTurn);
     const failedItems = [
       ...this.startingItems,
       ...this.queue,
@@ -1271,6 +1293,10 @@ export class CodexAgent {
     this.activeOwner = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
+    // Killed mid-turn: acceptance is unknowable, so the next daemon generation
+    // must open a fresh thread instead of resuming (duplicate-input and
+    // prompt-cache-rewrite risk on resume of an interrupted turn).
+    if (midTurn) this._markSessionUnresumable();
     if (this.primeWaiter) {
       this.primeWaiter.reject(new Error('codex stopped during cognition catch-up'));
       this.primeWaiter = null;
