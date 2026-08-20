@@ -465,9 +465,12 @@ export class PiAgent {
         throughSeq,
         this.config.cognitionMaxChars,
         this.needsHistoryPrefix ? 0 : this.deliveredThroughSeq,
+        // Same-session delta only: this transcript already observed its own
+        // committed sends; a fresh transcript still receives everything.
+        this.needsHistoryPrefix ? {} : { excludeCommittedOutboundFrom: this.authorityToken },
       );
       prefixThroughSeq = catchup.throughSeq;
-      body = `${catchup.text}\n${body}`;
+      if (catchup.text) body = `${catchup.text}\n${body}`;
     }
     let deliveredThroughSeq = prefixThroughSeq;
     for (const seq of seqs) {
@@ -723,6 +726,21 @@ export class PiAgent {
     if (merged.length > 0) this._writeBatch(merged);
   }
 
+  _markSessionUnresumable() {
+    if (!this.sessionPersistence || !this.sessionId || !this.sessionInitialized) return;
+    try {
+      const marked = this.store.markOwnedSessionUnresumable?.({
+        runtime: this.runtime,
+        authorityToken: this.authorityToken,
+        sessionId: this.sessionId,
+        epoch: this.cognitionEpoch,
+      });
+      if (marked === false) this.logger.info('pi_session_unresumable_stale');
+    } catch (error) {
+      this.logger.warn('pi_session_unresumable_failed', { error: safe(error) });
+    }
+  }
+
   _persistSession() {
     if (!this.sessionPersistence || !this.sessionId) return;
     try {
@@ -768,6 +786,9 @@ export class PiAgent {
     this.needsHistoryPrefix = !this.sessionInitialized;
     if ((acceptanceUnknown || !this.sessionInitialized)
       && !this.stopping && this.startedOk && this.autoReconnect) {
+      // Demote the stored session before regenerating locally, so a daemon
+      // crash in this window cannot resume the ambiguous transcript later.
+      if (acceptanceUnknown) this._markSessionUnresumable();
       this.sessionId = randomUUID();
       this.sessionInitialized = false;
       this.resumeRequested = false;
@@ -1017,6 +1038,7 @@ export class PiAgent {
   async stop() {
     this.stopping = true;
     this.autoReconnect = false;
+    const midTurn = this.turnActive;
     const queued = this.queue.flat();
     this.queue = [];
     if (receiptIds(queued).length > 0) {
@@ -1026,6 +1048,9 @@ export class PiAgent {
     this.activeOwner = null;
     this.turnActive = false;
     if (items.length > 0) this._failItems(items, new Error('pi stopped during an active turn'));
+    // Killed mid-turn: acceptance is unknowable, so the next generation must
+    // not resume this transcript (duplicate-input and cache-rewrite risk).
+    if (midTurn) this._markSessionUnresumable();
     this._resolveIdleWaiters();
     await this._terminateCurrent();
   }

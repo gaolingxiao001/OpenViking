@@ -69,8 +69,14 @@ export function cognitionHistoryPrefix(
   throughSeq = store.cognitionJournalHead(epoch),
   maxChars = 120_000,
   afterSeq = 0,
+  { excludeCommittedOutboundFrom = null } = {},
 ) {
-  const journal = store.cognitionJournal(epoch, throughSeq, afterSeq).map(formatCognitionJournalLine);
+  const journal = store
+    .cognitionJournal(epoch, throughSeq, afterSeq, { excludeCommittedOutboundFrom })
+    .map(formatCognitionJournalLine);
+  // A delta whose only rows were the runtime's own committed deliveries has
+  // nothing to teach the model; advance the cursor without paying for a header.
+  if (afterSeq > 0 && journal.length === 0) return { throughSeq, text: '' };
   return {
     throughSeq,
     text: assertBounded([

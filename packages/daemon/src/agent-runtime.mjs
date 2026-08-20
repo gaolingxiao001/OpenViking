@@ -118,6 +118,8 @@ export class AgentRuntime {
     this._authorityChanged(cognition);
   }
 
+  whenIdle() { return this.backend?.whenIdle() ?? Promise.resolve(); }
+
   submit(items, { admission = 'enqueue' } = {}) {
     if (this.stopping) return { accepted: false, reason: 'stopping' };
     if (this.pendingTransitions > 0) return { accepted: false, reason: 'switching' };
