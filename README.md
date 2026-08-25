@@ -1,46 +1,31 @@
 # lark-daemon
 
-一个单用户、本机常驻、可横向扩展的飞书 AI Agent 服务。项目拆成三个模块：`daemon` 负责飞书订阅、Codex/Claude/Pi/火山方舟 Managed Agent、SQLite 与内部 API；`web` 提供本机 Activity 页面并按 manifest 代理各实例；`updater` 是 PM2 sibling，从固定的 upstream `main` 发布并滚动 allowlist 内的 daemon。
+把你本机上的 coding agent 接进飞书。它不只是聊天 bot：你可以直接在私聊或群里交代任务，它会在自己的工作区里查资料、改代码、跑命令、调用飞书工具，再把结果送回来。
 
-daemon 是一根薄管道：`lark-cli event +subscribe` 收到的每条消息被压缩成一行，喂给当前全局 runtime。Codex 使用常驻 app-server，Claude 使用常驻 stream-json stdin/stdout，Pi 使用常驻 `--mode rpc` JSONL，火山方舟使用 Sessions API + SSE；它们共享同一套带 authority/freshness fence 的飞书出站链路。所有聊天共享一份全局认知，同一时刻只运行一个 runtime。群聊在空闲时先等固定 400ms，把同一 chat/thread 里紧跟着的补充合进首轮。Codex/Claude/Pi 支持 turn 内纠正；Ark 为避免云端事件串轮，把活跃 turn 期间的新消息排到下一轮。日常使用不需要 `@`。
+适合想把 Codex、Claude、Pi 或方舟 Agent 变成长期协作者的人。上下文沉淀在 OpenViking，不用每次重新解释项目背景；代码、凭据和本地工具依然留在自己的机器上。
+
+## 怎么用
+
+1. 在 Mac 或 Devbox 上常驻运行 daemon，把 bot 加进你信任的私聊和群。
+2. 直接发任务，不需要每条消息都 `@`。比如“查一下这个报错”“把 README 改短一点并提 PR”“整理今天的讨论”。
+3. 需要展开讨论就开 thread。它能执行 coding task、调用 subagent，也能在必要时去其他已授权聊天继续工作。
+
+它默认不抢话：明确问题、任务、纠正才回复；“收到”“谢谢”、闲聊和人与人之间的对话通常保持静默。所有聊天共享一份工作上下文，所以它能接住跨群、跨天的续聊。
+
+## 为什么用它
+
+- **飞书是入口，agent 还是 coding agent。**不用再把需求复制到另一个终端窗口；需要代码、调研、文档或协作动作时，直接在对话里交代。
+- **上下文不靠聊天记录硬塞。**项目知识、长期记忆和任务资料放在 OpenViking；每个 agent 有自己的 workspace 和记忆配置。
+- **本机可控。**daemon 只是把可信聊天消息和本地 agent 接起来，不把本机工作区搬到云端。
+- **可以有多个 agent。**每个 agent 使用独立的飞书 profile、workspace、数据目录和 OpenViking 配置；共享同一个 Web 和 updater。
+
+## 架构，够用就行
+
+`lark-cli` 收到飞书消息，daemon 把它交给当前 agent runtime；Agent 通过受约束的飞书工具回消息、读文档、查聊天或执行授权动作。Codex、Claude、Pi 和方舟使用不同 transport，但出站都走同一套权限、时效和幂等校验。Activity 页面记录消息、决策和投递结果，方便排查。
 
 ## 安装
 
-前置依赖（均为本机命令行工具）：
-
-1. Node.js ≥ 22.5（使用 `node:sqlite`，项目本身零 npm 依赖，无需 `npm install`）。
-2. `lark-cli` 已安装并完成 bot 登录（权限见「飞书前置条件」；路径默认 `/opt/homebrew/bin/lark-cli`，可用 `LARK_CLI_BIN` 覆盖）。
-3. `codex` CLI 已安装并登录（默认 `/opt/homebrew/bin/codex`，可用 `CODEX_BIN` 覆盖）。
-4. 如需切到 Claude，安装并登录 `claude` CLI；路径可用 `CLAUDE_BIN` 覆盖。
-5. 如需切到 Pi，安装并登录 `pi` CLI（`@earendil-works/pi-coding-agent`）；路径可用 `PI_BIN` 覆盖。daemon 以 `pi --mode rpc` 常驻；Pi 用内置 bash 调用 daemon 固定的本地 `lark-cli`，不加载 Pi extension。
-6. 如需切到火山方舟，设置 `ARK_API_KEY`，并用 `LARK_DAEMON_VOLC_SESSION_ID` 指向一个已绑定 Agent 与 Environment 的 seed session。daemon 只读取其中锁定的 Agent/Environment 配置，每个实例会创建独立的新 session，不会共同写 seed session。API key 只放进进程环境，不写入 deployment manifest。新实例可把 `agents[].model` 设为 `ark` 直接以 Ark 启动；已有实例用 `/model ark` 切换。
-
-   **⚠️ 目前 Ark managed agent（MA）还不算 ready，2026-08-15 评估**：MA 自带的 agent sandbox 是跟本地完全隔离的远端执行环境，不是"daemon 跑在 MA 里"——daemon 只把消息 POST 过去、收 `agent.message` 文本回来，MA 自己在它自己的沙箱里跑工具。两个已知限制：(a) MA 不支持挂自定义 MCP server，只有内建工具集，理论上可以改成 CLI 触发本地脚本的方式绕过（`ant beta:worker poll --on-work <script>` 那类模式），这条可解；(b) MA 的 sandbox 本身连不到本地资源（比如这台机器的 SQLite），这是架构上的硬限制，短期内无解。真要接入本地资源，得让"需要碰本地的活"完全留在本地 daemon 侧，MA/沙箱只管纯推理。
-7. `pm2`（仅正式部署需要：`npm i -g pm2`；`ecosystem.config.cjs` 假定 node 在 `/opt/homebrew/bin`，Intel Mac 需自行调整）。
-
-首次运行：
-
-```bash
-cd lark-daemon
-mkdir -p ~/.lark-daemon
-cp deployment.example.json ~/.lark-daemon/deployment.json
-# 修改 deployment.json 中的 env 和 agents
-npm test && npm run check
-npm run start:daemon   # 默认跑 defaultInstance
-# LARK_DAEMON_INSTANCE_ID=research npm run start:daemon  # 显式选择
-```
-
-默认配置路径是 `~/.lark-daemon/deployment.json`。需要放在其他位置时，为启动 daemon、执行 `deploy.sh`、bootstrap updater 和 `lark-daemon` CLI 的系统环境设置绝对路径 `LARK_DAEMON_DEPLOYMENT_MANIFEST`；每次调用都必须带上同一个 override。它只选择 manifest，不承载 Agent 配置。`deploy.sh` 会在发布 release 前完成 manifest preflight。
-
-首次上线依次执行：
-
-```bash
-./scripts/deploy.sh HEAD
-./scripts/bootstrap-updater.sh
-lark-daemon upgrade all
-```
-
-`deploy.sh` 发布 bootstrap release，第二步启动独立 updater，最后一步应执行 `lark-daemon upgrade all`，启动并验收 manifest 中的全部 daemon 与共享 Web。此后普通代码合入并 push 到 upstream `main` 后，只需升级目标实例；共享 Web 改动使用 `upgrade all`。部署配置只有 release 之外的持久 manifest，不读取或生成 `.env`。`current` 指向最新发布版本，`rollback` 保留上一个发布版本。
+看 [install.md](./install.md)。里面有依赖、飞书权限、`deployment.json`、首次部署、多 agent 和日常升级。
 
 ## 交互规则
 
