@@ -220,7 +220,7 @@ export const LARK_TOOLS = [
   {
     name: 'send_lark_message',
     title: 'Send a Lark message',
-    description: 'Send a message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. Body is markdown only (--markdown): use it for short replies and for bold/links/embedded images. Quote with "double quotes", not single quotes, so formatting is preserved. For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
+    description: 'Send a message as the bot to a Lark chat, optionally with explicit user mentions. Use a full chat_id returned by list_lark_chats or supplied in daemon-authenticated metadata. Mention IDs must come from trusted metadata or tool results. Body is markdown only (--markdown): use it for short replies and for bold/links/embedded images. Quote with "double quotes", not single quotes, so formatting is preserved. For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet: attach one with `lark-cli im +messages-reply --as bot --message-id <om_...> --image <cwd-relative path>`, adding --reply-in-thread to put it in a thread. Do not reach for `+messages-send` to attach an image — it has no thread parameter, so the image lands in the main chat while your text stays in the thread. Details in packages/daemon/agent/lark-message-formats.md. This is an external side effect: call it only when the user has asked for the message or a previously requested follow-up is now due.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -257,7 +257,7 @@ export const LARK_TOOLS = [
   {
     name: 'reply_lark_message',
     title: 'Reply to a Lark message',
-    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. Body is markdown only (--markdown). Quote with "double quotes", not single quotes, so formatting is preserved. For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet — see packages/daemon/agent/lark-message-formats.md for the lark-cli fallback. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
+    description: 'Reply as the bot to a specific Lark message, optionally with explicit user mentions. Use the full msg id from the bracketed inbound line. Mention IDs must come from trusted metadata or tool results. Set reply_in_thread to continue (or start) a thread. Body is markdown only (--markdown). Quote with "double quotes", not single quotes, so formatting is preserved. For image/file/video/audio attachments or raw interactive cards, this tool does not cover it yet: attach one with `lark-cli im +messages-reply --as bot --message-id <om_...> --image <cwd-relative path>`, adding --reply-in-thread to put it in a thread. Do not reach for `+messages-send` to attach an image — it has no thread parameter, so the image lands in the main chat while your text stays in the thread. Details in packages/daemon/agent/lark-message-formats.md. This is an external side effect: reply at most once per decision, and stay silent by simply not calling it.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -1356,6 +1356,10 @@ export class LarkToolService {
       await this.runLark([
         'messages', 'delete', '--as', 'bot',
         '--params', JSON.stringify({ message_id: messageId }), '--format', 'json',
+        // lark-cli marks im.messages.delete high-risk and refuses without --yes;
+        // the user-confirmation gate lives in this tool's contract (explicit user
+        // request required), so the daemon supplies the confirmation flag.
+        '--yes',
       ], 'retract Lark message');
     } catch (error) {
       this._settleOutbound(journal?.key, 'UNCERTAIN', null, { action: 'retract' });

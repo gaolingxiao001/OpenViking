@@ -29,7 +29,8 @@ markdown: "**审核通过** 详情看 [PR #123](https://example.com/pr/123)"
 
 按 policy,只有用户在当前对话里明确要求、且没有更合适的可信工具时才能走 shell fallback,且遵守：id 只用可信元数据里的、一次决策只发一次、带 idempotency key。
 
-- **image / file / video / audio**: 需要先把媒体上传拿到 `img_xxx`/`file_xxx` key(`drive` 或 `im` 域下的上传命令),再传给 `+messages-send --image/--file/--video/--audio`。上传本身是另一个高风险动作(任意文件/URL),没有做进 MCP。
+- **image / file / video / audio**: `+messages-send` 和 `+messages-reply` 都收 `--image/--file/--video/--audio`,值可以是已有的 `img_xxx`/`file_xxx` key、URL,或 cwd 相对的本地路径(绝对路径和 `..` 会被拒);本地路径由 lark-cli 在发送前自动上传,不用自己先跑上传命令。上传本身是高风险动作(任意文件/URL),所以没有做进 MCP。
+  - **要发进 thread(话题)就必须用 `+messages-reply`**:`+messages-send` 没有 thread 参数,发出去一定落在主群。正确形状是 `im +messages-reply --as bot --message-id <om_xxx> --image ./x.png --reply-in-thread --idempotency-key <k>`,底层是 `POST /open-apis/im/v1/messages/:message_id/reply`,body 里带 `msg_type:"image"` + `reply_in_thread:true`(可以先 `--dry-run` 核对)。file/video/audio 同理。
 - **post 富文本(原始 JSON)**: `--content '<json>' --msg-type post`,自己拼多段富文本结构(粗体/多图混排/多个链接分区)。一般 `markdown` 就够,只有 markdown 表达不了的复杂排版才用这个。
 - **interactive 卡片**: `--content '<json>' --msg-type interactive`,即飞书消息卡片(按钮、多列布局)。风险最高,内容是任意 JSON,发之前必须让用户看过卡片结构再发。
 - **share_chat / share_user**: 分享群名片/个人名片,`--content '{"chat_id":"oc_xxx"}' --msg-type share_chat` 或 `share_user`。
