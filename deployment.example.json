@@ -22,7 +22,6 @@
     "LARK_DAEMON_CLAUDE_MODEL": "",
     "LARK_DAEMON_PI_EFFORT": "medium",
     "LARK_DAEMON_PI_MODEL": "",
-    "LARK_DAEMON_VOLC_SESSION_ID": "",
     "FALLBACK_MODEL": "gpt-5.6-sol",
     "LARK_DAEMON_COGNITION_MAX_CHARS": "120000",
     "LARK_DAEMON_HISTORY_LIMIT": "30"
@@ -36,7 +35,9 @@
       "dataDir": "/Users/you/.local/share/lark-daemon-primary",
       "workspace": "/Users/you/Documents/work/primary-workspace",
       "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
-      "model": "gpt-5.6-sol",
+      "model": "ark",
+      "volcSessionId": "sesn-your-self-hosted-seed",
+      "volcEnvironmentId": "env-your-self-hosted-environment",
       "meetingAudio": {
         "targetChatId": "oc_your_private_target_chat",
         "pythonCommand": "/usr/bin/python3",

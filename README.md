@@ -21,11 +21,40 @@
 
 ## 架构，够用就行
 
-`lark-cli` 收到飞书消息，daemon 把它交给当前 agent runtime；Agent 通过受约束的飞书工具回消息、读文档、查聊天或执行授权动作。Codex、Claude、Pi 和方舟使用不同 transport，但出站都走同一套权限、时效和幂等校验。Activity 页面记录消息、决策和投递结果，方便排查。
+`lark-cli` 收到飞书消息，daemon 把它交给当前 agent runtime。Codex、Claude 通过受约束的 MCP 工具执行飞书动作；Pi 与方舟 Self-hosted Managed Agent 通过各自 runtime 的 bash 调用固定的本机 `lark-cli`。方舟由 daemon 负责 Sessions API/SSE，官方 Environment Worker 是唯一工具执行面。Activity 页面记录消息、决策和投递结果，方便排查。
 
 ## 安装
 
 看 [install.md](./install.md)。里面有依赖、飞书权限、`deployment.json`、首次部署、多 agent 和日常升级。
+
+### 方舟 MA 配置
+
+方舟只支持 Self-hosted Managed Agent。最小接入流程：
+
+1. 在方舟控制台创建或选择 `config.type=self_hosted` 的 Environment，把目标 Agent 绑定到该 Environment，并创建一个 seed session。可参考[已验证的 Self-hosted Environment](https://console.volcengine.com/ark/region:cn-beijing/managed-agents/environments/env-20260831031839-rm2nj?searchField=Name)。
+2. 在 `deployment.json` 的目标 agent 中同时配置 seed session 和 Environment；二者必须属于同一个 Environment，每个 bot 使用独立配置：
+
+   ```json
+   {
+     "model": "ark",
+     "volcSessionId": "sesn-your-self-hosted-seed",
+     "volcEnvironmentId": "env-your-self-hosted-environment"
+   }
+   ```
+
+3. daemon 进程需要 `ARK_API_KEY`。另外独立常驻官方 Go `EnvironmentWorker`，给 Worker 设置以下进程环境变量；密钥不要写入 `deployment.json`：
+
+   ```bash
+   ARK_API_KEY="..."
+   ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+   MA_ENVIRONMENT_ID="env-your-self-hosted-environment"
+   LARKSUITE_CLI_PROFILE="cli_primary"
+   ```
+
+4. 先确认该 profile 的本机 `lark-cli` 可用，再启动 Worker 和 daemon。daemon 只负责 Sessions API/SSE，Worker 是唯一工具执行面；Worker 的进程部署、存活与升级不由本仓库托管。
+5. 用一个原生 turn 触发至少两次本地 CLI 调用做验收。预期可重复经过 `agent.tool_use -> requires_action -> user.tool_result`，最后以 `end_turn` 成功结束；即使没有返回 `agent.message` 也不应报错。
+
+云沙箱和严格 JSON `agent.message` Tool Call bridge 均不再支持。把 CLI credential 同步进云沙箱理论上可能实现，但不是当前建议的接入方式。完整部署说明见 [install.md 的方舟 Self-hosted Managed Agent 小节](./install.md#方舟-self-hosted-managed-agent)。
 
 ## 交互规则
 
@@ -33,12 +62,12 @@
 - 所有聊天共享一个全局 runtime/session，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
 - 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn。Codex/Claude/Pi 已有 turn 时使用即时 steer；Ark 的后续消息进入下一 turn。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
-- 图片、文件和音视频会以受限资源引用进入 Agent；Codex/Claude/Pi 可按消息中的 image_key 用专用工具查看图片，内容本身不会直接塞进 prompt。Ark 的字符串工具桥目前不传 MCP image content，因此不会向它暴露看图工具。未知消息类型不会触发回复。
+- 图片、文件和音视频会以受限资源引用进入 Agent；Codex/Claude/Pi 可按消息中的 image_key 用专用工具查看图片，内容本身不会直接塞进 prompt。Self-hosted Ark 不继承 daemon 的 MCP 图片工具，只有 Worker 环境另行提供等价本地能力时才能读取。未知消息类型不会触发回复。
 - 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model pi` 切到 Pi（`/model pi:provider/id` 指定模型），用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 daemon journal。Ark 的 model/effort 由远端 Agent 配置管理。
-- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_lark_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的进程内桥不暴露临时 reaction，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。MCP sidecar 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
+- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_lark_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的 Worker/CLI 路径不使用 daemon 的临时 reaction helper，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。MCP sidecar 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
-Codex/Claude 通过 MCP 调用受保护的 Lark 工具，Ark 在 `agent.message` 中返回严格 JSON 决策，再由 daemon 进程内执行。Pi 没有 MCP client 配置接口，直接使用其内置 bash 调用 daemon 固定的本地 `lark-cli`：prompt 限定为 bot identity、完整可信 ID、一次决策一条最终消息和稳定的 idempotency key，且禁止 auth/config/profile 操作。Pi 不获得 daemon 的 runtime token，也不加载 extension；因此 Pi 的 CLI 出站不经过 MCP 的 freshness fence，适合单用户本机运行，不应把它用于需要 host 级别强制审计的部署。其余 runtime 的 `react_to_lark_message`、`reply_lark_message`、`send_lark_message`、`retract_lark_message` 仍保留 freshness fence 和 SQLite sidecar。Codex 默认不通过 shell 调用 `lark-cli`；仅当用户明确要求、且对应可信工具尚未加载时，才按 system prompt 的 fallback 规则执行等价的单条命令（auth/config/admin 操作始终禁止）。
+Codex/Claude 通过 MCP 调用受保护的 Lark 工具。Pi 与 Self-hosted Ark 没有本机 MCP client 配置面，改由各自 runtime 的 bash 调用 daemon 固定的本地 `lark-cli`；Ark 的调用由官方 Environment Worker 执行，回复可以完全由工具完成，`end_turn` 不要求再返回 `agent.message`。直接 CLI 出站不经过 MCP 的 freshness fence，适合单用户本机运行，不应把它用于需要 host 级别强制审计的部署。Codex/Claude 的 `react_to_lark_message`、`reply_lark_message`、`send_lark_message`、`retract_lark_message` 仍保留 freshness fence 和 SQLite sidecar。Codex 默认不通过 shell 调用 `lark-cli`；仅当用户明确要求、且对应可信工具尚未加载时，才按 system prompt 的 fallback 规则执行等价的单条命令（auth/config/admin 操作始终禁止）。
 
 ## 飞书前置条件
 
@@ -111,13 +140,11 @@ lark-daemon upgrade all
 
 ## Runtime 模块边界
 
-daemon 和 slash commands 只通过 `AgentRuntime` 的 `start`、`submit`、`snapshot`、`transition`、`stop` 接口控制模型。`runtime-catalog` 统一 model alias、effort 与 capability；`runtime-adapter` 把 Codex、Claude、Ark 的 transport lifecycle 归一；`runtime-input` 生成认证过的输入 envelope；`runtime-output` 为云端 runtime 执行本地工具，并在副作用前做 authority/freshness/journal 校验。具体 Adapter 只保留协议差异：Codex JSON-RPC、Claude stream-json、Ark Sessions/SSE。`submit` 返回 `accepted: false` 时 caller 仍持有整批消息；返回 `accepted: true` 后 ownership 才交给 runtime。
+daemon 和 slash commands 只通过 `AgentRuntime` 的 `start`、`submit`、`snapshot`、`transition`、`stop` 接口控制模型。`runtime-catalog` 统一 model alias、effort 与 capability；`runtime-adapter` 把 Codex、Claude、Ark 的 transport lifecycle 归一；`runtime-input` 生成认证过的输入 envelope。具体 Adapter 只保留协议差异：Codex JSON-RPC、Claude stream-json、Ark Sessions/SSE。Self-hosted Ark 的输出和工具执行归 Worker/runtime 所有。`submit` 返回 `accepted: false` 时 caller 仍持有整批消息；返回 `accepted: true` 后 ownership 才交给 runtime。
 
 ### MCP 与 CLI 的取舍
 
-当前继续使用 MCP，不另外分发 Agent 专用 CLI。这层 MCP 已经承担了 CLI wrapper 的工作：它收窄工具面、校验参数，并统一进入 `LarkToolService` 的 authority、freshness 和幂等链路。Codex/Claude 可以直接挂 stdio MCP；Ark 暂时由 daemon 通过 JSON bridge 调用同一 MCP handler。这样少一个需要打包、分发和升级的 CLI，现阶段更简单。
-
-等 Managed Agent 支持客户自有 Environment 后，可以重新评估 Ark 的工具入口：把同一组窄工具包装成 CLI，分发到客户 Environment 内，由 Ark 直接调用。这只是替换模型侧的调用协议；CLI 仍应复用现有工具语义，不应绕过 authority/freshness/journal 校验。Codex/Claude 的 stdio MCP 可以独立保留。
+Codex/Claude 继续挂本机 stdio MCP。Pi 与 Self-hosted Ark 使用各自已有的 bash 工具调用固定 `lark-cli`，因为这两种 runtime 没有本机 MCP client 配置面。Ark 的调用发生在官方 Environment Worker 进程里；Worker 是唯一工具执行面，也只有这条路径能在同一个原生 turn 中多次调用 Environment 内的 CLI。daemon 只观察远端 `agent.tool_use`、`user.tool_result` 与最终状态。云沙箱的严格 JSON Tool Call bridge 已移除；理论上可把 CLI credential 同步到云沙箱重建类似链路，但这不是当前支持或建议的接入方式。直接 CLI 路径使用稳定幂等键，但不经过 daemon 的 authority/freshness journal，因此其可靠性边界与 MCP 路径不同。
 
 ## 可靠性边界
 
@@ -126,8 +153,8 @@ daemon 和 slash commands 只通过 `AgentRuntime` 的 `start`、`submit`、`sna
 - slash command 和后续消息经过同一条全局 ingress barrier，但命令本身不等待模型；只读命令并行回答，会话变更命令先中断旧 turn。三个 runtime 都先 prepare 新 session，再用一次 SQLite CAS 原子提交 epoch、session、authority 与 model/effort 设置，最后做不可失败的本地 activation；prepare 或 CAS 失败时旧认知状态不变。跨 runtime switch 同样先 preflight 目标进程再交接，目标启动失败时仍留在旧 runtime。
 - SQLite 只保留一个 active runtime/session。跨 runtime journal 记录 accepted inbound、Lark outbound/control 与 uncertain side effect；它不保存隐藏思考。journal 超过上限时 switch fail closed，先 `/new` 再切。
 - 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
-- Codex/Claude 通过 MCP 工具执行飞书动作；云端 Ark 无法访问本机 stdio MCP，所以 daemon 把允许的工具 schema 与严格 `lark-daemon-tools/v1` JSON 协议注入 system policy。Ark 返回 `tool_call` 或 `finish:silent` 决策，daemon 校验完整 JSON/schema、在进程内调用同一个 MCP handler，并把只读结果作为下一 remote subturn 的受限 `tool_result` 送回；成功的 send/reply/reaction/retract 直接结束逻辑 turn，不再自动发送 `agent.message` 文本。工具结果和调用计数会随 managed-turn fence 持久化，重启可继续已生成的结果而不重跑只读工具；无法证明 POST acceptance 时仍隔离旧 session。两条路径都在副作用前校验 active-runtime token/session/epoch 和 freshness，并先写 PENDING journal；成功后 COMMITTED，timeout/crash 保留为 UNCERTAIN。副作用重放遇到 COMMITTED/UNCERTAIN 会 fail closed，不重复发送。Ark 不会把不同 chat/thread 合进同一个远端逻辑 turn，避免工具结果或投递跨会话泄漏。runtime token 是本机单用户进程内的 fencing nonce，不是远程凭证；能读取 daemon SQLite 或进程配置的本机用户，本来就已处于 daemon 的信任边界内。
-- Ark 的多工具循环是 daemon 拼出的逻辑 turn，不是一次 Ark 原生 turn。每个 `agent.message` 只能放一个 plain-text JSON `tool_call`；等远端 `end_turn` 后 daemon 才执行工具，再把只读 `tool_result` POST 回去，开启下一个 remote subturn。同一逻辑 turn 最多可串行 8 次工具调用，但一次远端 response 里不能批量或并行发出多个原生 tool call。
+- Codex/Claude 通过 MCP 工具执行飞书动作。Self-hosted Ark 的原生工具循环由官方 Worker 执行：`agent.tool_use` 后 Session 会以 `requires_action` 暂停，Worker 回写关联的 `user.tool_result` 后继续，最终 `end_turn` 才结束本轮。daemon 不执行工具、不 POST tool result、不转发最终 `agent.message`，避免双重执行和重复投递。
+- Ark 不会把不同 chat/thread 合进同一个远端逻辑 turn。daemon 仍以 accepted `user.message` event id 做因果 fence，并持久化 turn/session 恢复信息；但 Worker 直接调用 CLI 的本地副作用不在 daemon SQLite journal 内。Worker/CLI timeout 或 crash 的重复执行保证由 Ark Worker 协议和 CLI 幂等键承担。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。
 - Activity 账本保留脱敏后的短摘要（含收消息、turn 开始/结束、steer、agent 输出）；老记录由网页折叠，不因业务表的清理而消失。
 - 单个 turn 没有总时长 watchdog；Codex/Claude 若长时间不结束一轮，该轮会一直 active。Ark 的 SSE 单次空闲超时默认 15 分钟，随后自动重连并从历史补偿。

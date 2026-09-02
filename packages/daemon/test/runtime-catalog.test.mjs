@@ -36,7 +36,7 @@ describe('runtime catalog', () => {
       effortControl: 'remote-managed',
       activeInput: 'queue-next-turn',
       scopePolicy: 'single-conversation',
-      outputOwnership: 'host',
+      outputOwnership: 'runtime',
       sessionAuthority: 'rotate',
     });
     assert.deepEqual(getRuntimeDefinition('pi').directAliases, ['pi']);

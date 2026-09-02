@@ -1552,7 +1552,6 @@ export class Store {
     inboundSeqs,
     conversationKey,
     deliveredThroughSeq = 0,
-    bridge = null,
     atMs = Date.now(),
   }) {
     return this.transaction(() => {
@@ -1575,7 +1574,6 @@ export class Store {
         conversationKey,
         deliveredThroughSeq,
         expectedUserEventId: null,
-        ...(bridge && typeof bridge === 'object' ? { bridge } : {}),
         atMs,
       };
       this.setMetaStatement.run(`managed_turn:${runtime}`, JSON.stringify(turn));
@@ -1611,46 +1609,6 @@ export class Store {
         );
       }
       return accepted;
-    });
-  }
-
-  prepareManagedTurnContinuation({
-    runtime,
-    authorityToken,
-    sessionId,
-    epoch,
-    expectedUserEventId,
-    body,
-    bridge,
-  }) {
-    return this.transaction(() => {
-      const turn = this.getManagedTurn(runtime);
-      if (!turn || turn.sessionId !== sessionId || turn.status !== 'ACCEPTED'
-        || turn.expectedUserEventId !== expectedUserEventId) {
-        throw new Error('managed continuation does not match the accepted subturn');
-      }
-      const cognition = this.getCognitionState();
-      const session = this.getGlobalSession();
-      if (cognition.runtime !== runtime
-        || cognition.authorityToken !== authorityToken
-        || cognition.epoch !== epoch
-        || session.runtime !== runtime
-        || session.epoch !== epoch
-        || session.sessionId !== sessionId) {
-        throw new Error('managed continuation no longer owns the active session');
-      }
-      if (typeof body !== 'string' || !body || body.length > 200_000) {
-        throw new Error('managed continuation body is invalid');
-      }
-      const continuation = {
-        ...turn,
-        status: 'CONTINUATION_READY',
-        expectedUserEventId: null,
-        continuationBody: body,
-        bridge: bridge && typeof bridge === 'object' ? bridge : {},
-      };
-      this.setMetaStatement.run(`managed_turn:${runtime}`, JSON.stringify(continuation));
-      return continuation;
     });
   }
 
