@@ -57,6 +57,8 @@ describe('module boundaries', () => {
           workspace: '/Users/test/Documents/work/beta-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.beta',
           model: 'ark',
+          volcSessionId: 'sesn-beta-self-hosted',
+          volcEnvironmentId: 'env-beta-self-hosted',
         },
       ],
     }, null, 2)}\n`);
@@ -116,9 +118,13 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.LARK_DAEMON_LOG_LEVEL, 'debug');
     assert.equal(alpha.env.LARK_DAEMON_DRY_RUN, 'false');
     assert.equal(alpha.env.ARK_API_KEY, 'system-only-secret');
+    assert.equal(alpha.env.LARK_DAEMON_VOLC_SESSION_ID, '');
+    assert.equal(alpha.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, '');
     assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
     assert.equal(beta.env.LARK_DAEMON_MODEL, 'ark');
     assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, '');
+    assert.equal(beta.env.LARK_DAEMON_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
+    assert.equal(beta.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
     assert.equal(beta.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, undefined);
     assert.equal(web.env.LARK_WEB_PORT, '3737');
     assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'beta');

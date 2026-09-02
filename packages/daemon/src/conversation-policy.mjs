@@ -124,16 +124,22 @@ export function assembleConversationPolicy(config = {}, options = {}) {
 // tool, so its local Lark integration is the pinned lark-cli binary rather than
 // a Pi extension which re-implements the MCP bridge.
 export function assemblePiConversationPolicy(config = {}, options = {}) {
+  return joinSections([
+    assembleConversationPolicy(config, options),
+    localLarkCliDeliveryPolicy(config, 'Pi'),
+  ]);
+}
+
+export function localLarkCliDeliveryPolicy(config = {}, runtimeName = 'Agent') {
   const cli = String(config.larkCliBin || 'lark-cli');
-  const runtimeInstructions = [
-    '## Pi delivery runtime',
+  return [
+    `## ${runtimeName} delivery runtime`,
     '',
-    'This Pi process has no Lark MCP tools. For a Lark delivery, use your bash tool to invoke the pinned local CLI directly; do not call a nonexistent send_lark_message/reply_lark_message tool and do not put the reply only in your final text.',
+    `This ${runtimeName} process has no Lark MCP tools. For a Lark delivery, use your bash tool to invoke the pinned local CLI directly; do not call a nonexistent send_lark_message/reply_lark_message tool and do not put the reply only in your final text.`,
     `Use \`${cli} im +messages-reply --as bot --message-id <om_...> --markdown \"<body>\" --idempotency-key <stable-key>\` for a normal reply. Add \`--reply-in-thread\` only when the authenticated inbound line contains \`thread=\`. Use \`${cli} im +messages-send --as bot --chat-id <oc_...> --markdown \"<body>\" --idempotency-key <stable-key>\` only for a standalone or explicitly requested cross-chat send.`,
     'Use only full IDs from authenticated inbound metadata or trusted CLI output. Never pass --profile: the daemon supplies the authenticated profile. Make at most one final Lark delivery per decision and use a stable idempotency key (50 characters or less). Do not run lark-cli auth, login, config, or profile commands.',
     'The CLI path and bot identity are already configured. A successful CLI command is the only user-visible delivery; your final answer text is internal telemetry.',
   ].join('\n');
-  return joinSections([assembleConversationPolicy(config, options), runtimeInstructions]);
 }
 
 // Volc cannot load local MCP/skills. It still gets inbound grammar + persona
@@ -149,4 +155,11 @@ export function assembleVolcConversationPolicy(config = {}, extra = []) {
     .map((part) => String(part || '').trim())
     .filter(Boolean)
     .join(' ');
+}
+
+export function assembleVolcSelfHostedConversationPolicy(config = {}) {
+  return assembleVolcConversationPolicy(config, [
+    localLarkCliDeliveryPolicy(config, 'Managed Agent self-hosted'),
+    'The official self-hosted Environment Worker is the only tool executor. Use its native bash tool for every local CLI action; one native turn may call it repeatedly before end_turn. The daemon only observes tool events and never mirrors or relays their side effects.',
+  ]);
 }

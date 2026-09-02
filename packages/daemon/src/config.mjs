@@ -186,6 +186,7 @@ export function getConfig() {
       || process.env.ARK_SESSION_ID
       || process.env.SESSION_ID
       || '',
+    volcEnvironmentId: (process.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID || '').trim(),
     volcBaseUrl,
     volcRequestTimeoutMs: intEnv('LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS', 30_000, {
       min: 1_000,

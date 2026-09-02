@@ -1,30 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
-import { assembleVolcConversationPolicy } from './conversation-policy.mjs';
+import { assembleVolcSelfHostedConversationPolicy } from './conversation-policy.mjs';
 import { safeError as safe } from './logger.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
-import {
-  MANAGED_TOOL_MAX_CALLS,
-  MANAGED_TOOL_MAX_PROTOCOL_ERRORS,
-  managedProtocolErrorMessage,
-  managedToolPolicy,
-  managedToolResultMessage,
-  parseManagedToolDecision,
-} from './managed-tool-bridge.mjs';
 import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
 
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_CAP_MS = 5_000;
 const MAX_EVENT_BYTES = 5_000_000;
-const LEGACY_VOLC_TRANSPORT_POLICY = [
-  'lark-daemon transport contract:',
-  'This user.message belongs to exactly one Lark conversation scope.',
-  'You cannot access the daemon local Lark MCP or its local workspace.',
-  'Do not claim that you sent a Lark message.',
-  'Put the complete user-facing answer in agent.message; the daemon relays only the final agent.message locally.',
-  'Do not expose transport metadata or credentials.',
-].join(' ');
-
 class VolcApiError extends Error {
   constructor(status, requestId = '') {
     super(`Volc API request failed (${status})${requestId ? `, request_id=${requestId}` : ''}`);
@@ -78,14 +61,9 @@ export class VolcAgent {
     this.fetch = options.fetch ?? globalThis.fetch;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
-    this.onTurnOutput = options.onTurnOutput ?? null;
-    this.onToolCall = options.onToolCall ?? null;
-    this.toolDefinitions = Array.isArray(options.toolDefinitions) ? options.toolDefinitions : [];
-    this.toolBridgeEnabled = typeof this.onToolCall === 'function' && this.toolDefinitions.length > 0;
+    this.environmentId = config.volcEnvironmentId ?? '';
     this.agentName = config.agentName || 'the bot';
-    this.transportPolicy = assembleVolcConversationPolicy(config, [
-      this.toolBridgeEnabled ? managedToolPolicy(this.toolDefinitions) : LEGACY_VOLC_TRANSPORT_POLICY,
-    ]);
+    this.transportPolicy = assembleVolcSelfHostedConversationPolicy(config);
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
 
@@ -137,8 +115,6 @@ export class VolcAgent {
     this.lastMessageEventId = null;
     this.expectedUserEventId = null;
     this.turnFenceSeen = false;
-    this.bridgeCalls = 0;
-    this.bridgeProtocolErrors = 0;
     this.transportPolicyInjected = false;
     this.activitySeq = 0;
     this.idleWaiters = [];
@@ -173,9 +149,19 @@ export class VolcAgent {
     if (!this.templateSessionId) {
       throw new Error('LARK_DAEMON_VOLC_SESSION_ID (or SESSION_ID) is required for the Volc managed-agent runtime');
     }
+    if (!this.environmentId) {
+      throw new Error('LARK_DAEMON_VOLC_ENVIRONMENT_ID is required for the self-hosted Volc runtime');
+    }
     this.stopping = false;
     this.template = await this._getSession(this.templateSessionId);
     this._validateSessionTemplate(this.template);
+    if (this.template.environment_id !== this.environmentId) {
+      throw new Error('Volc template session does not use the configured self-hosted Environment');
+    }
+    const environment = await this._getEnvironment(this.environmentId);
+    if (environment?.config?.type !== 'self_hosted') {
+      throw new Error('configured Volc Environment must have config.type=self_hosted');
+    }
     this.policyHashValue = createHash('sha256')
       .update('volc-managed-agent-v2').update('\0')
       .update(this.baseUrl).update('\0')
@@ -248,10 +234,7 @@ export class VolcAgent {
       ? pending.inboundSeqs.filter(Number.isSafeInteger)
       : [];
     const accepted = pending.status === 'ACCEPTED' && pending.expectedUserEventId;
-    const continuationReady = pending.status === 'CONTINUATION_READY'
-      && typeof pending.continuationBody === 'string'
-      && pending.continuationBody;
-    if (!accepted && !continuationReady) {
+    if (!accepted) {
       this._poisonSession();
       this.store.clearManagedTurn?.(this.runtime, { sessionId: this.sessionId });
       const error = new Error('Volc user.message acceptance was unknown after restart; the request was not resent');
@@ -276,12 +259,8 @@ export class VolcAgent {
     this.turnStartedAtMs = Date.now();
     this.modelWorking = true;
     this.modelStartedAtMs = this.turnStartedAtMs;
-    this.expectedUserEventId = accepted ? pending.expectedUserEventId : null;
+    this.expectedUserEventId = pending.expectedUserEventId;
     this.turnFenceSeen = false;
-    this.bridgeCalls = Number.isSafeInteger(pending.bridge?.calls) ? pending.bridge.calls : 0;
-    this.bridgeProtocolErrors = Number.isSafeInteger(pending.bridge?.protocolErrors)
-      ? pending.bridge.protocolErrors
-      : 0;
     const acceptedThroughSeq = Number(pending.deliveredThroughSeq) || 0;
     const acceptanceAdvanced = this.store.advanceOwnedSessionAcceptance?.({
       runtime: this.runtime,
@@ -307,14 +286,7 @@ export class VolcAgent {
       inboundSeq: seqs.at(-1) ?? null,
       metadata: { runtime: this.runtime, inboundSeqs: seqs },
     });
-    void this._runTurn(continuationReady
-      ? {
-          body: pending.continuationBody,
-          seqs,
-          deliveredThroughSeq: this.deliveredThroughSeq,
-          bridge: { calls: this.bridgeCalls, protocolErrors: this.bridgeProtocolErrors },
-        }
-      : { deliveredThroughSeq: this.deliveredThroughSeq })
+    void this._runTurn({ deliveredThroughSeq: this.deliveredThroughSeq })
       .catch((error) => this._completeTurn(error));
   }
 
@@ -370,6 +342,10 @@ export class VolcAgent {
 
   _getSession(sessionId) {
     return this._json(`/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  _getEnvironment(environmentId) {
+    return this._json(`/environments/${encodeURIComponent(environmentId)}`);
   }
 
   async _createSession() {
@@ -488,8 +464,6 @@ export class VolcAgent {
     this.lastMessageEventId = null;
     this.expectedUserEventId = null;
     this.turnFenceSeen = false;
-    this.bridgeCalls = 0;
-    this.bridgeProtocolErrors = 0;
     this.abortController = new AbortController();
     this._recordActivity('agent.turn_started', {
       inboundSeq: prepared.seqs.at(-1) ?? null,
@@ -579,12 +553,6 @@ export class VolcAgent {
               inboundSeqs: prepared.seqs,
               conversationKey: this.activeConversationKey,
               deliveredThroughSeq: prepared.deliveredThroughSeq,
-              ...(this.toolBridgeEnabled ? {
-                bridge: prepared.bridge ?? {
-                  calls: this.bridgeCalls,
-                  protocolErrors: this.bridgeProtocolErrors,
-                },
-              } : {}),
             });
           } catch (error) {
             error.volcTerminal = true;
@@ -763,7 +731,7 @@ export class VolcAgent {
           summary: text,
           metadata: {
             runtime: this.runtime,
-            delivery: this.toolBridgeEnabled ? 'pending_tool_decision' : 'pending_local_delivery',
+            delivery: 'telemetry_only',
           },
         });
       }
@@ -777,7 +745,7 @@ export class VolcAgent {
         summary: String(event.name ?? 'unknown tool'),
         metadata: { runtime: this.runtime, toolId: event.id },
       });
-    } else if (event.type === 'agent.tool_result') {
+    } else if (event.type === 'agent.tool_result' || event.type === 'user.tool_result') {
       this.modelWorking = true;
       this.modelStartedAtMs = Date.now();
       this._recordActivity('agent.tool_completed', {
@@ -789,7 +757,12 @@ export class VolcAgent {
       const stopType = typeof event.stop_reason === 'string'
         ? event.stop_reason
         : event.stop_reason?.type;
-      if (stopType !== 'end_turn') {
+      if (stopType === 'requires_action') {
+        this._recordActivity('agent.tool_waiting', {
+          inboundSeq,
+          metadata: { runtime: this.runtime },
+        });
+      } else if (stopType !== 'end_turn') {
         void this._completeTurn(new Error(`Volc session stopped with ${stopType ?? 'unknown stop reason'}`));
       } else {
         void this._completeTurn(null);
@@ -819,124 +792,11 @@ export class VolcAgent {
     this.streamAbortController = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    let completionError = error;
-    let completionUncertain = false;
-
-    if (!completionError && this.toolBridgeEnabled) {
-      let decision;
-      try {
-        decision = parseManagedToolDecision(this.lastMessage, this.toolDefinitions);
-      } catch (protocolError) {
-        this.bridgeProtocolErrors += 1;
-        if (this.bridgeProtocolErrors > MANAGED_TOOL_MAX_PROTOCOL_ERRORS) {
-          completionError = new Error(`Volc managed tool protocol failed: ${safe(protocolError)}`);
-        } else {
-          try {
-            this._continueManagedTurn(managedProtocolErrorMessage(protocolError));
-            return;
-          } catch (continuationError) {
-            completionError = continuationError;
-          }
-        }
-      }
-
-      if (!completionError && decision?.kind === 'tool_call') {
-        if (this.bridgeCalls >= MANAGED_TOOL_MAX_CALLS) {
-          completionError = new Error(`Volc managed tool bridge exceeded ${MANAGED_TOOL_MAX_CALLS} calls`);
-        } else {
-          this.bridgeCalls += 1;
-          const seqs = [...new Set(this.activeItems.map((item) => item.seq).filter((seq) => seq != null))];
-          this._recordActivity('agent.tool_called', {
-            inboundSeq: seqs.at(-1) ?? null,
-            summary: decision.name,
-            metadata: {
-              runtime: this.runtime,
-              toolId: decision.callId,
-              toolName: decision.name,
-              bridged: true,
-              bridgeCall: this.bridgeCalls,
-            },
-          });
-          let toolResult;
-          try {
-            toolResult = await this.onToolCall(withReceiptIds({
-              inboundSeqs: seqs,
-              callId: decision.callId,
-              name: decision.name,
-              arguments: decision.arguments,
-              eventId: this.lastMessageEventId,
-              runtime: this.runtime,
-              authorityToken: this.authorityToken,
-              sessionId: this.sessionId,
-              cognitionEpoch: this.cognitionEpoch,
-            }, receiptIds(this.activeItems)));
-          } catch (toolError) {
-            toolResult = { accepted: true, ok: false, terminal: false, error: safe(toolError) };
-          }
-          this._recordActivity('agent.tool_completed', {
-            inboundSeq: seqs.at(-1) ?? null,
-            status: toolResult?.ok ? 'COMPLETED' : toolResult?.uncertain ? 'UNCERTAIN' : 'FAILED',
-            summary: decision.name,
-            metadata: {
-              runtime: this.runtime,
-              toolId: decision.callId,
-              toolName: decision.name,
-              bridged: true,
-              terminal: Boolean(toolResult?.terminal),
-              reason: toolResult?.reason,
-            },
-          });
-          if (!toolResult?.accepted) {
-            completionError = new Error(toolResult?.error || 'managed MCP tool call was not accepted');
-          } else if (toolResult.terminal) {
-            completionUncertain = toolResult.uncertain === true;
-            if (!toolResult.ok && !toolResult.suppressed && !completionUncertain) {
-              completionError = new Error(toolResult.error || 'managed MCP delivery failed');
-            }
-          } else {
-            const resultMessage = managedToolResultMessage({
-              callId: decision.callId,
-              name: decision.name,
-              ok: toolResult.ok,
-              result: toolResult.result,
-              error: toolResult.error,
-            });
-            try {
-              this._continueManagedTurn(resultMessage);
-              return;
-            } catch (continuationError) {
-              completionError = continuationError;
-            }
-          }
-        }
-      }
-    } else if (!completionError && !this.lastMessage) {
-      completionError = new Error('Volc managed-agent turn ended without an agent.message');
-    }
+    const completionError = error;
 
     const items = this.activeItems.splice(0);
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
     const receipts = receiptIds(items);
-    if (!completionError && !this.toolBridgeEnabled && this.onTurnOutput) {
-      try {
-        const result = await this.onTurnOutput(withReceiptIds({
-            inboundSeqs: seqs,
-            text: this.lastMessage,
-            eventId: this.lastMessageEventId,
-            runtime: this.runtime,
-            authorityToken: this.authorityToken,
-            sessionId: this.sessionId,
-            cognitionEpoch: this.cognitionEpoch,
-          }, receipts));
-        if (!result?.accepted) {
-          throw new Error('Volc managed-agent output was not accepted for local delivery');
-        }
-        completionUncertain = result.uncertain === true;
-      } catch (outputError) {
-        completionError = outputError;
-        this.logger.warn('volc_output_delivery_failed', { error: safe(outputError) });
-      }
-    }
     this.activeConversationKey = null;
     this.turnStartedAtMs = null;
     if (!completionError) {
@@ -947,16 +807,14 @@ export class VolcAgent {
     }
     this._recordActivity('agent.turn_completed', {
       inboundSeq: seqs.at(-1) ?? null,
-      status: completionError ? 'failed' : completionUncertain ? 'uncertain' : 'completed',
-      summary: completionError
-        ? safe(completionError)
-        : completionUncertain ? 'local Lark delivery outcome is uncertain; not retried' : undefined,
+      status: completionError ? 'failed' : 'completed',
+      summary: completionError ? safe(completionError) : undefined,
       metadata: { runtime: this.runtime, inboundSeqs: seqs },
     });
     if (completionError && this.onTurnFailed) {
       try { this.onTurnFailed(withReceiptIds({ inboundSeqs: seqs, error: safe(completionError) }, receipts)); } catch {}
     }
-    if (!completionError && !completionUncertain && this.onTurnSucceeded) {
+    if (!completionError && this.onTurnSucceeded) {
       try { this.onTurnSucceeded(withReceiptIds({ inboundSeqs: seqs }, receipts)); } catch {}
     }
     try {
@@ -972,48 +830,9 @@ export class VolcAgent {
     this.lastMessageEventId = null;
     this.expectedUserEventId = null;
     this.turnFenceSeen = false;
-    this.bridgeCalls = 0;
-    this.bridgeProtocolErrors = 0;
     if (this.sessionPoisoned) void this._ensureFreshSession();
     else this._drain();
     this._notifyAvailable();
-  }
-
-  _continueManagedTurn(body) {
-    const seqs = [...new Set(this.activeItems.map((item) => item.seq).filter((seq) => seq != null))];
-    const bridge = { calls: this.bridgeCalls, protocolErrors: this.bridgeProtocolErrors };
-    if (!this.expectedUserEventId) throw new Error('managed tool continuation lost its accepted user.message fence');
-    if (!this.store.prepareManagedTurnContinuation) {
-      throw new Error('managed tool continuation persistence is unavailable');
-    }
-    this.store.prepareManagedTurnContinuation({
-      runtime: this.runtime,
-      authorityToken: this.authorityToken,
-      sessionId: this.sessionId,
-      epoch: this.cognitionEpoch,
-      expectedUserEventId: this.expectedUserEventId,
-      body,
-      bridge,
-    });
-    this.lastMessage = '';
-    this.lastMessageEventId = null;
-    this.expectedUserEventId = null;
-    this.turnFenceSeen = false;
-    this.turnActive = true;
-    this.turnCompleting = false;
-    this.modelWorking = true;
-    this.modelStartedAtMs = Date.now();
-    this.abortController = new AbortController();
-    this._recordActivity('agent.subturn_started', {
-      inboundSeq: seqs.at(-1) ?? null,
-      metadata: { runtime: this.runtime, inboundSeqs: seqs, bridge },
-    });
-    void this._runTurn({
-      body,
-      seqs,
-      deliveredThroughSeq: this.deliveredThroughSeq,
-      bridge,
-    }).catch((continuationError) => this._completeTurn(continuationError));
   }
 
   _failItems(items, error) {
@@ -1075,8 +894,6 @@ export class VolcAgent {
     });
     this.expectedUserEventId = null;
     this.turnFenceSeen = false;
-    this.bridgeCalls = 0;
-    this.bridgeProtocolErrors = 0;
     if ((inboundSeqs.length > 0 || receipts.length > 0) && this.onTurnAbandoned) {
       try { this.onTurnAbandoned(withReceiptIds({ inboundSeqs }, receipts)); } catch {}
     }
@@ -1097,8 +914,6 @@ export class VolcAgent {
     this.transportPolicyInjected = false;
     this.expectedUserEventId = null;
     this.turnFenceSeen = false;
-    this.bridgeCalls = 0;
-    this.bridgeProtocolErrors = 0;
     this.sessionPoisoned = false;
     this._clearPoisonRecoveryTimer();
     this.poisonRecoveryBackoffMs = this.reconnectBaseMs;
@@ -1185,8 +1000,6 @@ export class VolcAgent {
       this.seenEventIds.clear();
       this.expectedUserEventId = null;
       this.turnFenceSeen = false;
-      this.bridgeCalls = 0;
-      this.bridgeProtocolErrors = 0;
       this.transportPolicyInjected = false;
       this.sessionPoisoned = false;
       this.poisonRecoveryBackoffMs = this.reconnectBaseMs;

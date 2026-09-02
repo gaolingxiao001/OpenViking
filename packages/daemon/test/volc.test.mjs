@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { VolcAgent } from '../src/volc.mjs';
+import { VolcAgent as BaseVolcAgent } from '../src/volc.mjs';
 
 const quietLogger = {
   child() { return this; },
@@ -66,30 +66,6 @@ function store() {
       };
       return managedTurn;
     },
-    prepareManagedTurnContinuation: ({
-      runtime,
-      authorityToken,
-      sessionId,
-      epoch,
-      expectedUserEventId,
-      body,
-      bridge,
-    }) => {
-      assert.equal(managedTurn.runtime, runtime);
-      assert.equal(managedTurn.authorityToken, authorityToken);
-      assert.equal(managedTurn.sessionId, sessionId);
-      assert.equal(managedTurn.epoch, epoch);
-      assert.equal(managedTurn.status, 'ACCEPTED');
-      assert.equal(managedTurn.expectedUserEventId, expectedUserEventId);
-      managedTurn = {
-        ...managedTurn,
-        status: 'CONTINUATION_READY',
-        expectedUserEventId: null,
-        continuationBody: body,
-        bridge,
-      };
-      return managedTurn;
-    },
     clearManagedTurn: (runtime, expected = {}) => {
       if (!managedTurn || managedTurn.runtime !== runtime) return false;
       if (expected.sessionId && managedTurn.sessionId !== expected.sessionId) return false;
@@ -139,6 +115,7 @@ function config(overrides = {}) {
   return {
     volcApiKey: 'test-key',
     volcSessionId: 'sesn-template12345',
+    volcEnvironmentId: 'env-test12345',
     volcBaseUrl: 'https://ark.example.test/api/v3',
     volcRequestTimeoutMs: 5_000,
     volcStreamIdleTimeoutMs: 5_000,
@@ -147,8 +124,92 @@ function config(overrides = {}) {
   };
 }
 
+class VolcAgent extends BaseVolcAgent {
+  async _getEnvironment(environmentId) {
+    return { id: environmentId, config: { type: 'self_hosted' } };
+  }
+}
+
 describe('Volc managed-agent runtime', () => {
-  it('posts before opening SSE and delivers only the last agent.message on idle', async () => {
+  it('fails closed unless the configured Environment is the template self-hosted Environment', async () => {
+    let requestedEnvironment = 0;
+    const mismatched = new BaseVolcAgent(config({
+      volcEnvironmentId: 'env-expected12345',
+    }), store(), quietLogger, {
+      fetch: async (url) => {
+        if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+        requestedEnvironment += 1;
+        return json({});
+      },
+    });
+    await assert.rejects(() => mismatched.start(), /does not use the configured self-hosted Environment/);
+    assert.equal(requestedEnvironment, 0);
+
+    const cloud = new BaseVolcAgent(config(), store(), quietLogger, {
+      fetch: async (url) => {
+        if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
+        if (url.endsWith('/environments/env-test12345')) {
+          return json({ id: 'env-test12345', config: { type: 'cloud' } });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      },
+    });
+    await assert.rejects(() => cloud.start(), /config\.type=self_hosted/);
+  });
+
+  it('keeps one self-hosted turn active across repeated CLI tool results without agent.message or host relay', async () => {
+    let succeeded = 0;
+    const failures = [];
+    const data = store();
+    const agent = new VolcAgent(config({
+      larkCliBin: '/opt/homebrew/bin/lark-cli',
+    }), data, quietLogger, {
+      fetch: async () => json({}),
+      onTurnSucceeded: () => { succeeded += 1; },
+      onTurnFailed: (info) => failures.push(info),
+    });
+    assert.match(agent.transportPolicy, /Managed Agent self-hosted delivery runtime/);
+    assert.match(agent.transportPolicy, /official self-hosted Environment Worker is the only tool executor/);
+    assert.doesNotMatch(agent.transportPolicy, /strict JSON|lark-daemon-tools\/v1/);
+    assert.match(agent.transportPolicy, /one native turn may call it repeatedly before end_turn/);
+
+    agent.connected = true;
+    agent.turnActive = true;
+    agent.activeItems = [{ text: 'first', seq: 1 }];
+    agent.deliveredThroughSeq = 1;
+    agent.expectedUserEventId = 'user-current';
+    agent._handleEvent({ id: 'user-current', type: 'user.message' });
+    agent._handleEvent({ id: 'tool-1', type: 'agent.tool_use', name: 'bash' });
+    agent._handleEvent({
+      id: 'wait-1',
+      type: 'session.status_idle',
+      stop_reason: { type: 'requires_action', event_ids: ['tool-1'] },
+    });
+    assert.equal(agent.turnActive, true);
+    agent._handleEvent({ id: 'result-1', type: 'user.tool_result', tool_use_id: 'tool-1' });
+    agent._handleEvent({ id: 'tool-2', type: 'agent.tool_use', name: 'bash' });
+    agent._handleEvent({
+      id: 'wait-2',
+      type: 'session.status_idle',
+      stop_reason: { type: 'requires_action', event_ids: ['tool-2'] },
+    });
+    assert.equal(agent.turnActive, true);
+    agent._handleEvent({ id: 'result-2', type: 'user.tool_result', tool_use_id: 'tool-2' });
+    agent._handleEvent({
+      id: 'done-current',
+      type: 'session.status_idle',
+      stop_reason: { type: 'end_turn' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(agent.turnActive, false);
+    assert.equal(succeeded, 1);
+    assert.deepEqual(failures, []);
+    assert.equal(data.activities.filter((activity) => activity.kind === 'agent.tool_called').length, 2);
+    assert.equal(data.activities.filter((activity) => activity.kind === 'agent.tool_waiting').length, 2);
+    assert.equal(data.activities.filter((activity) => activity.kind === 'agent.tool_completed').length, 2);
+  });
+
+  it('posts before opening SSE and records agent.message as telemetry only', async () => {
     const calls = [];
     const events = [
       { id: 'evt-old-final', type: 'agent.message', content: [{ type: 'text', text: 'STALE_OUTPUT' }] },
@@ -175,16 +236,11 @@ describe('Volc managed-agent runtime', () => {
       }
       throw new Error(`unexpected request: ${url}`);
     };
-    const outputs = [];
     let succeeded;
     const completed = new Promise((resolve) => { succeeded = resolve; });
     const data = store();
     const agent = new VolcAgent(config(), data, quietLogger, {
       fetch,
-      onTurnOutput: async (output) => {
-        outputs.push(output);
-        return { accepted: true };
-      },
       onTurnSucceeded: succeeded,
     });
 
@@ -192,13 +248,9 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(agent.deliver('hello', 1), true);
     await completed;
 
-    assert.equal(outputs.length, 1);
-    assert.equal(outputs[0].text, 'ARK_RUNTIME_OK');
-    assert.equal(outputs[0].eventId, 'evt-final');
-    assert.deepEqual(outputs[0].inboundSeqs, [1]);
-    assert.equal(outputs[0].authorityToken, 'token');
-    assert.equal(outputs[0].sessionId, 'sesn-live12345678');
-    assert.equal(outputs[0].cognitionEpoch, 1);
+    assert.ok(data.activities.some((activity) => activity.kind === 'agent.note'
+      && activity.summary === 'ARK_RUNTIME_OK'
+      && activity.metadata.delivery === 'telemetry_only'));
     const streamIndex = calls.findIndex((call) => call.url.endsWith('/events/stream'));
     const postIndex = calls.findIndex((call) => call.url.endsWith('/events') && call.method === 'POST');
     // Post before attaching the stream: Volc buffers session events until a
@@ -213,7 +265,8 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(posted.events.length, 1);
     assert.equal(posted.events[0].type, 'user.message');
     const messageText = posted.events[0].content[0].text;
-    assert.match(messageText, /daemon relays only the final agent\.message locally/);
+    assert.match(messageText, /official self-hosted Environment Worker is the only tool executor/);
+    assert.match(messageText, /one native turn may call it repeatedly before end_turn/);
     // The Ark agent template's own system field only carries persona; the
     // injected policy must also explain the [chat=... msg=...] line format
     // and the reply/silence rules, or MA has no way to know them.
@@ -224,177 +277,8 @@ describe('Volc managed-agent runtime', () => {
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
   });
 
-  it('bridges strict text tool decisions across remote subturns before completing once', async () => {
-    const toolDefinitions = [
-      {
-        name: 'list_lark_chats',
-        description: 'List chats.',
-        inputSchema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: { limit: { type: 'integer', minimum: 1, maximum: 500 } },
-        },
-      },
-      {
-        name: 'reply_lark_message',
-        description: 'Reply to a message.',
-        inputSchema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            message_id: { type: 'string', pattern: '^om_[A-Za-z0-9_-]{8,}$' },
-            text: { type: 'string', minLength: 1 },
-          },
-          required: ['message_id'],
-        },
-      },
-    ];
-    const decisions = [
-      JSON.stringify({
-        protocol: 'lark-daemon-tools/v1',
-        kind: 'tool_call',
-        call_id: 'read_1',
-        name: 'list_lark_chats',
-        arguments: { limit: 5 },
-      }),
-      JSON.stringify({
-        protocol: 'lark-daemon-tools/v1',
-        kind: 'tool_call',
-        call_id: 'reply_1',
-        name: 'reply_lark_message',
-        arguments: { message_id: 'om_first12345678', text: 'done' },
-      }),
-    ];
-    const posts = [];
-    let streamIndex = 0;
-    const fetch = async (url, options = {}) => {
-      if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
-      if (url.endsWith('/sessions') && options.method === 'POST') {
-        return json(templateSession('sesn-bridge123456'));
-      }
-      if (url.endsWith('/events/stream')) {
-        const index = streamIndex++;
-        const events = [
-          { id: `evt-user-${index + 1}`, type: 'user.message' },
-          { id: `evt-decision-${index + 1}`, type: 'agent.message', content: [{ type: 'text', text: decisions[index] }] },
-          { id: `evt-idle-${index + 1}`, type: 'session.status_idle', stop_reason: 'end_turn' },
-        ];
-        return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
-          status: 200,
-          headers: { 'content-type': 'text/event-stream' },
-        });
-      }
-      if (url.includes('/events?')) return json({ data: [] });
-      if (url.endsWith('/events') && options.method === 'POST') {
-        const body = JSON.parse(options.body);
-        posts.push(body);
-        return json({ data: [{ id: `evt-user-${posts.length}`, type: 'user.message' }] });
-      }
-      throw new Error(`unexpected request: ${url}`);
-    };
-    const toolCalls = [];
-    const outputs = [];
-    let resolveCompleted;
-    const completed = new Promise((resolve) => { resolveCompleted = resolve; });
-    const data = store();
-    const agent = new VolcAgent(config(), data, quietLogger, {
-      fetch,
-      toolDefinitions,
-      onToolCall: async (call) => {
-        toolCalls.push(call);
-        if (call.name === 'list_lark_chats') {
-          return {
-            accepted: true,
-            ok: true,
-            terminal: false,
-            result: {
-              content: [{ type: 'text', text: 'one chat' }],
-              structuredContent: { chats: [{ chat_id: 'oc_chat12345678', name: 'chat' }] },
-            },
-          };
-        }
-        return { accepted: true, ok: true, terminal: true, result: { content: [] } };
-      },
-      onTurnOutput: async (output) => { outputs.push(output); return { accepted: true }; },
-      onTurnSucceeded: resolveCompleted,
-    });
 
-    await agent.start();
-    agent.deliver('hello', 1);
-    await completed;
-
-    assert.equal(posts.length, 2);
-    assert.equal(posts[0].events.length, 1);
-    assert.match(posts[0].events[0].content[0].text, /lark-daemon-tools\/v1/);
-    assert.match(posts[0].events[0].content[0].text, /hello$/);
-    const continuation = JSON.parse(posts[1].events[0].content[0].text);
-    assert.equal(continuation.kind, 'tool_result');
-    assert.equal(continuation.call_id, 'read_1');
-    assert.deepEqual(toolCalls.map((call) => call.name), ['list_lark_chats', 'reply_lark_message']);
-    assert.equal(toolCalls[1].eventId, 'evt-decision-2');
-    assert.deepEqual(outputs, []);
-    assert.equal(agent.turnInProgress, false);
-    assert.equal(data.getManagedTurn(), null);
-    assert.equal(data.activities.filter((activity) => activity.kind === 'agent.turn_completed').length, 1);
-  });
-
-  it('returns a protocol error subturn when the managed agent emits prose', async () => {
-    const toolDefinitions = [{
-      name: 'list_lark_chats',
-      description: 'List chats.',
-      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
-    }];
-    const decisions = [
-      'I should use a tool.',
-      JSON.stringify({ protocol: 'lark-daemon-tools/v1', kind: 'finish', outcome: 'silent' }),
-    ];
-    const posts = [];
-    let streamIndex = 0;
-    const fetch = async (url, options = {}) => {
-      if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
-      if (url.endsWith('/sessions') && options.method === 'POST') {
-        return json(templateSession('sesn-repair123456'));
-      }
-      if (url.endsWith('/events/stream')) {
-        const index = streamIndex++;
-        const events = [
-          { id: `evt-repair-user-${index}`, type: 'user.message' },
-          { id: `evt-repair-agent-${index}`, type: 'agent.message', content: [{ type: 'text', text: decisions[index] }] },
-          { id: `evt-repair-idle-${index}`, type: 'session.status_idle', stop_reason: 'end_turn' },
-        ];
-        return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
-          status: 200,
-          headers: { 'content-type': 'text/event-stream' },
-        });
-      }
-      if (url.includes('/events?')) return json({ data: [] });
-      if (url.endsWith('/events') && options.method === 'POST') {
-        posts.push(JSON.parse(options.body));
-        return json({ data: [{ id: `evt-repair-user-${posts.length - 1}`, type: 'user.message' }] });
-      }
-      throw new Error(`unexpected request: ${url}`);
-    };
-    let completed;
-    const done = new Promise((resolve) => { completed = resolve; });
-    const agent = new VolcAgent(config(), store(), quietLogger, {
-      fetch,
-      toolDefinitions,
-      onToolCall: async () => { throw new Error('no tool should execute'); },
-      onTurnSucceeded: completed,
-    });
-
-    await agent.start();
-    agent.deliver('hello', 1);
-    await done;
-
-    assert.equal(posts.length, 2);
-    const repair = JSON.parse(posts[1].events[0].content[0].text);
-    assert.equal(repair.kind, 'protocol_error');
-    assert.match(repair.error, /strict JSON/);
-    assert.equal(agent.turnInProgress, false);
-  });
-
-  it('does not replay accepted cognition after an idle turn has no agent.message', async () => {
+  it('does not replay accepted cognition after a CLI-only turn ends without agent.message', async () => {
     const rows = [
       {
         seq: 1, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 1,
@@ -406,7 +290,7 @@ describe('Volc managed-agent runtime', () => {
       },
       {
         seq: 3, epoch: 1, kind: 'outbound', status: 'COMMITTED', atMs: 3,
-        chatId: 'chat-a', actor: 'me', text: 'FIRST_TURN_FAILED',
+        chatId: 'chat-a', actor: 'me', text: 'FIRST_TURN_CLI_REPLY',
       },
       {
         seq: 4, epoch: 1, kind: 'inbound', status: 'COMMITTED', atMs: 4,
@@ -456,12 +340,15 @@ describe('Volc managed-agent runtime', () => {
       throw new Error(`unexpected request: ${url}`);
     };
     let agent;
+    let succeeded = 0;
     const completed = new Promise((resolve) => {
       agent = new VolcAgent(config(), data, quietLogger, {
         fetch,
-        onTurnOutput: async () => ({ accepted: true }),
-        onTurnFailed: () => agent.deliver('second', 2),
-        onTurnSucceeded: resolve,
+        onTurnSucceeded: () => {
+          succeeded += 1;
+          if (succeeded === 1) agent.deliver('second', 2);
+          else resolve();
+        },
       });
     });
     await agent.start();
@@ -472,7 +359,7 @@ describe('Volc managed-agent runtime', () => {
     assert.match(posts[0], /OLD_HISTORY_MARKER/);
     assert.doesNotMatch(posts[1], /OLD_HISTORY_MARKER/);
     assert.doesNotMatch(posts[1], /\] first(?:\n|$)/);
-    assert.match(posts[1], /FIRST_TURN_FAILED/);
+    assert.match(posts[1], /FIRST_TURN_CLI_REPLY/);
     assert.match(posts[1], /second$/);
     await agent.stop();
   });
@@ -513,15 +400,11 @@ describe('Volc managed-agent runtime', () => {
       }
       throw new Error(`unexpected request: ${url}`);
     };
-    const outputs = [];
+    const data = store();
     let settle;
     const done = new Promise((resolve) => { settle = resolve; });
-    const agent = new VolcAgent(config(), store(), quietLogger, {
+    const agent = new VolcAgent(config(), data, quietLogger, {
       fetch,
-      onTurnOutput: async (output) => {
-        outputs.push(output.text);
-        return { accepted: true };
-      },
       onTurnSucceeded: () => settle('succeeded'),
       onTurnFailed: (info) => settle(`failed: ${info.error}`),
     });
@@ -535,7 +418,9 @@ describe('Volc managed-agent runtime', () => {
     const outcome = await Promise.race([done, timedOut]);
     clearTimeout(timeout);
     assert.equal(outcome, 'succeeded');
-    assert.deepEqual(outputs, ['HISTORY_FENCE_OK']);
+    assert.ok(data.activities.some((activity) => activity.kind === 'agent.note'
+      && activity.summary === 'HISTORY_FENCE_OK'
+      && activity.metadata.delivery === 'telemetry_only'));
     // The post-POST history catch-up (historyCount 2) already contains the
     // fence, the answer, and the idle event, so the turn completes without
     // ever needing to attach the live stream.
@@ -617,118 +502,18 @@ describe('Volc managed-agent runtime', () => {
         if (url.includes('/events?')) return json({ data: history });
         throw new Error(`unexpected recovery request: ${url}`);
       },
-      onTurnOutput: async (info) => {
-        assert.equal(info.text, 'RECOVERED_OK');
-        return { accepted: true };
-      },
       onTurnSucceeded: completed,
     });
     await recovered.start();
     await done;
     assert.equal(calls.some((call) => call.url.endsWith('/events') && call.method === 'POST'), false);
     assert.equal(data.getManagedTurn(), null);
+    assert.ok(data.activities.some((activity) => activity.kind === 'agent.note'
+      && activity.summary === 'RECOVERED_OK'
+      && activity.metadata.delivery === 'telemetry_only'));
     await recovered.stop();
   });
 
-  it('reposts a persisted tool result after restart without executing the tool again', async () => {
-    const toolDefinitions = [{
-      name: 'list_lark_chats',
-      description: 'List chats.',
-      inputSchema: { type: 'object', additionalProperties: false, properties: {} },
-    }];
-    const data = store();
-    const bridgeOptions = {
-      toolDefinitions,
-      onToolCall: async () => {
-        throw new Error('persisted tool call must not execute again');
-      },
-    };
-    const bootstrap = new VolcAgent(config(), data, quietLogger, {
-      ...bridgeOptions,
-      fetch: async (url, options = {}) => {
-        if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
-        if (url.endsWith('/sessions') && options.method === 'POST') {
-          return json(templateSession('sesn-continuation1'));
-        }
-        throw new Error(`unexpected bootstrap request: ${url}`);
-      },
-    });
-    await bootstrap.start();
-    data.beginManagedTurn({
-      runtime: 'volc',
-      authorityToken: 'token',
-      sessionId: bootstrap.sessionId,
-      epoch: 1,
-      inboundSeqs: [1],
-      conversationKey: 'chat-a',
-      deliveredThroughSeq: 1,
-      bridge: { calls: 0, protocolErrors: 0 },
-    });
-    data.acceptManagedTurn('volc', bootstrap.sessionId, 'evt-original-user');
-    const continuationBody = JSON.stringify({
-      protocol: 'lark-daemon-tools/v1',
-      kind: 'tool_result',
-      call_id: 'read_1',
-      name: 'list_lark_chats',
-      ok: true,
-      result: { content: [{ type: 'text', text: 'one chat' }] },
-    });
-    data.prepareManagedTurnContinuation({
-      runtime: 'volc',
-      authorityToken: 'token',
-      sessionId: bootstrap.sessionId,
-      epoch: 1,
-      expectedUserEventId: 'evt-original-user',
-      body: continuationBody,
-      bridge: { calls: 1, protocolErrors: 0 },
-    });
-
-    const posts = [];
-    const finish = JSON.stringify({
-      protocol: 'lark-daemon-tools/v1',
-      kind: 'finish',
-      outcome: 'silent',
-    });
-    let completed;
-    const done = new Promise((resolve) => { completed = resolve; });
-    const recovered = new VolcAgent(config(), data, quietLogger, {
-      ...bridgeOptions,
-      fetch: async (url, options = {}) => {
-        if (url.endsWith('/sessions/sesn-template12345')) return json(templateSession());
-        if (url.endsWith('/sessions/sesn-continuation1')) {
-          return json(templateSession('sesn-continuation1'));
-        }
-        if (url.endsWith('/events/stream')) {
-          const events = [
-            { id: 'evt-cont-user', type: 'user.message' },
-            { id: 'evt-cont-finish', type: 'agent.message', content: [{ type: 'text', text: finish }] },
-            { id: 'evt-cont-idle', type: 'session.status_idle', stop_reason: 'end_turn' },
-          ];
-          return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), {
-            status: 200,
-            headers: { 'content-type': 'text/event-stream' },
-          });
-        }
-        if (url.includes('/events?')) return json({ data: [] });
-        if (url.endsWith('/events') && options.method === 'POST') {
-          posts.push(JSON.parse(options.body));
-          return json({ data: [{ id: 'evt-cont-user', type: 'user.message' }] });
-        }
-        throw new Error(`unexpected recovery request: ${url}`);
-      },
-      onTurnSucceeded: completed,
-    });
-    await recovered.start();
-    await done;
-
-    assert.equal(posts.length, 1);
-    assert.equal(posts[0].events.length, 1);
-    const continuationEvent = posts[0].events[0];
-    assert.equal(continuationEvent.type, 'user.message');
-    assert.ok(continuationEvent.content[0].text.endsWith(continuationBody));
-    assert.equal(data.getManagedTurn(), null);
-    await recovered.stop();
-  });
 
   it('quarantines an accepted saved turn whose Lark conversation scope cannot be recovered', async () => {
     const data = store();
@@ -817,7 +602,7 @@ describe('Volc managed-agent runtime', () => {
     await recovered.stop();
   });
 
-  it('queues all input that arrives during an active cloud turn', async () => {
+  it('queues all input that arrives during an active self-hosted turn', async () => {
     const data = store();
     const agent = new VolcAgent(config(), data, quietLogger, { fetch: async () => json({}) });
     agent.connected = true;
@@ -834,13 +619,8 @@ describe('Volc managed-agent runtime', () => {
   it('requires the accepted user.message fence before accepting output or idle', async () => {
     const data = store();
     let succeeded = 0;
-    const outputs = [];
     const agent = new VolcAgent(config(), data, quietLogger, {
       fetch: async () => json({}),
-      onTurnOutput: async (info) => {
-        outputs.push(info.text);
-        return { accepted: true };
-      },
       onTurnSucceeded: () => { succeeded += 1; },
     });
     agent.connected = true;
@@ -859,7 +639,9 @@ describe('Volc managed-agent runtime', () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(agent.turnActive, false);
     assert.equal(succeeded, 1);
-    assert.deepEqual(outputs, ['right']);
+    assert.ok(data.activities.some((activity) => activity.kind === 'agent.note'
+      && activity.summary === 'right'
+      && activity.metadata.delivery === 'telemetry_only'));
   });
 
   it('pulls the canonical persona from system-prompt.md instead of relying on a separately maintained copy', () => {
@@ -958,11 +740,13 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(failures.length, 2);
   });
 
-  it('treats bare status_idle and string stop reasons strictly', async () => {
+  it('keeps a bare requires_action status inside the active self-hosted turn', async () => {
     const failures = [];
+    let succeeded = 0;
     const agent = new VolcAgent(config(), store(), quietLogger, {
       fetch: async () => json({}),
       onTurnFailed: (info) => failures.push(info),
+      onTurnSucceeded: () => { succeeded += 1; },
     });
     agent.connected = true;
     agent.turnActive = true;
@@ -970,71 +754,14 @@ describe('Volc managed-agent runtime', () => {
     agent.expectedUserEventId = 'user-current';
     agent._handleEvent({ id: 'user-current', type: 'user.message' });
     agent._handleEvent({ id: 'idle-current', type: 'status_idle', stop_reason: 'requires_action' });
+    assert.equal(agent.turnActive, true);
+    assert.deepEqual(failures, []);
+    agent._handleEvent({ id: 'done-current', type: 'status_idle', stop_reason: 'end_turn' });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(agent.turnActive, false);
-    assert.match(failures[0].error, /requires_action/);
+    assert.equal(succeeded, 1);
   });
 
-  it('does not report success when local output delivery is rejected', async () => {
-    let succeeded = 0;
-    const failures = [];
-    const agent = new VolcAgent(config(), store(), quietLogger, {
-      fetch: async () => json({}),
-      onTurnOutput: async () => ({ accepted: false }),
-      onTurnSucceeded: () => { succeeded += 1; },
-      onTurnFailed: (info) => failures.push(info),
-    });
-    agent.connected = true;
-    agent.turnActive = true;
-    agent.activeItems = [{ text: 'first', seq: 1 }];
-    agent.deliveredThroughSeq = 1;
-    agent.expectedUserEventId = 'user-current';
-    agent._handleEvent({ id: 'user-current', type: 'user.message' });
-    agent._handleEvent({ id: 'answer-current', type: 'agent.message', content: [{ type: 'text', text: 'answer' }] });
-    agent._handleEvent({ id: 'idle-current', type: 'status_idle', stop_reason: 'end_turn' });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(succeeded, 0);
-    assert.equal(failures.length, 1);
-    assert.equal(agent.syncedThroughSeq, 0);
-  });
-
-  it('waits for completion that races the interrupt POST before rotating', async () => {
-    let releaseInterrupt;
-    let releaseOutput;
-    const interruptPosted = new Promise((resolve) => { releaseInterrupt = resolve; });
-    const outputDelivered = new Promise((resolve) => { releaseOutput = resolve; });
-    let abandoned = 0;
-    const agent = new VolcAgent(config(), store(), quietLogger, {
-      fetch: async () => json({}),
-      onTurnOutput: async () => {
-        await outputDelivered;
-        return { accepted: true };
-      },
-      onTurnAbandoned: () => { abandoned += 1; },
-    });
-    agent.connected = true;
-    agent.sessionId = 'sesn-race-old123';
-    agent.turnActive = true;
-    agent.activeItems = [{ text: 'first', seq: 1 }];
-    agent.lastMessage = 'answer';
-    agent.lastMessageEventId = 'evt-answer';
-    agent.expectedUserEventId = 'evt-user';
-    agent.turnFenceSeen = true;
-    agent._postEvents = async () => { await interruptPosted; return { data: [] }; };
-
-    let interruptSettled = false;
-    const interrupted = agent.interruptTurn().then(() => { interruptSettled = true; });
-    await new Promise((resolve) => setImmediate(resolve));
-    const completing = agent._completeTurn();
-    releaseInterrupt();
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(interruptSettled, false, 'rotation must wait for the in-flight local delivery');
-    releaseOutput();
-    await Promise.all([interrupted, completing]);
-    assert.equal(interruptSettled, true);
-    assert.equal(abandoned, 0);
-    assert.equal(agent.rotationPending, true);
-  });
 
   it('restores FIFO draining when a prepared rotation is cancelled', () => {
     const agent = new VolcAgent(config(), store(), quietLogger, { fetch: async () => json({}) });
@@ -1084,28 +811,6 @@ describe('Volc managed-agent runtime', () => {
     assert.notEqual(agent.authorityToken, 'token');
   });
 
-  it('settles an uncertain replay without reporting ordinary turn success', async () => {
-    let succeeded = 0;
-    let failed = 0;
-    const data = store();
-    const agent = new VolcAgent(config(), data, quietLogger, {
-      fetch: async () => json({}),
-      onTurnOutput: async () => ({ accepted: true, uncertain: true }),
-      onTurnSucceeded: () => { succeeded += 1; },
-      onTurnFailed: () => { failed += 1; },
-    });
-    agent.connected = true;
-    agent.sessionId = 'sesn-uncertain123';
-    agent.turnActive = true;
-    agent.activeItems = [{ text: 'first', seq: 1 }];
-    agent.lastMessage = 'answer';
-    agent.deliveredThroughSeq = 1;
-    await agent._completeTurn();
-    assert.equal(succeeded, 0);
-    assert.equal(failed, 0);
-    assert.equal(agent.syncedThroughSeq, 1);
-    assert.equal(data.activities.at(-1).status, 'uncertain');
-  });
 
   it('fails terminal HTTP errors once without logging the response body', async () => {
     let streamCalls = 0;

@@ -67,7 +67,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       effortControl: 'remote-managed',
       activeInput: 'queue-next-turn',
       scopePolicy: 'single-conversation',
-      outputOwnership: 'host',
+      outputOwnership: 'runtime',
       sessionAuthority: 'rotate',
     },
   }),
