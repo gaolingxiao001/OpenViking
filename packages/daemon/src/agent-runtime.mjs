@@ -289,6 +289,7 @@ export class AgentRuntime {
       try {
         threadId = await this._rotateSession({
           resume: false,
+          preserveContext: true,
           settings: { [`${this.runtime}_model`]: target.model },
           rollback: { model: previousModel },
         });
@@ -420,7 +421,7 @@ export class AgentRuntime {
 
   _selectEffort(effort, options) { return this.backend.selectEffort(effort, options); }
 
-  async _rotateSession({ resume = false, settings = {}, rollback = {} } = {}) {
+  async _rotateSession({ resume = false, preserveContext = false, settings = {}, rollback = {} } = {}) {
     if (resume) {
       const plan = await this.backend.prepareSession({ resume: true });
       return this.backend.commitSession(plan);
@@ -429,6 +430,7 @@ export class AgentRuntime {
     // may perform fallible RPC/process work, but cannot persist or drain input;
     // commit is a synchronous activation after the local authority hand-off.
     let plan = null;
+    if (preserveContext) await this.store.prepareOVContext?.(this.store.getCognitionState().epoch);
     try {
       plan = await this.backend.prepareSession({ resume: false, rollback });
     } catch (error) {
@@ -452,6 +454,7 @@ export class AgentRuntime {
         sessionId: plan.prepared.id,
         policyHash: this.backend.policyHash,
         expectedEpoch: current.epoch,
+        preserveContext,
         syncedThroughSeq: 0,
         sessionReady: plan.prepared.sessionReady !== false,
         settings,
@@ -462,7 +465,7 @@ export class AgentRuntime {
     }
     this.backend.applyCognition({ ...cognition, syncedThroughSeq: 0 });
     this._authorityChanged(cognition);
-    return this.backend.commitSession(plan, { persist: false });
+    return this.backend.commitSession(plan, { persist: false, ...(preserveContext ? { preserveContext: true } : {}) });
   }
 
   async stop() {

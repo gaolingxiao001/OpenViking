@@ -1260,6 +1260,7 @@ export class Store {
     syncedThroughSeq = 0,
     sessionReady = true,
     settings = {},
+    preserveContext = false,
   }) {
     return this.transaction(() => {
       const current = this.getCognitionState();
@@ -1268,7 +1269,7 @@ export class Store {
         || current.epoch !== expectedEpoch) {
         throw new Error('cognition authority changed during session rotation');
       }
-      const epoch = current.epoch + 1;
+      const epoch = current.epoch + (preserveContext ? 0 : 1);
       this.setMetaStatement.run('active_runtime', runtime);
       this.setMetaStatement.run('active_runtime_token', nextAuthorityToken);
       this.setMetaStatement.run('global_cognition_epoch', String(epoch));

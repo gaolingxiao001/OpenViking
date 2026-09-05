@@ -939,13 +939,13 @@ export class CodexAgent {
     return Object.freeze({ id, sessionReady: true });
   }
 
-  commitSessionRotation(prepared, { persist = true } = {}) {
+  commitSessionRotation(prepared, { persist = true, preserveContext = false } = {}) {
     if (!prepared?.id || this.sessionRotation?.id !== prepared.id) {
       throw new Error('prepared codex session is no longer current');
     }
     this.threadId = prepared.deferred ? null : prepared.id;
     this.storedThreadId = null;
-    this.needsHistoryPrefix = false;
+    this.needsHistoryPrefix = preserveContext;
     this.sessionRotation = null;
     if (persist) this._publishSession();
     this._recordActivity('agent.session_rotated', {

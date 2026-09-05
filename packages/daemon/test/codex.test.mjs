@@ -1101,7 +1101,8 @@ describe('CodexAgent session rotation (slash commands)', () => {
     assert.equal(agent.threadId, 'th-1');
     assert.deepEqual(store.getGlobalSession(), before);
 
-    assert.equal(agent.commitSessionRotation(prepared, { persist: false }), 'th-candidate');
+    assert.equal(agent.commitSessionRotation(prepared, { persist: false, preserveContext: true }), 'th-candidate');
+    assert.equal(agent.needsHistoryPrefix, true);
     assert.equal(agent.threadId, 'th-candidate');
     assert.deepEqual(store.getGlobalSession(), before);
   });

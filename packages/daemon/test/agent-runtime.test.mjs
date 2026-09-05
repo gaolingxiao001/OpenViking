@@ -422,6 +422,7 @@ describe('global Codex/Claude hard switch', () => {
           return { id: 'codex-fresh', sessionReady: true };
         };
         instance.commitSessionRotation = function commitSessionRotation(prepared, options) {
+          assert.equal(options.preserveContext, true);
           this.calls.push(`commit:${options.persist}`);
           this.threadId = prepared.id;
           return this.threadId;
@@ -433,6 +434,8 @@ describe('global Codex/Claude hard switch', () => {
     try {
       await runtime.start();
       const before = store.getCognitionState();
+      let preparedEpoch;
+      store.prepareOVContext = async (epoch) => { preparedEpoch = epoch; };
       const result = await runtime.transition({ kind: 'select-model', selector: 'gpt-5.6-sol' });
       assert.deepEqual(instance.calls, [
         'interrupt',
@@ -440,10 +443,11 @@ describe('global Codex/Claude hard switch', () => {
         'prepare',
         'commit:false',
       ]);
+      assert.equal(preparedEpoch, before.epoch);
       assert.equal(result.runtimeChanged, false);
       assert.equal(result.threadId, 'codex-fresh');
-      // The fresh session starts a new cognition epoch, like /new.
-      assert.equal(store.getCognitionState().epoch, before.epoch + 1);
+      // /m replaces the native session but preserves its logical OV epoch.
+      assert.equal(store.getCognitionState().epoch, before.epoch);
       assert.equal(store.getSetting('codex_model'), 'gpt-5.6-sol');
       // Codex keeps one MCP child across native thread rotation, so its process
       // authority remains stable until that child is replaced.

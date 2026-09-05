@@ -890,10 +890,11 @@ export class PiAgent {
     }
   }
 
-  commitSessionRotation(prepared, { persist = true } = {}) {
+  commitSessionRotation(prepared, { persist = true, preserveContext = false } = {}) {
     if (!prepared?.id || this.sessionRotation?.id !== prepared.id || this.sessionId !== prepared.id) {
       throw new Error('prepared pi session is no longer current');
     }
+    this.needsHistoryPrefix = preserveContext;
     this.sessionRotation = null;
     if (persist) this._persistSession();
     this._drain();
