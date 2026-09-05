@@ -114,10 +114,12 @@ describe('configuration safety', { concurrency: false }, () => {
     setEnv('LARK_DAEMON_MODEL', 'ark');
     setEnv('LARK_DAEMON_CODEX_MODEL', 'ark');
     setEnv('LARK_DAEMON_VOLC_SESSION_ID', 'sesn-test12345678');
+    setEnv('LARK_DAEMON_VOLC_ENVIRONMENT_ID', 'env-test12345678');
     setEnv('SESSION_ID', 'sesn-generic-wins-only-as-fallback');
     const config = getConfig();
     assert.equal(config.volcApiKey, 'secret-test-key');
     assert.equal(config.volcSessionId, 'sesn-test12345678');
+    assert.equal(config.volcEnvironmentId, 'env-test12345678');
     assert.equal(config.volcBaseUrl, 'https://ark.cn-beijing.volces.com/api/v3');
     assert.equal(config.initialModel, 'ark');
     assert.equal(config.codexModel, '');

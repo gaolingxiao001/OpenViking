@@ -449,50 +449,6 @@ describe('Store', () => {
     assert.equal(store.getManagedTurn('volc'), null);
   });
 
-  it('persists a ready managed-tool continuation before the next remote subturn', () => {
-    const cognition = store.initializeCognition('volc', 'volc-authority');
-    store.setGlobalSession('sesn-active1234', 'volc-policy', {
-      runtime: 'volc',
-      epoch: cognition.epoch,
-    });
-    store.beginManagedTurn({
-      runtime: 'volc',
-      authorityToken: cognition.authorityToken,
-      sessionId: 'sesn-active1234',
-      epoch: cognition.epoch,
-      inboundSeqs: [8],
-      conversationKey: 'default:tenant:chat:main',
-      deliveredThroughSeq: 12,
-      bridge: { calls: 0, protocolErrors: 0 },
-    });
-    store.acceptManagedTurn('volc', 'sesn-active1234', 'sevt-user1234');
-    store.prepareManagedTurnContinuation({
-      runtime: 'volc',
-      authorityToken: cognition.authorityToken,
-      sessionId: 'sesn-active1234',
-      epoch: cognition.epoch,
-      expectedUserEventId: 'sevt-user1234',
-      body: '{"kind":"tool_result"}',
-      bridge: { calls: 1, protocolErrors: 0 },
-    });
-
-    const continuation = store.getManagedTurn('volc');
-    assert.equal(Number.isFinite(continuation.atMs), true);
-    delete continuation.atMs;
-    assert.deepEqual(continuation, {
-      runtime: 'volc',
-      authorityToken: cognition.authorityToken,
-      sessionId: 'sesn-active1234',
-      epoch: cognition.epoch,
-      status: 'CONTINUATION_READY',
-      inboundSeqs: [8],
-      conversationKey: 'default:tenant:chat:main',
-      deliveredThroughSeq: 12,
-      expectedUserEventId: null,
-      bridge: { calls: 1, protocolErrors: 0 },
-      continuationBody: '{"kind":"tool_result"}',
-    });
-  });
 
   it('rejects a managed-turn fence after its authority token is superseded', () => {
     const cognition = store.initializeCognition('volc', 'volc-old-authority');

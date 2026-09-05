@@ -210,7 +210,11 @@ test('manifest env accepts only string values from the daemon-wide allowlist', (
 
 test('foreground selection defaults to defaultInstance and pins every identity boundary', () => {
   withManifest(validManifest(), (manifestPath) => {
-    const env = { LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath };
+    const env = {
+      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+      LARK_DAEMON_VOLC_SESSION_ID: 'legacy-global-seed',
+      LARK_DAEMON_VOLC_ENVIRONMENT_ID: 'legacy-global-environment',
+    };
     const deployment = loadDeploymentManifest(env);
     applyDeploymentAgentEnv(env, deployment);
 
@@ -239,19 +243,51 @@ test('foreground selection defaults to defaultInstance and pins every identity b
       model: 'gpt-5.6-sol',
       codexModel: 'gpt-5.6-sol',
     });
+    assert.equal(env.LARK_DAEMON_VOLC_SESSION_ID, undefined);
+    assert.equal(env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, undefined);
   });
 });
 
 test('pins Ark as a generic initial model without misconfiguring Codex', () => {
   const manifest = validManifest();
   manifest.agents[1].model = 'ark';
+  manifest.agents[1].volcSessionId = 'sesn-beta-self-hosted';
+  manifest.agents[1].volcEnvironmentId = 'env-beta-self-hosted';
   withManifest(manifest, (manifestPath) => {
     const env = { LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath };
     const deployment = loadDeploymentManifest(env);
     applyDeploymentAgentEnv(env, deployment);
     assert.equal(env.LARK_DAEMON_MODEL, 'ark');
     assert.equal(env.LARK_DAEMON_CODEX_MODEL, '');
+    assert.equal(env.LARK_DAEMON_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
+    assert.equal(env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
   });
+});
+
+test('requires a complete per-agent self-hosted binding for Ark', () => {
+  const cases = [
+    [
+      'missing binding',
+      (agent) => { agent.model = 'ark'; },
+      /using ark must configure volcSessionId and volcEnvironmentId/,
+    ],
+    [
+      'partial binding',
+      (agent) => { agent.volcSessionId = 'sesn-partial'; },
+      /volcSessionId and agents\[1\]\.volcEnvironmentId must be configured together/,
+    ],
+  ];
+  for (const [name, mutate, error] of cases) {
+    const manifest = validManifest();
+    mutate(manifest.agents[1]);
+    withManifest(manifest, (manifestPath) => {
+      assert.throws(
+        () => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
+        error,
+        name,
+      );
+    });
+  }
 });
 
 test('rejects unknown and missing manifest fields instead of guessing', () => {

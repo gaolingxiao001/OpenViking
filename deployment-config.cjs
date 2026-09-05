@@ -29,6 +29,7 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'LARK_DAEMON_PI_EFFORT',
   'LARK_DAEMON_PI_MODEL',
   'LARK_DAEMON_VOLC_SESSION_ID',
+  'LARK_DAEMON_VOLC_ENVIRONMENT_ID',
   'LARK_DAEMON_VOLC_BASE_URL',
   'LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS',
   'LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS',
@@ -54,6 +55,8 @@ const AGENT_FIELDS = Object.freeze([
   'workspace',
   'ovConfig',
   'model',
+  'volcSessionId',
+  'volcEnvironmentId',
   'meetingAudio',
 ]);
 
@@ -133,6 +136,11 @@ function manifestAbsolutePath(value, name) {
   return path.normalize(normalized);
 }
 
+function optionalManifestString(value, name) {
+  if (value === undefined || value === null) return null;
+  return manifestString(value, name);
+}
+
 function parseDaemonEnv(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('deployment manifest env must be an object');
@@ -180,6 +188,18 @@ function parseAgent(value, index) {
       ),
     });
   }
+  const model = manifestString(value.model, `${label}.model`);
+  const volcSessionId = optionalManifestString(value.volcSessionId, `${label}.volcSessionId`);
+  const volcEnvironmentId = optionalManifestString(
+    value.volcEnvironmentId,
+    `${label}.volcEnvironmentId`,
+  );
+  if (Boolean(volcSessionId) !== Boolean(volcEnvironmentId)) {
+    throw new Error(`${label}.volcSessionId and ${label}.volcEnvironmentId must be configured together`);
+  }
+  if (model === 'ark' && !volcSessionId) {
+    throw new Error(`${label} using ark must configure volcSessionId and volcEnvironmentId`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -188,15 +208,27 @@ function parseAgent(value, index) {
     dataDir: manifestAbsolutePath(value.dataDir, `${label}.dataDir`),
     workspace: manifestAbsolutePath(value.workspace, `${label}.workspace`),
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
-    model: manifestString(value.model, `${label}.model`),
+    model,
+    volcSessionId,
+    volcEnvironmentId,
     meetingAudio,
   });
 }
 
 function assertUniqueAgentFields(agents) {
-  for (const field of ['id', 'profile', 'port', 'dataDir', 'workspace', 'ovConfig']) {
+  for (const field of [
+    'id',
+    'profile',
+    'port',
+    'dataDir',
+    'workspace',
+    'ovConfig',
+    'volcSessionId',
+    'volcEnvironmentId',
+  ]) {
     const seen = new Set();
     for (const agent of agents) {
+      if (agent[field] === null) continue;
       if (seen.has(agent[field])) throw new Error(`duplicate agent ${field}: ${agent[field]}`);
       seen.add(agent[field]);
     }
@@ -316,6 +348,13 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     LARK_DAEMON_MODEL: agent.model,
     LARK_DAEMON_CODEX_MODEL: agent.model === 'ark' ? '' : agent.model,
   });
+  if (agent.volcSessionId) {
+    env.LARK_DAEMON_VOLC_SESSION_ID = agent.volcSessionId;
+    env.LARK_DAEMON_VOLC_ENVIRONMENT_ID = agent.volcEnvironmentId;
+  } else {
+    delete env.LARK_DAEMON_VOLC_SESSION_ID;
+    delete env.LARK_DAEMON_VOLC_ENVIRONMENT_ID;
+  }
   if (agent.meetingAudio) {
     Object.assign(env, {
       LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',

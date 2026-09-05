@@ -10,7 +10,6 @@ import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy, journaledReply } from './notices.mjs';
 import { startHttpApi } from './http-api.mjs';
-import { ManagedAgentOutputPort } from './runtime-output.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
@@ -41,7 +40,6 @@ export class LarkDaemon {
     this.lark = null;
     this.meeting = null;
     this.liveness = null;
-    this.managedOutput = null;
     this.roster = null;
     this.chatNames = null;
     this.failurePolicy = null;
@@ -133,15 +131,6 @@ export class LarkDaemon {
         enabled: !this.config.dryRun,
       });
 
-      this.managedOutput = new ManagedAgentOutputPort({
-        config: this.config,
-        store: this.store,
-        logger: this.logger.child({ component: 'managed-output' }),
-        roster: this.roster,
-        liveness: this.liveness,
-        isStopping: () => this.shuttingDown,
-      });
-
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           this.meeting?.onTurnFailed(info);
@@ -154,9 +143,6 @@ export class LarkDaemon {
           this.meeting?.onTurnSucceeded(info);
           this.failurePolicy.onTurnSucceeded(info);
         },
-        onTurnOutput: (info) => this.managedOutput.deliver(info),
-        onToolCall: (info) => this.managedOutput.callTool(info),
-        toolDefinitions: this.managedOutput.toolDefinitions,
         onTurnAbandoned: (info) => {
           this.meeting?.onTurnAbandoned(info);
         },
