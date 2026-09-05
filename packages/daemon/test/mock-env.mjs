@@ -243,7 +243,15 @@ export async function startMockEnv({
     meetingAudio: null,
     ...configOverrides,
   };
-  const daemon = new LarkDaemon(config, createLogger('error', { test: 'mock-env' }));
+  const daemon = new LarkDaemon(config, createLogger('error', { test: 'mock-env' }), {
+    ovClient: {
+      messages: new Map(),
+      async create(sessionId) { return { session_id: sessionId, uri: `viking://session/${sessionId}` }; },
+      async append(id, message) { const rows = this.messages.get(id) || []; rows.push({ ...message, parts: [{ type: 'text', text: message.content }] }); this.messages.set(id, rows); },
+      async context(id) { return { latest_archive_overview: '', messages: this.messages.get(id) || [], stats: { totalArchives: 0 } }; },
+      async request() { return { pending_tokens: 0 }; },
+    },
+  });
 
   const env = {
     dir,

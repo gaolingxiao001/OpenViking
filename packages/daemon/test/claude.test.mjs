@@ -1,3 +1,4 @@
+import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -90,6 +91,7 @@ function makeStore({ globalOverride = {} } = {}) {
   ];
   return {
     activities,
+    getOVContext: () => ovFixture(rows),
     getCognitionState: () => ({ runtime: 'claude', epoch: 1, authorityToken: 'token-claude' }),
     getGlobalSession: () => global,
     setGlobalSession(sessionId, policyHash, fields) {
@@ -207,7 +209,7 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
     const first = JSON.parse(persistent[0].writes[0]);
     const body = first.message.content[0].text;
-    assert.match(body, /daemon cognition journal/);
+    assert.match(body, /daemon OpenViking context/);
     assert.match(body, /earlier question/);
     assert.match(body, /earlier answer/);
     assert.match(body, /history above, new messages below/);
@@ -291,6 +293,7 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
   it('surfaces a receipt when prompt preparation fails before Claude owns the turn', async () => {
     const store = makeStore();
     store.cognitionJournalBeforeInbound = () => 1;
+    store.getOVContext = () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: 'x'.repeat(130_000), messages: [] });
     store.cognitionJournal = () => [{
       seq: 1,
       epoch: 1,

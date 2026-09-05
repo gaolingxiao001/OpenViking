@@ -345,23 +345,16 @@ export class CodexAgent {
       const beforeSeq = seqs.length > 0 ? Math.min(...seqs) : null;
       const throughSeq = this.store.cognitionJournalBeforeInbound?.(beforeSeq, this.cognitionEpoch) ?? 0;
       const needsCatchup = hadPrefix || throughSeq > this.syncedThroughSeq;
-      if (needsCatchup && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
+      if (needsCatchup) {
         const catchup = cognitionHistoryPrefix(
           this.store,
           this.cognitionEpoch,
           throughSeq,
           this.config.cognitionMaxChars,
           hadPrefix ? 0 : this.syncedThroughSeq,
-          // Same-thread delta only: this thread already observed its own
-          // committed sends as tool calls; a fresh thread receives everything.
-          hadPrefix ? {} : { excludeCommittedOutboundFrom: this.authorityToken },
         );
         journalThroughSeq = catchup.throughSeq;
         if (catchup.text) body = `${catchup.text}\n${text}`;
-      } else if (hadPrefix) {
-        // Compatibility fallback for isolated tests and pre-journal stores.
-        const history = this.store.history(this.config.historyLimit, beforeSeq).map(formatHistoryLine);
-        if (history.length > 0) body = [...history, HISTORY_SEPARATOR, text].join('\n');
       }
       this.needsHistoryPrefix = false;
     }
@@ -761,18 +754,22 @@ export class CodexAgent {
 
   // ---- connection lifecycle ---------------------------------------------------
 
-  _handshake() {
+  async _handshake() {
+    // Fetch before starting the app-server handshake deadline. Network/archive
+    // work must not consume the native protocol's handshake timeout.
+    const global = this.store.getGlobalSession();
+    const resumable = (this.allowResume
+      && !this.forceFreshThread
+      && global.sessionId
+      && global.sessionReady !== false
+      && global.policyHash === this.policyHash
+      && (global.runtime ?? 'codex') === this.runtime
+      && (global.epoch || this.cognitionEpoch) === this.cognitionEpoch);
+    if (resumable) this.syncedThroughSeq = global.syncedThroughSeq ?? this.syncedThroughSeq;
+    this.storedThreadId = resumable ? global.sessionId : null;
+
+    if (!resumable) await this.store.prepareOVContext?.(this.cognitionEpoch);
     return new Promise((resolve, reject) => {
-      const global = this.store.getGlobalSession();
-      const resumable = (this.allowResume
-        && !this.forceFreshThread
-        && global.sessionId
-        && global.sessionReady !== false
-        && global.policyHash === this.policyHash
-        && (global.runtime ?? 'codex') === this.runtime
-        && (global.epoch || this.cognitionEpoch) === this.cognitionEpoch);
-      if (resumable) this.syncedThroughSeq = global.syncedThroughSeq ?? this.syncedThroughSeq;
-      this.storedThreadId = resumable ? global.sessionId : null;
 
       const args = [
         'app-server', '--listen', 'stdio://',
@@ -904,12 +901,13 @@ export class CodexAgent {
         return;
       } catch (error) {
         this.logger.warn('codex_resume_failed_fresh_start', { error: safe(error) });
+        await this.store.prepareOVContext?.(this.cognitionEpoch);
       }
     }
     const result = await this._request('thread/start', params);
     this.threadId = result?.thread?.id;
     if (!this.threadId) throw new Error('thread/start returned no thread id');
-    // A fresh native transcript has accepted none of the journal yet. The first
+    // A fresh native transcript has accepted none of the OV context yet. The first
     // real turn deliberately catches up from zero and advances this cursor when
     // turn/started (or turn/completed) proves acceptance.
     this.syncedThroughSeq = 0;

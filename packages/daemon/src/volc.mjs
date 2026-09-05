@@ -199,6 +199,7 @@ export class VolcAgent {
       this.syncedThroughSeq = global.syncedThroughSeq ?? 0;
       this.deliveredThroughSeq = this.syncedThroughSeq;
     } else {
+      await this.store.prepareOVContext?.(this.cognitionEpoch);
       if (this.template.status === 'terminated') throw new Error('configured Volc managed-agent session is terminated');
       const session = await this._createSession();
       this.sessionId = session.id;
@@ -443,8 +444,7 @@ export class VolcAgent {
     const throughSeq = this.store.cognitionJournalBeforeInbound?.(beforeSeq, this.cognitionEpoch) ?? 0;
     let body = items.map((item) => item.text).join('\n');
     let deliveredThroughSeq = this.deliveredThroughSeq;
-    if (throughSeq > this.deliveredThroughSeq
-      && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
+    if (throughSeq > this.deliveredThroughSeq) {
       const catchup = cognitionHistoryPrefix(
         this.store,
         this.cognitionEpoch,

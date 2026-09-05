@@ -1,3 +1,4 @@
+import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -416,6 +417,7 @@ describe('Volc managed-agent runtime', () => {
     const data = store();
     data.cognitionJournalBeforeInbound = (seq) => (seq === 1 ? 1 : 3);
     data.cognitionJournalSeqForInbound = (seq) => (seq === 1 ? 2 : 4);
+    data.getOVContext = () => ovFixture(rows);
     data.cognitionJournal = (_epoch, through, after = 0) => rows
       .filter((row) => row.seq > after && row.seq <= through);
 
@@ -472,7 +474,7 @@ describe('Volc managed-agent runtime', () => {
     assert.match(posts[0], /OLD_HISTORY_MARKER/);
     assert.doesNotMatch(posts[1], /OLD_HISTORY_MARKER/);
     assert.doesNotMatch(posts[1], /\] first(?:\n|$)/);
-    assert.match(posts[1], /FIRST_TURN_FAILED/);
+    assert.doesNotMatch(posts[1], /FIRST_TURN_FAILED/);
     assert.match(posts[1], /second$/);
     await agent.stop();
   });

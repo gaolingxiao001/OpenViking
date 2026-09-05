@@ -292,7 +292,8 @@ export class ClaudeAgent {
     try { fs.rmSync(directory, { recursive: true, force: true }); } catch {}
   }
 
-  _spawnPersistent() {
+  async _spawnPersistent() {
+    if (this.needsHistoryPrefix) await this.store.prepareOVContext?.(this.cognitionEpoch);
     return new Promise((resolve, reject) => {
       const mcpConfigPath = this._writeMcpConfig();
       const args = [
@@ -440,17 +441,13 @@ export class ClaudeAgent {
     const needsCatchup = this.needsHistoryPrefix || throughSeq > this.deliveredThroughSeq;
     let body = items.map((item) => item.text).join('\n');
     let prefixThroughSeq = this.deliveredThroughSeq;
-    if (needsCatchup && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
+    if (needsCatchup) {
       const catchup = cognitionHistoryPrefix(
         this.store,
         this.cognitionEpoch,
         throughSeq,
         this.config.cognitionMaxChars,
         this.needsHistoryPrefix ? 0 : this.deliveredThroughSeq,
-        // Same-session delta only: this transcript already contains its own
-        // committed sends as tool calls, so skip their journal echo. A fresh
-        // transcript (history prefix) still receives everything.
-        this.needsHistoryPrefix ? {} : { excludeCommittedOutboundFrom: this.authorityToken },
       );
       prefixThroughSeq = catchup.throughSeq;
       if (catchup.text) body = `${catchup.text}\n${body}`;

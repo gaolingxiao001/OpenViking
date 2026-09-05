@@ -120,6 +120,8 @@ export class AgentRuntime {
 
   whenIdle() { return this.backend?.whenIdle() ?? Promise.resolve(); }
 
+  prepareInputContext() { return this.backend?.prepareInputContext?.(); }
+
   submit(items, { admission = 'enqueue' } = {}) {
     if (this.stopping) return { accepted: false, reason: 'stopping' };
     if (this.pendingTransitions > 0) return { accepted: false, reason: 'switching' };

@@ -38,6 +38,7 @@ export class Harness {
     this.onInboundChat = onInboundChat;
     this.isStopping = isStopping;
     this.ingressBarrier = Promise.resolve();
+    this.pendingIngress = 0;
     this.groupBurst = new GroupBurstRouter({
       submit: (items, options) => this.runtime.submit(items, options),
       isConnected: () => this.runtime.snapshot().session.connected,
@@ -153,6 +154,7 @@ export class Harness {
       // display name. warm() never rejects and races an internal timeout, so a
       // slow or failing lark-cli only degrades the label back to the id stub.
       await this.roster?.warm(event.chatId);
+      await this.runtime.prepareInputContext?.();
       this.groupBurst.route({
         conversationKey: event.conversationKey,
         scope: { kind: 'lark', conversationKey: event.conversationKey },
@@ -175,9 +177,10 @@ export class Harness {
   // Slow model discovery and two-phase runtime catch-up therefore cannot let a
   // following message slip into the old runtime.
   enqueueIngress(action) {
+    this.pendingIngress += 1;
     const run = this.ingressBarrier.then(async () => {
       if (!this.isStopping()) await action();
-    });
+    }).finally(() => { this.pendingIngress -= 1; });
     this.ingressBarrier = run.catch((error) => {
       this.logger.error('ingress_barrier_action_failed', { error: safeError(error) });
     });

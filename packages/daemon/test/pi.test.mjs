@@ -1,3 +1,4 @@
+import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
@@ -97,6 +98,7 @@ function makeStore({ globalOverride = {} } = {}) {
   ];
   return {
     activities,
+    getOVContext: () => ovFixture(rows),
     getCognitionState: () => ({ runtime: 'pi', epoch: 1, authorityToken: 'token-pi' }),
     getGlobalSession: () => global,
     setGlobalSession(sessionId, policyHash, fields) {
@@ -207,7 +209,7 @@ describe('PiAgent persistent rpc runtime', () => {
     agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
     const prompt = parsedWrites(persistent[0]).find((message) => message.type === 'prompt');
     assert.ok(prompt);
-    assert.match(prompt.message, /daemon cognition journal/);
+    assert.match(prompt.message, /daemon OpenViking context/);
     assert.match(prompt.message, /earlier question/);
     assert.match(prompt.message, /earlier answer/);
     assert.match(prompt.message, /history above, new messages below/);

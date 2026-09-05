@@ -271,7 +271,8 @@ export class PiAgent {
     return path.join(this._sessionDir(), 'system-prompt.md');
   }
 
-  _spawnPersistent() {
+  async _spawnPersistent() {
+    if (this.needsHistoryPrefix) await this.store.prepareOVContext?.(this.cognitionEpoch);
     return new Promise((resolve, reject) => {
       const promptPath = this._promptPath();
       fs.writeFileSync(promptPath, this.developerInstructionsText, { encoding: 'utf8', mode: 0o600 });
@@ -458,7 +459,7 @@ export class PiAgent {
     const needsCatchup = this.needsHistoryPrefix || throughSeq > this.deliveredThroughSeq;
     let body = items.map((item) => item.text).join('\n');
     let prefixThroughSeq = this.deliveredThroughSeq;
-    if (needsCatchup && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
+    if (needsCatchup) {
       const catchup = cognitionHistoryPrefix(
         this.store,
         this.cognitionEpoch,

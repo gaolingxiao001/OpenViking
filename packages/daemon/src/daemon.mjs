@@ -14,6 +14,7 @@ import { ManagedAgentOutputPort } from './runtime-output.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
+import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import {
   isMeetingEvent,
   MeetingPlugin,
@@ -29,7 +30,7 @@ function delay(ms) {
 // observation surface. LarkDaemon wires them together, starts them in order,
 // and tears them down in reverse.
 export class LarkDaemon {
-  constructor(config, logger) {
+  constructor(config, logger, { ovClient = null } = {}) {
     this.config = config;
     this.logger = logger;
     this.lock = new InstanceLock(config.lockPath);
@@ -52,6 +53,10 @@ export class LarkDaemon {
     this.maintenanceTimer = null;
     this.runId = randomUUID();
     this.activitySequence = 0;
+    this.ovClient = ovClient;
+    this.ovContext = null;
+    this.ovSyncTimer = null;
+    this.ovSyncBusy = false;
   }
 
   recordSystemActivity(kind, fields = {}, eventSuffix = null) {
@@ -80,6 +85,10 @@ export class LarkDaemon {
     this.lock.acquire();
     try {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
+      this.ovContext = new OVSessionContext(this.store,
+        this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath), this.logger,
+        { canCommit: () => !this.lark?.subscriptionRunning
+          && !this.store.db.prepare("SELECT 1 FROM inbound WHERE status = 'QUEUED' LIMIT 1").get() });
       this.recordSystemActivity('system.starting', {
         summary: '本机飞书 Agent 正在启动',
         status: 'STARTING',
@@ -221,6 +230,15 @@ export class LarkDaemon {
       this.ready = true;
       this.chatNames.refresh();
       this.maintenanceTimer = setInterval(() => this.runMaintenance(), 86_400_000);
+      this.ovSyncTimer = setInterval(() => {
+        if (this.shuttingDown || this.ovSyncBusy || this.harness.pendingIngress > 0 || this.agentRuntime.turnInProgress
+          || this.agentRuntime.state.queued > 0 || this.harness.groupBurst.pendingConversations > 0) return;
+        this.ovSyncBusy = true;
+        void this.ovContext.checkpoint(this.store.getCognitionState().epoch)
+          .catch(() => this.logger.warn('ov_session_sync_failed', { error: 'OV sync will retry; local transport cursor retained' }))
+          .finally(() => { this.ovSyncBusy = false; });
+      }, 5_000);
+      this.ovSyncTimer.unref();
       this.maintenanceTimer.unref();
       this.logger.info('daemon_ready', {
         address: this.config.httpEnabled ? `http://${this.config.host}:${this.config.port}` : 'disabled',
@@ -340,6 +358,8 @@ export class LarkDaemon {
         metadata: { reason: safeError(reason), exitCode },
       }, 'stopping');
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+      if (this.ovSyncTimer) clearInterval(this.ovSyncTimer);
+      this.ovContext?.stop();
       this.maintenanceTimer = null;
       registerNameResolver(null);
       try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }

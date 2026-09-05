@@ -1,3 +1,4 @@
+import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -65,6 +66,8 @@ function makeStore({ history = [] } = {}) {
     setGlobalSession(sessionId, policyHash) { session = { sessionId, policyHash }; },
     recordActivity() {},
     history: () => history,
+    getOVContext: () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: '',
+      messages: history.map((item) => ({ parts: [{ type: 'text', text: formatHistoryLine(item) }] })) }),
   };
 }
 
@@ -376,6 +379,7 @@ describe('CodexAgent turn/steer state machine', () => {
     const failures = [];
     const store = makeStore();
     store.cognitionJournalBeforeInbound = () => 1;
+    store.getOVContext = () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: 'too large', messages: [] });
     store.cognitionJournal = () => [{
       seq: 1,
       epoch: 1,
@@ -752,6 +756,7 @@ describe('CodexAgent turn/steer state machine', () => {
     store.getCognitionState = () => ({ runtime: 'codex', epoch: 1, authorityToken: 'codex-token' });
     store.cognitionJournalBeforeInbound = (seq) => (seq === 10 ? 1 : 3);
     store.cognitionJournalSeqForInbound = (seq) => (seq === 10 ? 2 : 4);
+    store.getOVContext = () => ovFixture(rows);
     store.cognitionJournal = (_epoch, through, after = 0) => rows
       .filter((row) => row.seq > after && row.seq <= through);
     store.advanceOwnedSessionAcceptance = () => true;
@@ -771,7 +776,7 @@ describe('CodexAgent turn/steer state machine', () => {
     const second = child.ofMethod('turn/start').at(-1).params.input[0].text;
     assert.doesNotMatch(second, /OLD_CODEX_HISTORY/);
     assert.doesNotMatch(second, /\] first(?:\n|$)/);
-    assert.match(second, /FIRST_CODEX_FAILED/);
+    assert.doesNotMatch(second, /FIRST_CODEX_FAILED/);
     assert.match(second, /second$/);
   });
 

@@ -40,6 +40,12 @@ export class RuntimeAdapter {
   selectModel(model, options) { return this.#implementation.setModel(model, options); }
   selectEffort(effort, options) { return this.#implementation.setEffort(effort, options); }
 
+  async prepareInputContext() {
+    const agent = this.#implementation;
+    const fresh = agent.needsHistoryPrefix ?? (agent.deliveredThroughSeq === 0);
+    if (fresh) await agent.store?.prepareOVContext?.(agent.cognitionEpoch);
+  }
+
   submit(items, { admission = 'enqueue' } = {}) {
     if (!Array.isArray(items) || items.length === 0) {
       return { accepted: false, reason: 'empty-batch' };

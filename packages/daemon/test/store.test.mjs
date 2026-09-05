@@ -285,10 +285,8 @@ describe('Store', () => {
     });
     assert.equal(emptyDelta.text, '');
     assert.equal(emptyDelta.throughSeq, 2);
-    const fullPrefix = cognitionHistoryPrefix(store, epoch, head, 120_000, 0, {
-      excludeCommittedOutboundFrom: null,
-    });
-    assert.match(fullPrefix.text, /own committed answer/);
+    assert.throws(() => cognitionHistoryPrefix(store, epoch, head), /OpenViking context is not prepared/);
+    // Even with a complete local ledger, an OV handoff is never reconstructed from it.
   });
 
   it('atomically advances cognition and publishes a prepared managed session', () => {

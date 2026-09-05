@@ -992,7 +992,7 @@ describe('Lark proactive IM MCP protocol', () => {
     const initialized = await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(initialized.result.serverInfo.name, 'lark-daemon-im');
     const listed = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
+    const toolNames = ['read_openviking_session_context', 'list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), toolNames);
     assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), toolNames);
     for (const name of ['send_lark_message', 'reply_lark_message', 'react_to_lark_message']) {
@@ -1173,12 +1173,41 @@ describe('Lark proactive IM MCP protocol', () => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: {} } })}\n`);
       await waitFor(3);
       assert.equal(responses[0].result.serverInfo.name, 'lark-daemon-im');
-      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
+      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['read_openviking_session_context', 'list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
       assert.match(responses[2].result.content[0].text, /Fixture Chat/);
     } finally {
       child.stdin.end();
       child.kill('SIGTERM');
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe('OV archive reader', () => {
+  it('pages consistently and fences authority after remote reads', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-ov-reader-'));
+    const databasePath = path.join(directory, 'state.sqlite3');
+    const store = new Store(databasePath, quietLogger);
+    const { epoch } = store.initializeCognition('codex', 'ov-owner');
+    store.db.exec('CREATE TABLE ov_session_sync(epoch INTEGER PRIMARY KEY,session_id TEXT,uri TEXT)');
+    store.db.prepare('INSERT INTO ov_session_sync VALUES (?,?,?)').run(epoch, 'test-session', 'viking://session/test');
+    let value = 'abcdef';
+    const service = new LarkToolService(options({ databasePath, runtimeToken: 'ov-owner',
+      freshnessCheck: undefined, ovClient: { async context() { return { overview: value }; } },
+    }));
+    try {
+      const first = await service.readOVSession({ epoch, max_chars: 4 });
+      const next = await service.readOVSession({ epoch, offset: first.next_offset, expected_digest: first.expected_digest });
+      assert.equal(first.text + next.text, JSON.stringify({ overview: value }));
+      await assert.rejects(service.readOVSession({ epoch, offset: 4 }), /requires expected_digest/);
+      value = 'changed';
+      await assert.rejects(service.readOVSession({ epoch, offset: 4, expected_digest: first.expected_digest }), /result changed/);
+      service.options.ovClient.context = async () => {
+        store.initializeCognition('claude', 'new-owner');
+        return { overview: 'must not escape' };
+      };
+      await assert.rejects(service.readOVSession({ epoch }), /no longer owns/);
+    } finally { service.close(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); }
   });
 });
