@@ -992,7 +992,7 @@ describe('Lark proactive IM MCP protocol', () => {
     const initialized = await handle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
     assert.equal(initialized.result.serverInfo.name, 'lark-daemon-im');
     const listed = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
-    const toolNames = ['read_cognition_journal', 'read_cognition_snapshot', 'save_cognition_snapshot', 'list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
+    const toolNames = ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image'];
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), toolNames);
     assert.deepEqual(LARK_TOOLS.map((tool) => tool.name), toolNames);
     for (const name of ['send_lark_message', 'reply_lark_message', 'react_to_lark_message']) {
@@ -1173,7 +1173,7 @@ describe('Lark proactive IM MCP protocol', () => {
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_lark_chats', arguments: {} } })}\n`);
       await waitFor(3);
       assert.equal(responses[0].result.serverInfo.name, 'lark-daemon-im');
-      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['read_cognition_journal', 'read_cognition_snapshot', 'save_cognition_snapshot', 'list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
+      assert.deepEqual(responses[1].result.tools.map((tool) => tool.name), ['list_lark_chats', 'list_lark_chat_messages', 'search_lark_messages', 'list_lark_thread_messages', 'read_meeting_inbox', 'send_lark_message', 'reply_lark_message', 'react_to_lark_message', 'retract_lark_message', 'view_lark_image']);
       assert.match(responses[2].result.content[0].text, /Fixture Chat/);
     } finally {
       child.stdin.end();

@@ -344,8 +344,7 @@ export class CodexAgent {
       const seqs = items.map((item) => item.seq).filter((seq) => seq != null);
       const beforeSeq = seqs.length > 0 ? Math.min(...seqs) : null;
       const throughSeq = this.store.cognitionJournalBeforeInbound?.(beforeSeq, this.cognitionEpoch) ?? 0;
-      const needsCatchup = hadPrefix || throughSeq > this.syncedThroughSeq
-        || this.store.cognitionCheckpointDue?.(this.cognitionEpoch, throughSeq);
+      const needsCatchup = hadPrefix || throughSeq > this.syncedThroughSeq;
       if (needsCatchup && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
         const catchup = cognitionHistoryPrefix(
           this.store,

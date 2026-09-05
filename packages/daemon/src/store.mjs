@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { migrateCognitionSnapshots, latestCognitionSnapshot } from './cognition-snapshot.mjs';
 import { opaqueRef } from './logger.mjs';
 import {
   activityDefinition,
@@ -353,7 +352,6 @@ export class Store {
       -- treat it as failed and invite a duplicate send.
       UPDATE cognition_journal SET status = 'UNCERTAIN' WHERE status = 'PENDING';
     `);
-    migrateCognitionSnapshots(this.db);
     migrateMeetingStore(this.db);
     const inboundColumns = new Set(
       this.db.prepare('PRAGMA table_info(inbound)').all().map((row) => row.name),
@@ -1393,45 +1391,6 @@ export class Store {
       WHERE epoch = ? AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
     `).get(epoch);
     return number(row?.seq) || 0;
-  }
-
-  // Bounded projection for handoff. Full journal reads remain available for
-  // audit/tests; the hot path never materializes the entire epoch's bodies.
-  cognitionHandoff(epoch, throughSeq, afterSeq = 0, { excludeCommittedOutboundFrom = null } = {}) {
-    const snapshot = latestCognitionSnapshot(this.db, epoch, throughSeq);
-    const usableSnapshot = snapshot && snapshot.throughSeq > afterSeq ? snapshot : null;
-    const start = usableSnapshot?.throughSeq ?? afterSeq;
-    const rows = this.db.prepare(`SELECT seq, epoch, kind, status, at_ms, inbound_seq, chat_id, thread_id, message_id, actor,
-      substr(text, 1, 4000) AS excerpt,
-      length(text) AS full_length FROM cognition_journal
-      WHERE epoch = ? AND seq > ? AND seq <= ?
-        AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
-        AND NOT (kind = 'outbound' AND status = 'COMMITTED' AND COALESCE(runtime_token, '') = COALESCE(?, '__no_runtime__'))
-      ORDER BY seq DESC LIMIT 128`).all(epoch, start, throughSeq, excludeCommittedOutboundFrom);
-    const tail = rows.reverse().map((row) => ({
-      ...rowToCognitionJournal({ ...row, text: row.excerpt }),
-      truncated: row.full_length > 4000,
-    }));
-    const count = this.db.prepare(`SELECT COUNT(*) AS n FROM cognition_journal
-      WHERE epoch = ? AND seq > ? AND seq <= ?
-        AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
-        AND NOT (kind = 'outbound' AND status = 'COMMITTED' AND COALESCE(runtime_token, '') = COALESCE(?, '__no_runtime__'))`)
-      .get(epoch, start, throughSeq, excludeCommittedOutboundFrom).n;
-    // Uncertainty must be read live: PENDING can settle after a checkpoint is
-    // saved. Never freeze its status in a model-generated summary.
-    const uncertain = this.db.prepare(`SELECT COUNT(*) AS n FROM cognition_journal
-      WHERE epoch = ? AND seq <= ? AND kind = 'outbound' AND status IN ('PENDING', 'UNCERTAIN')`)
-      .get(epoch, throughSeq).n;
-    return { snapshot: usableSnapshot, tail, count, uncertain, start,
-      checkpointDue: this.cognitionCheckpointDue(epoch, throughSeq) };
-  }
-
-  cognitionCheckpointDue(epoch, throughSeq) {
-    const snapshot = latestCognitionSnapshot(this.db, epoch, throughSeq);
-    const sinceCheckpoint = this.db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(length(text)), 0) AS chars
-      FROM cognition_journal WHERE epoch = ? AND seq > ? AND seq <= ?`)
-      .get(epoch, snapshot?.throughSeq ?? 0, throughSeq);
-    return sinceCheckpoint.n >= 40 || sinceCheckpoint.chars >= 16_000;
   }
 
   cognitionJournalBeforeInbound(inboundSeq, epoch = this.getCognitionState().epoch) {

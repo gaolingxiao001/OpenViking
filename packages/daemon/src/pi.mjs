@@ -455,8 +455,7 @@ export class PiAgent {
       beforeSeq,
       this.cognitionEpoch,
     ) ?? 0;
-    const needsCatchup = this.needsHistoryPrefix || throughSeq > this.deliveredThroughSeq
-      || this.store.cognitionCheckpointDue?.(this.cognitionEpoch, throughSeq);
+    const needsCatchup = this.needsHistoryPrefix || throughSeq > this.deliveredThroughSeq;
     let body = items.map((item) => item.text).join('\n');
     let prefixThroughSeq = this.deliveredThroughSeq;
     if (needsCatchup && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
