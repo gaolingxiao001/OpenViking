@@ -49,6 +49,32 @@ function backend(runtime, options = {}) {
 }
 
 describe('global Codex/Claude hard switch', () => {
+  it('switches a legacy epoch larger than the old handoff limit without a synthetic model turn', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-snapshot-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      codexFactory: (options) => ({ ...backend('codex', options), interruptTurn: async () => {} }),
+      claudeFactory: (options) => ({ ...backend('claude', options),
+        primeCognition: () => { throw new Error('must not start a synthetic turn'); },
+      }),
+    });
+    try {
+      await runtime.start();
+      const epoch = store.getCognitionState().epoch;
+      store.appendCognitionJournal({ kind: 'inbound', text: 'x'.repeat(250_000), epoch });
+      const result = await runtime.transition({ kind: 'select-model', selector: 'sonnet' });
+      assert.equal(result.runtimeChanged, true);
+      assert.equal(runtime.runtime, 'claude');
+      assert.equal(store.getCognitionState().epoch, epoch);
+      assert.equal(store.getGlobalSession().syncedThroughSeq, 0);
+      assert.equal(store.cognitionJournal(epoch)[0].text.length, 250_000);
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('retires stale sessions, fences authority, and rolls back target-start failure', async () => {
     const result = await runClaudeRuntimeSimulation();
     assert.equal(result.ok, true);

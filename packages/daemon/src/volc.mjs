@@ -443,7 +443,8 @@ export class VolcAgent {
     const throughSeq = this.store.cognitionJournalBeforeInbound?.(beforeSeq, this.cognitionEpoch) ?? 0;
     let body = items.map((item) => item.text).join('\n');
     let deliveredThroughSeq = this.deliveredThroughSeq;
-    if (throughSeq > this.deliveredThroughSeq
+    if ((throughSeq > this.deliveredThroughSeq
+      || this.store.cognitionCheckpointDue?.(this.cognitionEpoch, throughSeq))
       && this.store.cognitionJournal && this.store.cognitionJournalBeforeInbound) {
       const catchup = cognitionHistoryPrefix(
         this.store,
