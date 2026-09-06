@@ -130,7 +130,9 @@ export class OVSessionContext {
     while (state.synced_seq < throughSeq) {
       if (this.stopped) throw new Error('OV sync stopped');
       const row = this.store.db.prepare(`SELECT seq,status FROM cognition_journal
-        WHERE epoch=? AND seq>? AND seq<=? ORDER BY seq LIMIT 1`).get(epoch, state.synced_seq, throughSeq);
+        WHERE epoch=? AND seq>? AND seq<=?
+          AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
+        ORDER BY seq LIMIT 1`).get(epoch, state.synced_seq, throughSeq);
       if (!row) break;
       if (row.status === 'PENDING') throw new Error('OV sync is waiting for an unsettled local delivery');
       const sourceId = `lark:${epoch}:${row.seq}`;
@@ -184,7 +186,9 @@ export class OVSessionContext {
         }
       }
       const visibleSources = new Set(context.messages.flatMap((message) => message.source_message_ids ?? []));
-      const needed = this.store.db.prepare('SELECT seq FROM cognition_journal WHERE epoch=? AND seq>? AND seq<=?')
+      const needed = this.store.db.prepare(`SELECT seq FROM cognition_journal
+        WHERE epoch=? AND seq>? AND seq<=?
+          AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')`)
         .all(epoch, state.confirmed_seq, state.synced_seq);
       if (needed.some((row) => !visibleSources.has(`lark:${epoch}:${row.seq}`))) {
         throw new Error('OV context omitted unsummarized source messages; refusing an incomplete handoff');

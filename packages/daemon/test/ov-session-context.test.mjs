@@ -55,6 +55,21 @@ test('uncertain successful append reconciles source ID after restart', async (t)
   assert.equal(store.db.prepare('SELECT pending_seq FROM ov_session_sync').get().pending_seq, null);
 });
 
+test('cancelled journal rows are skipped while syncing to OV', async (t) => {
+  const { store, epoch, client, service, append } = setup(t);
+  append('first');
+  store.appendCognitionJournal({ kind: 'outbound', status: 'CANCELLED', text: 'cancelled' });
+  append('second');
+
+  const context = await service.prepare(epoch);
+
+  assert.equal(client.writes, 2);
+  assert.equal(context.messages.length, 2);
+  assert.match(context.messages[0].content, /first/);
+  assert.match(context.messages[1].content, /second/);
+  assert.doesNotMatch(context.messages.map((message) => message.content).join('\n'), /cancelled/);
+});
+
 test('OV budget omission and truncation fail closed', async (t) => {
   const { epoch, client, service, append } = setup(t);
   append('original'); await service.prepare(epoch);
