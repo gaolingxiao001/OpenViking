@@ -315,7 +315,8 @@ export class CodexAgent {
         try {
           this.onTurnFailed?.(withReceiptIds({ inboundSeqs, error: safe(error) }, receipts));
         } catch {}
-        this._notifyAvailable();
+        // Let the submitting router release this batch before it can drain again.
+        queueMicrotask(() => this._notifyAvailable());
         return;
       }
       // Ownership has already crossed the transport boundary. Keep the whole
@@ -344,7 +345,8 @@ export class CodexAgent {
       const seqs = items.map((item) => item.seq).filter((seq) => seq != null);
       const beforeSeq = seqs.length > 0 ? Math.min(...seqs) : null;
       const throughSeq = this.store.cognitionJournalBeforeInbound?.(beforeSeq, this.cognitionEpoch) ?? 0;
-      const needsCatchup = hadPrefix || throughSeq > this.syncedThroughSeq;
+      // Native transcripts already own their history, even when the cursor is zero.
+      const needsCatchup = hadPrefix;
       if (needsCatchup) {
         const catchup = cognitionHistoryPrefix(
           this.store,

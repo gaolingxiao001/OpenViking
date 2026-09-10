@@ -438,7 +438,8 @@ export class ClaudeAgent {
       beforeSeq,
       this.cognitionEpoch,
     ) ?? 0;
-    const needsCatchup = this.needsHistoryPrefix || throughSeq > this.deliveredThroughSeq;
+    // Native transcripts already own their history, even when the cursor is zero.
+    const needsCatchup = this.needsHistoryPrefix;
     let body = items.map((item) => item.text).join('\n');
     let prefixThroughSeq = this.deliveredThroughSeq;
     if (needsCatchup) {

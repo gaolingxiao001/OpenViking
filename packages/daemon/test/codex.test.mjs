@@ -375,6 +375,44 @@ describe('CodexAgent turn/steer state machine', () => {
     }]);
   });
 
+  it('does not require OV for a native session with a zero history cursor', async () => {
+    const store = makeStore();
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+    agent.needsHistoryPrefix = false;
+    agent.syncedThroughSeq = 0;
+    store.cognitionJournalBeforeInbound = () => 42;
+    store.getOVContext = () => { throw new Error('native history must not load OV'); };
+    agent.deliver('native continuation', 10);
+    assert.equal(child.ofMethod('turn/start').length, 1);
+    assert.equal(child.ofMethod('turn/start')[0].params.input[0].text, 'native continuation');
+  });
+
+  it('releases a rejected batch before notifying the group router', async () => {
+    const store = makeStore();
+    store.cognitionJournalBeforeInbound = () => 1;
+    store.getOVContext = () => undefined;
+    const failures = [];
+    let submitting = false;
+    let notifications = 0;
+    const { agent, children } = newAgent(store, {
+      onTurnFailed: (info) => failures.push(info),
+      onAvailable: () => {
+        assert.equal(submitting, false);
+        notifications += 1;
+      },
+    });
+    await handshake(agent, children);
+    notifications = 0;
+    submitting = true;
+    assert.equal(agent.tryStartBatch([{ text: 'request', seq: 10 }]), true);
+    assert.equal(notifications, 0);
+    submitting = false;
+    await flush();
+    assert.equal(failures.length, 1);
+    assert.equal(notifications, 1);
+  });
+
   it('fails a receipt through the callback when cognition limits reject it before turn ownership', async () => {
     const failures = [];
     const store = makeStore();
