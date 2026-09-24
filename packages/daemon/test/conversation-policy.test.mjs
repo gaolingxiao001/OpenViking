@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   assembleConversationPolicy,
   assembleVolcConversationPolicy,
@@ -15,7 +16,20 @@ function writePrompt(name, body) {
   return { directory, filePath };
 }
 
+const defaultSystemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
+
 describe('conversation policy assemble', () => {
+  it('requires native runtimes to close tool-only Lark turns with internal text', () => {
+    const text = assembleConversationPolicy({
+      systemPromptPath: defaultSystemPromptPath,
+    });
+
+    assert.match(text, /After a successful final Lark delivery tool call/);
+    assert.match(text, /DELIVERED/);
+    assert.match(text, /NO_DELIVERY/);
+    assert.match(text, /Never end a runtime turn with an empty final answer/);
+  });
+
   it('stitches base, OpenViking, optional meeting audio, and harness', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-policy-all-'));
     const files = {
