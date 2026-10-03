@@ -80,25 +80,30 @@ export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
       }
 
       if (url.pathname === '/api/activity') {
-        const allowed = new Set(['limit', 'before', 'epoch']);
+        const allowed = new Set(['limit', 'before', 'after', 'epoch']);
         if ([...url.searchParams.keys()].some((key) => !allowed.has(key))
           || url.searchParams.getAll('limit').length > 1
           || url.searchParams.getAll('before').length > 1
+          || url.searchParams.getAll('after').length > 1
+          || (url.searchParams.has('before') && url.searchParams.has('after'))
           || url.searchParams.getAll('epoch').length > 1) {
           send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_query' });
           return;
         }
         const limitText = url.searchParams.get('limit');
         const beforeText = url.searchParams.get('before');
+        const afterText = url.searchParams.get('after');
         const epochText = url.searchParams.get('epoch');
         if ((limitText !== null && !/^[1-9]\d*$/.test(limitText))
           || (beforeText !== null && !/^[1-9]\d*$/.test(beforeText))
+          || (afterText !== null && !/^(?:0|[1-9]\d*)$/.test(afterText))
           || (epochText !== null && epochText !== 'current' && !/^[1-9]\d{0,8}$/.test(epochText))) {
           send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_query' });
           return;
         }
         const limit = limitText === null ? 100 : Number(limitText);
         const beforeId = beforeText === null ? null : Number(beforeText);
+        const afterId = afterText === null ? null : Number(afterText);
         const epoch = epochText === null
           ? null
           : epochText === 'current'
@@ -106,11 +111,12 @@ export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
             : Number(epochText);
         if (!Number.isSafeInteger(limit) || limit > 100
           || (beforeId !== null && !Number.isSafeInteger(beforeId))
+          || (afterId !== null && !Number.isSafeInteger(afterId))
           || (epoch !== null && !Number.isSafeInteger(epoch))) {
           send(response, 400, 'application/json; charset=utf-8', { error: 'invalid_query' });
           return;
         }
-        const feed = store.listActivities({ limit, beforeId, epoch });
+        const feed = store.listActivities({ limit, beforeId, afterId, epoch });
         const service = serviceSnapshot({ includeState: false });
         send(response, 200, 'application/json; charset=utf-8', {
           generatedAt: Date.now(),
@@ -124,6 +130,7 @@ export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
           epoch,
           activities: feed.activities,
           nextCursor: feed.nextCursor,
+          hasNewer: feed.hasNewer ?? false,
         });
         return;
       }

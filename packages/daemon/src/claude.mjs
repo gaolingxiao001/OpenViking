@@ -5,6 +5,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { safeError as safe } from './logger.mjs';
+import { activityPayload } from './activity.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
@@ -115,6 +116,7 @@ export class ClaudeAgent {
     this.activitySeq = 0;
     this.idleWaiters = [];
     this.deliveryTools = new Map();
+    this.toolStarts = new Map();        // tool_use id -> { name, atMs } for Activity durations
     this.mcpTempDir = null;
     this.sessionRotation = null;
   }
@@ -500,9 +502,18 @@ export class ClaudeAgent {
       this.modelWorking = true;
       this.modelStartedAtMs = this.turnStartedAtMs;
     }
+    const input = items.map((item) => item.text).join('\n');
     this._recordActivity(wasActive ? 'agent.steered' : 'agent.turn_started', {
       inboundSeq: prepared.seqs.at(-1) ?? null,
-      metadata: { runtime: CLAUDE_RUNTIME.id, inboundSeqs: prepared.seqs },
+      summary: wasActive ? input : undefined,
+      metadata: {
+        runtime: CLAUDE_RUNTIME.id,
+        model: this.model || undefined,
+        effort: this.effort || undefined,
+        input,
+        historyChars: Math.max(0, prepared.body.length - input.length),
+        inboundSeqs: prepared.seqs,
+      },
     });
   }
 
@@ -560,10 +571,11 @@ export class ClaudeAgent {
           this.modelStartedAtMs = Date.now();
         }
         if (block.type === 'thinking') {
-          // Hidden thinking is intentionally not persisted into the daemon journal.
+          // Hidden thinking is intentionally not persisted into the daemon journal;
+          // the local Activity page still shows it.
           this._recordActivity('agent.thinking', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
-            metadata: { runtime: CLAUDE_RUNTIME.id },
+            metadata: { runtime: CLAUDE_RUNTIME.id, thinking: block.thinking || undefined },
           });
         } else if (block.type === 'text' && block.text) {
           // Telemetry only. Claude must call the Lark MCP tool to deliver text.
@@ -582,10 +594,12 @@ export class ClaudeAgent {
               input: block.input && typeof block.input === 'object' ? block.input : {},
             });
           }
+          this.toolStarts.set(block.id, { name: String(block.name ?? 'unknown tool'), atMs: Date.now() });
           this._recordActivity('agent.tool_called', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
             summary: String(block.name ?? 'unknown tool'),
-            metadata: { runtime: CLAUDE_RUNTIME.id, toolId: block.id },
+            status: 'RUNNING',
+            metadata: { runtime: CLAUDE_RUNTIME.id, toolId: block.id, toolName: block.name, input: activityPayload(block.input) },
           });
         }
       }
@@ -598,11 +612,20 @@ export class ClaudeAgent {
         if (block?.type !== 'tool_result') continue;
         const delivery = this.deliveryTools.get(block.tool_use_id) ?? null;
         this.deliveryTools.delete(block.tool_use_id);
+        const started = this.toolStarts.get(block.tool_use_id);
+        this.toolStarts.delete(block.tool_use_id);
+        const output = activityPayload(block.content);
         this._recordActivity('agent.tool_completed', {
           inboundSeq: this._activeSeqs().at(-1) ?? null,
           status: block.is_error === true ? 'FAILED' : 'COMPLETED',
-          summary: block.is_error === true ? 'Claude tool failed' : 'Claude tool completed',
-          metadata: { runtime: CLAUDE_RUNTIME.id, toolId: block.tool_use_id },
+          summary: started?.name ?? (block.is_error === true ? 'Claude tool failed' : 'Claude tool completed'),
+          metadata: {
+            runtime: CLAUDE_RUNTIME.id,
+            toolId: block.tool_use_id,
+            toolName: started?.name,
+            ...(started ? { durationMs: Date.now() - started.atMs } : {}),
+            ...(block.is_error === true ? { error: output } : { output }),
+          },
         });
         if (delivery && block.is_error !== true && this.onDeliverySucceeded) {
           const responseMessageId = delivery.input.response_to_message_id
@@ -645,6 +668,15 @@ export class ClaudeAgent {
         error = new Error(String(message.result || 'Claude error result'));
       }
       this.turnError = null;
+      const usage = message.usage ?? {};
+      this.turnUsage = {
+        inputTokens: Number.isFinite(usage.input_tokens)
+          ? usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+          : undefined,
+        cachedInputTokens: usage.cache_read_input_tokens,
+        outputTokens: usage.output_tokens,
+        costUsd: message.total_cost_usd,
+      };
       this._completeTurn(error);
     }
   }
@@ -656,6 +688,7 @@ export class ClaudeAgent {
   }
 
   _completeTurn(error = null) {
+    const turnStartedAtMs = this.turnStartedAtMs;
     const items = this.activeItems.splice(0);
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
     const receipts = receiptIds(items);
@@ -667,13 +700,20 @@ export class ClaudeAgent {
     this.modelWorking = false;
     this.modelStartedAtMs = null;
     this.deliveryTools.clear();
+    this.toolStarts.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this._recordActivity('agent.turn_completed', {
       inboundSeq: seqs.at(-1) ?? null,
       status: error ? 'failed' : 'completed',
       summary: error ? safe(error) : undefined,
-      metadata: { runtime: CLAUDE_RUNTIME.id, inboundSeqs: seqs },
+      metadata: {
+        runtime: CLAUDE_RUNTIME.id,
+        inboundSeqs: seqs,
+        ...(turnStartedAtMs ? { durationMs: Date.now() - turnStartedAtMs } : {}),
+        ...(this.turnUsage ?? {}),
+      },
     });
+    this.turnUsage = null;
     if (error && this.onTurnFailed) {
       try {
         this.onTurnFailed(withReceiptIds({ inboundSeqs: seqs, error: safe(error) }, receipts));

@@ -2,6 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { safeError as safe } from './logger.mjs';
+import { activityPayload } from './activity.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError, HISTORY_SEPARATOR } from './cognition.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, formatHistoryLine, receiptIds, withReceiptIds } from './runtime-input.mjs';
@@ -32,6 +33,46 @@ function cleanToolPart(value, fallback) {
   return text ? text.slice(0, 80) : fallback;
 }
 
+const TOOL_ITEM_TYPES = new Set([
+  'mcpToolCall', 'dynamicToolCall', 'commandExecution', 'fileChange', 'webSearch',
+  'imageView', 'imageGeneration', 'collabAgentToolCall',
+]);
+
+// Raw tool input/output for the Activity page (redacted + capped on write).
+function toolPayloads(item) {
+  switch (item.type) {
+    case 'mcpToolCall':
+      return {
+        input: activityPayload(item.arguments),
+        output: activityPayload(item.result?.content ?? item.result?.structuredContent),
+        error: item.error?.message,
+      };
+    case 'dynamicToolCall':
+      return { input: activityPayload(item.arguments), output: activityPayload(item.contentItems) };
+    case 'commandExecution':
+      return { input: activityPayload(item.command), output: activityPayload(item.aggregatedOutput), cwd: item.cwd };
+    case 'fileChange':
+      return {
+        input: Array.isArray(item.changes) ? item.changes.map((change) => `${change?.kind?.type ?? change?.kind ?? ''} ${change?.path ?? ''}`.trim()).join('\n') : undefined,
+        output: Array.isArray(item.changes) ? item.changes.map((change) => change?.diff ?? '').join('\n') : undefined,
+      };
+    case 'webSearch':
+      return { input: activityPayload(item.query), output: activityPayload(item.results) };
+    case 'imageView':
+      return { input: activityPayload(item.path) };
+    case 'imageGeneration':
+      return { input: activityPayload(item.revisedPrompt), output: activityPayload(item.savedPath), error: activityPayload(item.failure) };
+    case 'collabAgentToolCall':
+      return { input: activityPayload(item.prompt) };
+    default:
+      return {};
+  }
+}
+
+function definedFields(fields) {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && value !== ''));
+}
+
 function completedToolActivity(item) {
   if (!item || typeof item !== 'object') return null;
   const durationMs = Number.isFinite(item.durationMs) ? Math.max(0, item.durationMs) : undefined;
@@ -45,6 +86,7 @@ function completedToolActivity(item) {
       toolLabel,
       toolStatus: cleanToolPart(item.status, failed ? 'failed' : 'completed'),
       ...(durationMs === undefined ? {} : { durationMs }),
+      ...definedFields({ toolId: item.id, ...toolPayloads(item) }),
       ...extra,
     },
   });
@@ -339,6 +381,7 @@ export class CodexAgent {
   _startTurn(items, { prime = false } = {}) {
     const text = items.map((item) => item.text).join('\n');
     let body = text;
+    this.startingInput = { input: text, historyChars: 0 };
     const hadPrefix = this.needsHistoryPrefix;
     let journalThroughSeq = this.syncedThroughSeq;
     if (!prime) {
@@ -356,7 +399,10 @@ export class CodexAgent {
           hadPrefix ? 0 : this.syncedThroughSeq,
         );
         journalThroughSeq = catchup.throughSeq;
-        if (catchup.text) body = `${catchup.text}\n${text}`;
+        if (catchup.text) {
+          body = `${catchup.text}\n${text}`;
+          this.startingInput.historyChars = catchup.text.length;
+        }
       }
       this.needsHistoryPrefix = false;
     }
@@ -430,7 +476,7 @@ export class CodexAgent {
         turnId: expectedTurnId,
         inboundSeq: seqs.at(-1) ?? null,
         summary: text,
-        metadata: { inboundSeqs: [...this.activeInboundSeqs] },
+        metadata: { runtime: this.runtime, input: text, inboundSeqs: [...this.activeInboundSeqs] },
       });
     }).catch((error) => {
       // Race: the turn ended just as we steered. Re-deliver so the message is not lost.
@@ -454,11 +500,19 @@ export class CodexAgent {
     this.startingItems = [];
     this.startingJournalThroughSeq = 0;
     this.startingOwner = null;
+    this.turnUsage = null;
     this._recordActivity('agent.turn_started', {
       turnId: this.activeTurnId,
       inboundSeq: this.activeInboundSeqs.at(-1) ?? null,
-      metadata: { inboundSeqs: [...this.activeInboundSeqs] },
+      metadata: {
+        runtime: this.runtime,
+        model: this.model ?? undefined,
+        effort: this.effort ?? undefined,
+        ...(this.startingInput ?? {}),
+        inboundSeqs: [...this.activeInboundSeqs],
+      },
     });
+    this.startingInput = null;
     if (!this.activeTurnId) return;
     const items = this.queue.splice(0);
     for (let index = 0; index < items.length;) {
@@ -491,6 +545,7 @@ export class CodexAgent {
   // emitted turn/started) is merged into one fresh turn/start.
   _onTurnCompleted(status, error, completedTurnId = null) {
     const turnId = this.activeTurnId ?? completedTurnId;
+    const turnStartedAtMs = this.turnStartedAtMs;
     const inboundSeqs = this._associatedInboundSeqs();
     const receipts = this._associatedReceiptIds();
     if (!this.activeOwner) {
@@ -512,8 +567,16 @@ export class CodexAgent {
       inboundSeq: inboundSeqs.at(-1) ?? null,
       status,
       summary: failed ? errorText : undefined,
-      metadata: { status, error: errorText || undefined, inboundSeqs },
+      metadata: {
+        runtime: this.runtime,
+        status,
+        error: errorText || undefined,
+        inboundSeqs,
+        ...(turnStartedAtMs ? { durationMs: Date.now() - turnStartedAtMs } : {}),
+        ...(this.turnUsage ?? {}),
+      },
     });
+    this.turnUsage = null;
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     this.startingItems = [];
@@ -672,6 +735,30 @@ export class CodexAgent {
         const modelOutput = ['reasoning', 'agentMessage', 'agent_message'].includes(type);
         this.modelWorking = modelOutput;
         this.modelStartedAtMs = modelOutput ? Date.now() : null;
+        if (TOOL_ITEM_TYPES.has(type)) {
+          // Running tools are visible before they finish; completion reuses toolId.
+          const started = completedToolActivity({ ...params.item, status: 'inProgress', error: null });
+          this._recordActivity('agent.tool_called', {
+            turnId: params.turnId ?? this.activeTurnId,
+            inboundSeq: this._associatedInboundSeqs().at(-1) ?? null,
+            summary: started.metadata.toolLabel,
+            status: 'RUNNING',
+            metadata: { runtime: this.runtime, ...started.metadata },
+          });
+        }
+        break;
+      }
+      case 'thread/tokenUsage/updated': {
+        const last = params.tokenUsage?.last;
+        if (last) {
+          this.turnUsage = definedFields({
+            inputTokens: last.inputTokens,
+            cachedInputTokens: last.cachedInputTokens,
+            outputTokens: last.outputTokens,
+            reasoningTokens: last.reasoningOutputTokens,
+            contextWindow: params.tokenUsage.modelContextWindow,
+          });
+        }
         break;
       }
       case 'item/completed': {
@@ -682,12 +769,22 @@ export class CodexAgent {
         }
         const text = item?.text ?? item?.message?.text;
         const associatedInboundSeqs = this._associatedInboundSeqs();
+        if (item?.type === 'reasoning') {
+          const thinking = [...(item.summary ?? []), ...(item.content ?? [])]
+            .filter((part) => typeof part === 'string').join('\n').trim();
+          this._recordActivity('agent.thinking', {
+            turnId: params.turnId ?? this.activeTurnId,
+            inboundSeq: associatedInboundSeqs.at(-1) ?? null,
+            metadata: { runtime: this.runtime, ...(thinking ? { thinking } : {}) },
+          });
+          break;
+        }
         if ((item?.type === 'agentMessage' || item?.type === 'agent_message') && text) {
           this._recordActivity('agent.note', {
             turnId: params.turnId ?? this.activeTurnId,
             inboundSeq: associatedInboundSeqs.at(-1) ?? null,
             summary: text,
-            metadata: { inboundSeqs: associatedInboundSeqs },
+            metadata: { runtime: this.runtime, inboundSeqs: associatedInboundSeqs },
           });
           break;
         }
@@ -715,7 +812,7 @@ export class CodexAgent {
             inboundSeq,
             summary: tool.summary,
             status: tool.status,
-            metadata: { ...tool.metadata, inboundSeqs },
+            metadata: { runtime: this.runtime, ...tool.metadata, inboundSeqs },
           });
           if (tool.status === 'SENT' && tool.metadata?.deliveryMode && this.onDeliverySucceeded) {
             try {

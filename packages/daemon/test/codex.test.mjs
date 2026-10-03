@@ -916,7 +916,7 @@ describe('CodexAgent turn/steer state machine', () => {
     agent.stopping = true;
   });
 
-  it('associates completed tool calls with the active inbound message without storing arguments', async () => {
+  it('records tool start and completion with input/output, dropping secret keys', async () => {
     const activities = [];
     const store = makeStore();
     store.recordActivity = (activity) => activities.push(activity);
@@ -925,42 +925,54 @@ describe('CodexAgent turn/steer state machine', () => {
 
     agent.deliver('read memory', 41);
     child.feed({ method: 'turn/started', params: { turn: { id: 'turn-tool' } } });
+    const item = {
+      type: 'mcpToolCall',
+      id: 'item-1',
+      server: 'openviking',
+      tool: 'read_resource',
+      arguments: { uri: 'viking://user/path', api_key: 'must-not-persist' },
+    };
+    child.feed({ method: 'item/started', params: { turnId: 'turn-tool', item: { ...item, status: 'inProgress' } } });
     child.feed({
       method: 'item/completed',
       params: {
         turnId: 'turn-tool',
         item: {
-          type: 'mcpToolCall',
-          id: 'item-1',
-          server: 'openviking',
-          tool: 'read_resource',
+          ...item,
           status: 'completed',
-          arguments: { uri: 'viking://private/path', api_key: 'must-not-persist' },
           durationMs: 37,
-          result: { content: [{ type: 'text', text: 'must-not-persist' }] },
+          result: { content: [{ type: 'text', text: 'resource body' }] },
           error: null,
         },
       },
     });
 
+    const started = activities.find((activity) => activity.kind === 'agent.tool_called');
+    assert.equal(started.status, 'RUNNING');
+    assert.equal(started.metadata.toolId, 'item-1');
+    assert.equal(started.metadata.input, '{"uri":"viking://user/path"}');
     const tool = activities.find((activity) => activity.kind === 'agent.tool');
     assert.ok(tool);
     assert.equal(tool.turnId, 'turn-tool');
     assert.equal(tool.inboundSeq, 41);
     assert.equal(tool.summary, 'openviking · read_resource');
     assert.deepEqual(tool.metadata, {
+      runtime: 'codex',
       itemType: 'mcpToolCall',
       toolLabel: 'openviking · read_resource',
       toolName: 'read_resource',
       toolServer: 'openviking',
       toolStatus: 'completed',
       durationMs: 37,
+      toolId: 'item-1',
+      input: '{"uri":"viking://user/path"}',
+      output: 'resource body',
       inboundSeqs: [41],
     });
-    assert.doesNotMatch(JSON.stringify(tool), /private\/path|must-not-persist/);
+    assert.doesNotMatch(JSON.stringify(activities), /must-not-persist/);
   });
 
-  it('records only a generic tool failure and associates items completed during turn startup', async () => {
+  it('records the tool error and associates items completed during turn startup', async () => {
     const activities = [];
     const store = makeStore();
     store.recordActivity = (activity) => activities.push(activity);
@@ -978,12 +990,10 @@ describe('CodexAgent turn/steer state machine', () => {
           server: 'openviking',
           tool: 'read_resource',
           status: 'failed',
-          arguments: { uri: 'viking://private/path' },
+          arguments: { uri: 'viking://user/path' },
           durationMs: 18,
           result: null,
-          error: {
-            message: 'failed for viking://private/path and om_private12345678 with full result',
-          },
+          error: { message: 'not found: viking://user/path' },
         },
       },
     });
@@ -993,8 +1003,42 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(failure.turnId, 'turn-fast-tool');
     assert.equal(failure.inboundSeq, 73);
     assert.equal(failure.status, 'FAILED');
-    assert.equal(failure.metadata.toolError, undefined);
-    assert.doesNotMatch(JSON.stringify(failure), /private\/path|om_private|full result/);
+    assert.equal(failure.metadata.error, 'not found: viking://user/path');
+  });
+
+  it('records reasoning text, turn input and token usage', async () => {
+    const activities = [];
+    const store = makeStore();
+    store.recordActivity = (activity) => activities.push(activity);
+    const { agent, children } = newAgent(store);
+    const child = await handshake(agent, children);
+
+    agent.deliver('hello model', 5);
+    child.feed({ method: 'turn/started', params: { turn: { id: 'turn-u' } } });
+    child.feed({
+      method: 'item/completed',
+      params: { turnId: 'turn-u', item: { type: 'reasoning', id: 'r1', summary: ['plan the reply'], content: [] } },
+    });
+    child.feed({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        turnId: 'turn-u',
+        tokenUsage: {
+          last: { inputTokens: 900, cachedInputTokens: 800, outputTokens: 40, reasoningOutputTokens: 10, totalTokens: 940 },
+          total: {},
+          modelContextWindow: 200000,
+        },
+      },
+    });
+    child.feed({ method: 'turn/completed', params: { turn: { id: 'turn-u', status: 'completed' } } });
+
+    const started = activities.find((activity) => activity.kind === 'agent.turn_started');
+    assert.match(started.metadata.input, /hello model/);
+    assert.equal(activities.find((activity) => activity.kind === 'agent.thinking').metadata.thinking, 'plan the reply');
+    const done = activities.find((activity) => activity.kind === 'agent.turn_completed');
+    assert.equal(done.metadata.inputTokens, 900);
+    assert.equal(done.metadata.contextWindow, 200000);
+    assert.ok(Number.isFinite(done.metadata.durationMs));
   });
 
   it('keeps the incoming association if a turn completes during the startup window', async () => {
@@ -1067,7 +1111,8 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(delivery.inboundSeq, 55);
     assert.equal(delivery.metadata.deliveryMode, 'thread');
     assert.equal(delivery.metadata.toolLabel, '飞书回复');
-    assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
+    // Raw args are kept; the public /api/activity projection masks Lark ids.
+    assert.match(delivery.metadata.input, /reply_in_thread/);
   });
 
   it('records a Lark reaction as a delivery associated with its inbound message', async () => {
@@ -1108,7 +1153,6 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(delivery.inboundSeq, 55);
     assert.equal(delivery.metadata.deliveryMode, 'reaction');
     assert.equal(delivery.metadata.toolLabel, '飞书表态');
-    assert.doesNotMatch(JSON.stringify(delivery), /om_target12345678/);
     assert.deepEqual(deliveries, [{ inboundSeqs: [55], mode: 'reaction' }]);
   });
 });
