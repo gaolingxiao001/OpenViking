@@ -15,6 +15,7 @@ const HIDDEN_KINDS = new Set(['message.duplicate', 'agent.tool_waiting']);
 const TURN_STEP_KINDS = new Set([
   'agent.tool', 'agent.tool_called', 'agent.tool_completed', 'agent.note', 'agent.thinking', 'agent.turn_completed',
 ]);
+const INTERNAL_MARKERS = new Set(['DELIVERED', 'NO_DELIVERY']);
 const LARK_DELIVERY = /(reply|send|react_to|retract)_lark_message$/;
 
 const $ = (id) => document.getElementById(id);
@@ -283,6 +284,8 @@ function buildModel(rows) {
       continue;
     }
     if (kind === 'agent.note') {
+      // system-prompt 要求模型以 DELIVERED / NO_DELIVERY 结束本轮，是内部标记不是内容
+      if (INTERNAL_MARKERS.has(String(row.summary || '').trim())) continue;
       open.steps.push({ type: 'note', key: `n:${row.id}`, row, text: row.summary });
       continue;
     }
@@ -410,7 +413,7 @@ function renderStep(step) {
     return el;
   }
   if (step.type === 'note') {
-    head.append(tag('输出', 'tag-note'), h('span', 'aux', '未发送，仅记录'));
+    head.append(tag('模型文本', 'tag-note'), h('span', 'aux', '未发到飞书'));
     el.append(head, block(step.key, '', step.text));
     return el;
   }
