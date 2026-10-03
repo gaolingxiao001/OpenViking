@@ -5,6 +5,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { safeError as safe } from './logger.mjs';
+import { activityPayload } from './activity.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { assemblePiConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
@@ -127,6 +128,7 @@ export class PiAgent {
     this.reconnecting = false;
     this.backoffMs = this.reconnectBaseMs;
     this.activitySeq = 0;
+    this.toolStarts = new Map();
     this.rpcSeq = 0;
     this.pendingRpc = new Map();
     this.idleWaiters = [];
@@ -518,9 +520,16 @@ export class PiAgent {
       this.modelWorking = true;
       this.modelStartedAtMs = this.turnStartedAtMs;
     }
+    const input = items.map((item) => item.text).join('\n');
     this._recordActivity(wasActive ? 'agent.steered' : 'agent.turn_started', {
       inboundSeq: prepared.seqs.at(-1) ?? null,
-      metadata: { runtime: PI_RUNTIME.id, inboundSeqs: prepared.seqs },
+      summary: wasActive ? input : undefined,
+      metadata: {
+        runtime: PI_RUNTIME.id,
+        input,
+        historyChars: Math.max(0, prepared.body.length - input.length),
+        inboundSeqs: prepared.seqs,
+      },
     });
   }
 
@@ -584,15 +593,16 @@ export class PiAgent {
         this.modelWorking = true;
         this.modelStartedAtMs = Date.now();
       }
-      if (kind === 'thinking_start' || kind === 'thinking_delta') {
+      // One row per finished block; per-token deltas only flooded the feed.
+      if (kind === 'thinking_end') {
         this._recordActivity('agent.thinking', {
           inboundSeq: this._activeSeqs().at(-1) ?? null,
-          metadata: { runtime: PI_RUNTIME.id },
+          metadata: { runtime: PI_RUNTIME.id, thinking: event.content || undefined },
         });
-      } else if ((kind === 'text_delta' || kind === 'text_end') && (event.delta || event.content)) {
+      } else if (kind === 'text_end' && event.content) {
         this._recordActivity('agent.note', {
           inboundSeq: this._activeSeqs().at(-1) ?? null,
-          summary: String(event.content || event.delta || ''),
+          summary: String(event.content),
           metadata: { runtime: PI_RUNTIME.id, delivery: 'telemetry_only' },
         });
       } else if (kind === 'error') {
@@ -602,6 +612,15 @@ export class PiAgent {
     }
 
     if (message.type === 'message_end') {
+      const usage = message.message?.usage;
+      if (usage && Number.isFinite(usage.input)) {
+        this.turnUsage = {
+          inputTokens: usage.input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0),
+          cachedInputTokens: usage.cacheRead,
+          outputTokens: usage.output,
+          costUsd: usage.cost?.total,
+        };
+      }
       const stop = message.message?.stopReason;
       if (stop && !['stop', 'toolUse'].includes(stop)) {
         this.turnError = this.turnError ?? new Error(`pi stop: ${stop}`);
@@ -613,20 +632,31 @@ export class PiAgent {
       this.modelWorking = false;
       this.modelStartedAtMs = null;
       const name = String(message.toolName ?? '');
+      this.toolStarts.set(message.toolCallId, Date.now());
       this._recordActivity('agent.tool_called', {
         inboundSeq: this._activeSeqs().at(-1) ?? null,
         summary: name || 'unknown tool',
-        metadata: { runtime: PI_RUNTIME.id, toolId: message.toolCallId },
+        status: 'RUNNING',
+        metadata: { runtime: PI_RUNTIME.id, toolId: message.toolCallId, toolName: name, input: activityPayload(message.args) },
       });
       return;
     }
 
     if (message.type === 'tool_execution_end') {
+      const startedAtMs = this.toolStarts.get(message.toolCallId);
+      this.toolStarts.delete(message.toolCallId);
+      const output = activityPayload(message.result?.content ?? message.result);
       this._recordActivity('agent.tool_completed', {
         inboundSeq: this._activeSeqs().at(-1) ?? null,
         status: message.isError === true ? 'FAILED' : 'COMPLETED',
-        summary: message.isError === true ? 'Pi tool failed' : 'Pi tool completed',
-        metadata: { runtime: PI_RUNTIME.id, toolId: message.toolCallId },
+        summary: String(message.toolName || (message.isError === true ? 'Pi tool failed' : 'Pi tool completed')),
+        metadata: {
+          runtime: PI_RUNTIME.id,
+          toolId: message.toolCallId,
+          toolName: message.toolName,
+          ...(startedAtMs ? { durationMs: Date.now() - startedAtMs } : {}),
+          ...(message.isError === true ? { error: output } : { output }),
+        },
       });
       this.modelWorking = true;
       this.modelStartedAtMs = Date.now();
@@ -649,6 +679,7 @@ export class PiAgent {
   }
 
   _completeTurn(error = null) {
+    const turnStartedAtMs = this.turnStartedAtMs;
     const items = this.activeItems.splice(0);
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
     const receipts = receiptIds(items);
@@ -660,12 +691,19 @@ export class PiAgent {
     this.modelWorking = false;
     this.modelStartedAtMs = null;
     this.deliveredThroughSeq = this.syncedThroughSeq;
+    this.toolStarts.clear();
     this._recordActivity('agent.turn_completed', {
       inboundSeq: seqs.at(-1) ?? null,
       status: error ? 'failed' : 'completed',
       summary: error ? safe(error) : undefined,
-      metadata: { runtime: PI_RUNTIME.id, inboundSeqs: seqs },
+      metadata: {
+        runtime: PI_RUNTIME.id,
+        inboundSeqs: seqs,
+        ...(turnStartedAtMs ? { durationMs: Date.now() - turnStartedAtMs } : {}),
+        ...(this.turnUsage ?? {}),
+      },
     });
+    this.turnUsage = null;
     if (error && this.onTurnFailed) {
       try {
         this.onTurnFailed(withReceiptIds({ inboundSeqs: seqs, error: safe(error) }, receipts));

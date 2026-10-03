@@ -105,6 +105,10 @@ const PUBLIC_METADATA_KEYS = new Set([
   'durationMs', 'expired', 'filterReason', 'inboundSeqs', 'interruptedTurns', 'itemType', 'larkVersion',
   'messageType', 'outboxes', 'reason', 'reasonCode', 'removed',
   'requestedDeliveryMode', 'signal', 'toolLabel', 'toolName', 'toolServer', 'toolStatus',
+  // Full-context fields: what the model saw, what tools received/returned, cost.
+  'cachedInputTokens', 'contextWindow', 'costUsd', 'cwd', 'delivery', 'effort', 'error',
+  'historyChars', 'input', 'inputTokens', 'latencyMs', 'model', 'output', 'outputTokens', 'reasoningTokens',
+  'runtime', 'status', 'terminal', 'thinking', 'toolId',
 ]);
 const PUBLIC_NESTED_METADATA_KEYS = new Set(['conversations', 'inbound', 'outbox', 'turns']);
 
@@ -971,8 +975,16 @@ export class Store {
     return this.listActivitySessions().find((session) => session.epoch === epoch) ?? null;
   }
 
-  listActivities({ limit = 100, beforeId = null, epoch = null } = {}) {
+  listActivities({ limit = 100, beforeId = null, afterId = null, epoch = null } = {}) {
     const safeLimit = Math.max(1, Math.min(100, Number(limit) || 100));
+    if (afterId != null) {
+      // Live tail: oldest-first after the cursor so a poller never skips rows.
+      const rows = this.db.prepare(`
+        SELECT * FROM activities WHERE id > ? ORDER BY id ASC LIMIT ?
+      `).all(afterId, safeLimit + 1);
+      const visible = rows.slice(0, safeLimit).reverse();
+      return { activities: visible.map(rowToPublicActivity), nextCursor: null, hasNewer: rows.length > safeLimit };
+    }
     let startMs = null;
     let endMs = null;
     if (epoch != null) {
@@ -1112,6 +1124,7 @@ export class Store {
             chatType: event.chatType,
             messageType: event.messageType,
             filterReason,
+            ...(Number.isFinite(event.createTimeMs) ? { latencyMs: Math.max(0, now - event.createTimeMs) } : {}),
           },
         }, now);
       }

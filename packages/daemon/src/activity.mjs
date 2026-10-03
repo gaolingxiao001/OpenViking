@@ -10,6 +10,12 @@ const DEFINITIONS = Object.freeze({
   'agent.steered': { category: 'agent', severity: 'info', priority: 58, title: '中途追加' },
   'agent.note': { category: 'agent', severity: 'info', priority: 45, title: 'Agent 输出' },
   'agent.tool': { category: 'agent', severity: 'info', priority: 48, title: '工具调用' },
+  'agent.tool_called': { category: 'agent', severity: 'info', priority: 46, title: '调用工具' },
+  'agent.tool_completed': { category: 'agent', severity: 'info', priority: 48, title: '工具完成' },
+  'agent.tool_waiting': { category: 'agent', severity: 'info', priority: 20, title: '等待工具执行' },
+  'agent.thinking': { category: 'agent', severity: 'info', priority: 30, title: '思考' },
+  'agent.turn_recovered': { category: 'agent', severity: 'warn', priority: 70, title: '恢复一轮' },
+  'agent.fallback': { category: 'agent', severity: 'warn', priority: 80, title: '切换运行时' },
   'agent.started': { category: 'agent', severity: 'info', priority: 60, title: '开始判断' },
   'agent.decided': { category: 'agent', severity: 'info', priority: 65, title: '决定回复' },
   'agent.silent': { category: 'agent', severity: 'info', priority: 25, title: '保持静默' },
@@ -44,6 +50,8 @@ const DEFINITIONS = Object.freeze({
 });
 
 const SENSITIVE_KEY = /(?:authorization|api[_-]?key|token|secret|credential|password|cookie|session|idempotency|raw)/i;
+// Token counts, not credentials.
+const COUNT_KEY = /^(?:input|cachedInput|output|reasoning)Tokens$/;
 
 export function activityDefinition(kind) {
   return DEFINITIONS[kind] ?? {
@@ -76,7 +84,7 @@ export function cleanActivityText(value, limit = 4000) {
 function cleanMetadataValue(value, depth = 0) {
   if (value === null || value === undefined) return value ?? null;
   if (depth >= 4) return '[TRUNCATED]';
-  if (typeof value === 'string') return cleanActivityText(value, 1000);
+  if (typeof value === 'string') return cleanActivityText(value, 4000);
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'bigint') return Number(value);
@@ -84,12 +92,27 @@ function cleanMetadataValue(value, depth = 0) {
   if (typeof value === 'object') {
     const cleaned = {};
     for (const [key, child] of Object.entries(value).slice(0, 50)) {
-      if (SENSITIVE_KEY.test(key)) continue;
+      if (child === undefined || (SENSITIVE_KEY.test(key) && !COUNT_KEY.test(key))) continue;
       cleaned[key] = cleanMetadataValue(child, depth + 1);
     }
     return cleaned;
   }
   return cleanActivityText(String(value), 1000);
+}
+
+// Tool input/output for the Activity page: objects become JSON, strings stay
+// as-is; cleanActivityMetadata later redacts and caps the length.
+export function activityPayload(value) {
+  if (value === null || value === undefined || value === '') return undefined;
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && value.every((block) => typeof block?.text === 'string')) {
+    return value.map((block) => block.text).join('\n');
+  }
+  try {
+    return JSON.stringify(value, (key, child) => (key && SENSITIVE_KEY.test(key) ? undefined : child));
+  } catch {
+    return String(value);
+  }
 }
 
 export function cleanActivityMetadata(value) {

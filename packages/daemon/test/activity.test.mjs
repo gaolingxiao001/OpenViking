@@ -203,7 +203,7 @@ describe('activity store', { concurrency: false }, () => {
     assert.equal(JSON.stringify(activities).includes(chatId), false);
   });
 
-  it('publishes compact tool metadata while keeping tool arguments and Lark ids private', () => {
+  it('publishes tool input/output and token counts while masking Lark ids and secrets', () => {
     const incoming = event('tool-source', 'run a tool', {
       messageId: 'om-tool-target-private',
       chatId: 'oc-tool-chat-private',
@@ -225,7 +225,9 @@ describe('activity store', { concurrency: false }, () => {
         toolServer: 'openviking',
         toolStatus: 'completed',
         durationMs: 42,
-        toolError: 'failed for viking://private/sentinel',
+        input: '{"uri":"viking://user/x","message_id":"om_abcdef123456"}',
+        output: 'Authorization: Bearer abc.def.ghi',
+        inputTokens: 1200,
         arguments: { uri: 'viking://private/sentinel' },
       },
     }, 1_700_000_180_042);
@@ -237,14 +239,29 @@ describe('activity store', { concurrency: false }, () => {
     assert.equal(tool.sourceType, 'group');
     assert.deepEqual(tool.metadata, {
       durationMs: 42,
+      input: '{"uri":"viking://user/x","message_id":"[LARK_ID]"}',
+      inputTokens: 1200,
       itemType: 'mcpToolCall',
+      output: 'Authorization: [REDACTED] [REDACTED]',
       toolLabel: 'openviking · read_resource',
       toolName: 'read_resource',
       toolServer: 'openviking',
       toolStatus: 'completed',
     });
-    const serialized = JSON.stringify(tool);
-    assert.doesNotMatch(serialized, /viking:\/\/private|om-tool-target|oc-tool-chat/);
+    assert.doesNotMatch(JSON.stringify(tool), /viking:\/\/private|om-tool-target|oc-tool-chat/);
+  });
+
+  it('tails activities after a cursor oldest-first without skipping rows', () => {
+    for (let index = 1; index <= 5; index += 1) {
+      store.recordActivity({ eventKey: `tail:${index}`, kind: 'system.maintenance', occurredAtMs: index }, index);
+    }
+    const ids = store.db.prepare('SELECT id FROM activities ORDER BY id').all().map((row) => Number(row.id));
+    const page = store.listActivities({ afterId: ids[1], limit: 2 });
+    assert.deepEqual(page.activities.map((item) => item.id), [ids[3], ids[2]]);
+    assert.equal(page.hasNewer, true);
+    const rest = store.listActivities({ afterId: ids[3], limit: 2 });
+    assert.deepEqual(rest.activities.map((item) => item.id), [ids[4]]);
+    assert.equal(rest.hasNewer, false);
   });
 
   it('closes stale subscriber lifecycle rows so only the current listener is running', () => {

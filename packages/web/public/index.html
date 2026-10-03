@@ -7,79 +7,55 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     >
-    <meta name="color-scheme" content="light">
-    <title>Agent Activity · 时间轴</title>
+    <meta name="color-scheme" content="light dark">
+    <title>Agent Activity</title>
     <link rel="stylesheet" href="/activity.css">
     <script src="/activity.js" defer></script>
   </head>
   <body>
-    <a class="skip-link" href="#detail">跳到活动详情</a>
-
     <header class="topbar">
-      <div class="identity">
-        <div class="logo" aria-hidden="true">▦</div>
-        <label class="instance-picker" for="instance-select">
-          <span class="visually-hidden">选择 Agent</span>
-          <select id="instance-select" aria-label="选择 Agent" disabled>
-            <option>正在读取</option>
-          </select>
-        </label>
-        <div class="session-picker" role="group" aria-label="选择会话">
-          <button id="session-prev" type="button" title="更早的会话 ([)" disabled>‹</button>
-          <label class="session-select-wrap" for="session-select">
-            <span class="visually-hidden">选择会话</span>
-            <select id="session-select" aria-label="选择会话" disabled>
-              <option>正在读取</option>
-            </select>
-          </label>
-          <button id="session-next" type="button" title="更新的会话 (])" disabled>›</button>
-        </div>
-        <span id="service-status" class="service-status" role="status" aria-live="polite">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="service-status-text">正在连接</span>
-        </span>
-        <span class="crumb" id="crumb"></span>
+      <select id="instance-select" aria-label="选择 Agent" disabled>
+        <option>正在读取</option>
+      </select>
+      <div class="session-picker" role="group" aria-label="选择会话">
+        <button id="session-prev" type="button" title="更早的会话 ([)" disabled>‹</button>
+        <select id="session-select" aria-label="选择会话" disabled>
+          <option>正在读取</option>
+        </select>
+        <button id="session-next" type="button" title="更新的会话 (])" disabled>›</button>
       </div>
-
-      <div class="topbar-actions">
-        <span class="pill" id="clock" title="播放头时间">--:--:--</span>
-        <div class="zoom-ctl" role="group" aria-label="时间轴缩放">
-          <button id="z-out" type="button" title="缩小 (-)">−</button>
-          <input type="range" id="z-slider" min="0" max="1000" value="0" aria-label="缩放">
-          <button id="z-in" type="button" title="放大 (+)">＋</button>
-          <button id="z-def" type="button" class="accent" title="默认视窗 (0)">默认</button>
-          <button id="z-fit" type="button" class="accent" title="全览 (9)">全览</button>
-          <span class="span-label" id="span-label"></span>
-        </div>
-        <button id="privacy-toggle" class="quiet-button" type="button" aria-pressed="false">隐藏正文</button>
-      </div>
+      <span id="live" class="live" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="live-text">正在连接</span>
+      </span>
+      <button id="privacy-toggle" class="quiet" type="button" aria-pressed="false" title="模糊正文 (P)">隐藏正文</button>
     </header>
 
-    <main id="main">
-      <section id="detail" aria-label="活动详情">
-        <div id="landing">
-          <h2>正在读取活动</h2>
-          <p>消息、判断、投递和系统事件会显示在这里。</p>
-          <p class="keys">会话 [ ] · 拖动轨道 = 回放 · 滚轮 = 缩放 · ← → 步进 · 0 默认视窗 · 9 全览 · L 回到最新 · 右键块/轨道名 = 忽略</p>
-        </div>
-      </section>
+    <section id="strip" class="strip" aria-label="时间带：每段为一轮，点击跳转">
+      <div class="strip-labels" aria-hidden="true">
+        <span class="lb-in">收</span><span>回合</span><span class="lb-out">回</span>
+      </div>
+      <div class="strip-main">
+        <div id="strip-track" class="strip-track"></div>
+        <div id="strip-axis" class="strip-axis"></div>
+      </div>
+    </section>
 
-      <div id="divider" title="拖动调整上下比例"></div>
+    <div class="split">
+      <main id="feed" class="feed" aria-label="上下文">
+        <button id="load-older" class="quiet older" type="button" hidden>加载更早</button>
+        <div id="entries"></div>
+        <p id="empty" class="empty">正在读取活动…</p>
+      </main>
+      <aside class="side" aria-label="运行状态与系统事件">
+        <h2>运行状态</h2>
+        <dl id="stats" class="stats"></dl>
+        <h2>系统事件</h2>
+        <ol id="system" class="system"></ol>
+      </aside>
+    </div>
 
-      <section id="timeline" aria-label="活动时间轴">
-        <div id="gutter"></div>
-        <div id="viewport">
-          <div class="world" id="world"></div>
-          <div id="playhead"></div>
-        </div>
-      </section>
-    </main>
-
-    <footer class="statusbar">
-      <button id="follow-live" class="quiet-button" type="button" hidden>回到最新</button>
-      <button id="load-older" class="quiet-button" type="button" hidden>加载更早</button>
-      <span id="counts" class="counts"></span>
-      <span id="connection-notice" class="connection-notice" role="alert" hidden></span>
-    </footer>
+    <button id="follow-live" class="follow" type="button" hidden>↓ 最新</button>
+    <div id="notice" class="notice" role="alert" hidden></div>
   </body>
 </html>

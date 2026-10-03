@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { assembleVolcSelfHostedConversationPolicy } from './conversation-policy.mjs';
 import { safeError as safe } from './logger.mjs';
+import { activityPayload } from './activity.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
 
@@ -465,9 +466,14 @@ export class VolcAgent {
     this.expectedUserEventId = null;
     this.turnFenceSeen = false;
     this.abortController = new AbortController();
+    this.toolStarts = new Map();
     this._recordActivity('agent.turn_started', {
       inboundSeq: prepared.seqs.at(-1) ?? null,
-      metadata: { runtime: this.runtime, inboundSeqs: prepared.seqs },
+      metadata: {
+        runtime: this.runtime,
+        input: items.map((item) => item.text).join('\n'),
+        inboundSeqs: prepared.seqs,
+      },
     });
     void this._runTurn(prepared).catch((error) => this._completeTurn(error));
   }
@@ -736,22 +742,37 @@ export class VolcAgent {
         });
       }
     } else if (event.type === 'agent.thinking') {
-      this._recordActivity('agent.thinking', { inboundSeq, metadata: { runtime: this.runtime } });
+      this._recordActivity('agent.thinking', {
+        inboundSeq,
+        metadata: { runtime: this.runtime, thinking: textContent(event) || undefined },
+      });
     } else if (event.type === 'agent.tool_use') {
       this.modelWorking = false;
       this.modelStartedAtMs = null;
+      this.toolStarts?.set(event.id, { name: String(event.name ?? 'unknown tool'), atMs: Date.now() });
       this._recordActivity('agent.tool_called', {
         inboundSeq,
         summary: String(event.name ?? 'unknown tool'),
-        metadata: { runtime: this.runtime, toolId: event.id },
+        status: 'RUNNING',
+        metadata: { runtime: this.runtime, toolId: event.id, toolName: event.name, input: activityPayload(event.input) },
       });
     } else if (event.type === 'agent.tool_result' || event.type === 'user.tool_result') {
       this.modelWorking = true;
       this.modelStartedAtMs = Date.now();
+      const started = this.toolStarts?.get(event.tool_use_id);
+      this.toolStarts?.delete(event.tool_use_id);
+      const output = activityPayload(event.content);
       this._recordActivity('agent.tool_completed', {
         inboundSeq,
         status: event.is_error === true ? 'FAILED' : 'COMPLETED',
-        metadata: { runtime: this.runtime, toolId: event.tool_use_id },
+        summary: started?.name,
+        metadata: {
+          runtime: this.runtime,
+          toolId: event.tool_use_id,
+          toolName: started?.name,
+          ...(started ? { durationMs: Date.now() - started.atMs } : {}),
+          ...(event.is_error === true ? { error: output } : { output }),
+        },
       });
     } else if (event.type === 'session.status_idle' || event.type === 'status_idle') {
       const stopType = typeof event.stop_reason === 'string'
@@ -798,6 +819,7 @@ export class VolcAgent {
     const seqs = [...new Set(items.map((item) => item.seq).filter((seq) => seq != null))];
     const receipts = receiptIds(items);
     this.activeConversationKey = null;
+    const turnStartedAtMs = this.turnStartedAtMs;
     this.turnStartedAtMs = null;
     if (!completionError) {
       this.syncedThroughSeq = Math.max(this.syncedThroughSeq, this.deliveredThroughSeq);
@@ -809,7 +831,11 @@ export class VolcAgent {
       inboundSeq: seqs.at(-1) ?? null,
       status: completionError ? 'failed' : 'completed',
       summary: completionError ? safe(completionError) : undefined,
-      metadata: { runtime: this.runtime, inboundSeqs: seqs },
+      metadata: {
+        runtime: this.runtime,
+        inboundSeqs: seqs,
+        ...(turnStartedAtMs ? { durationMs: Date.now() - turnStartedAtMs } : {}),
+      },
     });
     if (completionError && this.onTurnFailed) {
       try { this.onTurnFailed(withReceiptIds({ inboundSeqs: seqs, error: safe(completionError) }, receipts)); } catch {}
