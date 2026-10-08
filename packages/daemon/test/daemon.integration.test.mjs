@@ -32,6 +32,32 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
     }
   });
 
+  it('marks a mention of another bot as other and expands its placeholder', async () => {
+    const env = await startMockEnv();
+    try {
+      env.receive(textMessage({
+        messageId: 'om-other-bot',
+        chatId: 'oc-group',
+        chatType: 'group',
+        text: '@_user_1 飞书CLI',
+        mentions: [{
+          key: '@_user_1',
+          name: '吴郑啸的DevBox飞书 CLI',
+          id: { open_id: 'ou_devbox12345678' },
+        }],
+      }));
+      await env.waitForCodexInput(/om-other-bot/);
+
+      const delivered = env.codexInput().find((entry) => /om-other-bot/.test(entry.text));
+      assert.match(delivered.text, / mention=other\]/);
+      assert.match(delivered.text, /@吴郑啸的DevBox飞书 CLI 飞书CLI/);
+      assert.doesNotMatch(delivered.text, /@_user_1/);
+      assert.doesNotMatch(delivered.text, /\[mentions:/);
+    } finally {
+      await env.stop();
+    }
+  });
+
   it('deduplicates a redelivered event instead of waking the model twice', async () => {
     const env = await startMockEnv();
     try {

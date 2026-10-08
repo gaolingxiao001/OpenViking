@@ -204,6 +204,7 @@ export function getConfig() {
     logLevel: enumEnv('LARK_DAEMON_LOG_LEVEL', 'info', ['debug', 'info', 'warn', 'error']),
     eventMode,
     profile: daemonProfile || cliProfile,
+    botOpenId: '',
     ignoredSenderIds: csvEnv('LARK_DAEMON_IGNORED_SENDER_IDS'),
     sendTimeoutMs: intEnv('LARK_DAEMON_SEND_TIMEOUT_MS', 30_000, { min: 1_000 }),
     shutdownTimeoutMs: intEnv('LARK_DAEMON_SHUTDOWN_TIMEOUT_MS', 20_000, { min: 5_000, max: 25_000 }),

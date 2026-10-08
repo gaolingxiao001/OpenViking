@@ -154,7 +154,7 @@ export class ChatRoster {
     }
     const unknown = results.filter((result) => result.matches.length === 0);
     if (unknown.length > 0) {
-      throw new Error(`mention_names contains unknown member name(s) for this chat: ${unknown.map((result) => result.name).join(', ')}. Use a name exactly as it appears in from= or [mentions: …] metadata.`);
+      throw new Error(`mention_names contains unknown member name(s) for this chat: ${unknown.map((result) => result.name).join(', ')}. Use a name exactly as it appears in from= metadata or trusted tool output.`);
     }
     const ambiguous = results.find((result) => result.matches.length > 1);
     if (ambiguous) {
