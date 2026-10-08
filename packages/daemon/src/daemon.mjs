@@ -112,7 +112,6 @@ export class LarkDaemon {
       registerNameResolver((chatId, userId) => this.roster.nameForId(chatId, userId));
       const larkInfo = await this.lark.preflight();
       this.config.profile = larkInfo.profile;
-      this.config.botOpenId = larkInfo.botOpenId;
       this.logger.info('cli_preflight_ok', { larkVersion: larkInfo.version });
       this.recordSystemActivity('system.preflight_ok', {
         summary: 'lark-cli 可用',

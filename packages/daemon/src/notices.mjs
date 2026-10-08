@@ -162,7 +162,6 @@ export class FailurePolicy {
     this.runtime.submit(rows.map((row) => ({
       text: formatInboundLine(row, null, {
         replyTo: resolveReplyTarget(this.store, row),
-        botOpenId: this.config.botOpenId,
       }),
       seq: row.seq,
       conversationKey: row.conversationKey,
