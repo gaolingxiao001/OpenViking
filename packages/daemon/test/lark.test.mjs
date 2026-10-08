@@ -119,6 +119,31 @@ describe('Lark bot identity', () => {
     }, registry, quietLogger);
     await assert.rejects(() => client.getBotIdentity(), /no valid open_id/);
   });
+
+  it('accepts nested camel-case bot info envelopes', async () => {
+    const registry = {
+      async run() {
+        return {
+          code: 0,
+          timedOut: false,
+          stdout: JSON.stringify({
+            ok: true,
+            data: { result: { botInfo: { openId: 'ou_sisi12345678', appName: 'Sisi' } } },
+          }),
+          stderr: '',
+        };
+      },
+    };
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: '/fake/lark-cli',
+      projectDir: '/tmp',
+    }, registry, quietLogger);
+    assert.deepEqual(await client.getBotIdentity(), {
+      openId: 'ou_sisi12345678',
+      name: 'Sisi',
+    });
+  });
 });
 
 describe('Lark meeting transport', () => {
