@@ -246,7 +246,7 @@ export const LARK_TOOLS = [
           maxItems: 10,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 100 },
-          description: 'Optional member display names to @mention, written exactly as they appear in from= or [mentions: …] metadata. The daemon resolves them to real IDs via the chat roster; prefer this over mention_user_ids and never guess an ID.',
+          description: 'Optional member display names to @mention, written exactly as they appear in from= metadata or trusted tool results. The daemon resolves them to real IDs via the chat roster; prefer this over mention_user_ids and never guess an ID.',
         },
         mention_user_ids: {
           type: 'array',
@@ -283,7 +283,7 @@ export const LARK_TOOLS = [
           maxItems: 10,
           uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 100 },
-          description: 'Optional member display names to @mention, written exactly as they appear in from= or [mentions: …] metadata. The daemon resolves them to real IDs via the chat roster; prefer this over mention_user_ids and never guess an ID.',
+          description: 'Optional member display names to @mention, written exactly as they appear in from= metadata or trusted tool results. The daemon resolves them to real IDs via the chat roster; prefer this over mention_user_ids and never guess an ID.',
         },
         mention_user_ids: {
           type: 'array',

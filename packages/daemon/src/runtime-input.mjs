@@ -52,6 +52,25 @@ export function oneLine(text) {
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
+export function mentionTarget(mentions, botOpenId) {
+  if (!Array.isArray(mentions) || mentions.length === 0) return null;
+  if (typeof botOpenId !== 'string' || !botOpenId) return 'other';
+  const mentionsMe = mentions.some((mention) => mention?.id === botOpenId);
+  const mentionsOther = mentions.some((mention) => mention?.id !== botOpenId);
+  if (mentionsMe && mentionsOther) return 'mixed';
+  return mentionsMe ? 'me' : 'other';
+}
+
+function renderInboundContent(message) {
+  let content = String(message.content ?? '');
+  for (const mention of message.mentions ?? []) {
+    if (typeof mention?.key !== 'string' || !mention.key) continue;
+    const label = oneLine(mention.name).trim() || shortenId(mention.id);
+    content = content.split(mention.key).join(`@${label}`);
+  }
+  return oneLine(content);
+}
+
 export function formatInboundLine(message, resolveName = null, authenticated = {}) {
   const idleForMs = Number(authenticated?.idleForMs);
   const idleTag = Number.isFinite(idleForMs) && idleForMs >= 0
@@ -65,13 +84,11 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
         ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName)
         : shortenId(replyTo.id)}`
     : '';
-  let line = `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}${replyTag}${idleTag}] ${oneLine(message.content)}`;
-  if (Array.isArray(message.mentions) && message.mentions.length > 0) {
-    const names = message.mentions.map((mention) => `@${oneLine(mention.name) || shortenId(mention.id)}`).join(' ');
-    line += ` [mentions: ${names}]`;
-  }
-  return line;
+  const target = mentionTarget(message.mentions, authenticated?.botOpenId);
+  const mentionTag = target ? ` mention=${target}` : '';
+  return `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}`
+    + `${replyTag}${mentionTag}${idleTag}] ${renderInboundContent(message)}`;
 }
 
 // A quote-reply's target, resolved from local history: 'me' when the sender

@@ -91,6 +91,8 @@ describe('conversation policy assemble', () => {
         agentName: 'Zayn',
       });
       assert.match(text, /Lark conversation format/);
+      assert.match(text, /mention=me\|other\|mixed/);
+      assert.match(text, /mention=other are strong negative routing signals/);
       assert.match(text, /## Persona and voice/);
       assert.match(text, /CANONICAL_PERSONA_MARKER/);
       assert.doesNotMatch(text, /irrelevant filler/);
@@ -124,6 +126,11 @@ describe('conversation policy assemble', () => {
       assert.match(injected, /OpenViking identity/);
       assert.match(injected, /viking:\/\/user\/amy\/identity\.md/);
       assert.match(injected, /I am Alice/);
+      assert.match(injected, /Identity boundary:/);
+      assert.ok(
+        injected.indexOf('Identity boundary:') > injected.indexOf('I am Alice'),
+        'the routing boundary must follow untrusted identity prose',
+      );
 
       const fallback = assembleConversationPolicy(files, {
         env: {},

@@ -75,10 +75,26 @@ export class LarkClient {
       timeoutMs: 10_000,
     });
     if (version.code !== 0) throw new Error('lark-cli --version failed');
+    const identity = await this.getBotIdentity();
     return {
       profile: this.profile,
       version: `${version.stdout}\n${version.stderr}`.trim().split(/\r?\n/).at(-1),
+      botOpenId: identity.openId,
     };
+  }
+
+  async getBotIdentity() {
+    const parsed = await this.runJson([
+      '--profile', this.profile,
+      'api', 'GET', '/open-apis/bot/v3/info',
+      '--as', 'bot', '--json',
+    ], 'bot identity lookup', 15_000);
+    const bot = parsed?.data?.bot ?? parsed?.data?.data?.bot ?? parsed?.bot;
+    const openId = bot?.open_id;
+    if (typeof openId !== 'string' || !/^ou_[A-Za-z0-9_-]{8,}$/.test(openId)) {
+      throw new Error('lark-cli bot identity lookup returned no valid open_id');
+    }
+    return { openId, name: typeof bot?.app_name === 'string' ? bot.app_name : '' };
   }
 
   startSubscription(onLine, onUnexpectedExit) {

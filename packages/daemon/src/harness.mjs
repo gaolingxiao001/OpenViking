@@ -167,6 +167,7 @@ export class Harness {
         text: formatInboundLine(event, null, {
           ...(idleHint ?? {}),
           replyTo: resolveReplyTarget(this.store, event),
+          botOpenId: this.config.botOpenId,
         }),
         seq: result.inbound.seq,
       });

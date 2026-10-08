@@ -72,6 +72,54 @@ describe('Lark chat lookup', () => {
   });
 });
 
+describe('Lark bot identity', () => {
+  it('resolves the authenticated bot open_id instead of matching display names', async () => {
+    const calls = [];
+    const registry = {
+      async run(command, args, options) {
+        calls.push({ command, args, options });
+        return {
+          code: 0,
+          timedOut: false,
+          stdout: JSON.stringify({
+            ok: true,
+            data: { bot: { open_id: 'ou_zayn12345678', app_name: 'Zayn' } },
+          }),
+          stderr: '',
+        };
+      },
+    };
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: '/fake/lark-cli',
+      projectDir: '/tmp',
+    }, registry, quietLogger);
+    assert.deepEqual(await client.getBotIdentity(), {
+      openId: 'ou_zayn12345678',
+      name: 'Zayn',
+    });
+    assert.deepEqual(calls[0].args, [
+      '--profile', 'test-profile',
+      'api', 'GET', '/open-apis/bot/v3/info',
+      '--as', 'bot', '--json',
+    ]);
+  });
+
+  it('rejects bot info without a valid open_id', async () => {
+    const registry = {
+      async run() {
+        return { code: 0, timedOut: false, stdout: '{"ok":true,"data":{"bot":{}}}', stderr: '' };
+      },
+    };
+    const client = new LarkClient({
+      profile: 'test-profile',
+      larkCliBin: '/fake/lark-cli',
+      projectDir: '/tmp',
+    }, registry, quietLogger);
+    await assert.rejects(() => client.getBotIdentity(), /no valid open_id/);
+  });
+});
+
 describe('Lark meeting transport', () => {
   it('subscribes to IM plus the three VC push event types', () => {
     assert.deepEqual(SUBSCRIBED_EVENT_TYPES, [
