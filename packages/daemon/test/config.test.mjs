@@ -97,6 +97,29 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.throws(() => getConfig(), /LARK_DAEMON_CODEX_EFFORT/);
   });
 
+  it('does not read the removed Codex model environment variable', () => {
+    setEnv('LARK_DAEMON_MODEL', undefined);
+    setEnv('LARK_DAEMON_CODEX_MODEL', 'gpt-5.6-sol');
+    const config = getConfig();
+    assert.equal(config.initialModel, '');
+    assert.equal(Object.hasOwn(config, 'codexModel'), false);
+  });
+
+  it('accepts TraeX CLI path and reasoning effort', () => {
+    setEnv('TRAEX_BIN', '/opt/local/bin/traecli');
+    setEnv('TRAECLI_BIN', '/ignored/traecli');
+    setEnv('LARK_DAEMON_TRAEX_EFFORT', 'xhigh');
+    const config = getConfig();
+    assert.equal(config.traexBin, '/opt/local/bin/traecli');
+    assert.equal(config.traexEffort, 'xhigh');
+
+    setEnv('TRAEX_BIN', undefined);
+    assert.equal(getConfig().traexBin, '/ignored/traecli');
+
+    setEnv('LARK_DAEMON_TRAEX_EFFORT', 'turbo');
+    assert.throws(() => getConfig(), /LARK_DAEMON_TRAEX_EFFORT/);
+  });
+
   it('accepts Pi CLI path and thinking-level effort', () => {
     setEnv('PI_BIN', '/opt/homebrew/bin/pi');
     setEnv('LARK_DAEMON_PI_MODEL', 'openai/gpt-4o');
@@ -112,7 +135,6 @@ describe('configuration safety', { concurrency: false }, () => {
   it('loads the managed-agent seed session without exposing the API key publicly', () => {
     setEnv('ARK_API_KEY', 'secret-test-key');
     setEnv('LARK_DAEMON_MODEL', 'ark');
-    setEnv('LARK_DAEMON_CODEX_MODEL', 'ark');
     setEnv('LARK_DAEMON_VOLC_SESSION_ID', 'sesn-test12345678');
     setEnv('LARK_DAEMON_VOLC_ENVIRONMENT_ID', 'env-test12345678');
     setEnv('SESSION_ID', 'sesn-generic-wins-only-as-fallback');
@@ -122,7 +144,6 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.equal(config.volcEnvironmentId, 'env-test12345678');
     assert.equal(config.volcBaseUrl, 'https://ark.cn-beijing.volces.com/api/v3');
     assert.equal(config.initialModel, 'ark');
-    assert.equal(config.codexModel, '');
   });
 
   it('rejects a non-HTTPS managed-agent endpoint', () => {

@@ -21,6 +21,7 @@ function validManifest() {
     env: {
       LARK_DAEMON_LOG_LEVEL: 'info',
       LARK_DAEMON_DRY_RUN: 'false',
+      LARK_DAEMON_TRAEX_EFFORT: 'medium',
       TEAM_TASK_BOARD_URL: '',
     },
     agents: [
@@ -84,6 +85,7 @@ test('loads any number of agents from one absolute deployment manifest', () => {
     assert.deepEqual(deployment.env, {
       LARK_DAEMON_LOG_LEVEL: 'info',
       LARK_DAEMON_DRY_RUN: 'false',
+      LARK_DAEMON_TRAEX_EFFORT: 'medium',
       TEAM_TASK_BOARD_URL: '',
     });
     assert.deepEqual(deployment.agents.map(({ id }) => id), ['alpha', 'beta', 'gamma']);
@@ -194,6 +196,7 @@ test('manifest env accepts only string values from the daemon-wide allowlist', (
     ['reserved identity', 'LARK_DAEMON_PROFILE', 'cli_wrong', /env field is not allowed: LARK_DAEMON_PROFILE/],
     ['reserved control plane', 'LARK_UPDATER_SOCKET', '/tmp/wrong', /env field is not allowed: LARK_UPDATER_SOCKET/],
     ['system-only secret', 'ARK_API_KEY', 'must-not-live-in-manifest', /env field is not allowed: ARK_API_KEY/],
+    ['removed Codex model', 'LARK_DAEMON_CODEX_MODEL', 'gpt-5.6-sol', /env field is not allowed: LARK_DAEMON_CODEX_MODEL/],
     ['unknown key', 'UNRELATED_SETTING', 'value', /env field is not allowed: UNRELATED_SETTING/],
     ['non-string', 'LARK_DAEMON_HISTORY_LIMIT', 30, /env\.LARK_DAEMON_HISTORY_LIMIT must be a string/],
   ];
@@ -229,7 +232,6 @@ test('foreground selection defaults to defaultInstance and pins every identity b
       workspace: env.LARK_DAEMON_WORKSPACE,
       ovConfig: env.OPENVIKING_CLI_CONFIG_FILE,
       model: env.LARK_DAEMON_MODEL,
-      codexModel: env.LARK_DAEMON_CODEX_MODEL,
     }, {
       id: 'beta',
       target: 'beta',
@@ -241,8 +243,8 @@ test('foreground selection defaults to defaultInstance and pins every identity b
       workspace: '/srv/lark-daemon/workspaces/beta',
       ovConfig: '/srv/lark-daemon/ov/beta.json',
       model: 'gpt-5.6-sol',
-      codexModel: 'gpt-5.6-sol',
     });
+    assert.equal(env.LARK_DAEMON_CODEX_MODEL, undefined);
     assert.equal(env.LARK_DAEMON_VOLC_SESSION_ID, undefined);
     assert.equal(env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, undefined);
   });
@@ -258,7 +260,7 @@ test('pins Ark as a generic initial model without misconfiguring Codex', () => {
     const deployment = loadDeploymentManifest(env);
     applyDeploymentAgentEnv(env, deployment);
     assert.equal(env.LARK_DAEMON_MODEL, 'ark');
-    assert.equal(env.LARK_DAEMON_CODEX_MODEL, '');
+    assert.equal(env.LARK_DAEMON_CODEX_MODEL, undefined);
     assert.equal(env.LARK_DAEMON_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
     assert.equal(env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
   });

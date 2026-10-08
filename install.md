@@ -6,11 +6,11 @@
 
 - Node.js 22.5 或以上；项目没有 npm 依赖，不需要 `npm install`。
 - 已配置 bot profile 的 `lark-cli`。
-- 一个 coding agent：默认支持 Codex，也可以使用 Claude、Pi 或火山方舟 Managed Agent。
+- 一个 coding agent：默认支持 Codex，也可以使用 TraeX、Claude、Pi 或火山方舟 Managed Agent。
 - 正式常驻运行需要 `pm2`：`npm i -g pm2`。
 - OpenViking，用来保存跨会话上下文。每个 agent 在 deployment manifest 中配置自己的 `ovConfig`。
 
-Codex、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [deployment.example.json](./deployment.example.json)。
+Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [deployment.example.json](./deployment.example.json)。
 
 ## 配飞书
 

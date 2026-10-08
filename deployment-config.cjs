@@ -11,6 +11,8 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'TEAM_TASK_BOARD_URL',
   'LARK_CLI_BIN',
   'CODEX_BIN',
+  'TRAEX_BIN',
+  'TRAECLI_BIN',
   'CLAUDE_BIN',
   'PI_BIN',
   'LARK_DAEMON_LOG_LEVEL',
@@ -24,6 +26,7 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'LARK_DAEMON_IDLE_REACTION_AFTER_MS',
   'LARK_DAEMON_RETENTION_MS',
   'LARK_DAEMON_CODEX_EFFORT',
+  'LARK_DAEMON_TRAEX_EFFORT',
   'LARK_DAEMON_CLAUDE_EFFORT',
   'LARK_DAEMON_CLAUDE_MODEL',
   'LARK_DAEMON_PI_EFFORT',
@@ -346,7 +349,6 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     LARK_DAEMON_WORKSPACE: agent.workspace,
     OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
     LARK_DAEMON_MODEL: agent.model,
-    LARK_DAEMON_CODEX_MODEL: agent.model === 'ark' ? '' : agent.model,
   });
   if (agent.volcSessionId) {
     env.LARK_DAEMON_VOLC_SESSION_ID = agent.volcSessionId;

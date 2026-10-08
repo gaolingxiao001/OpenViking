@@ -54,19 +54,25 @@ export function parseCommand(text) {
 }
 
 export function helpText(snapshot) {
-  return [
+  const supportsEffort = snapshot.capabilities?.effortControl === 'selectable';
+  const effortLevels = getRuntimeDefinition(snapshot.runtime ?? DEFAULT_RUNTIME_ID)?.efforts ?? EFFORT_LEVELS;
+  const lines = [
     '可用命令（支持前缀匹配，如 /h、/m）：',
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
     '/status — 查看模型是否在工作以及持续时间',
-    '/model [名称] — 查看或切换模型，如 pi、ark、sonnet、gpt-5.6-sol',
-    `/effort [档位] — 查看或切换推理档位（${EFFORT_LEVELS.join('/')}）`,
+    '/model [名称] — 查看或切换模型，如 traex、pi、ark、sonnet、gpt-5.6-sol',
+  ];
+  if (supportsEffort) lines.push(`/effort [档位] — 查看或切换推理档位（${effortLevels.join('/')}）`);
+  else lines.push('/effort [档位] — 当前 Runtime 不支持 daemon 侧推理档位配置');
+  lines.push(
     '',
     `当前会话：${snapshot.session?.id ?? snapshot.threadId ?? '（未连接）'}`,
     `Runtime：${snapshot.runtime ?? 'codex'}`,
     `模型：${snapshot.model || '（默认）'}`,
-    `推理档位：${snapshot.effort}`,
-  ].join('\n');
+  );
+  if (supportsEffort) lines.push(`推理档位：${snapshot.effort}`);
+  return lines.join('\n');
 }
 
 function durationText(milliseconds) {
@@ -205,7 +211,14 @@ export async function executeCommand(command, runtime) {
   }
 
   const capabilities = current.capabilities ?? getRuntimeDefinition(current.runtime)?.capabilities;
-  if (capabilities?.effortControl === 'remote-managed') {
+  const effortControl = capabilities?.effortControl ?? 'unsupported';
+  if (effortControl === 'unsupported') {
+    return {
+      ok: false,
+      text: '当前 Runtime 不支持 daemon 侧 /effort 配置',
+    };
+  }
+  if (effortControl === 'remote-managed') {
     return {
       ok: false,
       text: 'Ark managed agent 的推理档位由远端 Agent 配置管理，不能通过 /effort 修改',
@@ -246,6 +259,12 @@ export async function executeCommand(command, runtime) {
     return {
       ok: false,
       text: '当前 Runtime 的推理档位由远端配置管理，不能通过 /effort 修改',
+    };
+  }
+  if (applied.ok === false && applied.reason === 'unsupported-effort-control') {
+    return {
+      ok: false,
+      text: '当前 Runtime 不支持 daemon 侧 /effort 配置',
     };
   }
   const threadId = applied.threadId;

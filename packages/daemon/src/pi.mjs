@@ -101,7 +101,11 @@ export class PiAgent {
 
     this.systemPrompt = assemblePiConversationPolicy(config);
     this.developerInstructionsText = this.systemPrompt;
-    this.model = options.model ?? store.getSetting?.('pi_model') ?? config.piModel ?? '';
+    this.model = options.model
+      ?? store.getSetting?.('pi_model')
+      ?? options.initialModel
+      ?? config.piModel
+      ?? '';
     this.effort = options.effort
       ?? store.getSetting?.('pi_effort')
       ?? config.piEffort
