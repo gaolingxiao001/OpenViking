@@ -32,7 +32,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
     }
   });
 
-  it('marks a mention of another bot as other and expands its placeholder', async () => {
+  it('expands a mention placeholder to the visible target name', async () => {
     const env = await startMockEnv();
     try {
       env.receive(textMessage({
@@ -49,7 +49,6 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
       await env.waitForCodexInput(/om-other-bot/);
 
       const delivered = env.codexInput().find((entry) => /om-other-bot/.test(entry.text));
-      assert.match(delivered.text, / mention=other\]/);
       assert.match(delivered.text, /@吴郑啸的DevBox飞书 CLI 飞书CLI/);
       assert.doesNotMatch(delivered.text, /@_user_1/);
       assert.doesNotMatch(delivered.text, /\[mentions:/);

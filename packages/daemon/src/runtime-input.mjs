@@ -52,15 +52,6 @@ export function oneLine(text) {
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
-export function mentionTarget(mentions, botOpenId) {
-  if (!Array.isArray(mentions) || mentions.length === 0) return null;
-  if (typeof botOpenId !== 'string' || !botOpenId) return 'other';
-  const mentionsMe = mentions.some((mention) => mention?.id === botOpenId);
-  const mentionsOther = mentions.some((mention) => mention?.id !== botOpenId);
-  if (mentionsMe && mentionsOther) return 'mixed';
-  return mentionsMe ? 'me' : 'other';
-}
-
 function renderInboundContent(message) {
   let content = String(message.content ?? '');
   for (const mention of message.mentions ?? []) {
@@ -84,11 +75,9 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
         ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName)
         : shortenId(replyTo.id)}`
     : '';
-  const target = mentionTarget(message.mentions, authenticated?.botOpenId);
-  const mentionTag = target ? ` mention=${target}` : '';
   return `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
     + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}`
-    + `${replyTag}${mentionTag}${idleTag}] ${renderInboundContent(message)}`;
+    + `${replyTag}${idleTag}] ${renderInboundContent(message)}`;
 }
 
 // A quote-reply's target, resolved from local history: 'me' when the sender

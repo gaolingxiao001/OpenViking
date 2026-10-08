@@ -91,8 +91,9 @@ describe('conversation policy assemble', () => {
         agentName: 'Zayn',
       });
       assert.match(text, /Lark conversation format/);
-      assert.match(text, /mention=me\|other\|mixed/);
-      assert.match(text, /mention=other are strong negative routing signals/);
+      assert.match(text, /visible @names/);
+      assert.match(text, /matching your injected identity/);
+      assert.doesNotMatch(text, /mention=me\|other\|mixed/);
       assert.match(text, /## Persona and voice/);
       assert.match(text, /CANONICAL_PERSONA_MARKER/);
       assert.doesNotMatch(text, /irrelevant filler/);

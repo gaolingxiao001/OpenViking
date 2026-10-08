@@ -26,28 +26,6 @@ function findChatName(value, depth = 0) {
   return null;
 }
 
-function findBotIdentity(value, depth = 0) {
-  if (depth > 8 || value === null || value === undefined) return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findBotIdentity(item, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (typeof value !== 'object') return null;
-  const openId = value.open_id ?? value.openId;
-  if (typeof openId === 'string' && /^ou_[A-Za-z0-9_-]{8,}$/.test(openId)) {
-    const name = value.app_name ?? value.appName ?? value.name;
-    return { openId, name: typeof name === 'string' ? name : '' };
-  }
-  for (const child of Object.values(value)) {
-    const found = findBotIdentity(child, depth + 1);
-    if (found) return found;
-  }
-  return null;
-}
-
 export class LarkClient {
   constructor(config, registry, logger) {
     this.config = config;
@@ -97,25 +75,10 @@ export class LarkClient {
       timeoutMs: 10_000,
     });
     if (version.code !== 0) throw new Error('lark-cli --version failed');
-    const identity = await this.getBotIdentity();
     return {
       profile: this.profile,
       version: `${version.stdout}\n${version.stderr}`.trim().split(/\r?\n/).at(-1),
-      botOpenId: identity.openId,
     };
-  }
-
-  async getBotIdentity() {
-    const parsed = await this.runJson([
-      '--profile', this.profile,
-      'api', 'GET', '/open-apis/bot/v3/info',
-      '--as', 'bot', '--json',
-    ], 'bot identity lookup', 15_000);
-    const identity = findBotIdentity(parsed);
-    if (!identity) {
-      throw new Error('lark-cli bot identity lookup returned no valid open_id');
-    }
-    return identity;
   }
 
   startSubscription(onLine, onUnexpectedExit) {

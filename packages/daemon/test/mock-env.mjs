@@ -89,10 +89,6 @@ function fakeLarkSource(dir) {
       console.log(JSON.stringify({ ok: true, data: { users: [], bots: [] } }));
       process.exit(0);
     }
-    if (args.includes('/open-apis/bot/v3/info')) {
-      console.log(JSON.stringify({ ok: true, data: { bot: { open_id: 'ou_zayn12345678', app_name: 'Zayn' } } }));
-      process.exit(0);
-    }
     if (args.includes('event')) {
       // ponytail: 20ms file polling; appends are small enough to arrive whole.
       let offset = 0;
