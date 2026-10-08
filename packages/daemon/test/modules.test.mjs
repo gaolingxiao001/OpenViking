@@ -106,7 +106,7 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.LARK_DAEMON_AGENT_NAME, 'Alpha');
     assert.equal(alpha.env.LARK_DAEMON_UPGRADE_TARGET, 'alpha');
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
-    assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, 'gpt-5.6-sol');
+    assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, undefined);
     assert.equal(alpha.env.LARK_DAEMON_MODEL, 'gpt-5.6-sol');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, 'true');
     assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND, '/usr/bin/python3');
@@ -122,7 +122,7 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, '');
     assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
     assert.equal(beta.env.LARK_DAEMON_MODEL, 'ark');
-    assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, '');
+    assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, undefined);
     assert.equal(beta.env.LARK_DAEMON_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
     assert.equal(beta.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
     assert.equal(beta.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, undefined);

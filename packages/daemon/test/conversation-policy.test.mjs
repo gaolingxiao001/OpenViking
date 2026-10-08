@@ -19,15 +19,20 @@ function writePrompt(name, body) {
 const defaultSystemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 describe('conversation policy assemble', () => {
-  it('requires native runtimes to close tool-only Lark turns with internal text', () => {
+  it('does not tell the agent to suppress final assistant output', () => {
     const text = assembleConversationPolicy({
       systemPromptPath: defaultSystemPromptPath,
     });
 
-    assert.match(text, /After a successful final Lark delivery tool call/);
-    assert.match(text, /DELIVERED/);
-    assert.match(text, /NO_DELIVERY/);
-    assert.match(text, /Never end a runtime turn with an empty final answer/);
+    assert.match(text, /Your final answer text, your thinking, and anything printed outside tool calls are internal telemetry/);
+    assert.match(text, /The only way any user sees anything is a successful trusted Lark tool call/);
+    assert.match(text, /do not call a Lark delivery tool/);
+    assert.match(text, /prefer no Lark delivery action/);
+    assert.doesNotMatch(text, /standard agent protocol/);
+    assert.doesNotMatch(text, /DELIVERED/);
+    assert.doesNotMatch(text, /NO_DELIVERY/);
+    assert.doesNotMatch(text, /do nothing and end the turn/);
+    assert.doesNotMatch(text, /Stay silent/);
   });
 
   it('stitches base, OpenViking, optional meeting audio, and harness', () => {

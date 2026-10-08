@@ -87,7 +87,11 @@ export class ClaudeAgent {
 
     this.systemPrompt = assembleConversationPolicy(config);
     this.developerInstructionsText = this.systemPrompt;
-    this.model = options.model ?? store.getSetting?.('claude_model') ?? config.claudeModel ?? '';
+    this.model = options.model
+      ?? store.getSetting?.('claude_model')
+      ?? options.initialModel
+      ?? config.claudeModel
+      ?? '';
     this.effort = options.effort
       ?? store.getSetting?.('claude_effort')
       ?? config.claudeEffort

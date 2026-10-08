@@ -229,7 +229,6 @@ export async function startMockEnv({
     codexBin: fakeCodex,
     profile: 'test-profile',
     initialModel: '',
-    codexModel: '',
     claudeModel: '',
     openVikingConfigPath,
     ignoredSenderIds: new Set(),

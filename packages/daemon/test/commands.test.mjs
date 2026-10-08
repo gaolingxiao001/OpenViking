@@ -38,7 +38,9 @@ function fakeCodex(overrides = {}) {
           switching: false,
         },
         capabilities: {
-          effortControl: this.runtime === 'volc' ? 'remote-managed' : 'selectable',
+          effortControl: this.runtime === 'volc'
+            ? 'remote-managed'
+            : 'selectable',
         },
         models,
       };
@@ -135,10 +137,19 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /th-42/);
     assert.match(outcome.text, /gpt-x/);
     assert.match(outcome.text, /high/);
-    assert.match(outcome.text, /pi、ark、sonnet、gpt-5\.6-sol/);
+    assert.match(outcome.text, /traex、pi、ark、sonnet、gpt-5\.6-sol/);
     assert.doesNotMatch(outcome.text, /claude:|codex:/);
     assert.doesNotMatch(outcome.text, /restart/);
     assert.equal(codex.calls.length, 0);
+  });
+
+  it('help reports TraeX effort controls', async () => {
+    const agent = fakeCodex({ runtime: 'traex', threadId: 'th-42', model: 'gpt-5.5', effort: 'medium' });
+    const outcome = await executeCommand({ name: 'help', arg: '' }, agent);
+    assert.equal(outcome.ok, true);
+    assert.match(outcome.text, /\/effort/);
+    assert.match(outcome.text, /max/);
+    assert.match(outcome.text, /推理档位：medium/);
   });
 
   it('new rotates the session without resume', async () => {
@@ -364,6 +375,34 @@ describe('executeCommand', () => {
     assert.match(qualified.text, /已切到 openai\/gpt-4o/);
   });
 
+  it('selects TraeX as a first-class runtime via /model traex and trae:<model>', async () => {
+    const agent = fakeCodex({
+      runtime: 'codex',
+      model: 'gpt-current',
+      listModels: async () => [
+        { id: 'gpt-current', efforts: ['medium'] },
+      ],
+      async setModel(model) {
+        this.calls.push(['setModel', model]);
+        const resolved = model.replace(/^trae:/, '');
+        this.runtime = model.startsWith('trae') ? 'traex' : this.runtime;
+        return { runtimeChanged: this.runtime === 'traex', runtime: this.runtime, model: resolved || 'traex' };
+      },
+    });
+
+    const switched = await executeCommand({ name: 'model', arg: 'traex' }, agent);
+    assert.equal(switched.ok, true);
+    assert.deepEqual(agent.calls.at(-1), ['setModel', 'traex']);
+    assert.match(switched.text, /已切到 traex/);
+
+    agent.runtime = 'codex';
+    const model = await executeCommand({ name: 'model', arg: 'trae:gpt-5.6-sol' }, agent);
+    assert.equal(model.ok, true);
+    assert.deepEqual(agent.calls.at(-1), ['setModel', 'trae:gpt-5.6-sol']);
+    assert.match(model.text, /已切到 gpt-5\.6-sol/);
+    assert.doesNotMatch(model.text, /trae:/);
+  });
+
   it('stays on Pi for pi:<id> and an unprefixed live-list id', async () => {
     const agent = fakeCodex({
       runtime: 'pi',
@@ -409,6 +448,19 @@ describe('executeCommand', () => {
     assert.equal(result.ok, false);
     assert.match(result.text, /远端 Agent/);
     assert.equal(calls.some(([name]) => name === 'setEffort'), false);
+  });
+
+  it('switches TraeX effort by rotating the session', async () => {
+    const agent = fakeCodex({
+      runtime: 'traex',
+      model: 'gpt-5.5',
+      effort: 'medium',
+      listModels: async () => [{ id: 'gpt-5.5', efforts: ['low', 'medium', 'high'] }],
+    });
+    const result = await executeCommand({ name: 'effort', arg: 'high' }, agent);
+    assert.equal(result.ok, true);
+    assert.equal(result.text, '已切换推理档位：high，并已开启新会话：th-new');
+    assert.deepEqual(agent.calls, [['interrupt'], ['setEffort', 'high'], ['rotate', { resume: false }]]);
   });
 
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {

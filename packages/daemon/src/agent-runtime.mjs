@@ -100,14 +100,14 @@ export class AgentRuntime {
     const persistedRuntime = RUNTIME_IDS.includes(cognition.runtime)
       ? cognition.runtime
       : DEFAULT_RUNTIME_ID;
-    this.runtime = this.store.hasCognitionRuntime?.() === false
-      ? resolveRuntimeModelTarget(this.config.initialModel || this.config.codexModel || '').runtime
-      : persistedRuntime;
+    const freshTarget = resolveRuntimeModelTarget(this.config.initialModel || '');
+    const freshCognition = this.store.hasCognitionRuntime?.() === false;
+    this.runtime = freshCognition ? freshTarget.runtime : persistedRuntime;
     // A daemon generation must never inherit the previous process's authority.
     // If that process crashed with a detached MCP sidecar still alive, rotating
     // the token here fences it before the replacement backend starts.
     cognition = this.store.initializeCognition(this.runtime, randomUUID());
-    this.backend = this._instantiate(this.runtime);
+    this.backend = this._instantiate(this.runtime, freshCognition ? { initialModel: freshTarget.model } : {});
     await this.backend.start();
     this._authorityChanged(cognition);
   }
@@ -237,12 +237,20 @@ export class AgentRuntime {
       }
       if (request.kind === 'select-effort') {
         const definition = getRuntimeDefinition(this.runtime);
-        if (definition?.capabilities.effortControl !== 'selectable') {
-          return { ok: false, kind: request.kind, reason: 'remote-managed' };
+        const effortControl = definition?.capabilities.effortControl;
+        if (effortControl !== 'selectable') {
+          return {
+            ok: false,
+            kind: request.kind,
+            reason: effortControl === 'remote-managed'
+              ? 'remote-managed'
+              : 'unsupported-effort-control',
+          };
         }
         if (!definition.efforts.includes(request.effort)) {
           return { ok: false, kind: request.kind, reason: 'unsupported-effort' };
         }
+        // TODO（gaolingxiao）：当前切effort后直接重开session，后续可以讨论是否不重开
         await this._interrupt();
         if (this.stopping) throw new Error('agent runtime stopped during effort transition');
         const previousEffort = this.backend.effort;

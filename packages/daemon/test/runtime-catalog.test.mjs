@@ -16,9 +16,12 @@ import {
 describe('runtime catalog', () => {
   it('owns runtime ids, aliases, static models, efforts, and capabilities', () => {
     assert.equal(DEFAULT_RUNTIME_ID, 'codex');
-    assert.deepEqual(RUNTIME_IDS, ['codex', 'claude', 'volc', 'pi']);
+    assert.deepEqual(RUNTIME_IDS, ['codex', 'traex', 'claude', 'volc', 'pi']);
     assert.deepEqual(RUNTIME_ALIASES, {
       codex: 'codex',
+      traex: 'traex',
+      trae: 'traex',
+      traecli: 'traex',
       claude: 'claude',
       volc: 'volc',
       volcengine: 'volc',
@@ -28,6 +31,18 @@ describe('runtime catalog', () => {
     assert.deepEqual(getRuntimeDefinition('claude').models, ['sonnet', 'opus', 'haiku', 'fable']);
     assert.deepEqual(getRuntimeDefinition('claude').efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
     assert.equal(getRuntimeDefinition('codex').capabilities.sessionAuthority, 'preserve-process');
+    assert.deepEqual(getRuntimeDefinition('traex').directAliases, ['traex', 'trae', 'traecli']);
+    assert.deepEqual(getRuntimeDefinition('traex').efforts, [
+      'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
+    ]);
+    assert.deepEqual(getRuntimeDefinition('traex').capabilities, {
+      modelCatalog: 'dynamic',
+      effortControl: 'selectable',
+      activeInput: 'steer',
+      scopePolicy: 'any',
+      outputOwnership: 'runtime',
+      sessionAuthority: 'preserve-process',
+    });
     assert.equal(getRuntimeDefinition('claude').capabilities.sessionAuthority, 'preserve-process');
     assert.deepEqual(getRuntimeDefinition('ark').models, ['ark']);
     assert.deepEqual(getRuntimeDefinition('volc').efforts, ['managed']);
@@ -85,6 +100,9 @@ describe('runtime catalog', () => {
       ['claude:', { runtime: 'claude', model: '', canonical: 'claude' }],
       ['codex:gpt-5.6-sol', { runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol' }],
       ['codex:', { runtime: 'codex', model: '', canonical: '' }],
+      ['traex', { runtime: 'traex', model: '', canonical: 'traex' }],
+      ['traecli', { runtime: 'traex', model: '', canonical: 'traex' }],
+      ['traex:gpt-5.6-sol', { runtime: 'traex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol' }],
       ['ark', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
       ['volcengine', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
       ['volc:', { runtime: 'volc', model: 'ark', canonical: 'ark' }],
@@ -141,6 +159,20 @@ describe('runtime catalog', () => {
       runtime: 'pi',
       model: 'openai/gpt-4o',
     });
+    assert.deepEqual(parseRuntimeModelSelector('trae:gpt-5.6-sol'), {
+      raw: 'trae:gpt-5.6-sol',
+      qualified: true,
+      qualifier: 'trae',
+      runtime: 'traex',
+      model: 'gpt-5.6-sol',
+    });
+    assert.deepEqual(parseRuntimeModelSelector('traex'), {
+      raw: 'traex',
+      qualified: false,
+      qualifier: null,
+      runtime: null,
+      model: '',
+    });
   });
 
   it('filters live model ids using the same ownership rules as target resolution', () => {
@@ -148,8 +180,10 @@ describe('runtime catalog', () => {
     assert.equal(modelMatchesRuntime('ark', 'volcengine'), true);
     assert.equal(modelMatchesRuntime('gpt-5.6-sol', 'codex'), true);
     assert.equal(modelMatchesRuntime('openai/gpt-4o', 'pi'), true);
+    assert.equal(modelMatchesRuntime('openai/gpt-4o', 'traex'), true);
     assert.equal(modelMatchesRuntime('sonnet', 'codex'), false);
     assert.equal(modelMatchesRuntime('sonnet', 'pi'), false);
+    assert.equal(modelMatchesRuntime('sonnet', 'traex'), false);
     assert.equal(modelMatchesRuntime('gpt-5.6-sol', 'claude'), false);
     assert.equal(modelMatchesRuntime('anything', 'missing'), false);
     assert.deepEqual(
@@ -163,6 +197,10 @@ describe('runtime catalog', () => {
     assert.deepEqual(
       resolveRuntimeModelTarget('sonnet', 'pi'),
       { runtime: 'claude', model: 'sonnet', canonical: 'sonnet' },
+    );
+    assert.deepEqual(
+      resolveRuntimeModelTarget('openai/gpt-4o', 'traex'),
+      { runtime: 'traex', model: 'openai/gpt-4o', canonical: 'openai/gpt-4o' },
     );
     assert.deepEqual(staticModelEntries(), [
       { id: 'sonnet', efforts: getRuntimeDefinition('claude').efforts },
@@ -182,14 +220,14 @@ describe('runtime catalog dependency direction', () => {
     const coordinator = source('agent-runtime.mjs');
     const compositionRoot = source('runtime-factory.mjs');
     assert.match(commands, /from ['"]\.\/runtime-catalog\.mjs['"]/);
-    assert.doesNotMatch(commands, /from ['"]\.\/(?:claude|volc|pi)\.mjs['"]/);
+    assert.doesNotMatch(commands, /from ['"]\.\/(?:traex|claude|volc|pi)\.mjs['"]/);
     assert.doesNotMatch(commands, /\.(?:setModel|setEffort|rotateSession|interruptTurn|deliverBatch)\s*\(/);
-    assert.doesNotMatch(coordinator, /\b(?:CLAUDE|VOLC|PI)_(?:MODELS|EFFORTS)\b/);
-    assert.doesNotMatch(coordinator, /from ['"]\.\/(?:codex|claude|volc|pi)\.mjs['"]/);
-    for (const adapter of ['codex', 'claude', 'volc', 'pi']) {
+    assert.doesNotMatch(coordinator, /\b(?:TRAE?X|CLAUDE|VOLC|PI)_(?:MODELS|EFFORTS)\b/);
+    assert.doesNotMatch(coordinator, /from ['"]\.\/(?:codex|traex|claude|volc|pi)\.mjs['"]/);
+    for (const adapter of ['codex', 'traex', 'claude', 'volc', 'pi']) {
       assert.match(compositionRoot, new RegExp(`from ['"]\\./${adapter}\\.mjs['"]`));
     }
-    for (const adapter of ['codex.mjs', 'claude.mjs', 'volc.mjs', 'pi.mjs']) {
+    for (const adapter of ['codex.mjs', 'traex.mjs', 'claude.mjs', 'volc.mjs', 'pi.mjs']) {
       assert.match(source(adapter), /from ['"]\.\/runtime-catalog\.mjs['"]/, adapter);
     }
   });

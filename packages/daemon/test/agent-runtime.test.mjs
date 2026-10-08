@@ -15,7 +15,7 @@ const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { re
 function backend(runtime, options = {}) {
   return {
     runtime,
-    model: options.model ?? '',
+    model: options.model ?? options.initialModel ?? '',
     effort: 'medium',
     threadId: `${runtime}-session`,
     state: { connected: false, activeTurn: 0, queued: 0 },
@@ -76,6 +76,12 @@ describe('global Codex/Claude hard switch', () => {
     });
     assert.deepEqual(parseRuntimeModelTarget('codex:gpt-5.6-sol'), {
       runtime: 'codex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('traex'), {
+      runtime: 'traex', model: '', canonical: 'traex',
+    });
+    assert.deepEqual(parseRuntimeModelTarget('trae:gpt-5.6-sol'), {
+      runtime: 'traex', model: 'gpt-5.6-sol', canonical: 'gpt-5.6-sol',
     });
     assert.deepEqual(parseRuntimeModelTarget('ark'), {
       runtime: 'volc', model: 'ark', canonical: 'ark',
@@ -162,7 +168,6 @@ describe('global Codex/Claude hard switch', () => {
     const selected = [];
     const runtime = new AgentRuntime({
       initialModel: 'pi',
-      codexModel: '',
       cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       codexFactory: () => {
@@ -187,13 +192,70 @@ describe('global Codex/Claude hard switch', () => {
     }
   });
 
+  it('starts TraeX rather than Codex on a fresh database configured with model traex', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-fresh-traex-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    const selected = [];
+    const runtime = new AgentRuntime({
+      initialModel: 'traex',
+      cognitionMaxChars: 120_000,
+    }, store, quietLogger, {
+      codexFactory: () => {
+        selected.push('codex');
+        return backend('codex');
+      },
+      traexFactory: (options) => {
+        selected.push('traex');
+        return backend('traex', options);
+      },
+    });
+    try {
+      assert.equal(store.hasCognitionRuntime(), false);
+      await runtime.start();
+      assert.deepEqual(selected, ['traex']);
+      assert.equal(runtime.runtime, 'traex');
+      assert.equal(store.getCognitionState().runtime, 'traex');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('passes a qualified TraeX initial model to the fresh backend', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-fresh-traex-model-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    let initialOptions;
+    const runtime = new AgentRuntime({
+      initialModel: 'trae:gpt-5.6-sol',
+      cognitionMaxChars: 120_000,
+    }, store, quietLogger, {
+      codexFactory: () => backend('codex'),
+      traexFactory: (options) => {
+        initialOptions = options;
+        return backend('traex', options);
+      },
+    });
+    try {
+      assert.equal(store.hasCognitionRuntime(), false);
+      await runtime.start();
+      assert.equal(runtime.runtime, 'traex');
+      assert.equal(runtime.model, 'gpt-5.6-sol');
+      assert.equal(initialOptions.initialModel, 'gpt-5.6-sol');
+      assert.equal(store.getCognitionState().runtime, 'traex');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('starts Ark rather than Codex on a fresh database configured with model ark', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-fresh-ark-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     const selected = [];
     const runtime = new AgentRuntime({
       initialModel: 'ark',
-      codexModel: '',
       cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       codexFactory: () => {
@@ -565,6 +627,42 @@ describe('global Codex/Claude hard switch', () => {
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'stale-snapshot');
     assert.deepEqual(calls, []);
+  });
+
+  it('rotates the TraeX session when changing effort', async () => {
+    const settings = {};
+    const runtime = new AgentRuntime({}, {
+      getCognitionState: () => ({ runtime: 'traex', epoch: 1, authorityToken: 'token' }),
+      commitCognitionSessionRotation: (request) => {
+        assert.equal(request.runtime, 'traex');
+        assert.deepEqual(request.settings, { traex_effort: 'high' });
+        Object.assign(settings, request.settings);
+        return { runtime: 'traex', epoch: 2, authorityToken: request.nextAuthorityToken };
+      },
+    }, quietLogger);
+    const calls = [];
+    const implementation = backend('traex');
+    implementation.interruptTurn = async () => { calls.push('interrupt'); };
+    implementation.setEffort = (effort) => { calls.push(`effort:${effort}`); };
+    implementation.prepareSessionRotation = async () => { calls.push('prepare'); return { id: 'traex-fresh' }; };
+    implementation.commitSessionRotation = (prepared) => {
+      calls.push(`commit:${prepared.id}`);
+      implementation.threadId = prepared.id;
+      return implementation.threadId;
+    };
+    runtime.runtime = 'traex';
+    runtime.backend = adaptRuntime('traex', implementation);
+
+    const result = await runtime.transition({ kind: 'select-effort', effort: 'high' });
+    assert.deepEqual(result, {
+      ok: true,
+      kind: 'select-effort',
+      runtime: 'traex',
+      effort: 'high',
+      threadId: 'traex-fresh',
+    });
+    assert.deepEqual(calls, ['interrupt', 'effort:high', 'prepare', 'commit:traex-fresh']);
+    assert.equal(settings.traex_effort, 'high');
   });
 
   it('releases an Ark rotation fence when remote session preparation fails', async () => {
