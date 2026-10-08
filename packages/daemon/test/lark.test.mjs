@@ -83,7 +83,8 @@ describe('Lark bot identity', () => {
           timedOut: false,
           stdout: JSON.stringify({
             ok: true,
-            data: { bot: { open_id: 'ou_zayn12345678', app_name: 'Zayn' } },
+            identity: 'bot',
+            data: { open_id: 'ou_zayn12345678', app_name: 'Zayn' },
           }),
           stderr: '',
         };
