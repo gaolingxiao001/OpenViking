@@ -40,6 +40,21 @@ export const RUNTIME_CATALOG = Object.freeze({
       sessionAuthority: 'preserve-process',
     },
   }),
+  traex: runtimeDefinition({
+    id: 'traex',
+    aliases: ['traex', 'trae', 'traecli'],
+    directAliases: ['traex', 'trae', 'traecli'],
+    canonicalDefault: 'traex',
+    efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    capabilities: {
+      modelCatalog: 'dynamic',
+      effortControl: 'selectable',
+      activeInput: 'steer',
+      scopePolicy: 'any',
+      outputOwnership: 'runtime',
+      sessionAuthority: 'preserve-process',
+    },
+  }),
   claude: runtimeDefinition({
     id: 'claude',
     aliases: ['claude'],

@@ -9,6 +9,21 @@ import { deliveryItem, formatHistoryLine, receiptIds, withReceiptIds } from './r
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
 
 const CODEX_RUNTIME = getRuntimeDefinition('codex');
+const CODEX_APP_SERVER_CONFIG_ARGS = Object.freeze([
+  // Fast mode is a Codex service tier. Pin both the tier and its stable
+  // feature gate for this daemon-owned app-server process.
+  '-c', 'service_tier="fast"',
+  '-c', 'features.fast_mode=true',
+  // The user's interactive ~/.codex config drags desktop-only machinery into
+  // every turn: plugin marketplaces, <recommended_plugins> prompt injections,
+  // plugin-suggestion tools, and multi-agent framing. None of it serves a
+  // chat-reply agent, and it measurably costs prefill size plus whole model
+  // round-trips (~2x wall time on short replies). Skills (~/.agents) and the
+  // lark_daemon_im MCP server configured below are unaffected.
+  '-c', 'features.plugins=false',
+  '-c', 'features.tool_suggest=false',
+  '-c', 'features.apps=false',
+]);
 
 // turn/completed carries error as an object whose .message is often a JSON blob
 // wrapping the upstream API error; unwrap to the innermost human-readable message.
@@ -183,16 +198,33 @@ export function sanitizeCodexEnv(environment, profile = '') {
   return sanitizeAgentChildEnv(environment, { profile });
 }
 
-// The daemon is a thin pipe: inbound Lark lines are fed to one persistent codex
-// app-server thread via turn/start (idle) or turn/steer (mid-turn). Codex sends its
-// own replies with lark-cli. This class owns the app-server process, the JSON-RPC
-// handshake, the turn/steer state machine, and reconnect-with-resume.
+// The daemon is a thin pipe: inbound Lark lines are fed to one persistent
+// app-server thread via turn/start (idle) or turn/steer (mid-turn). The native
+// runtime sends its own replies with lark-cli through the MCP server below.
+// This class owns the app-server process, the JSON-RPC handshake, the
+// turn/steer state machine, and reconnect-with-resume.
 export class CodexAgent {
   constructor(config, store, logger, options = {}) {
     this.config = config;
     this.store = store;
     this.logger = logger;
     this._spawn = options.spawn ?? nodeSpawn;
+    const runtime = getRuntimeDefinition(options.runtimeId ?? CODEX_RUNTIME.id);
+    if (!runtime) throw new Error(`unknown app-server runtime: ${options.runtimeId}`);
+    this.runtime = runtime.id;
+    this.capabilities = runtime.capabilities;
+    this.effortControl = this.capabilities?.effortControl ?? 'unsupported';
+    this.supportsEffort = this.effortControl === 'selectable';
+    this.turnStartEffort = this.effortControl === 'selectable';
+    this.runtimeLabel = options.runtimeLabel ?? runtime.id;
+    this.logPrefix = options.logPrefix ?? runtime.id;
+    this.binConfigKey = options.binConfigKey ?? 'codexBin';
+    this.effortConfigKey = options.effortConfigKey ?? (this.supportsEffort ? `${runtime.id}Effort` : '');
+    this.modelSettingKey = options.modelSettingKey ?? `${runtime.id}_model`;
+    this.effortSettingKey = options.effortSettingKey ?? (this.supportsEffort ? `${runtime.id}_effort` : '');
+    this.appServerConfigArgs = options.appServerConfigArgs ?? CODEX_APP_SERVER_CONFIG_ARGS;
+    this._sanitizeEnv = options.sanitizeEnv ?? sanitizeCodexEnv;
+    this.policyVersion = options.policyVersion ?? 'steer-v2';
     this.reconnectBaseMs = options.reconnectBaseMs ?? 1000;
     this.reconnectCapMs = options.reconnectCapMs ?? 30_000;
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
@@ -202,9 +234,7 @@ export class CodexAgent {
     this.onTurnAbandoned = options.onTurnAbandoned ?? null; // ({ inboundSeqs }) => void
     this.onAvailable = options.onAvailable ?? null;   // () => void
     const cognition = store.getCognitionState?.()
-      ?? { runtime: CODEX_RUNTIME.id, epoch: 1, authorityToken: null };
-    this.runtime = CODEX_RUNTIME.id;
-    this.capabilities = CODEX_RUNTIME.capabilities;
+      ?? { runtime: this.runtime, epoch: 1, authorityToken: null };
     this.cognitionEpoch = options.cognitionEpoch ?? cognition.epoch;
     this.authorityToken = options.authorityToken ?? cognition.authorityToken ?? '';
     this.sessionPersistence = options.sessionPersistence !== false;
@@ -213,10 +243,16 @@ export class CodexAgent {
 
     this.systemPrompt = assembleConversationPolicy(config);
     this.developerInstructionsText = this.systemPrompt;
-    // Model/effort start from env config but can be switched at runtime via the
-    // /model and /effort slash commands; overrides persist in the store's meta table.
-    this.model = options.model ?? store.getSetting?.('codex_model') ?? config.codexModel ?? '';
-    this.effort = store.getSetting?.('codex_effort') ?? config.codexEffort;
+    // Persisted slash-command settings win on normal startup. Provider switch
+    // paths pass options.model deliberately, while first boot only passes
+    // options.initialModel so a saved setting cannot be overwritten by env.
+    this.model = options.model
+      ?? store.getSetting?.(this.modelSettingKey)
+      ?? options.initialModel
+      ?? '';
+    this.effort = this.supportsEffort
+      ? options.effort ?? store.getSetting?.(this.effortSettingKey) ?? config[this.effortConfigKey] ?? 'medium'
+      : '';
 
     this.child = null;
     this.threadId = null;
@@ -258,7 +294,7 @@ export class CodexAgent {
     return createHash('sha256')
       .update(this.developerInstructionsText).update('\0')
       .update(this.config.workspace).update('\0')
-      .update('steer-v2').digest('hex');
+      .update(this.policyVersion).digest('hex');
   }
 
   get state() {
@@ -332,7 +368,7 @@ export class CodexAgent {
   }
 
   // Atomic transport hand-off: a queued group burst may start only when no older
-  // Codex-owned work exists. A true result means this agent owns every item.
+  // runtime-owned work exists. A true result means this agent owns every item.
   tryStartBatch(items) {
     if (this.stopping
       || !this.child
@@ -353,7 +389,7 @@ export class CodexAgent {
       if (error instanceof CognitionLimitError) {
         const inboundSeqs = batch.map((item) => item.seq).filter((seq) => seq != null);
         const receipts = receiptIds(batch);
-        this.logger.warn('codex_cognition_limit', { error: safe(error) });
+        this.logger.warn(`${this.logPrefix}_cognition_limit`, { error: safe(error) });
         try {
           this.onTurnFailed?.(withReceiptIds({ inboundSeqs, error: safe(error) }, receipts));
         } catch {}
@@ -362,8 +398,8 @@ export class CodexAgent {
         return;
       }
       // Ownership has already crossed the transport boundary. Keep the whole
-      // batch in the Codex queue and retry; never leave half of it behind.
-      this.logger.warn('codex_turn_start_sync_failed', { error: safe(error) });
+      // batch in the runtime queue and retry; never leave half of it behind.
+      this.logger.warn(`${this.logPrefix}_turn_start_sync_failed`, { error: safe(error) });
       this._enqueueBatch(batch, { front: true });
       this._scheduleDrain();
     }
@@ -418,15 +454,16 @@ export class CodexAgent {
       sessionId: this.threadId,
       epoch: this.cognitionEpoch,
     });
-    // model/effort ride on every turn/start: thread/resume does not re-apply its
-    // config to an already-running thread, so per-turn overrides are the only way
-    // /model and /effort reliably take effect.
-    this._request('turn/start', {
+    // Model rides on every turn/start: thread/resume does not re-apply its
+    // config to an already-running thread. Selectable effort follows the same
+    // path so a fresh session starts under the requested reasoning level.
+    const params = {
       threadId: this.threadId,
       input: [{ type: 'text', text: body }],
-      effort: this.effort,
       ...(this.model ? { model: this.model } : {}),
-    }).catch((error) => {
+      ...(this.turnStartEffort ? { effort: this.effort } : {}),
+    };
+    this._request('turn/start', params).catch((error) => {
       this.startingTurn = false;
       this.turnStartedAtMs = null;
       this.modelWorking = false;
@@ -435,7 +472,7 @@ export class CodexAgent {
       this.startingJournalThroughSeq = 0;
       this.startingOwner = null;
       if (hadPrefix) this.needsHistoryPrefix = true;
-      this.logger.warn('codex_turn_start_failed', { error: safe(error) });
+      this.logger.warn(`${this.logPrefix}_turn_start_failed`, { error: safe(error) });
       if (prime && this.primeWaiter) {
         const waiter = this.primeWaiter;
         this.primeWaiter = null;
@@ -480,7 +517,7 @@ export class CodexAgent {
       });
     }).catch((error) => {
       // Race: the turn ended just as we steered. Re-deliver so the message is not lost.
-      this.logger.info('codex_steer_fell_back', { error: safe(error) });
+      this.logger.info(`${this.logPrefix}_steer_fell_back`, { error: safe(error) });
       this.deliverBatch(items);
     });
   }
@@ -586,7 +623,7 @@ export class CodexAgent {
     if (this.primeWaiter) {
       const waiter = this.primeWaiter;
       this.primeWaiter = null;
-      if (failed) waiter.reject(new Error(errorText || 'codex cognition catch-up failed'));
+      if (failed) waiter.reject(new Error(errorText || `${this.runtimeLabel} cognition catch-up failed`));
       else {
         this.syncedThroughSeq = waiter.syncedThroughSeq;
         waiter.resolve();
@@ -631,7 +668,7 @@ export class CodexAgent {
       && owner.sessionId === this.threadId
       && owner.epoch === this.cognitionEpoch;
     if (!accepted || !stillCurrent) {
-      this.logger.info('codex_session_acceptance_stale', { acceptedThroughSeq });
+      this.logger.info(`${this.logPrefix}_session_acceptance_stale`, { acceptedThroughSeq });
       return false;
     }
     this.syncedThroughSeq = Math.max(this.syncedThroughSeq, acceptedThroughSeq);
@@ -707,7 +744,7 @@ export class CodexAgent {
       const pending = this.pending.get(msg.id);
       if (!pending) return;
       this.pending.delete(msg.id);
-      if (msg.error) pending.reject(new Error(msg.error.message || 'codex rpc error'));
+      if (msg.error) pending.reject(new Error(msg.error.message || `${this.runtimeLabel} rpc error`));
       else pending.resolve(msg.result);
       return;
     }
@@ -845,7 +882,7 @@ export class CodexAgent {
       this.stdoutBuffer = this.stdoutBuffer.slice(index + 1);
       if (line.trim()) {
         try { this._handleLine(line); } catch (error) {
-          this.logger.warn('codex_line_error', { error: safe(error) });
+          this.logger.warn(`${this.logPrefix}_line_error`, { error: safe(error) });
         }
       }
     }
@@ -862,7 +899,7 @@ export class CodexAgent {
       && global.sessionId
       && global.sessionReady !== false
       && global.policyHash === this.policyHash
-      && (global.runtime ?? 'codex') === this.runtime
+      && (global.runtime ?? CODEX_RUNTIME.id) === this.runtime
       && (global.epoch || this.cognitionEpoch) === this.cognitionEpoch);
     if (resumable) this.syncedThroughSeq = global.syncedThroughSeq ?? this.syncedThroughSeq;
     this.storedThreadId = resumable ? global.sessionId : null;
@@ -873,22 +910,11 @@ export class CodexAgent {
       const args = [
         'app-server', '--listen', 'stdio://',
         '-c', `developer_instructions=${tomlString(this.developerInstructionsText)}`,
-        // Fast mode is a Codex service tier. Pin both the tier and its stable
-        // feature gate for this daemon-owned app-server process.
-        '-c', 'service_tier="fast"',
-        '-c', 'features.fast_mode=true',
-        // The user's interactive ~/.codex config drags desktop-only machinery into
-        // every turn: plugin marketplaces, <recommended_plugins> prompt injections,
-        // plugin-suggestion tools, and multi-agent framing. None of it serves a
-        // chat-reply agent, and it measurably costs prefill size plus whole model
-        // round-trips (~2x wall time on short replies). Skills (~/.agents) and the
-        // lark_daemon_im MCP server configured below are unaffected.
-        '-c', 'features.plugins=false',
-        '-c', 'features.tool_suggest=false',
-        '-c', 'features.apps=false',
+        ...this.appServerConfigArgs,
       ];
       // Proactive IM tools (list_lark_chats / send_lark_message) ride along as an
-      // MCP stdio server so codex can send messages through a typed, validated path.
+      // MCP stdio server so the runtime can send messages through a typed,
+      // validated path.
       if (this.config.profile) {
         const toolArgs = [
           this.config.larkToolServerPath,
@@ -917,9 +943,9 @@ export class CodexAgent {
       }
       let child;
       try {
-        child = this._spawn(this.config.codexBin, args, {
+        child = this._spawn(this.config[this.binConfigKey], args, {
           cwd: this.config.workspace,
-          env: sanitizeCodexEnv(process.env, this.config.profile),
+          env: this._sanitizeEnv(process.env, this.config.profile),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -937,7 +963,7 @@ export class CodexAgent {
       this.nextId = 0;
 
       let settled = false;
-      const timer = setTimeout(() => finish(new Error('codex handshake timed out')), this.handshakeTimeoutMs);
+      const timer = setTimeout(() => finish(new Error(`${this.runtimeLabel} handshake timed out`)), this.handshakeTimeoutMs);
       timer.unref?.();
       const finish = (error) => {
         if (settled) return;
@@ -945,7 +971,7 @@ export class CodexAgent {
         clearTimeout(timer);
         if (!error) { resolve(); return; }
         // A handshake can fail while the child is still alive (timeout, rpc error
-        // response); detach and kill it so a retry does not orphan a live codex.
+        // response); detach and kill it so a retry does not orphan a live runtime.
         this._handleExit(child);
         if (child.exitCode === null) terminateProcessTree(child, 'SIGKILL');
         reject(error);
@@ -959,7 +985,7 @@ export class CodexAgent {
       child.once('error', (error) => { this._handleExit(child); finish(error); });
       child.once('exit', (code, signal) => {
         this._handleExit(child, code, signal);
-        finish(new Error(`codex exited during handshake (code ${code}, signal ${signal})`));
+        finish(new Error(`${this.runtimeLabel} exited during handshake (code ${code}, signal ${signal})`));
       });
 
       this._request('initialize', {
@@ -984,7 +1010,7 @@ export class CodexAgent {
       cwd: this.config.workspace,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      config: { model_reasoning_effort: this.effort },
+      ...(this.turnStartEffort ? { config: { model_reasoning_effort: this.effort } } : {}),
       ...(this.model ? { model: this.model } : {}),
     };
   }
@@ -995,11 +1021,11 @@ export class CodexAgent {
       try {
         const result = await this._request('thread/resume', { ...params, threadId: this.storedThreadId });
         this.threadId = result?.thread?.id ?? this.storedThreadId;
-        this.needsHistoryPrefix = false; // codex retains the resumed thread's context
+        this.needsHistoryPrefix = false; // app-server retains the resumed thread's context
         this.forceFreshThread = false;
         return;
       } catch (error) {
-        this.logger.warn('codex_resume_failed_fresh_start', { error: safe(error) });
+        this.logger.warn(`${this.logPrefix}_resume_failed_fresh_start`, { error: safe(error) });
         await this.store.prepareOVContext?.(this.cognitionEpoch);
       }
     }
@@ -1018,10 +1044,10 @@ export class CodexAgent {
   // app-server RPC is the only fallible step; coordinator Store state, queued
   // work and the live thread remain untouched until commitSessionRotation.
   async prepareSessionRotation() {
-    if (this.turnInProgress) throw new Error('codex session rotation requires an idle runtime');
-    if (this.sessionRotation) throw new Error('codex session rotation is already prepared');
+    if (this.turnInProgress) throw new Error(`${this.runtimeLabel} session rotation requires an idle runtime`);
+    if (this.sessionRotation) throw new Error(`${this.runtimeLabel} session rotation is already prepared`);
     if (this.child && !this.threadId) {
-      throw new Error('codex connection is still starting');
+      throw new Error(`${this.runtimeLabel} connection is still starting`);
     }
     if (!this.child) {
       // Preserve /new while a reconnect is already in progress. The placeholder
@@ -1040,7 +1066,7 @@ export class CodexAgent {
 
   commitSessionRotation(prepared, { persist = true, preserveContext = false } = {}) {
     if (!prepared?.id || this.sessionRotation?.id !== prepared.id) {
-      throw new Error('prepared codex session is no longer current');
+      throw new Error(`prepared ${this.runtimeLabel} session is no longer current`);
     }
     this.threadId = prepared.deferred ? null : prepared.id;
     this.storedThreadId = null;
@@ -1057,7 +1083,7 @@ export class CodexAgent {
   }
 
   cancelSessionRotation() {
-    // Codex has created an empty, unreachable thread only. Dropping the local
+    // The app-server has created an empty, unreachable thread only. Dropping the local
     // candidate restores the exact pre-prepare state; no live thread was swapped.
     this.sessionRotation = null;
   }
@@ -1100,7 +1126,7 @@ export class CodexAgent {
     for (const resolve of waiters) resolve();
   }
 
-  // Rebuild the codex thread without restarting the child (slash commands).
+  // Rebuild the app-server thread without restarting the child (slash commands).
   // resume=true re-opens the current thread under the current model/effort params
   // (context kept, fresh-start fallback inside _startOrResumeThread); resume=false
   // is /new: an empty thread with no history prefix. Returns the new thread id, or
@@ -1152,7 +1178,7 @@ export class CodexAgent {
     } catch (error) {
       // No usable thread: recycle the child so the reconnect loop rebuilds a clean
       // connection instead of stranding the queue behind a null threadId.
-      this.logger.warn('codex_rotate_failed', { error: safe(error) });
+      this.logger.warn(`${this.logPrefix}_rotate_failed`, { error: safe(error) });
       if (this.child) terminateProcessTree(this.child, 'SIGKILL');
       throw error;
     }
@@ -1184,21 +1210,24 @@ export class CodexAgent {
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     for (const pending of this.pending.values()) {
-      try { pending.reject(new Error('codex connection replaced')); } catch { /* ignore */ }
+      try { pending.reject(new Error(`${this.runtimeLabel} connection replaced`)); } catch { /* ignore */ }
     }
     this.pending.clear();
   }
 
-  // Model/effort values ride on the next turn/start (see _startTurn). Command
-  // policy decides whether to preserve or rotate the thread after updating them.
+  // Model/effort values ride on the next turn/start (see _startTurn) when the
+  // runtime supports them. Command policy decides whether to preserve or rotate
+  // the thread after updating them.
   setModel(model, { persist = true } = {}) {
     this.model = model;
-    if (persist) this.store.setSetting?.('codex_model', model);
+    if (persist) this.store.setSetting?.(this.modelSettingKey, model);
   }
 
   setEffort(effort, { persist = true } = {}) {
+    if (!this.supportsEffort) throw new Error(`${this.runtimeLabel} does not support daemon-side effort control`);
     this.effort = effort;
-    if (persist) this.store.setSetting?.('codex_effort', effort);
+    if (persist) this.store.setSetting?.(this.effortSettingKey, effort);
+    return undefined;
   }
 
   // Visible models from the app-server with their supported reasoning efforts,
@@ -1213,12 +1242,14 @@ export class CodexAgent {
         .filter((model) => model && !model.hidden && typeof model.id === 'string')
         .map((model) => ({
           id: model.id,
-          efforts: (Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [])
-            .map((effort) => (typeof effort === 'string' ? effort : effort?.reasoningEffort))
-            .filter((effort) => typeof effort === 'string' && effort),
+          efforts: this.supportsEffort
+            ? (Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [])
+              .map((effort) => (typeof effort === 'string' ? effort : effort?.reasoningEffort))
+              .filter((effort) => typeof effort === 'string' && effort)
+            : [],
         }));
     } catch (error) {
-      this.logger.info('codex_model_list_failed', { error: safe(error) });
+      this.logger.info(`${this.logPrefix}_model_list_failed`, { error: safe(error) });
       return [];
     }
   }
@@ -1252,21 +1283,21 @@ export class CodexAgent {
     this.activeInboundSeqs = [];
     this.activeReceiptIds = [];
     for (const pending of this.pending.values()) {
-      try { pending.reject(new Error('codex connection lost')); } catch { /* ignore */ }
+      try { pending.reject(new Error(`${this.runtimeLabel} connection lost`)); } catch { /* ignore */ }
     }
     this.pending.clear();
     if (!this.stopping && failedReceiptIds.length > 0 && this.onTurnFailed) {
       try {
         this.onTurnFailed(withReceiptIds({
           inboundSeqs: failedInboundSeqs,
-          error: 'codex connection lost',
+          error: `${this.runtimeLabel} connection lost`,
         }, failedReceiptIds));
       } catch (error) {
         this.logger.warn('turn_failure_notify_failed', { error: safe(error) });
       }
     }
     if (this.stopping || !this.startedOk) return;
-    this.logger.warn('codex_disconnected', { code, signal });
+    this.logger.warn(`${this.logPrefix}_disconnected`, { code, signal });
     void this._reconnectLoop();
   }
 
@@ -1280,7 +1311,7 @@ export class CodexAgent {
         await this._handshake();
         break;
       } catch (error) {
-        this.logger.warn('codex_reconnect_failed', { error: safe(error), backoffMs: this.backoffMs });
+        this.logger.warn(`${this.logPrefix}_reconnect_failed`, { error: safe(error), backoffMs: this.backoffMs });
         this.backoffMs = Math.min(this.backoffMs * 2, this.reconnectCapMs);
       }
     }
@@ -1291,7 +1322,7 @@ export class CodexAgent {
     try {
       this.activitySeq += 1;
       this.store.recordActivity({
-        eventKey: `codex:${this.threadId ?? 'na'}:${fields.turnId ?? 'na'}:${kind}:${this.activitySeq}`,
+        eventKey: `${this.runtime}:${this.threadId ?? 'na'}:${fields.turnId ?? 'na'}:${kind}:${this.activitySeq}`,
         kind,
         summary: fields.summary,
         status: fields.status,
@@ -1313,9 +1344,9 @@ export class CodexAgent {
         sessionId: this.threadId,
         epoch: this.cognitionEpoch,
       });
-      if (marked === false) this.logger.info('codex_session_unresumable_stale');
+      if (marked === false) this.logger.info(`${this.logPrefix}_session_unresumable_stale`);
     } catch (error) {
-      this.logger.warn('codex_session_unresumable_failed', { error: safe(error) });
+      this.logger.warn(`${this.logPrefix}_session_unresumable_failed`, { error: safe(error) });
     }
   }
 
@@ -1332,7 +1363,7 @@ export class CodexAgent {
           acceptedThroughSeq: this.syncedThroughSeq,
           sessionReady: true,
         });
-        if (!published) this.logger.info('codex_session_publish_stale');
+        if (!published) this.logger.info(`${this.logPrefix}_session_publish_stale`);
         return published;
       }
       this.store.setGlobalSession?.(this.threadId, this.policyHash, {
@@ -1342,7 +1373,7 @@ export class CodexAgent {
       });
       return true;
     } catch (error) {
-      this.logger.warn('codex_session_persist_failed', { error: safe(error) });
+      this.logger.warn(`${this.logPrefix}_session_persist_failed`, { error: safe(error) });
       return false;
     }
   }
@@ -1357,7 +1388,7 @@ export class CodexAgent {
     try {
       this.onAvailable();
     } catch (error) {
-      this.logger.warn('codex_available_callback_failed', { error: safe(error) });
+      this.logger.warn(`${this.logPrefix}_available_callback_failed`, { error: safe(error) });
     }
   }
 
@@ -1378,7 +1409,7 @@ export class CodexAgent {
       try {
         this.onTurnFailed(withReceiptIds({
           inboundSeqs,
-          error: 'codex stopped before turn completion',
+          error: `${this.runtimeLabel} stopped before turn completion`,
         }, failedReceiptIds));
       } catch (error) {
         this.logger.warn('turn_failure_notify_failed', { error: safe(error) });
@@ -1395,7 +1426,7 @@ export class CodexAgent {
     // prompt-cache-rewrite risk on resume of an interrupted turn).
     if (midTurn) this._markSessionUnresumable();
     if (this.primeWaiter) {
-      this.primeWaiter.reject(new Error('codex stopped during cognition catch-up'));
+      this.primeWaiter.reject(new Error(`${this.runtimeLabel} stopped during cognition catch-up`));
       this.primeWaiter = null;
     }
     const waiters = this.idleWaiters.splice(0);

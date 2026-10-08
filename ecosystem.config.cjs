@@ -71,7 +71,6 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_DATA_DIR: agent.dataDir,
       LARK_DAEMON_WORKSPACE: agent.workspace,
       LARK_DAEMON_MODEL: agent.model,
-      LARK_DAEMON_CODEX_MODEL: agent.model === 'ark' ? '' : agent.model,
       // Empty values deliberately override any legacy global seed. Managed
       // Agent identity must remain pinned to one daemon/profile instance.
       LARK_DAEMON_VOLC_SESSION_ID: agent.volcSessionId || '',

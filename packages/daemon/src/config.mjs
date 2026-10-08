@@ -166,13 +166,12 @@ export function getConfig() {
     larkToolServerPath: path.join(sourceDir, 'lark-tools.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
+    traexBin: process.env.TRAEX_BIN || process.env.TRAECLI_BIN || 'traecli',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
     piBin: process.env.PI_BIN || 'pi',
-    initialModel: process.env.LARK_DAEMON_MODEL || process.env.LARK_DAEMON_CODEX_MODEL || '',
-    codexModel: process.env.LARK_DAEMON_MODEL === 'ark'
-      ? ''
-      : process.env.LARK_DAEMON_CODEX_MODEL || '',
+    initialModel: process.env.LARK_DAEMON_MODEL || '',
     codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
+    traexEffort: enumEnv('LARK_DAEMON_TRAEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
     claudeModel: process.env.LARK_DAEMON_CLAUDE_MODEL || '',
     claudeEffort: enumEnv('LARK_DAEMON_CLAUDE_EFFORT', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']),
     piModel: process.env.LARK_DAEMON_PI_MODEL || '',

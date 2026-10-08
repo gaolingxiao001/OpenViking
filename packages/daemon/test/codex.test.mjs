@@ -22,7 +22,6 @@ const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', impo
 const baseConfig = {
   systemPromptPath,
   codexBin: 'codex',
-  codexModel: '',
   codexEffort: 'medium',
   workspace: '/tmp/lark-agent-workspace',
   databasePath: '/tmp/lark-daemon-test.sqlite3',
