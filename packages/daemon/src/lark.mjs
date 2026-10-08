@@ -89,7 +89,7 @@ export class LarkClient {
       'api', 'GET', '/open-apis/bot/v3/info',
       '--as', 'bot', '--json',
     ], 'bot identity lookup', 15_000);
-    const bot = parsed?.data?.bot ?? parsed?.data?.data?.bot ?? parsed?.bot;
+    const bot = parsed?.data?.bot ?? parsed?.data?.data?.bot ?? parsed?.bot ?? parsed?.data;
     const openId = bot?.open_id;
     if (typeof openId !== 'string' || !/^ou_[A-Za-z0-9_-]{8,}$/.test(openId)) {
       throw new Error('lark-cli bot identity lookup returned no valid open_id');
