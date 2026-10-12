@@ -455,3 +455,19 @@ describe('agent tool front-ends', () => {
     assert.match(result.stderr, /PERSONAL_AGENT_SOCKET is not set/);
   });
 });
+
+it('finds decisions and reply targets by message id through an index', (t) => {
+  const { store } = setup(t);
+  const plans = [];
+  const prepare = store.db.prepare.bind(store.db);
+  store.db.prepare = (sql) => {
+    if (/FROM connector_events WHERE message_id = \?/.test(sql)) plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => row.detail).join(' '));
+    return prepare(sql);
+  };
+  // An id that is not an inbound (a reply to the bot's own message) used to
+  // scan the whole event history before falling through to the outbox.
+  store.eventByMessageId('om_unknown12345678');
+  store.connectorForMessage('om_unknown12345678');
+  assert.equal(plans.length, 2);
+  for (const plan of plans) assert.match(plan, /USING INDEX connector_events_message_seq/);
+});
