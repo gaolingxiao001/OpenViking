@@ -168,11 +168,13 @@ class OpenAPIChannel(BaseChannel):
         app: "FastAPI | None" = None,
         global_config: Config | None = None,
         compile_service: Any | None = None,
+        agent_loop: Any | None = None,
     ):
         super().__init__(config, bus, workspace_path)
         self.config = config
         self._global_config = global_config
         self._compile_service = compile_service
+        self._agent_loop = agent_loop
         # Regular OpenAPI pending and sessions
         self._pending: Dict[str, PendingResponse] = {}
         self._sessions: Dict[str, Dict[str, Any]] = {}
@@ -282,6 +284,11 @@ class OpenAPIChannel(BaseChannel):
                 )
                 pending.set_final(msg.content or "")
                 await pending.close_stream()
+            elif msg.event_type == OutboundEventType.INTERRUPT:
+                pending.set_response_id(msg.response_id)
+                await pending.add_event("interrupt", msg.metadata or {})
+                pending.set_final(msg.content or "")
+                await pending.close_stream()
             elif msg.event_type == OutboundEventType.REASONING:
                 await pending.add_event("reasoning", msg.content)
             elif msg.event_type == OutboundEventType.CONTENT_DELTA:
@@ -313,6 +320,11 @@ class OpenAPIChannel(BaseChannel):
                 "response",
                 {"content": msg.content or "", "response_id": msg.response_id},
             )
+            pending.set_final(msg.content or "")
+            await pending.close_stream()
+        elif msg.event_type == OutboundEventType.INTERRUPT:
+            pending.set_response_id(msg.response_id)
+            await pending.add_event("interrupt", msg.metadata or {})
             pending.set_final(msg.content or "")
             await pending.close_stream()
         elif msg.event_type == OutboundEventType.REASONING:
@@ -531,6 +543,25 @@ class OpenAPIChannel(BaseChannel):
             channel._session_manager.delete(session_key)
             del channel._sessions[storage_key]
             return {"deleted": True}
+
+        @router.post("/sessions/{session_id}/interrupt")
+        async def interrupt_session(
+            session_id: str,
+            http_request: Request,
+            auth: GatewayRequestAuth = Depends(verify_gateway_request),
+        ):
+            """Interrupt the active or queued turn for a session."""
+            if channel._agent_loop is None:
+                raise HTTPException(status_code=503, detail="Agent loop is not available")
+            scope = await channel._resolve_request_principal(http_request, auth)
+            storage_key = channel._scoped_session_id(scope, session_id)
+            session_key = SessionKey(
+                type="cli",
+                channel_id=channel.config.channel_id(),
+                chat_id=storage_key,
+            )
+            interrupted = await channel._agent_loop.interrupt(session_key)
+            return {"interrupted": interrupted}
 
         # ========== Bot Channel Routes ==========
 

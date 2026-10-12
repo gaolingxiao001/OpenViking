@@ -33,6 +33,14 @@ class MessageBus:
         """Consume the next outbound message (blocks until available)."""
         return await self.outbound.get()
 
+    def count_pending_inbound_session(self, session_key) -> int:
+        """Return the number of inbound messages waiting for the session."""
+        return sum(1 for msg in list(self.inbound._queue) if msg.session_key == session_key)
+
+    def has_pending_inbound_session(self, session_key) -> bool:
+        """Return whether an inbound message for the session is waiting."""
+        return self.count_pending_inbound_session(session_key) > 0
+
     @property
     def inbound_size(self) -> int:
         """Number of pending inbound messages."""

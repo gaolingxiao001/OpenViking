@@ -266,6 +266,16 @@ class _PlainTextFinal:
     content: str | None = None
 
 
+@dataclass(slots=True)
+class _ActiveTurn:
+    """The single turn currently running in the serial AgentLoop."""
+
+    session_key: SessionKey
+    task: asyncio.Task
+    interruptible: bool = False
+    interrupted: bool = False
+
+
 class AgentIterationLimitExceeded(RuntimeError):
     """A structured task used every available AgentLoop iteration without submitting."""
 
@@ -424,6 +434,8 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._ov_clients: dict[str, Any] = {}
+        self._active_turn: _ActiveTurn | None = None
+        self._queued_interrupt_counts: dict[SessionKey, int] = {}
         self._register_default_tools()
 
     async def _connect_mcp(self) -> None:
@@ -1126,9 +1138,19 @@ class AgentLoop:
 
                 # Process it
                 try:
-                    response = await self._process_message(msg)
+                    queued_interrupts = self._queued_interrupt_counts.get(msg.session_key, 0)
+                    if queued_interrupts > 0:
+                        if queued_interrupts == 1:
+                            self._queued_interrupt_counts.pop(msg.session_key, None)
+                        else:
+                            self._queued_interrupt_counts[msg.session_key] = queued_interrupts - 1
+                        response = await self._complete_interrupted_message(msg)
+                    else:
+                        response = await self._process_message_as_active_turn(msg)
                     if response:
                         await self.bus.publish_outbound(response)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.exception(f"Error processing message: {e}")
                     # Send error response
@@ -1142,10 +1164,80 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
 
+    async def interrupt(self, session_key: SessionKey) -> bool:
+        """Interrupt the active or already queued turn for a session."""
+        active = self._active_turn
+        if active and active.session_key == session_key:
+            if not active.interruptible or active.task.done():
+                return False
+            active.interrupted = True
+            active.task.cancel()
+            return True
+        pending_count = self.bus.count_pending_inbound_session(session_key)
+        queued_interrupts = self._queued_interrupt_counts.get(session_key, 0)
+        if queued_interrupts < pending_count:
+            self._queued_interrupt_counts[session_key] = queued_interrupts + 1
+            return True
+        return False
+
+    async def _process_message_as_active_turn(
+        self, msg: InboundMessage
+    ) -> OutboundMessage | None:
+        task = asyncio.create_task(self._process_message(msg))
+        active = _ActiveTurn(msg.session_key, task)
+        self._active_turn = active
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if active.interrupted:
+                logger.info(f"Interrupted message from {msg.session_key}")
+                return self._interrupted_message(msg)
+            raise
+        finally:
+            if self._active_turn and self._active_turn.task is task:
+                self._active_turn = None
+
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
+
+    def _mark_active_turn_after_user_commit(self, session_key: SessionKey) -> None:
+        active = self._active_turn
+        if active and active.session_key == session_key and not active.task.done():
+            active.interruptible = True
+
+    def _mark_active_turn_finalizing(self, session_key: SessionKey) -> None:
+        active = self._active_turn
+        if active and active.session_key == session_key and not active.task.done():
+            active.interruptible = False
+
+    async def _commit_user_message(self, session: Session, msg: InboundMessage) -> None:
+        session.add_message("user", msg.content, sender_id=msg.sender_id)
+        await self.sessions.save(session)
+        self._mark_active_turn_after_user_commit(msg.session_key)
+
+    @staticmethod
+    def _without_committed_user_message(session: Session) -> Session:
+        history_session = session.clone()
+        if history_session.messages and history_session.messages[-1].get("role") == "user":
+            history_session.messages = history_session.messages[:-1]
+        return history_session
+
+    def _interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
+        return OutboundMessage(
+            session_key=msg.session_key,
+            content="",
+            event_type=OutboundEventType.INTERRUPT,
+            metadata={**(msg.metadata or {}), "reason": "interrupted"},
+        )
+
+    async def _complete_interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
+        session_key = msg.session_key
+        skip_heartbeat = session_key.type == "cli"
+        session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
+        await self._commit_user_message(session, msg)
+        return self._interrupted_message(msg)
 
     async def _compact_tool_loop(
         self,
@@ -2165,14 +2257,12 @@ class AgentLoop:
             if self.config.mode == BotMode.DEBUG:
                 # In debug mode, only record message to session, no processing or reply
                 await self._evaluate_previous_response_outcome(session, msg)
-                session.add_message("user", msg.content, sender_id=msg.sender_id)
-                await self.sessions.save(session)
+                await self._commit_user_message(session, msg)
                 return None
 
             if not msg.need_reply:
                 await self._evaluate_previous_response_outcome(session, msg)
-                session.add_message("user", msg.content, sender_id=msg.sender_id)
-                await self.sessions.save(session)
+                await self._commit_user_message(session, msg)
                 return OutboundMessage(
                     session_key=msg.session_key,
                     content="",
@@ -2197,6 +2287,12 @@ class AgentLoop:
                     archive_all=False,
                     openviking_connection=openviking_connection,
                 )
+
+            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
+            user_committed = False
+            if not is_heartbeat:
+                await self._commit_user_message(session, msg)
+                user_committed = True
 
             if self.sandbox_manager:
                 message_workspace = self.sandbox_manager.get_workspace_path(session_key)
@@ -2234,8 +2330,11 @@ class AgentLoop:
 
             # Build initial messages (use OpenViking session context when enabled)
             provider_name = self.config.get_provider_name(self.model) if self.config else None
+            history_session = (
+                self._without_committed_user_message(session) if user_committed else session
+            )
             history = await self._build_prompt_history(
-                session,
+                history_session,
                 provider_name=provider_name,
                 openviking_connection=openviking_connection,
                 actor_peer_id=actor_peer_id,
@@ -2304,6 +2403,8 @@ class AgentLoop:
                     skill_runtime=skill_runtime,
                 )
 
+            self._mark_active_turn_finalizing(session_key)
+
             if auto_memory_tool:
                 tools_used = [auto_memory_tool, *(tools_used or [])]
 
@@ -2322,18 +2423,27 @@ class AgentLoop:
                 tools_used=tools_used,
             )
 
-            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
             if not (is_heartbeat and is_heartbeat_noop_response(final_content)):
                 # Write experience reminder into session history so it persists
                 # across turns and survives bot restarts (in JSONL).
                 if newly_recalled_exp_content:
-                    session.add_message(
-                        "user",
-                        f"[Experience Reminder]\n## Relevant Agent Experience\n{newly_recalled_exp_content}",
-                        exp_uris=newly_recalled_exp_uris,
-                        experience_reminder=True,
-                    )
-                session.add_message("user", msg.content, sender_id=msg.sender_id)
+                    reminder = {
+                        "role": "user",
+                        "content": (
+                            "[Experience Reminder]\n"
+                            f"## Relevant Agent Experience\n{newly_recalled_exp_content}"
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                        "exp_uris": newly_recalled_exp_uris,
+                        "experience_reminder": True,
+                    }
+                    if user_committed and session.messages:
+                        session.messages.insert(len(session.messages) - 1, reminder)
+                        session.updated_at = datetime.now()
+                    else:
+                        session.messages.append(reminder)
+                if not user_committed:
+                    session.add_message("user", msg.content, sender_id=msg.sender_id)
                 session.add_message(
                     "assistant",
                     final_content,

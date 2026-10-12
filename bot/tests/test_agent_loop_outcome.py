@@ -1,3 +1,4 @@
+import asyncio
 import copy
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,15 @@ class _FakeOVClient:
     async def get_session_context(self, session_id, token_budget):
         self.context_calls.append((session_id, token_budget))
         return self.context_payload
+
+
+class _NeverProvider(_FakeProvider):
+    def __init__(self):
+        self.started = asyncio.Event()
+
+    async def chat(self, *args, **kwargs):
+        self.started.set()
+        await asyncio.Future()
 
 
 @pytest.fixture
@@ -142,6 +152,19 @@ class _ImageRegistry:
         return ToolExecutionResult(
             result=MultimodalToolResult(text=label, content=content), effective_params=params
         )
+
+
+async def _consume_outbound_event(
+    bus: MessageBus, event_type: OutboundEventType, timeout: float = 2
+) -> object:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError(f"Timed out waiting for outbound event {event_type}")
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=remaining)
+        if outbound.event_type == event_type:
+            return outbound
 
 
 def test_context_keeps_multimodal_tool_result_on_tool_message(temp_dir: Path):
@@ -299,6 +322,168 @@ async def test_agent_loop_passes_configured_temperature_to_provider(make_loop, t
     assert response.content == "ok"
     assert provider.calls[0][1]["temperature"] == 0.2
     assert loop.subagents.kwargs["temperature"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_commits_current_user_before_model_without_prompt_duplication(
+    make_loop, temp_dir: Path, monkeypatch
+):
+    seen = {}
+
+    async def fake_run_agent_loop(self, **kwargs):
+        persisted = SessionManager(self.config.bot_data_path).get_or_create(
+            session_key, skip_heartbeat=True
+        )
+        seen["persisted_before_model"] = [
+            message["content"] for message in persisted.messages
+        ]
+        seen["prompt_user_messages"] = [
+            message.get("content")
+            for message in kwargs["messages"]
+            if message.get("role") == "user"
+        ]
+        return "final answer", None, [], {"prompt_tokens": 1, "completion_tokens": 1}, 1
+
+    fake_langfuse = _FakeLangfuseClient()
+    monkeypatch.setattr(AgentLoop, "_run_agent_loop", fake_run_agent_loop)
+    monkeypatch.setattr(
+        "vikingbot.agent.loop.LangfuseClient.get_instance",
+        staticmethod(lambda: fake_langfuse),
+    )
+
+    bus = MessageBus()
+    config = Config(storage_workspace=str(temp_dir))
+    loop = make_loop(bus=bus, config=config)
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="early-user-commit")
+    session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
+    session.add_message("user", "old user", sender_id="user-1")
+    session.add_message("assistant", "old assistant", sender_id="user-1")
+    await loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="new question")
+    )
+
+    assert response is not None
+    assert seen["persisted_before_model"] == ["old user", "old assistant", "new question"]
+    assert seen["prompt_user_messages"].count("new question") == 1
+    persisted = SessionManager(config.bot_data_path).get_or_create(
+        session_key, skip_heartbeat=True
+    )
+    assert [message["content"] for message in persisted.messages] == [
+        "old user",
+        "old assistant",
+        "new question",
+        "final answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_active_turn_saves_user_without_assistant(make_loop):
+    bus = MessageBus()
+    provider = _NeverProvider()
+    loop = make_loop(bus=bus, provider=provider)
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-active")
+
+    run_task = asyncio.create_task(loop.run())
+    await bus.publish_inbound(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="stop this")
+    )
+    try:
+        await asyncio.wait_for(provider.started.wait(), timeout=2)
+
+        assert await loop.interrupt(session_key) is True
+
+        outbound = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
+        assert outbound.content == ""
+
+        session = loop.sessions.get_or_create(session_key)
+        assert [message["role"] for message in session.messages] == ["user"]
+        assert session.messages[0]["content"] == "stop this"
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_queued_turn_saves_user_without_calling_provider(make_loop):
+    bus = MessageBus()
+    provider = _RecordingProvider()
+    loop = make_loop(bus=bus, provider=provider)
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-queued")
+
+    await bus.publish_inbound(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="queued message")
+    )
+
+    assert await loop.interrupt(session_key) is True
+
+    run_task = asyncio.create_task(loop.run())
+    try:
+        outbound = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
+        assert outbound.content == ""
+
+        session = loop.sessions.get_or_create(session_key)
+        assert [message["role"] for message in session.messages] == ["user"]
+        assert session.messages[0]["content"] == "queued message"
+        assert provider.calls == []
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_queued_turns_use_one_interrupt_per_pending_message(make_loop):
+    bus = MessageBus()
+    provider = _RecordingProvider()
+    loop = make_loop(bus=bus, provider=provider)
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-queued-count")
+
+    await bus.publish_inbound(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="first queued")
+    )
+    await bus.publish_inbound(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="second queued")
+    )
+
+    assert await loop.interrupt(session_key) is True
+
+    run_task = asyncio.create_task(loop.run())
+    try:
+        interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
+        assert interrupted.content == ""
+        response = await _consume_outbound_event(bus, OutboundEventType.RESPONSE)
+
+        session = loop.sessions.get_or_create(session_key)
+        assert response.content == "ok"
+        assert [message["content"] for message in session.messages] == [
+            "first queued",
+            "second queued",
+            "ok",
+        ]
+        assert len(provider.calls) == 1
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_repeated_text_keeps_prior_completed_turn(make_loop):
+    bus = MessageBus()
+    loop = make_loop(bus=bus, provider=_RecordingProvider())
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-repeat")
+    session = loop.sessions.get_or_create(session_key)
+    session.add_message("user", "repeat", sender_id="user-1")
+    session.add_message("assistant", "old answer", response_id="old-response")
+
+    interrupted = await loop._complete_interrupted_message(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="repeat")
+    )
+
+    assert interrupted.event_type == OutboundEventType.INTERRUPT
+    assert [message["role"] for message in session.messages] == ["user", "assistant", "user"]
+    assert session.messages[1]["content"] == "old answer"
+    assert session.messages[2]["content"] == "repeat"
 
 
 @pytest.mark.asyncio
