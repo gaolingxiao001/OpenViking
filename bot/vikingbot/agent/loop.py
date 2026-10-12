@@ -1214,13 +1214,6 @@ class AgentLoop:
         if active and active.session_key == msg.session_key and not active.task.done():
             active.interruptible = True
 
-    @staticmethod
-    def _history_without_current_user_message(session: Session) -> Session:
-        history_session = session.clone()
-        if history_session.messages and history_session.messages[-1].get("role") == "user":
-            history_session.messages = history_session.messages[:-1]
-        return history_session
-
     async def _complete_interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
         session_key = msg.session_key
         skip_heartbeat = session_key.type == "cli"
@@ -2282,12 +2275,6 @@ class AgentLoop:
                     openviking_connection=openviking_connection,
                 )
 
-            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
-            user_committed = False
-            if not is_heartbeat:
-                await self._append_user_message_to_session(session, msg)
-                user_committed = True
-
             if self.sandbox_manager:
                 message_workspace = self.sandbox_manager.get_workspace_path(session_key)
             else:
@@ -2324,11 +2311,8 @@ class AgentLoop:
 
             # Build initial messages (use OpenViking session context when enabled)
             provider_name = self.config.get_provider_name(self.model) if self.config else None
-            history_session = (
-                self._history_without_current_user_message(session) if user_committed else session
-            )
             history = await self._build_prompt_history(
-                history_session,
+                session,
                 provider_name=provider_name,
                 openviking_connection=openviking_connection,
                 actor_peer_id=actor_peer_id,
@@ -2370,6 +2354,19 @@ class AgentLoop:
                         existing_uris.add(uri)
                         exp_exclude_uris.append(uri)
                 session.metadata["recalled_exp_uris"] = exp_exclude_uris
+
+            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
+            user_appended_to_session = False
+            if not is_heartbeat:
+                if newly_recalled_exp_content:
+                    session.add_message(
+                        "user",
+                        f"[Experience Reminder]\n## Relevant Agent Experience\n{newly_recalled_exp_content}",
+                        exp_uris=newly_recalled_exp_uris,
+                        experience_reminder=True,
+                    )
+                await self._append_user_message_to_session(session, msg)
+                user_appended_to_session = True
 
             # Run agent loop within a stable response identity for tracing/tool spans.
             response_id = uuid.uuid4().hex
@@ -2422,23 +2419,14 @@ class AgentLoop:
             if not (is_heartbeat and is_heartbeat_noop_response(final_content)):
                 # Write experience reminder into session history so it persists
                 # across turns and survives bot restarts (in JSONL).
-                if newly_recalled_exp_content:
-                    reminder = {
-                        "role": "user",
-                        "content": (
-                            "[Experience Reminder]\n"
-                            f"## Relevant Agent Experience\n{newly_recalled_exp_content}"
-                        ),
-                        "timestamp": datetime.now().isoformat(),
-                        "exp_uris": newly_recalled_exp_uris,
-                        "experience_reminder": True,
-                    }
-                    if user_committed and session.messages:
-                        session.messages.insert(len(session.messages) - 1, reminder)
-                        session.updated_at = datetime.now()
-                    else:
-                        session.messages.append(reminder)
-                if not user_committed:
+                if not user_appended_to_session:
+                    if newly_recalled_exp_content:
+                        session.add_message(
+                            "user",
+                            f"[Experience Reminder]\n## Relevant Agent Experience\n{newly_recalled_exp_content}",
+                            exp_uris=newly_recalled_exp_uris,
+                            experience_reminder=True,
+                        )
                     session.add_message("user", msg.content, sender_id=msg.sender_id)
                 session.add_message(
                     "assistant",
