@@ -248,6 +248,8 @@ export class Store {
         ON connector_events(conv_key, status, seq);
       CREATE INDEX IF NOT EXISTS connector_events_received_at
         ON connector_events(received_at_ms);
+      CREATE INDEX IF NOT EXISTS connector_events_chat
+        ON connector_events(chat_id, seq);
       CREATE INDEX IF NOT EXISTS connector_events_message
         ON connector_events(connector_instance, message_id);
       CREATE INDEX IF NOT EXISTS connector_events_subject
@@ -1695,6 +1697,17 @@ export class Store {
     return this.db.prepare('SELECT connector_instance AS connector FROM connector_events WHERE chat_id = ? ORDER BY seq DESC LIMIT 1').get(chatId)?.connector
       ?? this.db.prepare('SELECT connector FROM outbox WHERE chat_id = ? ORDER BY id DESC LIMIT 1').get(chatId)?.connector
       ?? null;
+  }
+
+  // Tenant and chat type of a chat as its connector last reported them. For a
+  // chat it never reported, the connector's newest tenant: a Lark app sees one
+  // tenant on every event. Unary + keeps that lookup on newest-first seq order,
+  // which stops at the first row instead of sorting the connector's history.
+  chatContext(connector, chatId) {
+    return this.db.prepare(`SELECT tenant_key, chat_type FROM connector_events
+      WHERE chat_id = ? AND connector_instance = ? ORDER BY seq DESC LIMIT 1`).get(chatId, connector)
+      ?? { tenant_key: this.db.prepare(`SELECT tenant_key FROM connector_events
+        WHERE +connector_instance = ? AND tenant_key IS NOT NULL ORDER BY seq DESC LIMIT 1`).get(connector)?.tenant_key ?? null };
   }
 
   // Scope of a message this bot delivered (for replies/reactions to it).

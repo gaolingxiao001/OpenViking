@@ -293,12 +293,18 @@ export class ActionService {
     return this.store.eventByMessageId(messageId) ?? this.store.deliveredMessage(messageId);
   }
 
-  rememberCard(content, result, { source, chatId, replyInThread = false, replyTarget = null }) {
+  // Registers a delivered card against where it landed. `seen` are inbounds that
+  // may sit in that chat (the replied-to message, the decision); one counts only
+  // if it is in the destination chat on the delivering connector.
+  rememberCard(content, result, { connector, chatId, seen, replyInThread = false, replyTarget = null }) {
     if (content.type !== 'card' || result.dry_run || result.duplicate) return null;
+    const destination = result.chat_id || chatId;
+    const inbound = seen.find((row) => row?.connector_instance === connector && row.chat_id === destination) ?? null;
     try {
       registerCard(this.store.db, {
         messageId: result.message_id, profile: this.config.profile, question: content.question ?? null,
-        source, chatId, replyInThread, replyTarget, data: result,
+        instance: connector, chatId: destination, inbound, chat: inbound ?? this.store.chatContext(connector, destination),
+        replyInThread, replyTarget, data: result,
       });
       return null;
     } catch {
@@ -321,7 +327,7 @@ export class ActionService {
         fence,
         inboundSeq: responseTo.seq,
       });
-      const warning = this.rememberCard(content, result, { source: fence, chatId: input.chat_id });
+      const warning = this.rememberCard(content, result, { connector, chatId: input.chat_id, seen: [fence] });
       if (!result.dry_run) await this.clearTemporaryReaction(fence.conv_key);
       return this.deliveryResult(result, `message to chat_id=${input.chat_id}`, warning);
     } finally {
@@ -352,8 +358,8 @@ export class ActionService {
         inboundSeq: responseTo.seq,
       });
       const warning = this.rememberCard(content, result, {
-        source: this.store.eventByMessageId(input.message_id) ?? fence,
-        chatId, replyInThread: inThread, replyTarget: input.message_id,
+        connector, chatId, seen: [this.store.eventByMessageId(input.message_id), fence],
+        replyInThread: inThread, replyTarget: input.message_id,
       });
       if (!result.dry_run) await this.clearTemporaryReaction(fence.conv_key);
       return this.deliveryResult(result, `reply to message_id=${input.message_id}`, warning);

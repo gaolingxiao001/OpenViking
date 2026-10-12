@@ -248,3 +248,19 @@ it('Lark and Weixin both produce standard chat events, including thread and atta
   });
   assert.match(formatInboundLine(attachmentOnly), /Attachment ⏎ \[attachment type=file id=/);
 });
+
+it('looks chats up through an index instead of scanning the event history', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'connector-events-plan-'));
+  const store = new Store(path.join(directory, 'state.sqlite3'), logger);
+  t.after(() => { store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const plans = [];
+  const prepare = store.db.prepare.bind(store.db);
+  store.db.prepare = (sql) => {
+    if (/FROM connector_events\s+WHERE chat_id = \?/.test(sql)) plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => row.detail).join(' '));
+    return prepare(sql);
+  };
+  store.connectorForChat('oc_chat12345678');
+  store.chatContext('lark', 'oc_chat12345678');
+  assert.equal(plans.length, 2);
+  for (const plan of plans) assert.match(plan, /USING INDEX connector_events_chat/);
+});

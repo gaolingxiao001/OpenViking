@@ -10,7 +10,8 @@ import { Harness } from '../src/harness.mjs';
 import { normalizeEvent as normalizeConnectorEvent, deterministicFilter } from '../src/event.mjs';
 import { normalizeLarkMessage, normalizeLarkEvent } from '../src/connectors/lark-events.mjs';
 import { resolveCardAction, settledChoiceCard } from '../src/card-messages.mjs';
-import { larkConnectors, larkSuccess as success } from './action-fixture.mjs';
+import { fakeConnectors, larkConnectors, larkSuccess as success } from './action-fixture.mjs';
+import { chatEvent } from './event-fixture.mjs';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const profile = 'test-profile';
@@ -242,6 +243,39 @@ it('accepts raw SDK form callbacks without leaking tokens and keeps separate act
     assert.ok(!JSON.stringify(event).includes('private-token'));
     assert.equal(f.store.ingest(event).inserted, true);
   }
+});
+
+it('registers a cross-channel card where it landed, not where the decision came from', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-card-test-'));
+  const workspace = path.join(directory, 'workspace');
+  fs.mkdirSync(workspace);
+  const store = new Store(path.join(directory, 'state.sqlite3'), logger);
+  t.after(() => { store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  store.initializeCognition('pi', authority);
+  const groupMessage = normalizeEvent({ type: 'im.message.receive_v1', event_id: 'evt-group',
+    message_id: 'om_groupmsg123456', chat_id: chatId, chat_type: 'group', message_type: 'text',
+    sender_id: userId, sender_type: 'user', content: '群里的消息', tenant_key: 'tenant_lark' }, profile);
+  store.ingest(groupMessage);
+  store.ingest(chatEvent({ source: 'weixin', messageId: 'wx-decision-0001', chatId: 'wxuser@im.wechat',
+    tenantKey: 'wxbot@im.bot', senderId: 'wxuser@im.wechat' }));
+  const delivered = ['om_crosscard12345', 'om_unseencard1234'];
+  const connectors = fakeConnectors({ ids: ['lark', 'weixin'],
+    run: (_connector, _action, input) => ({ message_id: delivered.shift(), chat_id: input.chat_id }) });
+  const service = new ActionService({ config: { profile, workspace, tempDir: path.join(directory, 'tmp'),
+    maxReplyChars: 30_000 }, store, connectors, logger });
+  const send = (chat) => service.call('send_message', { source: 'lark', chat_id: chat,
+    decision_message_id: 'wx-decision-0001', card: { elements: [{ tag: 'markdown', content: 'vote' }] } }, { authority });
+
+  assert.equal((await send(chatId)).data.delivery_warning, undefined);
+  const click = normalizeCardAction(store.db, callback({ message_id: 'om_crosscard12345' }), profile);
+  assert.equal(click.connectorInstance, 'lark');
+  assert.equal(click.conversationKey, groupMessage.conversationKey, 'clicks share the group conversation');
+
+  // A chat the bot never heard from still gets the Lark tenant, never Weixin's.
+  await send('oc_unseenchat1234');
+  const scope = store.db.prepare('SELECT scope_json FROM lark_cards WHERE message_id = ?').get('om_unseencard1234');
+  assert.deepEqual(JSON.parse(scope.scope_json), { instance: 'lark', threadRootId: null,
+    conversation: { id: 'oc_unseenchat1234', type: 'group', tenant_id: 'tenant_lark', thread_id: null } });
 });
 
 it('validates card structure, size, mentions and choice keys without invoking the CLI', async (t) => {
