@@ -45,7 +45,7 @@ describe('idle liveness UX hint', () => {
       null,
     );
 
-    state.extension.onDeliverySucceeded({ inboundSeqs: [11], mode: 'reaction' });
+    state.extension.touch();
     assert.equal(state.extension.beforeInbound({}, { seq: 12 }), null);
     state.advance(600_000);
     assert.deepEqual(state.extension.beforeInbound({}, { seq: 13 }), { idleForMs: 600_000 });

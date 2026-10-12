@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createLogger } from '../src/logger.mjs';
 import { FailurePolicy } from '../src/notices.mjs';
+import { chatEvent } from './event-fixture.mjs';
 
 describe('automatic claude fallback', () => {
   function makeFallbackPolicy({ runtime = 'claude', setModelError = null, fallbackModel } = {}) {
@@ -36,12 +37,10 @@ describe('automatic claude fallback', () => {
       config: fallbackModel === undefined ? { fallbackModel: 'gpt-5.6-sol' } : { fallbackModel },
       store: {
         getCognitionState: () => ({ runtime: agentRuntime.runtime }),
-        inboundBySeq: (seq) => inboundRows[seq] ?? null,
-        appendCognitionJournal() {},
-        settleCognitionJournal() {},
+        inboundBySeq: (seq) => inboundRows[seq] ? chatEvent(inboundRows[seq]) : null,
       },
-      lark: {
-        async replyMessage(messageId, text) { replies.push({ messageId, text }); },
+      actions: {
+        async replyToEvent(event, text) { replies.push({ messageId: event.messageId, text }); return { ok: true }; },
       },
       logger: createLogger('error', { test: 'claude-fallback' }),
       runtime: agentRuntime,
@@ -64,7 +63,7 @@ describe('automatic claude fallback', () => {
     assert.doesNotMatch(replies[0].text, /没有生成回复/); // no duplicate failure notice
     assert.equal(delivered.length, 1);
     assert.equal(delivered[0][0].seq, 1);
-    assert.match(delivered[0][0].text, /^\[chat=oc_chat123456 msg=om_failed_123456 .*\] 帮我看下这个$/);
+    assert.match(delivered[0][0].text, /^\[chat=oc_chat123456 source=lark msg=om_failed_123456 .*\] 帮我看下这个$/);
     const fallback = activities.find((entry) => entry.kind === 'agent.fallback');
     assert.equal(fallback.status, 'SWITCHED');
     assert.equal(fallback.metadata.model, 'gpt-5.6-sol');
@@ -126,11 +125,9 @@ describe('failure notice mute', () => {
       store: {
         getCognitionState: () => ({ runtime: 'codex' }),
         inboundBySeq: (seq) => inboundRows[seq] ?? null,
-        appendCognitionJournal() {},
-        settleCognitionJournal() {},
       },
-      lark: {
-        async replyMessage(messageId, text) { replies.push({ messageId, text }); },
+      actions: {
+        async replyToEvent(event, text) { replies.push({ messageId: event.messageId, text }); return { ok: true }; },
       },
       logger: createLogger('error', { test: 'failure-mute' }),
       runtime: {},
@@ -139,7 +136,7 @@ describe('failure notice mute', () => {
     return { policy, replies, activities };
   }
 
-  const inbound = (seq, overrides = {}) => ({
+  const inbound = (seq, overrides = {}) => chatEvent({
     seq,
     messageId: `om_failed_${seq}`,
     chatId: 'oc_chat123456',
@@ -175,7 +172,7 @@ describe('failure notice mute', () => {
     await policy.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
     assert.equal(replies.length, 1);
     // Age the delivered mute past the 10-minute TTL.
-    const key = 'profile:tenant:oc_chat123456:main';
+    const key = inbound(1).conversationKey;
     const mute = policy.failureNoticeMutes.get(key);
     policy.failureNoticeMutes.set(key, { ...mute, atMs: mute.atMs - 11 * 60 * 1_000 });
     await policy.notifyTurnFailure({ inboundSeqs: [2], error: 'model exploded' });
@@ -191,7 +188,7 @@ describe('failure notice mute', () => {
   });
 
   it('keeps the mute when the successful turn belongs to another conversation', async () => {
-    const other = inbound(2, { conversationKey: 'profile:tenant:oc_other:main' });
+    const other = inbound(2, { chatId: 'oc_other' });
     const { policy, replies } = makePolicy({ 1: inbound(1), 2: other, 3: inbound(3) });
     await policy.notifyTurnFailure({ inboundSeqs: [1], error: 'model exploded' });
     policy.onTurnSucceeded({ inboundSeqs: [2] });

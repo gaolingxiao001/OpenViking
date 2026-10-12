@@ -7,14 +7,15 @@ history fallback and no local summary generator.
 
 Each cognition epoch owns a stable, private-to-this-daemon OV session. Switching
 providers keeps that session; `/new` starts a new epoch. Existing local ledger rows
-are uploaded on first use, in sequence. Only observable inbound Lark messages,
+are uploaded on first use, in sequence. Only observable inbound Connector events,
 outbound actions (including uncertain outcomes), and controls are mirrored.
 Native reasoning and arbitrary tool results are not session archives.
 
 `ov_session_sync` persists session identity, acknowledged sequence, uncertain
-append intent, and commit coverage. SQLite's existing journal remains a durable
-transport outbox and delivery ledger. It is not deleted or read to assemble
-historical prompts. This intentionally separates context storage from external
+append intent, and commit coverage. SQLite's cognition journal remains the durable
+source for this sync and the outbound delivery ledger; the `outbox` table guards
+the external side effects themselves. Neither is read to assemble historical
+prompts. This intentionally separates context storage from external
 side-effect reliability.
 
 The daemon disables OV auto-commit and requests a commit above 12,000 pending
@@ -30,7 +31,8 @@ A write timeout preserves its source ID. Before retrying, the next sync scans
 OV live messages and avoids re-appending an observed ID. OV currently has no
 idempotent append API: an original write arriving after reconciliation can still
 duplicate a source. This is not an exactly-once remote transport guarantee.
-External Lark delivery continues to use the local idempotency ledger independently.
+External deliveries (Lark, Weixin) use the Core `outbox` idempotency ledger
+independently.
 An ambiguous commit is not retried; if no changed overview appears, handoff can
 remain blocked and requires inspection of the OV archive/task. No local history
 fallback hides this condition.

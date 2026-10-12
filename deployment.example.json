@@ -8,6 +8,8 @@
     "TRAEX_BIN": "traecli",
     "CLAUDE_BIN": "claude",
     "PI_BIN": "pi",
+    "LARK_DAEMON_WEIXIN_ALLOW_FROM": "",
+    "LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS": "35000",
     "LARK_DAEMON_LOG_LEVEL": "info",
     "LARK_DAEMON_DRY_RUN": "false",
     "LARK_DAEMON_IGNORED_SENDER_IDS": "",
@@ -32,6 +34,8 @@
     {
       "id": "primary",
       "displayName": "Primary Agent",
+      "channel": "lark",
+      "connectors": ["lark"],
       "profile": "cli_primary",
       "port": 3738,
       "dataDir": "/Users/you/.local/share/lark-daemon-primary",
@@ -49,6 +53,8 @@
     {
       "id": "research",
       "displayName": "Research Agent",
+      "channel": "lark",
+      "connectors": ["lark"],
       "profile": "cli_research",
       "port": 3740,
       "dataDir": "/Users/you/.local/share/lark-daemon-research",

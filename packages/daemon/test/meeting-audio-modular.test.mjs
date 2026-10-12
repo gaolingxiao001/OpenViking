@@ -8,15 +8,16 @@ import { MeetingAudioCoordinator, MeetingGenerationClock } from '../src/meeting/
 import { MeetingInputPort } from '../src/meeting/input-port.mjs';
 import { MeetingMediaSupervisor } from '../src/meeting/media-supervisor.mjs';
 import { Store } from '../src/store.mjs';
+import { normalizeLarkEvent } from '../src/connectors/lark-events.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function envelope(type, id, event, atMs = Date.now()) {
-  return {
+  return normalizeLarkEvent({
     schema: '2.0',
     header: { event_id: id, event_type: type, tenant_key: 'tenant', create_time: String(atMs) },
     event,
-  };
+  }).data.meeting;
 }
 
 describe('modular meeting audio lifecycle', () => {

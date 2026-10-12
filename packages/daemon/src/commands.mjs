@@ -36,8 +36,10 @@ export function matchPrefix(token, candidates) {
 // against the bot's own id. Returns the parse candidate text, or null when the
 // message is not eligible (it then flows to codex as a normal message).
 export function commandCandidate(event) {
+  if (event.kind !== 'message.created' || !event.chatId || !event.messageId
+    || !event.replyRoute || !['text', 'post'].includes(event.messageType)) return null;
   const text = String(event.content ?? '').trim();
-  if ((event.chatType ?? 'p2p') === 'p2p') return text;
+  if (event.chatType === 'p2p') return text;
   return null;
 }
 

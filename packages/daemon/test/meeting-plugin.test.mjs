@@ -78,7 +78,7 @@ describe('MeetingPlugin text insert', () => {
     });
   });
 
-  it('closes claim authority after draining ingress', async () => {
+  it('revokes decision authority after draining ingress', async () => {
     const order = [];
     const plugin = new MeetingPlugin({
       config: {},
@@ -91,7 +91,6 @@ describe('MeetingPlugin text insert', () => {
     plugin.audio = {
       runtime: { stop() { order.push('runtime-drain-stop'); } },
       authority: { revokeAll() { order.push('authority-revoked'); } },
-      server: { async close() { order.push('claim-socket-closed'); } },
       coordinator: { async stop() { order.push('media-stop'); } },
       spool: { close() { order.push('spool-close'); } },
     };
@@ -102,8 +101,7 @@ describe('MeetingPlugin text insert', () => {
     const index = (event) => order.indexOf(event);
     assert.ok(index('runtime-drain-stop') < index('ingress-drained'));
     assert.ok(index('ingress-drained') < index('authority-revoked'));
-    assert.ok(index('authority-revoked') < index('claim-socket-closed'));
-    assert.ok(index('claim-socket-closed') < index('meeting-stop'));
+    assert.ok(index('authority-revoked') < index('meeting-stop'));
     assert.ok(index('meeting-stop') < index('media-stop'));
     assert.ok(index('media-stop') < index('spool-close'));
   });

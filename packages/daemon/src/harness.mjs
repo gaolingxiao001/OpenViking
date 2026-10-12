@@ -1,15 +1,14 @@
 import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { commandCandidate, parseCommand } from './commands.mjs';
 import { GroupBurstRouter } from './group-burst.mjs';
-import { formatInboundLine, resolveReplyTarget } from './runtime-input.mjs';
+import { formatInboundLine, resolveReplyTarget, eventDeliveryItem } from './runtime-input.mjs';
 import { opaqueRef, safeError } from './logger.mjs';
+import { parseProtocolLine } from './connectors/protocol.mjs';
 
-// The harness: the inbound pipe from a raw lark-cli event line to
-// AgentRuntime.submit. Owns the deterministic steps — parse, meeting dispatch,
-// normalize, filter, slash detection, persist/dedupe, roster warm-up, burst
-// batching — and the ingress barrier that keeps slash commands and later
-// messages in one global order. Everything that talks back to Lark (slash
-// execution, failure notices) lives outside; the harness only routes.
+// The harness: canonical Connector EVENT -> persistence -> AgentRuntime.submit.
+// Owns validation, filtering, dedupe and ordered admission. Chat capabilities
+// (slash commands, roster warm-up, burst batching) run only on eligible events.
+// Provider decoding and outbound actions live outside this input pipeline.
 export class Harness {
   constructor({
     config,
@@ -19,10 +18,11 @@ export class Harness {
     runtime,
     roster = null,
     liveness = null,
-    meeting = null,
-    isMeetingEvent = () => false,
+    prepareEvent = (event) => event,
+    eventHandler = () => null,
     onSlashCommand,
     onInboundChat = null,
+    afterEvent = null,
     isStopping = () => false,
   }) {
     this.config = config;
@@ -32,10 +32,11 @@ export class Harness {
     this.runtime = runtime;
     this.roster = roster;
     this.liveness = liveness;
-    this.meeting = meeting;
-    this.isMeetingEvent = isMeetingEvent;
+    this.prepareEvent = prepareEvent;
+    this.eventHandler = eventHandler;
     this.onSlashCommand = onSlashCommand;
     this.onInboundChat = onInboundChat;
+    this.afterEvent = afterEvent;
     this.isStopping = isStopping;
     this.ingressBarrier = Promise.resolve();
     this.pendingIngress = 0;
@@ -44,6 +45,10 @@ export class Harness {
       isConnected: () => this.runtime.snapshot().session.connected,
       isTurnInProgress: () => this.runtime.snapshot().work.turnInProgress,
     });
+  }
+
+  handleConnectorEvent(envelope) {
+    return this.handleEventLine(JSON.stringify(envelope));
   }
 
   handleEventLine(line) {
@@ -59,48 +64,39 @@ export class Harness {
     }
     let parsed;
     try {
-      parsed = JSON.parse(line);
+      parsed = parseProtocolLine(line);
+      if (parsed.type !== 'EVENT') throw new Error('expected a Connector EVENT');
     } catch (error) {
       this.logger.warn('event_invalid_json', { error: safeError(error) });
       this.recordActivity('system.event_dropped', {
-        summary: '收到无法解析的飞书事件',
+        summary: '收到无法解析的 Connector 事件',
         status: 'DROPPED',
         metadata: { reason: 'invalid_json', error: safeError(error) },
       });
       return;
     }
 
-    // VC events have a different schema and lifecycle from IM messages. Keep
-    // them off the IM normalizer/filter path so existing chat behavior remains
-    // byte-for-byte unchanged.
-    if (this.isMeetingEvent(parsed)) {
-      void this.meeting?.handleEvent(parsed).catch((error) => {
-        this.logger.warn('meeting_event_handle_failed', { error: safeError(error) });
-      });
-      return;
-    }
-
     let event;
     try {
-      event = normalizeEvent(parsed, this.config.profile);
+      event = this.prepareEvent(normalizeEvent(parsed));
     } catch (error) {
       this.logger.warn('event_invalid_shape', { error: safeError(error) });
       this.recordActivity('system.event_dropped', {
-        summary: '飞书事件缺少必要字段',
+        summary: 'Connector 事件缺少必要字段',
         status: 'DROPPED',
         metadata: { reason: 'invalid_shape', error: safeError(error) },
       });
       return;
     }
     const filterReason = deterministicFilter(event, this.config);
-    // '/'-prefixed text is reserved for local slash commands: handled by the daemon
-    // itself, recorded as filtered so it never enters codex delivery or history.
-    // P2P takes bare /commands; a group only when the bot is @-mentioned.
+    // Only eligible, replyable P2P messages can invoke local slash commands.
+    // A slash in any other event body remains ordinary model input.
     const commandText = filterReason ? null : commandCandidate(event);
     const command = commandText === null ? null : parseCommand(commandText);
+    const handler = this.eventHandler(event);
     let result;
     try {
-      result = this.store.ingest(event, command ? 'slash_command' : filterReason, Date.now());
+      result = this.store.ingest(event, command ? 'slash_command' : filterReason, Date.now(), { journal: !handler });
     } catch (error) {
       this.logger.error('event_persist_failed', { error: safeError(error) });
       this.recordActivity('system.persist_failed', {
@@ -112,14 +108,14 @@ export class Harness {
     if (!result.inserted) {
       this.logger.debug('event_duplicate', { messageRef: opaqueRef(event.messageId) });
       this.recordActivity('message.duplicate', {
-        summary: '同一条飞书消息已经处理过',
+        summary: '同一来源事件已经接收过',
         status: 'DUPLICATE',
         conversationKey: event.conversationKey,
         metadata: { reason: 'deduplicated' },
       });
       return;
     }
-    this.onInboundChat?.(event.chatId);
+    if (event.source === 'lark' && event.chatId) this.onInboundChat?.(event.chatId);
     if (command) {
       this.logger.info('event_slash_command', {
         messageRef: opaqueRef(event.messageId),
@@ -140,36 +136,36 @@ export class Harness {
       });
       return;
     }
+    if (this.afterEvent) {
+      void Promise.resolve().then(() => this.afterEvent(event)).catch(() => {
+        this.logger.warn('event_followup_failed');
+      });
+    }
+    if (handler) {
+      return this.enqueueIngress(() => handler(event));
+    }
     this.logger.info('event_delivered', {
+      seq: result.inbound.seq,
       messageRef: opaqueRef(event.messageId),
       chatRef: opaqueRef(event.chatId),
       conversationRef: opaqueRef(event.conversationKey),
       chatType: event.chatType,
     });
     this.enqueueIngress(async () => {
-      const idleHint = this.liveness?.beforeInbound(event, result.inbound, {
+      const idleHint = event.chatId && event.replyRoute && this.liveness?.beforeInbound(event, result.inbound, {
         modelBusy: this.runtime.snapshot().work.turnInProgress,
       });
       // Bounded roster warm-up so formatInboundLine can resolve from= to a
       // display name. warm() never rejects and races an internal timeout, so a
       // slow or failing lark-cli only degrades the label back to the id stub.
-      await this.roster?.warm(event.chatId);
+      if (event.source === 'lark' && event.chatId) await this.roster?.warm(event.chatId);
       await this.runtime.prepareInputContext?.();
-      this.groupBurst.route({
-        conversationKey: event.conversationKey,
-        scope: { kind: 'lark', conversationKey: event.conversationKey },
-        target: {
-          chatId: event.chatId,
-          threadId: event.threadId,
-          messageId: event.messageId,
-        },
-        chatType: event.chatType,
+      this.groupBurst.route(eventDeliveryItem(event, result.inbound.seq, {
         text: formatInboundLine(event, null, {
           ...(idleHint ?? {}),
-          replyTo: resolveReplyTarget(this.store, event),
+          replyTo: event.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, event),
         }),
-        seq: result.inbound.seq,
-      });
+      }));
     });
   }
 

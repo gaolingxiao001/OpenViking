@@ -23,7 +23,10 @@ const baseConfig = {
   dataDir: '/tmp/lark-daemon-pi-data',
   databasePath: '/tmp/lark-daemon-test.sqlite3',
   profile: 'test-profile',
+  connectors: ['lark'],
   larkCliBin: '/fake/lark-cli',
+  actionSocketPath: '/tmp/lark-daemon-pi-data/actions.sock',
+  actionCliPath: '/release/packages/daemon/src/actions/cli.mjs',
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
   cognitionMaxChars: 120_000,
@@ -199,12 +202,15 @@ describe('PiAgent persistent rpc runtime', () => {
     assert.ok(args.includes('--session-id'));
     const env = calls.at(-1).options.env;
     assert.equal(env.LARKSUITE_CLI_PROFILE, 'test-profile');
+    assert.equal(env.PERSONAL_AGENT_SOCKET, '/tmp/lark-daemon-pi-data/actions.sock');
+    assert.equal(env.PERSONAL_AGENT_AUTHORITY, agent.authorityToken);
     assert.equal(env.LARK_APP_SECRET, undefined);
     assert.equal(env.PI_LARK_TOOLS_CONFIG, undefined);
     const promptPath = args[args.indexOf('--append-system-prompt') + 1];
     const runtimePrompt = fs.readFileSync(promptPath, 'utf8');
-    assert.match(runtimePrompt, /Pi delivery runtime/);
-    assert.match(runtimePrompt, /\/fake\/lark-cli im \+messages-reply/);
+    assert.match(runtimePrompt, /## Agent tools from bash/);
+    assert.match(runtimePrompt, /actions\/cli\.mjs" <tool> <<'JSON'/);
+    assert.doesNotMatch(runtimePrompt, /lark-cli im \+messages-reply/);
 
     agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
     const prompt = parsedWrites(persistent[0]).find((message) => message.type === 'prompt');

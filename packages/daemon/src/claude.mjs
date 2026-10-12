@@ -7,6 +7,7 @@ import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { safeError as safe } from './logger.mjs';
 import { activityPayload } from './activity.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
+import { agentToolEnv, agentToolServer } from './actions/api.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
@@ -25,22 +26,6 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const LARK_DELIVERY_TOOLS = new Set([
-  'react_to_lark_message',
-  'retract_lark_message',
-  'reply_lark_message',
-  'send_lark_message',
-]);
-
-export function larkDeliveryToolName(value) {
-  const match = /^(?:mcp__)?lark_daemon_im__(.+)$/.exec(String(value ?? ''));
-  return match && LARK_DELIVERY_TOOLS.has(match[1]) ? match[1] : null;
-}
-
-export function isLarkDeliveryToolName(value) {
-  return Boolean(larkDeliveryToolName(value));
-}
-
 function appendBounded(current, chunk, label) {
   const next = current + chunk;
   if (Buffer.byteLength(next, 'utf8') > MAX_LINE_BYTES) {
@@ -49,13 +34,13 @@ function appendBounded(current, chunk, label) {
   return next;
 }
 
-export function sanitizeClaudeEnv(environment, profile = '') {
-  return sanitizeAgentChildEnv(environment, { profile, stripClaudeCode: true });
+export function sanitizeClaudeEnv(environment, profile = '', actions = null) {
+  return sanitizeAgentChildEnv(environment, { profile, stripClaudeCode: true, actions });
 }
 
 // Persistent Anthropic stream-json adapter, adapted from zouk-daemon v0.6.0's
 // MIT-licensed Claude driver. The daemon-specific state machine below keeps one
-// global runtime, journal cursor, and Lark authority fence; it does not reuse
+// global runtime, journal cursor, and tool authority fence; it does not reuse
 // Zouk's per-agent/server topology.
 export class ClaudeAgent {
   constructor(config, store, logger, options = {}) {
@@ -65,7 +50,6 @@ export class ClaudeAgent {
     this._spawn = options.spawn ?? nodeSpawn;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
-    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
@@ -119,8 +103,7 @@ export class ClaudeAgent {
     this.backoffMs = this.reconnectBaseMs;
     this.activitySeq = 0;
     this.idleWaiters = [];
-    this.deliveryTools = new Map();
-    this.toolStarts = new Map();        // tool_use id -> { name, atMs } for Activity durations
+    this.toolStarts = new Map(); // tool_use id -> name and Activity start time
     this.mcpTempDir = null;
     this.sessionRotation = null;
   }
@@ -214,7 +197,7 @@ export class ClaudeAgent {
       try {
         child = this._spawn(this.config.claudeBin, args, {
           cwd: this.config.workspace,
-          env: sanitizeClaudeEnv(process.env, this.config.profile),
+          env: sanitizeClaudeEnv(process.env, this.config.profile, agentToolEnv(this.config, this.authorityToken)),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -263,29 +246,9 @@ export class ClaudeAgent {
     this._cleanupMcpConfig();
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-claude-mcp-'));
     try { fs.chmodSync(directory, 0o700); } catch {}
-    const toolArgs = [
-      this.config.larkToolServerPath,
-      '--lark-cli-bin', this.config.larkCliBin,
-      '--profile', this.config.profile,
-      '--project-dir', this.config.projectDir,
-      '--database-path', this.config.databasePath,
-      '--temp-dir', this.config.tempDir,
-      '--timeout-ms', String(this.config.sendTimeoutMs),
-      '--max-text-chars', String(this.config.maxReplyChars),
-      '--dry-run', String(Boolean(this.config.dryRun)),
-      '--runtime-token', this.authorityToken,
-    ];
-    if (this.config.meetingAudio?.authoritySocketPath) {
-      toolArgs.push(
-        '--decision-authority-socket',
-        this.config.meetingAudio.authoritySocketPath,
-      );
-    }
     const configPath = path.join(directory, 'mcp-config.json');
     fs.writeFileSync(configPath, JSON.stringify({
-      mcpServers: {
-        lark_daemon_im: { command: process.execPath, args: toolArgs },
-      },
+      mcpServers: { personal_agent: agentToolServer(this.config, this.authorityToken) },
     }), { encoding: 'utf8', mode: 0o600 });
     this.mcpTempDir = directory;
     return configPath;
@@ -309,7 +272,7 @@ export class ClaudeAgent {
         '--output-format', 'stream-json',
         '--input-format', 'stream-json',
         // No --strict-mcp-config: user-scope skill/MCP servers (OpenViking via
-        // OPENVIKING_* env) load alongside lark_daemon_im. The daemon does not
+        // OPENVIKING_* env) load alongside personal_agent. The daemon does not
         // own an OV client.
         '--mcp-config', mcpConfigPath,
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
@@ -325,7 +288,7 @@ export class ClaudeAgent {
       try {
         child = this._spawn(this.config.claudeBin, args, {
           cwd: this.config.workspace,
-          env: sanitizeClaudeEnv(process.env, this.config.profile),
+          env: sanitizeClaudeEnv(process.env, this.config.profile, agentToolEnv(this.config, this.authorityToken)),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -582,7 +545,7 @@ export class ClaudeAgent {
             metadata: { runtime: CLAUDE_RUNTIME.id, thinking: block.thinking || undefined },
           });
         } else if (block.type === 'text' && block.text) {
-          // Telemetry only. Claude must call the Lark MCP tool to deliver text.
+          // Telemetry only. Claude must call a delivery tool to reach a user.
           this._recordActivity('agent.note', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
             summary: String(block.text),
@@ -591,13 +554,6 @@ export class ClaudeAgent {
         } else if (block.type === 'tool_use') {
           this.modelWorking = false;
           this.modelStartedAtMs = null;
-          const deliveryTool = larkDeliveryToolName(block.name);
-          if (deliveryTool && typeof block.id === 'string') {
-            this.deliveryTools.set(block.id, {
-              tool: deliveryTool,
-              input: block.input && typeof block.input === 'object' ? block.input : {},
-            });
-          }
           this.toolStarts.set(block.id, { name: String(block.name ?? 'unknown tool'), atMs: Date.now() });
           this._recordActivity('agent.tool_called', {
             inboundSeq: this._activeSeqs().at(-1) ?? null,
@@ -614,8 +570,6 @@ export class ClaudeAgent {
       const blocks = Array.isArray(message.message?.content) ? message.message.content : [];
       for (const block of blocks) {
         if (block?.type !== 'tool_result') continue;
-        const delivery = this.deliveryTools.get(block.tool_use_id) ?? null;
-        this.deliveryTools.delete(block.tool_use_id);
         const started = this.toolStarts.get(block.tool_use_id);
         this.toolStarts.delete(block.tool_use_id);
         const output = activityPayload(block.content);
@@ -631,25 +585,6 @@ export class ClaudeAgent {
             ...(block.is_error === true ? { error: output } : { output }),
           },
         });
-        if (delivery && block.is_error !== true && this.onDeliverySucceeded) {
-          const responseMessageId = delivery.input.response_to_message_id
-            ?? (['react_to_lark_message', 'reply_lark_message'].includes(delivery.tool)
-              ? delivery.input.message_id
-              : delivery.input.decision_message_id);
-          const resolvedSeq = responseMessageId
-            ? this.store.inboundSeqForMessageId?.(responseMessageId)
-            : null;
-          try {
-            this.onDeliverySucceeded({
-              inboundSeqs: resolvedSeq === null || resolvedSeq === undefined
-                ? this._activeSeqs()
-                : [resolvedSeq],
-              mode: 'lark',
-            });
-          } catch (error) {
-            this.logger.warn('delivery_success_notify_failed', { error: safe(error) });
-          }
-        }
       }
       if (blocks.some((block) => block?.type === 'tool_result')) {
         this.modelWorking = true;
@@ -703,7 +638,6 @@ export class ClaudeAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    this.deliveryTools.clear();
     this.toolStarts.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this._recordActivity('agent.turn_completed', {
@@ -830,7 +764,6 @@ export class ClaudeAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    this.deliveryTools.clear();
     this.deliveredThroughSeq = this.syncedThroughSeq;
     this.needsHistoryPrefix = !this.sessionInitialized;
     if ((acceptanceUnknown || !this.sessionInitialized)
@@ -981,7 +914,6 @@ export class ClaudeAgent {
     this.turnStartedAtMs = null;
     this.modelWorking = false;
     this.modelStartedAtMs = null;
-    this.deliveryTools.clear();
     if ((inboundSeqs.length > 0 || receipts.length > 0) && this.onTurnAbandoned) {
       try { this.onTurnAbandoned(withReceiptIds({ inboundSeqs }, receipts)); } catch (error) {
         this.logger.warn('turn_abandoned_notify_failed', { error: safe(error) });

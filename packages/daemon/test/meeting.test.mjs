@@ -9,14 +9,15 @@ import {
   MeetingInboxNotifier,
   meetingActivityDebounceMs,
   meetingContextLines,
-  normalizeMeetingEvent,
 } from '../src/meeting/index.mjs';
 import { Store } from '../src/store.mjs';
+import { chatEvent } from './event-fixture.mjs';
+import { normalizeLarkEvent } from '../src/connectors/lark-events.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function envelope(type, id, event, atMs = Date.now()) {
-  return {
+  return normalizeLarkEvent({
     schema: '2.0',
     header: {
       event_id: id,
@@ -25,7 +26,7 @@ function envelope(type, id, event, atMs = Date.now()) {
       create_time: String(atMs),
     },
     event,
-  };
+  }).data.meeting;
 }
 
 describe('TAT meeting adapter', () => {
@@ -43,10 +44,10 @@ describe('TAT meeting adapter', () => {
   });
 
   it('normalizes invite correlation fields without applying the IM schema', () => {
-    const parsed = normalizeMeetingEvent(envelope('vc.bot.meeting_invited_v1', 'evt-invite', {
+    const parsed = envelope('vc.bot.meeting_invited_v1', 'evt-invite', {
       meeting: { id: '734000000000000001', meeting_no: '123456789' },
       call_id: 'call-123',
-    }));
+    });
     assert.equal(parsed.meetingNumber, '123456789');
     assert.equal(parsed.callId, 'call-123');
     assert.equal(parsed.meetingId, '734000000000000001');
@@ -169,7 +170,7 @@ describe('TAT meeting adapter', () => {
     assert.equal(inboxBatches.length, 2);
 
     // The next real IM turn must not receive transcript payload via cognition catch-up.
-    const inbound = store.ingest({
+    const inbound = store.ingest(chatEvent({
       eventId: 'evt-im',
       messageId: 'om-im',
       conversationKey: 'test:tenant:oc-chat:main',
@@ -185,7 +186,7 @@ describe('TAT meeting adapter', () => {
       content: '会议讲到哪了？',
       mentions: [],
       createTimeMs: Date.now(),
-    }).inbound;
+    })).inbound;
     const through = store.cognitionJournalBeforeInbound(inbound.seq);
     const prefix = cognitionHistoryPrefix(store, store.getCognitionState().epoch, through).text;
     assert.doesNotMatch(prefix, /kind=meeting_context/);

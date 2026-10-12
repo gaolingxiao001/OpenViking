@@ -2,7 +2,7 @@
 import { createRequire } from 'node:module';
 import { getConfig, publicConfig } from './config.mjs';
 import { createLogger } from './logger.mjs';
-import { LarkDaemon } from './daemon.mjs';
+import { PersonalAgentDaemon } from './daemon.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -27,8 +27,8 @@ try {
   process.exit(1);
 }
 
-const logger = createLogger(config.logLevel, { service: 'lark-daemon' });
-const daemon = new LarkDaemon(config, logger);
+const logger = createLogger(config.logLevel, { service: 'personal-agent-core' });
+const daemon = new PersonalAgentDaemon(config, logger);
 let signalHandled = false;
 
 async function handleSignal(signal) {

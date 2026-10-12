@@ -44,7 +44,6 @@ describe('configuration safety', { concurrency: false }, () => {
       assert.match(config.meetingAudio.spoolPath, /meeting-audio-spool\.sqlite3$/);
       assert.deepEqual(config.meetingAudio.workerArgs, ['worker.py', '--config', asrConfigFile]);
       assert.equal(config.meetingAudio.asrConfigFile, asrConfigFile);
-      assert.match(config.meetingAudio.authoritySocketPath, /meeting-audio-authority\.sock$/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

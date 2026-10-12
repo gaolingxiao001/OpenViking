@@ -15,6 +15,8 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'TRAECLI_BIN',
   'CLAUDE_BIN',
   'PI_BIN',
+  'LARK_DAEMON_WEIXIN_ALLOW_FROM',
+  'LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS',
   'LARK_DAEMON_LOG_LEVEL',
   'LARK_DAEMON_DRY_RUN',
   'LARK_DAEMON_IGNORED_SENDER_IDS',
@@ -52,6 +54,8 @@ const DAEMON_PROCESS_ENV_FIELDS = Object.freeze([
 const AGENT_FIELDS = Object.freeze([
   'id',
   'displayName',
+  'channel',
+  'connectors',
   'profile',
   'port',
   'dataDir',
@@ -192,6 +196,29 @@ function parseAgent(value, index) {
     });
   }
   const model = manifestString(value.model, `${label}.model`);
+  let connectors = null;
+  if (value.connectors !== undefined) {
+    if (!Array.isArray(value.connectors) || value.connectors.length === 0) {
+      throw new Error(`${label}.connectors must be a non-empty array`);
+    }
+    connectors = [...new Set(value.connectors.map((connector, connectorIndex) => (
+      manifestString(connector, `${label}.connectors[${connectorIndex}]`, { maxLength: 64 })
+    )))];
+    if (connectors.length !== value.connectors.length
+      || connectors.some((connector) => !['lark', 'weixin'].includes(connector))) {
+      throw new Error(`${label}.connectors must contain unique lark or weixin values`);
+    }
+  }
+  const channel = value.channel === undefined
+    ? (connectors?.[0] ?? 'lark')
+    : manifestString(value.channel, `${label}.channel`);
+  if (!['lark', 'weixin'].includes(channel)) {
+    throw new Error(`${label}.channel must be lark or weixin`);
+  }
+  connectors ??= [channel];
+  if (!connectors.includes(channel)) {
+    throw new Error(`${label}.connectors must include ${label}.channel`);
+  }
   const volcSessionId = optionalManifestString(value.volcSessionId, `${label}.volcSessionId`);
   const volcEnvironmentId = optionalManifestString(
     value.volcEnvironmentId,
@@ -203,9 +230,17 @@ function parseAgent(value, index) {
   if (model === 'ark' && !volcSessionId) {
     throw new Error(`${label} using ark must configure volcSessionId and volcEnvironmentId`);
   }
+  if (connectors.includes('weixin') && model === 'ark') {
+    throw new Error(`${label} using the weixin connector cannot use the ark runtime`);
+  }
+  if (meetingAudio && !connectors.includes('lark')) {
+    throw new Error(`${label}.meetingAudio requires the lark connector`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
+    channel,
+    connectors: Object.freeze(connectors),
     profile: manifestString(value.profile, `${label}.profile`),
     port: value.port,
     dataDir: manifestAbsolutePath(value.dataDir, `${label}.dataDir`),
@@ -350,6 +385,8 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
     LARK_DAEMON_MODEL: agent.model,
   });
+  env.LARK_DAEMON_CHANNEL = agent.channel;
+  env.LARK_DAEMON_CONNECTORS_JSON = JSON.stringify(agent.connectors);
   if (agent.volcSessionId) {
     env.LARK_DAEMON_VOLC_SESSION_ID = agent.volcSessionId;
     env.LARK_DAEMON_VOLC_ENVIRONMENT_ID = agent.volcEnvironmentId;

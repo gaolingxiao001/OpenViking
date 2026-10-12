@@ -5,8 +5,8 @@ import { getRuntimeDefinition } from './runtime-catalog.mjs';
 const TRAEX_RUNTIME = getRuntimeDefinition('traex');
 const TRAEX_APP_SERVER_CONFIG_ARGS = Object.freeze([]);
 
-export function sanitizeTraexEnv(environment, profile = '') {
-  return sanitizeAgentChildEnv(environment, { profile });
+export function sanitizeTraexEnv(environment, profile = '', actions = null) {
+  return sanitizeAgentChildEnv(environment, { profile, actions });
 }
 
 // TraeX currently speaks the same app-server JSON-RPC shape that CodexAgent

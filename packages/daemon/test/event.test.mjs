@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { normalizeEvent, deterministicFilter } from '../src/event.mjs';
+import { normalizeLarkMessage as normalizeEvent } from '../src/connectors/lark-events.mjs';
+import { deterministicFilter as filterEvent } from '../src/event.mjs';
+import { chatEvent } from './event-fixture.mjs';
+const deterministicFilter = (event, config) => filterEvent(event.envelope ? event : chatEvent(event), config);
 
 function config(overrides = {}) {
   return {
@@ -44,7 +47,7 @@ describe('normalizeEvent', () => {
     assert.equal(event.senderType, 'user');
     assert.equal(event.threadId, 'omt-topic');
     assert.equal(event.threadRootId, 'om-root');
-    assert.equal(event.conversationKey, 'work:tenant-1:oc-chat:thread:omt-topic');
+    assert.equal(event.conversationKey, JSON.stringify(['work', 'conversation', 'tenant-1', 'oc-chat', 'omt-topic']));
   });
 
   it('keeps an ordinary quoted reply in the main conversation without thread_id', () => {
@@ -62,7 +65,7 @@ describe('normalizeEvent', () => {
     });
     assert.equal(event.threadId, null);
     assert.equal(event.threadRootId, null);
-    assert.equal(event.conversationKey, 'default:-:oc-chat:main');
+    assert.equal(event.conversationKey, JSON.stringify(['lark', 'conversation', '-', 'oc-chat', null]));
   });
 
   it('accepts the compact compatibility format', () => {
@@ -78,7 +81,7 @@ describe('normalizeEvent', () => {
       timestamp: String(Date.now()),
     });
     assert.equal(event.content, 'hello');
-    assert.equal(event.conversationKey, 'default:-:oc-2:main');
+    assert.equal(event.conversationKey, JSON.stringify(['lark', 'conversation', '-', 'oc-2', null]));
   });
 
   it('does not leak rich-text tag names into post content', () => {

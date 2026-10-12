@@ -6,11 +6,12 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.mjs';
 import { cognitionHistoryPrefix } from '../src/cognition.mjs';
+import { chatEvent } from './event-fixture.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function event(id, content = `message ${id}`, overrides = {}) {
-  return {
+  return chatEvent({
     type: 'im.message.receive_v1',
     eventId: `evt-${id}`,
     messageId: `om-${id}`,
@@ -29,7 +30,7 @@ function event(id, content = `message ${id}`, overrides = {}) {
     createTimeMs: Date.now(),
     raw: { id },
     ...overrides,
-  };
+  });
 }
 
 describe('Store', () => {
@@ -145,19 +146,20 @@ describe('Store', () => {
   it('does not persist raw event envelopes and blanks ignored content', () => {
     const accepted = event('raw', 'visible', { raw: { token: 'secret-sentinel' } });
     store.ingest(accepted);
-    const acceptedRow = store.db.prepare('SELECT raw_json, content, status FROM inbound WHERE message_id = ?')
+    const acceptedRow = store.db.prepare('SELECT event_json, content, status FROM connector_events WHERE message_id = ?')
       .get(accepted.messageId);
-    assert.equal(acceptedRow.raw_json, '{}');
+    assert.ok(!acceptedRow.event_json.includes('secret-sentinel'));
     assert.equal(acceptedRow.content, 'visible');
     assert.equal(acceptedRow.status, 'DONE');
 
     const ignored = event('ignored', 'private ignored body', { raw: { app_secret: 'secret-sentinel' } });
     store.ingest(ignored, 'unsupported_message_type');
     const ignoredRow = store.db.prepare(`
-      SELECT raw_json, content, mentions_json, status FROM inbound WHERE message_id = ?
+      SELECT event_json, content, mentions_json, status FROM connector_events WHERE message_id = ?
     `).get(ignored.messageId);
-    assert.deepEqual({ ...ignoredRow }, {
-      raw_json: '{}',
+    const { event_json, ...fields } = ignoredRow;
+    assert.ok(!event_json.includes('private ignored body'));
+    assert.deepEqual(fields, {
       content: '',
       mentions_json: '[]',
       status: 'RULE_IGNORED',

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(testDir, '..', 'public');
@@ -43,7 +44,7 @@ test('回合分组：消息按 inboundSeqs 归入回合，工具按 toolId 配�
   assert.match(js, /claim\(open, meta\.inboundSeqs\)/);
   assert.match(js, /tools\.get\(toolId\)/);
   assert.match(js, /LARK_DELIVERY = /);
-  assert.match(js, /CLI_DELIVERY = /); // Pi/方舟经 bash 调 lark-cli 发消息，同样算输出
+  assert.match(js, /CLI_DELIVERY = /); // 保留方舟 Worker 和旧版 CLI 投递记录
   assert.match(js, /模型实际收到/);
 });
 
@@ -63,4 +64,34 @@ test('每轮输入/输出单独成区，系统事件进侧栏', () => {
 
 test('渲染层只用安全 DOM API', () => {
   assert.doesNotMatch(js, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+test('Core 已结算投递进入输出区，MCP/CLI 调用和未确认投递不会重复计作成功', () => {
+  const { buildModel, deliveryOf } = runInNewContext(
+    js.slice(0, js.indexOf('// ---------- 渲染：上下文流')) + '\n({ buildModel, deliveryOf });',
+    { document: { getElementById: () => ({}) } },
+  );
+  for (const connector of ['lark', 'weixin']) {
+    const rows = [
+      { kind: 'agent.turn_started', metadata: { inboundSeqs: [1] } },
+      { kind: 'agent.tool_called', summary: 'personal_agent · reply_message', metadata: {
+        toolId: 'reply', toolName: 'reply_message', toolServer: 'personal_agent',
+        input: JSON.stringify({ markdown: '已完成' }),
+      } },
+      { kind: 'delivery.queued', outboxId: 1, status: 'PENDING', summary: '已完成' },
+      { kind: 'delivery.sent', outboxId: 1, status: 'SENT', summary: '已完成',
+        metadata: { connector, action: 'message.reply' } },
+      { kind: 'agent.tool', status: 'COMPLETED', metadata: { toolId: 'reply', output: 'ok' } },
+      { kind: 'agent.tool', status: 'COMPLETED', metadata: { toolName: 'bash',
+        input: 'node /daemon/actions/cli.mjs reply_message', output: 'ok' } },
+      { kind: 'delivery.uncertain', outboxId: 2, status: 'UNCERTAIN', summary: 'timeout' },
+      { kind: 'agent.turn_completed', status: 'completed' },
+    ].map((row, i) => ({ id: i + 1, createdAtMs: i * 100, ...row }));
+    const turn = buildModel(rows).turns[0];
+    const deliveries = turn.steps.filter((step) => step.type === 'tool' && deliveryOf(step));
+    assert.equal(deliveries.length, 1);
+    assert.equal(deliveryOf(deliveries[0]).mode, '回复');
+    assert.equal(deliveryOf(deliveries[0]).text, '已完成');
+    assert.equal(turn.steps.filter((step) => step.type === 'tool').length, 3);
+  }
 });

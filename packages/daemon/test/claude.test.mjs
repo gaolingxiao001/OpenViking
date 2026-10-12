@@ -1,9 +1,10 @@
 import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
-import { ClaudeAgent, isLarkDeliveryToolName, sanitizeClaudeEnv } from '../src/claude.mjs';
+import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
@@ -18,7 +19,8 @@ const baseConfig = {
   databasePath: '/tmp/lark-daemon-test.sqlite3',
   profile: 'test-profile',
   larkCliBin: '/fake/lark-cli',
-  larkToolServerPath: '/release/packages/daemon/src/lark-tools.mjs',
+  actionMcpPath: '/release/packages/daemon/src/actions/mcp.mjs',
+  actionSocketPath: '/data/actions.sock',
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
   cognitionMaxChars: 120_000,
@@ -182,13 +184,6 @@ function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {
 }
 
 describe('ClaudeAgent persistent stream-json runtime', () => {
-  it('recognises only delivery tools from the trusted Lark MCP server', () => {
-    assert.equal(isLarkDeliveryToolName('mcp__lark_daemon_im__send_lark_message'), true);
-    assert.equal(isLarkDeliveryToolName('lark_daemon_im__react_to_lark_message'), true);
-    assert.equal(isLarkDeliveryToolName('mcp__other__send_lark_message'), false);
-    assert.equal(isLarkDeliveryToolName('mcp__lark_daemon_im__view_lark_image'), false);
-  });
-
   it('preflights, starts persistent stream-json, and prefixes the first real turn', async () => {
     const { agent, calls, persistent, store } = harness();
     await agent.start();
@@ -198,8 +193,13 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     for (const value of ['--print', '--input-format', 'stream-json', '--output-format', '--mcp-config']) {
       assert.ok(args.includes(value));
     }
-    // User-scope and plugin MCP servers must load alongside lark_daemon_im.
+    // User-scope and plugin MCP servers must load alongside personal_agent.
     assert.ok(!args.includes('--strict-mcp-config'));
+    const mcpConfig = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8'));
+    assert.deepEqual(mcpConfig.mcpServers.personal_agent.args, [
+      '/release/packages/daemon/src/actions/mcp.mjs', '--socket', '/data/actions.sock', '--authority', agent.authorityToken,
+    ]);
+    assert.equal(calls.at(-1).options.env.PERSONAL_AGENT_SOCKET, '/data/actions.sock');
     assert.equal(args[args.indexOf('--model') + 1], 'sonnet');
     assert.equal(args[args.indexOf('--effort') + 1], 'medium');
     assert.ok(args.includes('--session-id'));
@@ -370,38 +370,6 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     child.feed({ type: 'result', subtype: 'success', is_error: false, result: 'done' });
     assert.equal(agent.turnInProgress, false);
     assert.equal(failures.length, 0);
-    await agent.stop();
-  });
-
-  it('notifies the outer lifecycle when a Lark delivery tool succeeds', async () => {
-    const deliveries = [];
-    const { agent, persistent } = harness({
-      agentOptions: { onDeliverySucceeded: (delivery) => deliveries.push(delivery) },
-    });
-    await agent.start();
-    const child = persistent[0];
-    agent.deliver('please react', 7);
-    child.feed({ type: 'system', subtype: 'init', session_id: agent.sessionId });
-    child.feed({
-      type: 'assistant',
-      message: { content: [{
-        type: 'tool_use',
-        id: 'tool-delivery-1',
-        name: 'mcp__lark_daemon_im__react_to_lark_message',
-        input: {},
-      }] },
-    });
-    child.feed({
-      type: 'user',
-      message: { content: [{
-        type: 'tool_result',
-        tool_use_id: 'tool-delivery-1',
-        is_error: false,
-        content: 'ok',
-      }] },
-    });
-    assert.deepEqual(deliveries, [{ inboundSeqs: [7], mode: 'lark' }]);
-    child.feed({ type: 'result', subtype: 'success', result: 'done' });
     await agent.stop();
   });
 

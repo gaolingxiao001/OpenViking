@@ -41,18 +41,19 @@ export class GroupBurstRouter {
 
   route(item) {
     if (this.stopped) return false;
-    if (!item || typeof item.conversationKey !== 'string' || !item.conversationKey) {
-      throw new TypeError('conversationKey is required');
+    const key = item?.scopeKey ?? item?.conversationKey;
+    if (typeof key !== 'string' || !key) {
+      throw new TypeError('event scopeKey is required');
     }
 
-    let existing = this.pending.get(item.conversationKey);
+    let existing = this.pending.get(key);
     if (item.chatType === 'group'
       && existing
       && existing.dueAtMs <= this.now()
       && this.isConnected()
       && !this.isTurnInProgress()) {
       const claimed = this.flushReady();
-      existing = this.pending.get(item.conversationKey);
+      existing = this.pending.get(key);
       // An older conversation may have won the idle turn. Keep this expired
       // conversation sealed behind it instead of steering across chat/thread.
       if (claimed && existing) {
@@ -69,19 +70,19 @@ export class GroupBurstRouter {
         existing.items.push(item);
       } else {
         existing = {
-          conversationKey: item.conversationKey,
+          scopeKey: key,
           dueAtMs: this.now(),
           order: this.nextOrder++,
           items: [item],
         };
         // Retain ownership before calling into the runtime. A transition may
         // close admission between the status check and submit.
-        this.pending.set(item.conversationKey, existing);
+        this.pending.set(key, existing);
       }
       const accepted = this.submit(existing.items, {
         admission: 'enqueue',
       })?.accepted === true;
-      if (accepted) this.pending.delete(item.conversationKey);
+      if (accepted) this.pending.delete(key);
       this._schedule();
       return true;
     }
@@ -89,8 +90,8 @@ export class GroupBurstRouter {
     if (existing) {
       existing.items.push(item);
     } else {
-      this.pending.set(item.conversationKey, {
-        conversationKey: item.conversationKey,
+      this.pending.set(key, {
+        scopeKey: key,
         dueAtMs: this.now() + this.delayMs,
         order: this.nextOrder++,
         items: [item],
@@ -116,7 +117,7 @@ export class GroupBurstRouter {
     }
 
     if (this.submit(next.items, { admission: 'claim-if-idle' })?.accepted !== true) return false;
-    this.pending.delete(next.conversationKey);
+    this.pending.delete(next.scopeKey);
     return true;
   }
 
@@ -129,7 +130,7 @@ export class GroupBurstRouter {
     let flushed = 0;
     for (const entry of entries) {
       if (this.submit(entry.items, { admission: 'enqueue' })?.accepted !== true) break;
-      this.pending.delete(entry.conversationKey);
+      this.pending.delete(entry.scopeKey);
       flushed += 1;
     }
     this._schedule();

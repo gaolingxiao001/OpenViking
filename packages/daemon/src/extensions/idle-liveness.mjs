@@ -1,7 +1,7 @@
 // A process-local hint only. The daemon never reacts on receipt: it tells the
 // model how long outbound delivery has been idle, then lets the normal reply
-// policy decide whether this message deserves work. Temporary reaction tokens
-// live in the Lark MCP sidecar that creates and clears them.
+// policy decide whether this message deserves work. Every successful delivery
+// through the ActionService touches it; temporary reactions live there too.
 export class IdleLivenessExtension {
   constructor({
     thresholdMs = 600_000,
@@ -22,11 +22,5 @@ export class IdleLivenessExtension {
     if (!this.enabled || modelBusy) return null;
     const idleForMs = Math.max(0, this.now() - this.lastDeliveryAtMs);
     return idleForMs >= this.thresholdMs ? { idleForMs } : null;
-  }
-
-  // A real outbound action, including a temporary working reaction, consumes
-  // the idle window. Merely receiving or silently inspecting a message does not.
-  onDeliverySucceeded() {
-    this.touch();
   }
 }

@@ -1,6 +1,14 @@
-# lark-daemon
+# Personal Agent Core
 
-A single-user local Lark agent pipe. These terms name the seams this repo actually owns.
+A single-user local agent pipe with provider Connector processes. These terms name the seams this repo actually owns.
+
+**Connector**:
+A child process that owns one provider's receive loop, credentials, provider state, and typed actions. It speaks the versioned NDJSON protocol in `docs/connector-protocol.md`.
+_Avoid_: putting provider polling, webhooks, or long connections in Core
+
+**Core**:
+The process that owns the shared AgentRuntime session, OpenViking session, inbox pipeline, and the outbound ActionService with its outbox.
+_Avoid_: Lark daemon when discussing provider-neutral behavior
 
 ## Language
 
@@ -9,7 +17,10 @@ The assembled text a runtime is allowed to see: base markdown plus harness, Open
 _Avoid_: system prompt file, kernel, instructions blob
 
 **Harness**:
-The inbound pipe from a accepted Lark event to `AgentRuntime.submit`.
+The inbound pipe from a canonical Connector event to `AgentRuntime.submit`.
+All events share the `connector_events` ledger; conversation/message/reply route
+are optional. Provider payload decoding belongs to the Connector. Runtime input
+and OpenViking context preserve source instance, event kind/id, and subject.
 _Avoid_: daemon class, orchestrator, coordinator
 
 **OpenViking connection**:
@@ -20,6 +31,9 @@ _Avoid_: OV client, memory service, daemon recall
 A standalone inbound source. Live ASR finals become text items on the same submit seam as chat.
 _Avoid_: meeting stack, audio runtime, media supervisor (those are internals)
 
-**Lark connection**:
-lark-cli subscribe inbound and the trusted outbound tools.
-_Avoid_: Lark client vs tools as two products
+**Agent tools**:
+The one tool surface every runtime uses for messaging and chat reads, served by
+the Core's ActionService over `<dataDir>/actions.sock`. The MCP adapter (Codex,
+Claude) and the CLI (Pi) only relay; every outbound action is checked there and
+recorded in the single `outbox` table before a Connector executes it.
+_Avoid_: Lark tools, sidecar, delivery CLI per connector

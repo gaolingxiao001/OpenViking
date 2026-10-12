@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
+import { agentToolEnv, agentToolServer } from './actions/api.mjs';
 import { safeError as safe } from './logger.mjs';
 import { activityPayload } from './activity.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError, HISTORY_SEPARATOR } from './cognition.mjs';
@@ -19,7 +20,7 @@ const CODEX_APP_SERVER_CONFIG_ARGS = Object.freeze([
   // plugin-suggestion tools, and multi-agent framing. None of it serves a
   // chat-reply agent, and it measurably costs prefill size plus whole model
   // round-trips (~2x wall time on short replies). Skills (~/.agents) and the
-  // lark_daemon_im MCP server configured below are unaffected.
+  // personal_agent MCP server configured below are unaffected.
   '-c', 'features.plugins=false',
   '-c', 'features.tool_suggest=false',
   '-c', 'features.apps=false',
@@ -109,33 +110,6 @@ function completedToolActivity(item) {
   if (item.type === 'mcpToolCall') {
     const toolServer = cleanToolPart(item.server, 'mcp');
     const toolName = cleanToolPart(item.tool, 'tool');
-    const isLarkDelivery = toolServer === 'lark_daemon_im'
-      && ['react_to_lark_message', 'retract_lark_message', 'reply_lark_message', 'send_lark_message'].includes(toolName);
-    if (isLarkDelivery) {
-      const reply = item.arguments && typeof item.arguments === 'object'
-        ? String(item.arguments.text ?? item.arguments.emoji_type ?? '').trim()
-        : '';
-      const deliveryMode = toolName === 'react_to_lark_message'
-        ? 'reaction'
-        : toolName === 'retract_lark_message'
-          ? 'retract'
-        : toolName === 'send_lark_message'
-          ? 'chat'
-          : item.arguments?.reply_in_thread === true ? 'thread' : 'reply';
-      const toolLabel = toolName === 'react_to_lark_message'
-        ? '飞书表态'
-        : toolName === 'retract_lark_message'
-          ? '飞书撤回'
-        : toolName === 'send_lark_message' ? '飞书发送' : '飞书回复';
-      const activity = common('mcpToolCall', toolLabel, {
-        toolName,
-        toolServer,
-        deliveryMode,
-      });
-      activity.summary = reply || toolLabel;
-      activity.status = failed ? 'FAILED' : 'SENT';
-      return activity;
-    }
     return common('mcpToolCall', `${toolServer} · ${toolName}`, { toolName, toolServer });
   }
 
@@ -194,15 +168,15 @@ function tomlString(value) {
   return JSON.stringify(value);
 }
 
-export function sanitizeCodexEnv(environment, profile = '') {
-  return sanitizeAgentChildEnv(environment, { profile });
+export function sanitizeCodexEnv(environment, profile = '', actions = null) {
+  return sanitizeAgentChildEnv(environment, { profile, actions });
 }
 
-// The daemon is a thin pipe: inbound Lark lines are fed to one persistent
-// app-server thread via turn/start (idle) or turn/steer (mid-turn). The native
-// runtime sends its own replies with lark-cli through the MCP server below.
-// This class owns the app-server process, the JSON-RPC handshake, the
-// turn/steer state machine, and reconnect-with-resume.
+// The daemon is a thin pipe: inbound lines are fed to one persistent native
+// app-server thread via turn/start (idle) or turn/steer (mid-turn). The runtime
+// delivers through the daemon's agent tools (MCP). This class owns the
+// app-server process, the JSON-RPC handshake, the turn/steer state machine,
+// and reconnect-with-resume.
 export class CodexAgent {
   constructor(config, store, logger, options = {}) {
     this.config = config;
@@ -230,7 +204,6 @@ export class CodexAgent {
     this.handshakeTimeoutMs = options.handshakeTimeoutMs ?? 15_000;
     this.onTurnFailed = options.onTurnFailed ?? null; // ({ inboundSeqs, error }) => void
     this.onTurnSucceeded = options.onTurnSucceeded ?? null; // ({ inboundSeqs }) => void
-    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null; // ({ inboundSeqs, mode }) => void
     this.onTurnAbandoned = options.onTurnAbandoned ?? null; // ({ inboundSeqs }) => void
     this.onAvailable = options.onAvailable ?? null;   // () => void
     const cognition = store.getCognitionState?.()
@@ -827,45 +800,13 @@ export class CodexAgent {
         }
         const tool = completedToolActivity(item);
         if (tool) {
-          const larkDelivery = item?.type === 'mcpToolCall'
-            && item.server === 'lark_daemon_im'
-            && tool.metadata?.deliveryMode;
-          const responseMessageId = larkDelivery
-            ? item.arguments?.response_to_message_id
-              ?? (['react_to_lark_message', 'reply_lark_message'].includes(item.tool)
-                ? item.arguments?.message_id
-                : item.arguments?.decision_message_id)
-            : null;
-          const resolvedSeq = responseMessageId
-            ? this.store.inboundSeqForMessageId?.(responseMessageId)
-            : null;
-          const inboundSeq = resolvedSeq ?? associatedInboundSeqs.at(-1) ?? null;
-          const inboundSeqs = [...associatedInboundSeqs];
-          if (resolvedSeq !== null && resolvedSeq !== undefined && !inboundSeqs.includes(resolvedSeq)) {
-            inboundSeqs.push(resolvedSeq);
-          }
           this._recordActivity(tool.kind, {
             turnId: params.turnId ?? this.activeTurnId,
-            inboundSeq,
+            inboundSeq: associatedInboundSeqs.at(-1) ?? null,
             summary: tool.summary,
             status: tool.status,
-            metadata: { runtime: this.runtime, ...tool.metadata, inboundSeqs },
+            metadata: { runtime: this.runtime, ...tool.metadata, inboundSeqs: associatedInboundSeqs },
           });
-          if (tool.status === 'SENT' && tool.metadata?.deliveryMode && this.onDeliverySucceeded) {
-            try {
-              this.onDeliverySucceeded({
-                // response_to_message_id separates attribution from the latest
-                // freshness fence. Fall back to the whole live turn only for
-                // legacy tools (notably retract) that carry no decision id.
-                inboundSeqs: resolvedSeq === null || resolvedSeq === undefined
-                  ? associatedInboundSeqs
-                  : [resolvedSeq],
-                mode: tool.metadata.deliveryMode,
-              });
-            } catch (callbackError) {
-              this.logger.warn('delivery_success_notify_failed', { error: safe(callbackError) });
-            }
-          }
         }
         break;
       }
@@ -912,40 +853,19 @@ export class CodexAgent {
         '-c', `developer_instructions=${tomlString(this.developerInstructionsText)}`,
         ...this.appServerConfigArgs,
       ];
-      // Proactive IM tools (list_lark_chats / send_lark_message) ride along as an
-      // MCP stdio server so the runtime can send messages through a typed,
-      // validated path.
-      if (this.config.profile) {
-        const toolArgs = [
-          this.config.larkToolServerPath,
-          '--lark-cli-bin', this.config.larkCliBin,
-          '--profile', this.config.profile,
-          '--project-dir', this.config.projectDir,
-          '--database-path', this.config.databasePath,
-          '--temp-dir', this.config.tempDir,
-          '--timeout-ms', String(this.config.sendTimeoutMs),
-          '--max-text-chars', String(this.config.maxReplyChars),
-          '--dry-run', String(Boolean(this.config.dryRun)),
-          '--runtime-token', this.authorityToken,
-        ];
-        if (this.config.meetingAudio?.authoritySocketPath) {
-          toolArgs.push(
-            '--decision-authority-socket',
-            this.config.meetingAudio.authoritySocketPath,
-          );
-        }
-        args.push(
-          '-c', `mcp_servers.lark_daemon_im.command=${tomlString(process.execPath)}`,
-          '-c', `mcp_servers.lark_daemon_im.args=${JSON.stringify(toolArgs)}`,
-          '-c', 'mcp_servers.lark_daemon_im.startup_timeout_sec=10',
-          '-c', `mcp_servers.lark_daemon_im.tool_timeout_sec=${Math.max(10, Math.ceil(this.config.sendTimeoutMs / 1_000) + 5)}`,
-        );
-      }
+      // The daemon's agent tools ride along as an MCP stdio adapter to the Core.
+      const tools = agentToolServer(this.config, this.authorityToken);
+      args.push(
+        '-c', `mcp_servers.personal_agent.command=${tomlString(tools.command)}`,
+        '-c', `mcp_servers.personal_agent.args=${JSON.stringify(tools.args)}`,
+        '-c', 'mcp_servers.personal_agent.startup_timeout_sec=10',
+        '-c', `mcp_servers.personal_agent.tool_timeout_sec=${Math.max(10, Math.ceil(this.config.sendTimeoutMs / 1_000) + 5)}`,
+      );
       let child;
       try {
         child = this._spawn(this.config[this.binConfigKey], args, {
           cwd: this.config.workspace,
-          env: this._sanitizeEnv(process.env, this.config.profile),
+          env: this._sanitizeEnv(process.env, this.config.profile, agentToolEnv(this.config, this.authorityToken)),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['pipe', 'pipe', 'pipe'],

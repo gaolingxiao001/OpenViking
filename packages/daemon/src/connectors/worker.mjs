@@ -1,0 +1,167 @@
+#!/usr/bin/env node
+import { ProcessRegistry } from '../process-utils.mjs';
+import { safeError } from '../logger.mjs';
+import { LarkClient } from '../lark.mjs';
+import { WeixinClient } from '../weixin/client.mjs';
+import { getConnectorManifest } from './catalog.mjs';
+import { normalizeLarkEvent } from './lark-events.mjs';
+import { invokeOperation } from './operations.mjs';
+import {
+  parseProtocolLine,
+  resultMessage,
+  statusMessage,
+} from './protocol.mjs';
+
+const connectorId = process.argv[2];
+const manifest = getConnectorManifest(connectorId);
+let config;
+try {
+  const parsed = JSON.parse(process.env.PERSONAL_AGENT_CONNECTOR_CONFIG ?? '');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('missing config');
+  config = {
+    ...parsed,
+    channel: connectorId,
+    connectorWorker: true,
+    weixinAllowFrom: new Set(parsed.weixinAllowFrom ?? []),
+  };
+} catch {
+  process.stderr.write('connector worker configuration is invalid\n');
+  process.exit(1);
+}
+delete process.env.PERSONAL_AGENT_CONNECTOR_CONFIG;
+
+function write(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function workerLogger(level = 'info', base = {}) {
+  const order = { debug: 10, info: 20, warn: 30, error: 40 };
+  const threshold = order[level] ?? order.info;
+  const emit = (kind, message, fields = {}) => {
+    if (order[kind] < threshold) return;
+    process.stderr.write(`${JSON.stringify({
+      time: new Date().toISOString(),
+      level: kind,
+      message,
+      connector: connectorId,
+      ...base,
+      ...Object.fromEntries(Object.entries(fields).map(([key, value]) => (
+        [key, key.toLowerCase().includes('token') ? '[REDACTED]' : value instanceof Error ? safeError(value) : value]
+      ))),
+    })}\n`);
+  };
+  return {
+    debug: (message, fields) => emit('debug', message, fields),
+    info: (message, fields) => emit('info', message, fields),
+    warn: (message, fields) => emit('warn', message, fields),
+    error: (message, fields) => emit('error', message, fields),
+    child: (fields) => workerLogger(level, { ...base, ...fields }),
+  };
+}
+
+const logger = workerLogger(config.logLevel);
+// Provider subprocesses stay in the worker's process group. Killing a failed
+// Connector therefore also reaps lark-cli and any short-lived command child.
+const registry = new ProcessRegistry(logger, { detached: false });
+const Client = connectorId === 'weixin' ? WeixinClient : LarkClient;
+const client = new Client(config, registry, logger);
+let checked = false;
+let started = false;
+let stopping = false;
+let inputBuffer = '';
+
+async function handleRequest(message) {
+  try {
+    let result;
+    if (message.operation === 'spec') {
+      result = { manifest };
+    } else if (message.operation === 'check') {
+      result = await client.preflight();
+      checked = true;
+    } else if (message.operation === 'start') {
+      if (!checked) throw new Error('connector must pass check before start');
+      if (started) throw new Error('connector is already started');
+      started = true;
+      client.startSubscription((line) => {
+        try {
+          const raw = JSON.parse(line);
+          write(connectorId === 'lark' ? normalizeLarkEvent(raw) : parseProtocolLine(line));
+        } catch (error) {
+          logger.warn('connector_event_rejected', { error: safeError(error) });
+        }
+      }, (exit) => {
+        if (stopping) return;
+        write(statusMessage(connectorId, 'failed', {
+          code: exit.code ?? null,
+          signal: exit.signal ?? null,
+          error: String(exit.stderr ?? '').slice(-2_000),
+        }));
+        setImmediate(() => process.exit(1));
+      });
+      result = { started: true };
+    } else if (message.operation === 'action') {
+      if (!checked) throw new Error('connector is not ready');
+      const payload = message.payload;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || typeof payload.name !== 'string'
+        || !payload.input || typeof payload.input !== 'object' || Array.isArray(payload.input)) {
+        throw new Error('connector action payload is invalid');
+      }
+      result = await invokeOperation(client, payload.name, payload.input);
+    } else if (message.operation === 'pause') {
+      if (typeof client.stopSubscription === 'function') await client.stopSubscription();
+      else await client.stop();
+      started = false;
+      result = { paused: true };
+    } else if (message.operation === 'stop') {
+      stopping = true;
+      await client.stop();
+      await registry.stopAll(2_000);
+      result = { stopped: true };
+      write(resultMessage(message.id, result));
+      setImmediate(() => process.exit(0));
+      return;
+    } else {
+      throw new Error(`unsupported connector operation: ${message.operation}`);
+    }
+    write(resultMessage(message.id, result));
+  } catch (error) {
+    write(resultMessage(message.id, null, safeError(error)));
+  }
+}
+
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  inputBuffer += chunk;
+  while (true) {
+    const newline = inputBuffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = inputBuffer.slice(0, newline);
+    inputBuffer = inputBuffer.slice(newline + 1);
+    if (!line.trim()) continue;
+    try {
+      const message = parseProtocolLine(line);
+      if (message.type !== 'REQUEST') throw new Error('connector worker accepts REQUEST messages only');
+      void handleRequest(message);
+    } catch (error) {
+      logger.warn('connector_request_rejected', { error: safeError(error) });
+    }
+  }
+  if (Buffer.byteLength(inputBuffer, 'utf8') > 1_000_000) {
+    logger.error('connector_request_oversize');
+    process.exit(1);
+  }
+});
+
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  logger.info('connector_worker_stopping', { signal });
+  try { await client.stop(); } catch {}
+  try { await registry.stopAll(2_000); } catch {}
+  process.exit(0);
+}
+
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.stdin.resume();

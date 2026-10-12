@@ -1,6 +1,5 @@
 import { MeetingAdapter } from './adapter.mjs';
 import { GenericDecisionAuthority } from './decision-authority.mjs';
-import { DecisionAuthorityServer } from './decision-socket.mjs';
 import { FlyReferenceRing } from './fly-reference.mjs';
 import { MeetingInboxNotifier } from './inbox.mjs';
 import { MeetingInputPort } from './input-port.mjs';
@@ -55,19 +54,11 @@ export class MeetingPlugin {
         getLatestLarkSeq: (chatId) => this.store.latestAcceptedInboundSeq(chatId),
         ttlMs: audioConfig.capabilityTtlMs,
       });
-      const server = new DecisionAuthorityServer({
-        socketPath: audioConfig.authoritySocketPath,
-        authority,
-        getRuntimeToken: () => this.store.getCognitionState().authorityToken,
-        logger: this.logger.child({ component: 'meeting-decision-authority' }),
-      });
-      await server.start();
       const audio = {
         spool,
         generationClock,
         flyReferences,
         authority,
-        server,
         coordinator: null,
         runtime: null,
       };
@@ -185,7 +176,6 @@ export class MeetingPlugin {
       try { await drainIngress(); } catch {}
     }
     this.audio?.authority?.revokeAll();
-    try { await this.audio?.server?.close(); } catch {}
     try { await this.adapter?.stop(); } catch {}
     try { await this.audio?.coordinator?.stop(); } catch {}
     try { this.audio?.spool?.close(); } catch {}

@@ -2,9 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { EventEmitter, once } from 'node:events';
+import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -12,7 +11,6 @@ import { LarkDaemon } from '../src/daemon.mjs';
 import {
   FlyReferenceRing,
   GenericDecisionAuthority,
-  DecisionAuthorityServer,
   LiveSpool,
   MeetingAdapter,
   MeetingAudioCoordinator,
@@ -22,17 +20,17 @@ import {
   MeetingRuntimeAdapter,
   StdioMeetingWorkerFactory,
 } from '../src/meeting/index.mjs';
-import { claimDecisionCapability } from '../src/meeting/decision-socket.mjs';
 import { Store } from '../src/store.mjs';
+import { normalizeLarkEvent } from '../src/connectors/lark-events.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function envelope(type, id, event, atMs = Date.now()) {
-  return {
+  return normalizeLarkEvent({
     schema: '2.0',
     header: { event_id: id, event_type: type, tenant_key: 'tenant', create_time: String(atMs) },
     event,
-  };
+  }).data.meeting;
 }
 
 async function tick() {
@@ -638,85 +636,6 @@ describe('meeting audio runtime vertical slice', () => {
     });
   });
 
-  it('claims capabilities through the mode-0600 Unix socket with runtime fencing', async () => {
-    const runtimeToken = 'runtime_socket_12345678';
-    const generations = new Map([['epoch_socket_12345678', 1]]);
-    const authority = new GenericDecisionAuthority({
-      runtimeToken,
-      getCurrentGeneration: (epoch) => generations.get(epoch) ?? 0,
-      getLatestLarkSeq: () => 4,
-    });
-    const issued = authority.issue({
-      sessionEpoch: 'epoch_socket_12345678',
-      generation: 1,
-      decisionKey: 'input_socket_12345678',
-      action: 'send_lark_message',
-      target: 'oc_target12345678',
-      larkFenceSeq: 4,
-    });
-    const socketPath = path.join(directory, 'authority.sock');
-    const server = new DecisionAuthorityServer({
-      socketPath,
-      authority,
-      getRuntimeToken: () => runtimeToken,
-    });
-    await server.start();
-    try {
-      assert.equal(fs.statSync(socketPath).mode & 0o077, 0);
-      await assert.rejects(
-        () => claimDecisionCapability({
-          socketPath,
-          runtimeToken: 'retired_runtime_1234',
-          capability: issued.capability,
-          action: 'send_lark_message',
-          target: 'oc_target12345678',
-        }),
-        /runtime_authority_revoked/,
-      );
-      const claimed = await claimDecisionCapability({
-        socketPath,
-        runtimeToken,
-        capability: issued.capability,
-        action: 'send_lark_message',
-        target: 'oc_target12345678',
-      });
-      assert.equal(claimed.decisionKey, 'input_socket_12345678');
-    } finally {
-      await server.close();
-    }
-  });
-
-  it('destroys an idle partial Unix client while closing decision authority', async () => {
-    const socketPath = path.join(directory, 'idle-authority.sock');
-    const server = new DecisionAuthorityServer({
-      socketPath,
-      authority: { claim() { throw new Error('not reached'); } },
-      getRuntimeToken: () => 'runtime_idle_12345678',
-    });
-    await server.start();
-    const client = net.createConnection(socketPath);
-    client.on('error', () => {});
-    await once(client, 'connect');
-    client.write('{"v":1,"op":"claim"');
-    const clientClosed = new Promise((resolve) => client.once('close', resolve));
-    let closeTimer;
-    try {
-      await Promise.race([
-        server.close(),
-        new Promise((_, reject) => {
-          closeTimer = setTimeout(
-            () => reject(new Error('decision authority close hung on idle client')),
-            250,
-          );
-        }),
-      ]);
-    } finally {
-      clearTimeout(closeTimer);
-    }
-    await clientClosed;
-    assert.equal(client.destroyed, true);
-  });
-
   it('accepts both definite and fallback-final POC transcript events', () => {
     const workerPath = fileURLToPath(new URL('../worker/meeting_asr_worker.py', import.meta.url));
     const script = `
@@ -920,11 +839,12 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
   it('closes the meeting plugin before stopping the model runtime', async () => {
     const order = [];
     const daemon = new LarkDaemon({
+      dataDir: directory,
       lockPath: path.join(directory, 'unused.lock'),
       shutdownTimeoutMs: 100,
     }, quietLogger);
     daemon.recordSystemActivity = () => false;
-    daemon.lark = { async stop() { order.push('lark-stop'); } };
+    daemon.connectors = { async pauseSubscriptions() { order.push('lark-stop'); }, async stop() {} };
     let releaseIngress;
     const ingressBarrier = new Promise((resolve) => { releaseIngress = resolve; });
     daemon.harness = {

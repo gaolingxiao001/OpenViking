@@ -10,6 +10,8 @@ import {
   reasonLabel,
 } from './activity.mjs';
 import { MeetingStore, migrateMeetingStore } from './meeting/store.mjs';
+import { migrateCardMessages, acceptCardAnswer } from './card-messages.mjs';
+import { normalizeEvent, eventIdentity } from './event.mjs';
 
 function number(value) {
   return typeof value === 'bigint' ? Number(value) : value;
@@ -18,6 +20,7 @@ function number(value) {
 function rowToInbound(row) {
   if (!row) return null;
   return {
+    ...normalizeEvent(JSON.parse(row.event_json)),
     seq: number(row.seq),
     messageId: row.message_id,
     eventId: row.event_id,
@@ -25,6 +28,7 @@ function rowToInbound(row) {
     chatId: row.chat_id,
     chatType: row.chat_type,
     messageType: row.message_type,
+    source: row.source || 'lark',
     senderId: row.sender_id,
     senderType: row.sender_type,
     rootId: row.root_id,
@@ -91,6 +95,10 @@ function maskPublicIdentifiers(value) {
 
 function chatIdFromConversationKey(value) {
   if (!value) return null;
+  try {
+    const parts = JSON.parse(value);
+    if (Array.isArray(parts) && parts[1] === 'conversation') return parts[3];
+  } catch {}
   const match = String(value).match(/:([^:]+):(?:main|thread:[^:]+)$/);
   return match?.[1] || null;
 }
@@ -103,14 +111,16 @@ const PUBLIC_METADATA_KEYS = new Set([
   'action', 'attempt', 'backfilled', 'batchSize', 'bytes', 'chatType',
   'code', 'codexVersion', 'deliveryMode', 'dryRun', 'eventMode', 'exitCode',
   'durationMs', 'expired', 'filterReason', 'inboundSeqs', 'interruptedTurns', 'itemType', 'larkVersion',
+  'connector', 'source', 'eventKind',
   'messageType', 'outboxes', 'reason', 'reasonCode', 'removed',
   'requestedDeliveryMode', 'signal', 'toolLabel', 'toolName', 'toolServer', 'toolStatus',
+  'tool', 'via', 'runtime', 'decisionSeq', 'newerSeq',
   // Full-context fields: what the model saw, what tools received/returned, cost.
   'cachedInputTokens', 'contextWindow', 'costUsd', 'cwd', 'delivery', 'effort', 'error',
   'historyChars', 'input', 'inputTokens', 'latencyMs', 'model', 'output', 'outputTokens', 'reasoningTokens',
-  'runtime', 'status', 'terminal', 'thinking', 'toolId',
+  'status', 'terminal', 'thinking', 'toolId',
 ]);
-const PUBLIC_NESTED_METADATA_KEYS = new Set(['conversations', 'inbound', 'outbox', 'turns']);
+const PUBLIC_NESTED_METADATA_KEYS = new Set(['conversations', 'inbound', 'outbox']);
 
 function publicMetadataValue(value) {
   if (typeof value === 'string') return maskPublicIdentifiers(value);
@@ -177,6 +187,13 @@ export class Store {
   }
 
   migrate() {
+    // Retired pre-release tables: the per-turn outbox, its turns, and the
+    // Weixin-only connector_outbox. Nothing reads them.
+    if (this.db.prepare("SELECT 1 FROM pragma_table_info('outbox') WHERE name = 'turn_id'").get()) {
+      this.db.exec('DROP TABLE outbox');
+    }
+    this.db.exec('DROP TABLE IF EXISTS turns; DROP TABLE IF EXISTS connector_outbox;');
+    migrateCardMessages(this.db);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -193,14 +210,22 @@ export class Store {
         updated_at_ms INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS inbound (
+      CREATE TABLE IF NOT EXISTS connector_events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT NOT NULL UNIQUE,
-        event_id TEXT UNIQUE,
-        conv_key TEXT NOT NULL,
-        chat_id TEXT NOT NULL,
-        chat_type TEXT NOT NULL,
-        message_type TEXT NOT NULL,
+        connector_instance TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        subject_type TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        event_json TEXT NOT NULL,
+        message_id TEXT,
+        conv_key TEXT,
+        chat_id TEXT,
+        chat_type TEXT,
+        message_type TEXT,
+        tenant_key TEXT,
+        source TEXT NOT NULL,
         sender_id TEXT,
         sender_type TEXT,
         root_id TEXT,
@@ -209,70 +234,54 @@ export class Store {
         thread_root_id TEXT,
         content TEXT NOT NULL,
         mentions_json TEXT NOT NULL,
-        raw_json TEXT NOT NULL,
         create_time_ms INTEGER NOT NULL,
         received_at_ms INTEGER NOT NULL,
         status TEXT NOT NULL,
         filter_reason TEXT,
         turn_id INTEGER,
         last_error TEXT,
-        FOREIGN KEY (conv_key) REFERENCES conversations(conv_key)
+        FOREIGN KEY (conv_key) REFERENCES conversations(conv_key),
+        UNIQUE(connector_instance, event_id)
       );
 
-      CREATE INDEX IF NOT EXISTS inbound_conv_status_seq
-        ON inbound(conv_key, status, seq);
-      CREATE INDEX IF NOT EXISTS inbound_received_at
-        ON inbound(received_at_ms);
+      CREATE INDEX IF NOT EXISTS connector_events_conv_status_seq
+        ON connector_events(conv_key, status, seq);
+      CREATE INDEX IF NOT EXISTS connector_events_received_at
+        ON connector_events(received_at_ms);
+      CREATE INDEX IF NOT EXISTS connector_events_message
+        ON connector_events(connector_instance, message_id);
+      CREATE INDEX IF NOT EXISTS connector_events_subject
+        ON connector_events(connector_instance, subject_type, subject_id, seq);
 
-      CREATE TABLE IF NOT EXISTS turns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conv_key TEXT NOT NULL,
-        start_seq INTEGER NOT NULL,
-        end_seq INTEGER NOT NULL,
-        snapshot_seq INTEGER NOT NULL,
-        target_message_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        decision_action TEXT,
-        reason_code TEXT,
-        reply TEXT,
-        error TEXT,
-        started_at_ms INTEGER NOT NULL,
-        updated_at_ms INTEGER NOT NULL,
-        completed_at_ms INTEGER,
-        FOREIGN KEY (conv_key) REFERENCES conversations(conv_key)
-      );
-
-      CREATE INDEX IF NOT EXISTS turns_conv_status
-        ON turns(conv_key, status, id);
-      CREATE INDEX IF NOT EXISTS turns_status_completed
-        ON turns(status, completed_at_ms);
-
+      -- Every external side effect, from any runtime or the daemon itself, is
+      -- reserved here before its Connector is invoked. The journal row with
+      -- dedupe_key outbox:<id> is written and settled in the same transaction.
       CREATE TABLE IF NOT EXISTS outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        turn_id INTEGER NOT NULL UNIQUE,
-        conv_key TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        reply_to_message_id TEXT NOT NULL,
-        reply_in_thread INTEGER NOT NULL DEFAULT 0,
-        delivery_mode TEXT NOT NULL DEFAULT 'reply',
-        target_chat_id TEXT,
-        body TEXT NOT NULL,
+        connector TEXT NOT NULL,
+        action TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        caller TEXT NOT NULL,
         status TEXT NOT NULL,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        last_attempt_ms INTEGER,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        chat_id TEXT,
+        conv_key TEXT,
+        inbound_seq INTEGER,
         remote_message_id TEXT,
+        result_json TEXT,
         last_error TEXT,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL,
         sent_at_ms INTEGER,
-        FOREIGN KEY (turn_id) REFERENCES turns(id),
-        FOREIGN KEY (conv_key) REFERENCES conversations(conv_key)
+        UNIQUE(connector, idempotency_key)
       );
 
       CREATE INDEX IF NOT EXISTS outbox_status_updated
         ON outbox(status, updated_at_ms);
-      CREATE INDEX IF NOT EXISTS outbox_status_sent
-        ON outbox(status, sent_at_ms);
+      CREATE INDEX IF NOT EXISTS outbox_remote_message
+        ON outbox(remote_message_id);
 
       CREATE TABLE IF NOT EXISTS activities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -355,42 +364,9 @@ export class Store {
       -- its local commit. Preserve that ambiguity for catch-up; never silently
       -- treat it as failed and invite a duplicate send.
       UPDATE cognition_journal SET status = 'UNCERTAIN' WHERE status = 'PENDING';
+      UPDATE outbox SET status = 'UNCERTAIN' WHERE status = 'PENDING';
     `);
     migrateMeetingStore(this.db);
-    const inboundColumns = new Set(
-      this.db.prepare('PRAGMA table_info(inbound)').all().map((row) => row.name),
-    );
-    if (!inboundColumns.has('thread_id')) {
-      this.db.exec('ALTER TABLE inbound ADD COLUMN thread_id TEXT');
-    }
-    const outboxColumns = new Set(
-      this.db.prepare('PRAGMA table_info(outbox)').all().map((row) => row.name),
-    );
-    if (!outboxColumns.has('delivery_mode') || !outboxColumns.has('target_chat_id')) {
-      this.db.exec('BEGIN IMMEDIATE');
-      try {
-        if (!outboxColumns.has('delivery_mode')) {
-          this.db.exec("ALTER TABLE outbox ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'reply'");
-          this.db.exec("UPDATE outbox SET delivery_mode = CASE WHEN reply_in_thread <> 0 THEN 'thread' ELSE 'reply' END");
-        }
-        if (!outboxColumns.has('target_chat_id')) {
-          this.db.exec('ALTER TABLE outbox ADD COLUMN target_chat_id TEXT');
-        }
-        this.db.exec(`
-          UPDATE outbox
-          SET target_chat_id = (
-            SELECT inbound.chat_id
-            FROM turns JOIN inbound ON inbound.seq = turns.end_seq
-            WHERE turns.id = outbox.turn_id
-          )
-          WHERE target_chat_id IS NULL
-        `);
-        this.db.exec('COMMIT');
-      } catch (error) {
-        try { this.db.exec('ROLLBACK'); } catch {}
-        throw error;
-      }
-    }
     const activityColumns = new Set(
       this.db.prepare('PRAGMA table_info(activities)').all().map((row) => row.name),
     );
@@ -427,17 +403,18 @@ export class Store {
       ON CONFLICT(conv_key) DO NOTHING
     `);
     this.insertInbound = this.db.prepare(`
-      INSERT OR IGNORE INTO inbound(
+      INSERT OR IGNORE INTO connector_events(
+        connector_instance, kind, subject_type, subject_id, scope_key, event_json, tenant_key,
         message_id, event_id, conv_key, chat_id, chat_type, message_type,
-        sender_id, sender_type, root_id, parent_id, thread_id, thread_root_id,
-        content, mentions_json, raw_json, create_time_ms, received_at_ms,
+        source, sender_id, sender_type, root_id, parent_id, thread_id, thread_root_id,
+        content, mentions_json, create_time_ms, received_at_ms,
         status, filter_reason
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (${Array(26).fill('?').join(', ')})
     `);
-    this.getInboundByMessage = this.db.prepare('SELECT * FROM inbound WHERE message_id = ?');
-    this.getInboundByEvent = this.db.prepare('SELECT * FROM inbound WHERE event_id = ?');
+    this.getInboundByMessage = this.db.prepare('SELECT * FROM connector_events WHERE connector_instance = ? AND message_id = ? ORDER BY seq DESC LIMIT 1');
+    this.getInboundByEvent = this.db.prepare('SELECT * FROM connector_events WHERE connector_instance = ? AND event_id = ?');
     this.getJournalActorByMessage = this.db.prepare(
-      'SELECT actor FROM cognition_journal WHERE message_id = ? ORDER BY seq DESC LIMIT 1',
+      "SELECT actor FROM cognition_journal WHERE COALESCE(json_extract(detail_json, '$.connectorInstance'), json_extract(detail_json, '$.source'), 'lark') = ? AND message_id = ? ORDER BY seq DESC LIMIT 1",
     );
     this.getMetaStatement = this.db.prepare('SELECT value FROM meta WHERE key = ?');
     this.setMetaStatement = this.db.prepare(`
@@ -469,27 +446,18 @@ export class Store {
       WHERE id = ? AND source_ref IS NULL
     `);
     this.getActivitySourceByInboundStatement = this.db.prepare(`
-      SELECT inbound.chat_id, inbound.chat_type, chat_sources.name AS source_name
-      FROM inbound
-      LEFT JOIN chat_sources ON chat_sources.chat_id = inbound.chat_id
-      WHERE inbound.seq = ?
-    `);
-    this.getActivitySourceByTurnStatement = this.db.prepare(`
-      SELECT inbound.chat_id, inbound.chat_type, chat_sources.name AS source_name
-      FROM turns
-      JOIN inbound ON inbound.seq = turns.end_seq
-      LEFT JOIN chat_sources ON chat_sources.chat_id = inbound.chat_id
-      WHERE turns.id = ?
+      SELECT connector_events.chat_id, connector_events.chat_type, connector_events.source,
+             connector_events.connector_instance, connector_events.subject_type, connector_events.subject_id,
+             chat_sources.name AS source_name
+      FROM connector_events
+      LEFT JOIN chat_sources ON chat_sources.chat_id = connector_events.chat_id AND connector_events.source = 'lark'
+      WHERE connector_events.seq = ?
     `);
     this.getActivitySourceByOutboxStatement = this.db.prepare(`
-      SELECT COALESCE(outbox.target_chat_id, inbound.chat_id) AS chat_id,
-             inbound.chat_type AS chat_type,
-             chat_sources.name AS source_name
+      SELECT outbox.chat_id, connector_events.chat_type, chat_sources.name AS source_name
       FROM outbox
-      LEFT JOIN turns ON turns.id = outbox.turn_id
-      LEFT JOIN inbound ON inbound.seq = turns.end_seq
-      LEFT JOIN chat_sources
-        ON chat_sources.chat_id = COALESCE(outbox.target_chat_id, inbound.chat_id)
+      LEFT JOIN connector_events ON connector_events.seq = outbox.inbound_seq
+      LEFT JOIN chat_sources ON chat_sources.chat_id = outbox.chat_id
       WHERE outbox.id = ?
     `);
     this.getChatSourceStatement = this.db.prepare(`
@@ -527,11 +495,15 @@ export class Store {
     if (activity.inboundSeq !== undefined && activity.inboundSeq !== null) {
       row = this.getActivitySourceByInboundStatement.get(activity.inboundSeq);
     }
+    if (row && (row.source !== 'lark' || !row.chat_id)) {
+      return {
+        sourceRef: opaqueRef(JSON.stringify([row.connector_instance, row.subject_type, row.subject_id])),
+        sourceType: ['p2p', 'group'].includes(row.chat_type) ? row.chat_type : 'event',
+        sourceName: null,
+      };
+    }
     if (!row?.chat_id && activity.outboxId !== undefined && activity.outboxId !== null) {
       row = this.getActivitySourceByOutboxStatement.get(activity.outboxId);
-    }
-    if (!row?.chat_id && activity.turnId !== undefined && activity.turnId !== null) {
-      row = this.getActivitySourceByTurnStatement.get(activity.turnId);
     }
     if (!row?.chat_id) {
       const chatId = chatIdFromConversationKey(activity.conversationKey);
@@ -632,8 +604,8 @@ export class Store {
         SELECT chat_id, chat_type,
                MIN(received_at_ms) AS created_at_ms,
                MAX(received_at_ms) AS updated_at_ms
-        FROM inbound
-        WHERE chat_type IN ('p2p', 'group')
+        FROM connector_events
+        WHERE source = 'lark' AND chat_type IN ('p2p', 'group')
         GROUP BY chat_id, chat_type
       `).all();
       for (const row of rows) {
@@ -728,7 +700,7 @@ export class Store {
         pending.push(activity);
       };
 
-      for (const row of this.db.prepare('SELECT * FROM inbound ORDER BY seq').all()) {
+      for (const row of this.db.prepare('SELECT * FROM connector_events ORDER BY seq').all()) {
         const expired = row.filter_reason === 'queue_expired';
         const ignored = row.status === 'RULE_IGNORED' && !expired;
         const queueRejected = ['queue_total_full', 'queue_conversation_full', 'queue_expired']
@@ -753,130 +725,6 @@ export class Store {
             filterReason: row.filter_reason,
           },
         });
-      }
-
-      const turns = this.db.prepare(`
-        SELECT t.*, i.content AS input_content,
-          EXISTS(SELECT 1 FROM outbox o WHERE o.turn_id = t.id) AS has_outbox
-        FROM turns t LEFT JOIN inbound i ON i.seq = t.end_seq
-        ORDER BY t.id
-      `).all();
-      for (const row of turns) {
-        const inboundSeqs = this.db.prepare(`
-          SELECT seq FROM inbound WHERE turn_id = ? ORDER BY seq
-        `).all(row.id).map((inbound) => number(inbound.seq));
-        add({
-          eventKey: `turn:${row.id}:started`,
-          kind: 'agent.started',
-          conversationKey: row.conv_key,
-          turnId: number(row.id),
-          inboundSeq: number(row.end_seq),
-          status: 'RUNNING',
-          summary: row.input_content,
-          occurredAtMs: number(row.started_at_ms),
-          metadata: {
-            batchSize: inboundSeqs.length || (number(row.end_seq) - number(row.start_seq) + 1),
-            inboundSeqs,
-          },
-        });
-        if (row.decision_action === 'ignore' || row.status === 'SILENT') {
-          add({
-            eventKey: `turn:${row.id}:decision`,
-            kind: 'agent.silent',
-            conversationKey: row.conv_key,
-            turnId: number(row.id),
-            inboundSeq: number(row.end_seq),
-            status: row.status,
-            summary: `未回复：${reasonLabel(row.reason_code)}`,
-            occurredAtMs: number(row.updated_at_ms),
-            metadata: { action: 'ignore', reasonCode: row.reason_code },
-          });
-        } else if (row.decision_action === 'reply' && (row.status !== 'STALE' || row.has_outbox)) {
-          add({
-            eventKey: `turn:${row.id}:decision`,
-            kind: 'agent.decided',
-            conversationKey: row.conv_key,
-            turnId: number(row.id),
-            inboundSeq: number(row.end_seq),
-            status: row.status,
-            summary: row.reply,
-            occurredAtMs: number(row.completed_at_ms ?? row.updated_at_ms),
-            metadata: { action: 'reply', reasonCode: row.reason_code },
-          });
-        }
-        if (row.status === 'STALE') {
-          add({
-            eventKey: `turn:${row.id}:stale`,
-            kind: 'agent.stale',
-            conversationKey: row.conv_key,
-            turnId: number(row.id),
-            inboundSeq: number(row.end_seq),
-            status: row.status,
-            summary: '有更新消息，旧回复未发送',
-            occurredAtMs: number(row.updated_at_ms),
-            metadata: { reasonCode: row.reason_code },
-          });
-        } else if (row.status === 'DEAD') {
-          add({
-            eventKey: `turn:${row.id}:failed`,
-            kind: 'agent.failed',
-            conversationKey: row.conv_key,
-            turnId: number(row.id),
-            inboundSeq: number(row.end_seq),
-            status: row.status,
-            summary: row.error,
-            occurredAtMs: number(row.completed_at_ms ?? row.updated_at_ms),
-          });
-        } else if (row.status === 'INTERRUPTED') {
-          add({
-            eventKey: `turn:${row.id}:interrupted`,
-            kind: 'agent.interrupted',
-            conversationKey: row.conv_key,
-            turnId: number(row.id),
-            inboundSeq: number(row.end_seq),
-            status: row.status,
-            summary: row.error || 'daemon stopped during Codex turn',
-            occurredAtMs: number(row.completed_at_ms ?? row.updated_at_ms),
-          });
-        }
-      }
-
-      for (const row of this.db.prepare('SELECT * FROM outbox ORDER BY id').all()) {
-        add({
-          eventKey: `outbox:${row.id}:queued`,
-          kind: 'delivery.queued',
-          conversationKey: row.conv_key,
-          turnId: number(row.turn_id),
-          outboxId: number(row.id),
-          status: 'PENDING',
-          summary: row.body,
-          occurredAtMs: number(row.created_at_ms),
-          metadata: { deliveryMode: row.delivery_mode },
-        });
-        const finalKinds = {
-          SENT: 'delivery.sent',
-          DRY_RUN: 'delivery.dry_run',
-          FAILED: 'delivery.failed',
-          UNCERTAIN: 'delivery.uncertain',
-          CANCELLED_STALE: 'delivery.cancelled',
-        };
-        const kind = finalKinds[row.status];
-        if (kind) {
-          add({
-            eventKey: `outbox:${row.id}:${row.status.toLowerCase()}`,
-            kind,
-            conversationKey: row.conv_key,
-            turnId: number(row.turn_id),
-            outboxId: number(row.id),
-            status: row.status,
-            summary: ['FAILED', 'UNCERTAIN'].includes(row.status) ? row.last_error : row.body,
-            occurredAtMs: number(row.sent_at_ms ?? row.updated_at_ms),
-            metadata: {
-              deliveryMode: row.delivery_mode,
-              attempt: number(row.attempt_count),
-            },
-          });
-        }
       }
 
       pending.sort((left, right) => (
@@ -1024,32 +872,12 @@ export class Store {
     start.setHours(0, 0, 0, 0);
     const startMs = start.getTime();
     const scalar = (sql, ...params) => number(this.db.prepare(sql).get(...params).count);
-    const failedTurns = scalar(`
-      SELECT COUNT(*) AS count FROM turns
-      WHERE status IN ('DEAD', 'INTERRUPTED', 'SEND_FAILED')
-    `);
-    const uncertainOutboxes = scalar(`
-      SELECT COUNT(*) AS count FROM outbox WHERE status = 'UNCERTAIN'
-    `);
-    const activeTurns = scalar(`
-      SELECT COUNT(*) AS count FROM turns WHERE status = 'RUNNING'
-    `);
-    const activeOutboxes = scalar(`
-      SELECT COUNT(*) AS count FROM outbox WHERE status IN ('PENDING', 'SENDING', 'RETRY')
-    `);
     return {
-      attention: failedTurns + uncertainOutboxes,
-      active: activeTurns + activeOutboxes,
-      queued: scalar(`SELECT COUNT(*) AS count FROM inbound WHERE status = 'QUEUED'`),
-      receivedToday: scalar(`SELECT COUNT(*) AS count FROM inbound WHERE received_at_ms >= ?`, startMs),
-      sentToday: scalar(`
-        SELECT COUNT(*) AS count FROM outbox
-        WHERE status IN ('SENT', 'DRY_RUN') AND sent_at_ms >= ?
-      `, startMs),
-      silentToday: scalar(`
-        SELECT COUNT(*) AS count FROM turns
-        WHERE status = 'SILENT' AND completed_at_ms >= ?
-      `, startMs),
+      attention: scalar(`SELECT COUNT(*) AS count FROM outbox WHERE status = 'UNCERTAIN'`),
+      active: scalar(`SELECT COUNT(*) AS count FROM outbox WHERE status = 'PENDING'`),
+      queued: scalar(`SELECT COUNT(*) AS count FROM connector_events WHERE status = 'QUEUED'`),
+      receivedToday: scalar(`SELECT COUNT(*) AS count FROM connector_events WHERE received_at_ms >= ?`, startMs),
+      sentToday: scalar(`SELECT COUNT(*) AS count FROM outbox WHERE status = 'SENT' AND sent_at_ms >= ?`, startMs),
     };
   }
 
@@ -1065,21 +893,32 @@ export class Store {
     }
   }
 
-  // The daemon is a thin pipe now: an accepted message is recorded DONE and handed
-  // straight to the codex thread. Filtered messages are recorded RULE_IGNORED with a
-  // blanked body. Dedup is by message_id/event_id unique constraints.
-  ingest(event, filterReason = null, now = Date.now()) {
+  // One event ledger for all sources. Chat columns are nullable indexes into the
+  // canonical envelope, not a separate message ledger. No provider raw is stored.
+  ingest(event, filterReason = null, now = Date.now(), { journal = true } = {}) {
     return this.transaction(() => {
-      this.insertConversation.run(event.conversationKey, now, now);
-      this.rememberChatSource(event.chatId, event.chatType, now);
+      const existing = this.getInboundByEvent.get(event.connectorInstance, event.eventId);
+      if (existing) return { inserted: false, inbound: rowToInbound(existing), filterReason: existing.filter_reason };
+      if (!filterReason && event.kind === 'message.action' && !acceptCardAnswer(this.db, event, now)) {
+        filterReason = 'card_already_answered_or_expired';
+      }
+      if (event.conversationKey) this.insertConversation.run(event.conversationKey, now, now);
+      if (event.source === 'lark') this.rememberChatSource(event.chatId, event.chatType, now);
       const status = filterReason ? 'RULE_IGNORED' : 'DONE';
+      const envelope = filterReason ? { ...event.envelope,
+        content: { title: '', text: '', attachments: [] }, data: {},
+        message: event.envelope.message ? { ...event.envelope.message, mentions: [] } : null,
+      } : event.envelope;
       const result = this.insertInbound.run(
+        event.connectorInstance, event.kind, event.subject.type, event.subject.id,
+        event.scopeKey, JSON.stringify(envelope), event.tenantKey,
         event.messageId,
         event.eventId,
         event.conversationKey,
         event.chatId,
         event.chatType,
         event.messageType,
+        event.source || 'lark',
         event.senderId,
         event.senderType,
         event.rootId,
@@ -1088,18 +927,16 @@ export class Store {
         event.threadRootId,
         filterReason ? '' : event.content,
         JSON.stringify(filterReason ? [] : event.mentions),
-        '{}',
         event.createTimeMs,
         now,
         status,
         filterReason,
       );
       const inserted = number(result.changes) > 0;
-      let row = this.getInboundByMessage.get(event.messageId);
-      if (!row && event.eventId) row = this.getInboundByEvent.get(event.eventId);
+      const row = this.getInboundByEvent.get(event.connectorInstance, event.eventId);
       if (inserted) {
         const ignored = Boolean(filterReason);
-        if (!ignored) {
+        if (!ignored && journal) {
           this.appendCognitionJournal({
             kind: 'inbound',
             atMs: event.createTimeMs || now,
@@ -1109,20 +946,23 @@ export class Store {
             messageId: event.messageId,
             actor: event.senderId || 'unknown',
             text: event.content,
-            dedupeKey: `inbound:${event.messageId}`,
+            dedupeKey: `event:${eventIdentity(event)}`,
+            metadata: { source: event.source, connectorInstance: event.connectorInstance, event: envelope },
           });
         }
         this.recordActivity({
           eventKey: `inbound:${row.seq}:${ignored ? 'ignored' : 'received'}`,
-          kind: ignored ? 'message.ignored' : 'message.received',
+          kind: ignored ? 'message.ignored' : event.chatId ? 'message.received' : 'connector.event_received',
           conversationKey: event.conversationKey,
           inboundSeq: number(row.seq),
           status,
-          summary: ignored ? `未进入 Agent：${reasonLabel(filterReason)}` : event.content,
+          summary: ignored ? `未进入 Agent：${reasonLabel(filterReason)}` : [event.title, event.content].filter(Boolean).join('\n'),
           occurredAtMs: now,
           metadata: {
             chatType: event.chatType,
             messageType: event.messageType,
+            source: event.source || 'lark',
+            eventKind: event.kind,
             filterReason,
             ...(Number.isFinite(event.createTimeMs) ? { latencyMs: Math.max(0, now - event.createTimeMs) } : {}),
           },
@@ -1719,46 +1559,30 @@ export class Store {
     );
   }
 
-  settleCognitionJournal(dedupeKey, status, { messageId = null, metadata = {} } = {}) {
-    if (!dedupeKey) return false;
-    const result = this.db.prepare(`
-      UPDATE cognition_journal
-      SET status = ?, message_id = COALESCE(?, message_id), detail_json = ?
-      WHERE dedupe_key = ?
-    `).run(status, messageId, JSON.stringify(metadata ?? {}), dedupeKey);
-    return number(result.changes) > 0;
-  }
-
-  inboundSeqForMessageId(messageId) {
-    if (!messageId) return null;
-    const row = this.getInboundByMessage.get(messageId);
-    return row ? number(row.seq) : null;
-  }
-
   // Who authored a message id this daemon has seen: an inbound sender, or the
   // bot itself (journaled deliveries record actor 'me'). Null when unseen —
   // e.g. quoted messages older than local history.
-  resolveMessageAuthor(messageId) {
+  resolveMessageAuthor(messageId, instance = 'lark') {
     if (!messageId) return null;
-    const inbound = this.getInboundByMessage.get(messageId);
+    const inbound = this.getInboundByMessage.get(instance, messageId);
     if (inbound) return { kind: 'user', chatId: inbound.chat_id, senderId: inbound.sender_id };
-    const journal = this.getJournalActorByMessage.get(messageId);
+    const journal = this.getJournalActorByMessage.get(instance, messageId);
     if (journal?.actor === 'me') return { kind: 'me' };
     return null;
   }
 
-  latestAcceptedInboundSeq(chatId) {
+  latestAcceptedInboundSeq(chatId, instance = 'lark') {
     if (!chatId) return 0;
     const row = this.db.prepare(`
       SELECT COALESCE(MAX(seq), 0) AS seq
-      FROM inbound WHERE chat_id = ? AND status = 'DONE'
-    `).get(chatId);
+      FROM connector_events WHERE connector_instance = ? AND chat_id = ? AND status = 'DONE'
+    `).get(instance, chatId);
     return number(row?.seq);
   }
 
   inboundBySeq(seq) {
     if (seq === null || seq === undefined) return null;
-    return rowToInbound(this.db.prepare('SELECT * FROM inbound WHERE seq = ?').get(seq));
+    return rowToInbound(this.db.prepare('SELECT * FROM connector_events WHERE seq = ?').get(seq));
   }
 
   clearGlobalSession() {
@@ -1774,6 +1598,111 @@ export class Store {
     this.setMetaStatement.run(`setting:${key}`, String(value));
   }
 
+  // Reserve one external action together with its outbound journal row and
+  // activity. An existing key reports its state instead; an UNCERTAIN one is
+  // reclaimed only when the provider honours the idempotency key.
+  reserveOutbox({
+    connector, action, idempotencyKey, payload, summary = '', caller, retryUncertain = false,
+    chatId = null, threadId = null, convKey = null, inboundSeq = null, runtimeToken = null, metadata = {},
+  }, now = Date.now()) {
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM outbox WHERE connector = ? AND idempotency_key = ?')
+        .get(connector, idempotencyKey);
+      let id;
+      let attempt = 1;
+      if (existing) {
+        id = number(existing.id);
+        if (existing.status !== 'UNCERTAIN' || !retryUncertain) {
+          return { id, claimed: false, status: existing.status,
+            result: existing.result_json ? JSON.parse(existing.result_json) : null };
+        }
+        attempt = number(existing.attempt_count) + 1;
+        this.db.prepare(`UPDATE outbox SET status = 'PENDING', attempt_count = ?, last_error = NULL, updated_at_ms = ?
+          WHERE id = ?`).run(attempt, now, id);
+        this.db.prepare("UPDATE cognition_journal SET status = 'PENDING' WHERE dedupe_key = ?").run(`outbox:${id}`);
+      } else {
+        id = number(this.db.prepare(`
+          INSERT INTO outbox(connector, action, idempotency_key, payload_json, summary, caller, status,
+            chat_id, conv_key, inbound_seq, created_at_ms, updated_at_ms)
+          VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?)
+        `).run(connector, action, idempotencyKey, JSON.stringify(payload), summary, caller,
+          chatId, convKey, inboundSeq, now, now).lastInsertRowid);
+        this.appendCognitionJournal({
+          kind: 'outbound', status: 'PENDING', atMs: now, chatId, threadId, actor: 'me', text: summary,
+          runtimeToken, dedupeKey: `outbox:${id}`,
+          metadata: { action, source: connector, connectorInstance: connector, ...metadata },
+        });
+      }
+      this.recordActivity({
+        eventKey: `outbox:${id}:${attempt}:queued`, kind: 'delivery.queued', conversationKey: convKey,
+        inboundSeq, outboxId: id, status: 'PENDING', summary, occurredAtMs: now,
+        metadata: { connector, action, attempt },
+      }, now);
+      return { id, claimed: true, status: 'PENDING', attempt, result: null };
+    });
+  }
+
+  settleOutbox(id, status, { result = null, error = null } = {}, now = Date.now()) {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM outbox WHERE id = ?').get(id);
+      const remoteMessageId = typeof result?.message_id === 'string' ? result.message_id : null;
+      this.db.prepare(`
+        UPDATE outbox SET status = ?, result_json = ?, remote_message_id = ?, last_error = ?, updated_at_ms = ?,
+          sent_at_ms = CASE WHEN ? = 'SENT' THEN ? ELSE sent_at_ms END
+        WHERE id = ?
+      `).run(status, result === null ? null : JSON.stringify(result), remoteMessageId,
+        error === null ? null : String(error).slice(0, 4_000), now, status, now, id);
+      this.db.prepare(`UPDATE cognition_journal SET status = ?, message_id = COALESCE(?, message_id)
+        WHERE dedupe_key = ?`).run(status === 'SENT' ? 'COMMITTED' : status, remoteMessageId, `outbox:${id}`);
+      this.recordActivity({
+        eventKey: `outbox:${id}:${number(row.attempt_count)}:${status.toLowerCase()}`,
+        kind: status === 'SENT' ? 'delivery.sent' : 'delivery.uncertain',
+        conversationKey: row.conv_key, inboundSeq: row.inbound_seq === null ? null : number(row.inbound_seq),
+        outboxId: id, status, summary: status === 'SENT' ? row.summary : String(error ?? ''), occurredAtMs: now,
+        metadata: { connector: row.connector, action: row.action, attempt: number(row.attempt_count) },
+      }, now);
+    });
+  }
+
+  // A cleared temporary reaction no longer belongs to the observable history.
+  cancelOutboxJournal(id) {
+    this.db.prepare("UPDATE cognition_journal SET status = 'CANCELLED' WHERE dedupe_key = ?").run(`outbox:${id}`);
+  }
+
+  // The newest accepted-or-ignored inbound row for a message id on any connector.
+  eventByMessageId(messageId) {
+    return this.db.prepare('SELECT * FROM connector_events WHERE message_id = ? ORDER BY seq DESC LIMIT 1')
+      .get(messageId) ?? null;
+  }
+
+  // The newest accepted inbound after `row` in its conversation, if any.
+  newerEventSeq(row) {
+    const newer = this.db.prepare(`
+      SELECT MAX(seq) AS seq FROM connector_events WHERE conv_key = ? AND status = 'DONE' AND seq > ?
+    `).get(row.conv_key, row.seq);
+    return newer?.seq == null ? null : number(newer.seq);
+  }
+
+  // Which connector a message or chat id belongs to, as far as this daemon has
+  // seen it: an authenticated inbound or one of its own deliveries.
+  connectorForMessage(messageId) {
+    return this.db.prepare('SELECT connector_instance AS connector FROM connector_events WHERE message_id = ? ORDER BY seq DESC LIMIT 1').get(messageId)?.connector
+      ?? this.db.prepare('SELECT connector FROM outbox WHERE remote_message_id = ? ORDER BY id DESC LIMIT 1').get(messageId)?.connector
+      ?? null;
+  }
+
+  connectorForChat(chatId) {
+    return this.db.prepare('SELECT connector_instance AS connector FROM connector_events WHERE chat_id = ? ORDER BY seq DESC LIMIT 1').get(chatId)?.connector
+      ?? this.db.prepare('SELECT connector FROM outbox WHERE chat_id = ? ORDER BY id DESC LIMIT 1').get(chatId)?.connector
+      ?? null;
+  }
+
+  // Scope of a message this bot delivered (for replies/reactions to it).
+  deliveredMessage(messageId) {
+    return this.db.prepare(`SELECT connector, chat_id, conv_key FROM outbox
+      WHERE remote_message_id = ? ORDER BY id DESC LIMIT 1`).get(messageId) ?? null;
+  }
+
   // Cross-chat history injected into a fresh thread's first turn. DONE rows include
   // every accepted sender, including bot/app messages. Outbound replies re-enter only
   // if Lark emits them back as inbound events.
@@ -1782,20 +1711,20 @@ export class Store {
   history(limit, beforeSeq = null) {
     if (limit <= 0) return [];
     const rows = this.db.prepare(`
-      SELECT received_at_ms AS at_ms, COALESCE(sender_id, 'unknown') AS actor,
-             chat_id AS chat_id, thread_id AS thread_id, content AS text
-      FROM inbound
+      SELECT *
+      FROM connector_events
       WHERE status = 'DONE' AND seq < ?
       ORDER BY received_at_ms DESC, seq DESC
       LIMIT ?
     `).all(beforeSeq ?? Number.MAX_SAFE_INTEGER, limit);
     return rows.reverse().map((row) => ({
-      atMs: number(row.at_ms),
+      ...rowToInbound(row),
+      atMs: number(row.received_at_ms),
       direction: 'inbound',
-      actor: row.actor,
+      source: row.source || 'lark',
       chatId: row.chat_id,
       threadId: row.thread_id,
-      text: row.text,
+      text: row.content,
     }));
   }
 
@@ -1803,33 +1732,22 @@ export class Store {
     const cutoff = now - retentionMs;
     const removed = this.transaction(() => {
       const inbound = this.db.prepare(`
-        DELETE FROM inbound
+        DELETE FROM connector_events
         WHERE received_at_ms < ? AND status IN ('DONE', 'DEAD', 'RULE_IGNORED')
       `).run(cutoff);
       const meeting = this.meetings.prune(cutoff);
       const outbox = this.db.prepare(`
-        DELETE FROM outbox
-        WHERE updated_at_ms < ?
-          AND status IN ('SENT', 'DRY_RUN', 'FAILED', 'UNCERTAIN', 'CANCELLED_STALE')
-      `).run(cutoff);
-      const turns = this.db.prepare(`
-        DELETE FROM turns
-        WHERE updated_at_ms < ?
-          AND status NOT IN ('RUNNING', 'OUTBOX_PENDING')
-          AND NOT EXISTS (SELECT 1 FROM outbox WHERE outbox.turn_id = turns.id)
+        DELETE FROM outbox WHERE updated_at_ms < ? AND status IN ('SENT', 'UNCERTAIN')
       `).run(cutoff);
       const conversations = this.db.prepare(`
         DELETE FROM conversations
-        WHERE NOT EXISTS (SELECT 1 FROM inbound WHERE inbound.conv_key = conversations.conv_key)
-          AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.conv_key = conversations.conv_key)
-          AND NOT EXISTS (SELECT 1 FROM outbox WHERE outbox.conv_key = conversations.conv_key)
+        WHERE NOT EXISTS (SELECT 1 FROM connector_events WHERE connector_events.conv_key = conversations.conv_key)
       `).run();
       return {
         inbound: number(inbound.changes),
         meetingEvents: meeting.events,
         meetingSessions: meeting.sessions,
         outbox: number(outbox.changes),
-        turns: number(turns.changes),
         conversations: number(conversations.changes),
       };
     });
@@ -1839,19 +1757,16 @@ export class Store {
 
   stats() {
     const inbound = Object.fromEntries(this.db.prepare(`
-      SELECT status, COUNT(*) AS count FROM inbound GROUP BY status
+      SELECT status, COUNT(*) AS count FROM connector_events GROUP BY status
     `).all().map((row) => [row.status, number(row.count)]));
     const outbox = Object.fromEntries(this.db.prepare(`
       SELECT status, COUNT(*) AS count FROM outbox GROUP BY status
-    `).all().map((row) => [row.status, number(row.count)]));
-    const turns = Object.fromEntries(this.db.prepare(`
-      SELECT status, COUNT(*) AS count FROM turns GROUP BY status
     `).all().map((row) => [row.status, number(row.count)]));
     const activities = number(this.db.prepare(`
       SELECT COUNT(*) AS count FROM activities
     `).get().count);
     const meeting = this.meetings.stats();
-    return { inbound, turns, outbox, activities, ...meeting };
+    return { inbound, outbox, activities, ...meeting };
   }
 
   close() {

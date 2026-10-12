@@ -1,5 +1,6 @@
 import { lookupMemberName } from './roster.mjs';
-import { chatTag, isoMinute, oneLine, shortenId } from './runtime-input.mjs';
+import { chatTag, isoMinute, oneLine, shortenId, formatInboundLine, metadataTag } from './runtime-input.mjs';
+import { normalizeEvent } from './event.mjs';
 
 const HISTORY_SEPARATOR = '--- history above, new messages below ---';
 
@@ -15,15 +16,25 @@ export class CognitionLimitError extends Error {
 
 export function formatCognitionJournalLine(item) {
   if (item.kind === 'inbound') {
+    if (item.metadata?.event) return formatInboundLine(normalizeEvent(item.metadata.event));
     const from = lookupMemberName(item.chatId, item.actor) ?? shortenId(item.actor);
-    return `[chat=${chatTag(item.chatId, item.threadId)} msg=${item.messageId}`
+    return `[chat=${chatTag(item.chatId, item.threadId)} source=${item.metadata?.source || 'lark'} msg=${item.messageId}`
       + ` time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
   }
   if (item.kind === 'outbound') {
     // PENDING means the external action may already have happened. Render it
     // conservatively until it settles or startup recovery marks it UNCERTAIN.
     const status = item.status === 'COMMITTED' ? '' : ' outcome=uncertain';
-    return `[chat=${chatTag(item.chatId, item.threadId)} time=${isoMinute(item.atMs)} from=me${status}]`
+    if (!item.chatId && item.metadata?.event) {
+      const event = normalizeEvent(item.metadata.event);
+      return `[source=${metadataTag(event.source)}`
+        + (event.connectorInstance !== event.source ? ` instance=${metadataTag(event.connectorInstance)}` : '')
+        + ` action=${metadataTag(event.replyRoute?.action ?? item.metadata.action)}`
+        + ` in_reply_to_event=${metadataTag(event.eventId)}`
+        + ` subject=${metadataTag(event.subject.type)}:${metadataTag(event.subject.id)}`
+        + ` time=${isoMinute(item.atMs)} from=me${status}] ${oneLine(item.text)}`;
+    }
+    return `[chat=${chatTag(item.chatId, item.threadId)} source=${item.metadata?.source || 'lark'} time=${isoMinute(item.atMs)} from=me${status}]`
       + ` ${oneLine(item.text)}`;
   }
   return `[daemon time=${isoMinute(item.atMs)} kind=${oneLine(item.kind)}] ${oneLine(item.text)}`;
