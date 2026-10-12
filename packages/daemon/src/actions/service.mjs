@@ -250,7 +250,14 @@ export class ActionService {
     return [...mentions.values()];
   }
 
-  async deliver({ caller, connector, action, input, key, summary, scope, inboundSeq = null, metadata = {} }) {
+  async deliver({ caller, connector, action, input, key, summary, scope, fence = null, inboundSeq = null, metadata = {} }) {
+    // Preparing the content may have awaited (a mention lookup), and a newer
+    // message or a runtime switch could have landed meanwhile. Re-check right
+    // before the reservation, with no await in between.
+    if (caller.authority) {
+      this.assertAuthority(caller.authority);
+      if (fence) this.fence(fence.message_id, caller);
+    }
     if (this.config.dryRun) return { dry_run: true };
     const spec = this.manifest(connector)?.actions[action] ?? {};
     const reservation = this.store.reserveOutbox({
@@ -311,6 +318,7 @@ export class ActionService {
         key: this.key(input.idempotency_key, 'send', connector, fence.message_id, responseTo.message_id, input.chat_id, content.canonical),
         summary: content.summary,
         scope: { chatId: input.chat_id, convKey: responseTo.conv_key },
+        fence,
         inboundSeq: responseTo.seq,
       });
       const warning = this.rememberCard(content, result, { source: fence, chatId: input.chat_id });
@@ -340,6 +348,7 @@ export class ActionService {
           input.message_id, inThread, content.canonical),
         summary: content.summary,
         scope: { chatId, threadId: target?.thread_id ?? null, convKey: responseTo.conv_key },
+        fence,
         inboundSeq: responseTo.seq,
       });
       const warning = this.rememberCard(content, result, {
@@ -367,6 +376,7 @@ export class ActionService {
       key: this.key(null, 'reaction', connector, fence.message_id, responseTo.message_id, input.message_id, input.emoji_type, temporary),
       summary: `[reaction ${input.emoji_type}]`,
       scope: { chatId: target?.chat_id ?? fence.chat_id, threadId: target?.thread_id ?? null, convKey: responseTo.conv_key },
+      fence,
       inboundSeq: responseTo.seq,
     });
     if (!result.dry_run && !result.duplicate) {

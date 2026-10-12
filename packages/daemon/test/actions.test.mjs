@@ -239,6 +239,30 @@ describe('agent tools', () => {
     ]);
   });
 
+  it('re-checks freshness and authority after an awaited mention lookup', async (t) => {
+    let finishLookup = null;
+    const roster = { resolveNames: (_chatId, names) => new Promise((resolve) => {
+      finishLookup = () => resolve(names.map((name) => ({ name, id: 'ou_alice12345678' })));
+    }) };
+    const { store, call, connectors, inbound } = setup(t, { roster });
+    inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
+
+    const stale = call('send_message', { chat_id: 'oc_chat12345678', markdown: '@Alice hi',
+      mention_names: ['Alice'], decision_message_id: 'om_decision123456' });
+    inbound({ messageId: 'om_newer123456789', chatId: 'oc_chat12345678' });
+    finishLookup();
+    await assert.rejects(stale, (error) => error.code === 'stale_decision');
+
+    const revoked = call('reply_message', { message_id: 'om_newer123456789', markdown: '@Alice hi',
+      mention_names: ['Alice'], decision_message_id: 'om_newer123456789' });
+    store.initializeCognition('claude', 'new-owner');
+    finishLookup();
+    await assert.rejects(revoked, (error) => error.code === 'authority_revoked');
+
+    assert.equal(connectors.calls.length, 0);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n, 0);
+  });
+
   it('keeps one temporary working reaction per conversation and clears it on the next final delivery there', async (t) => {
     let reactions = 0;
     const run = (_connector, action) => {
