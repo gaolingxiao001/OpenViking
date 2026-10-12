@@ -1191,7 +1191,12 @@ class AgentLoop:
         except asyncio.CancelledError:
             if active.interrupted:
                 logger.info(f"Interrupted message from {msg.session_key}")
-                return self._interrupted_message(msg)
+                return OutboundMessage(
+                    session_key=msg.session_key,
+                    content="",
+                    event_type=OutboundEventType.INTERRUPT,
+                    metadata={**(msg.metadata or {}), "reason": "interrupted"},
+                )
             raise
         finally:
             if self._active_turn and self._active_turn.task is task:
@@ -1202,20 +1207,12 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
-    def _mark_active_turn_after_user_commit(self, session_key: SessionKey) -> None:
-        active = self._active_turn
-        if active and active.session_key == session_key and not active.task.done():
-            active.interruptible = True
-
-    def _mark_active_turn_finalizing(self, session_key: SessionKey) -> None:
-        active = self._active_turn
-        if active and active.session_key == session_key and not active.task.done():
-            active.interruptible = False
-
     async def _commit_user_message(self, session: Session, msg: InboundMessage) -> None:
         session.add_message("user", msg.content, sender_id=msg.sender_id)
         await self.sessions.save(session)
-        self._mark_active_turn_after_user_commit(msg.session_key)
+        active = self._active_turn
+        if active and active.session_key == msg.session_key and not active.task.done():
+            active.interruptible = True
 
     @staticmethod
     def _without_committed_user_message(session: Session) -> Session:
@@ -1224,20 +1221,17 @@ class AgentLoop:
             history_session.messages = history_session.messages[:-1]
         return history_session
 
-    def _interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
+    async def _complete_interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
+        session_key = msg.session_key
+        skip_heartbeat = session_key.type == "cli"
+        session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
+        await self._commit_user_message(session, msg)
         return OutboundMessage(
             session_key=msg.session_key,
             content="",
             event_type=OutboundEventType.INTERRUPT,
             metadata={**(msg.metadata or {}), "reason": "interrupted"},
         )
-
-    async def _complete_interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
-        session_key = msg.session_key
-        skip_heartbeat = session_key.type == "cli"
-        session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
-        await self._commit_user_message(session, msg)
-        return self._interrupted_message(msg)
 
     async def _compact_tool_loop(
         self,
@@ -2403,7 +2397,9 @@ class AgentLoop:
                     skill_runtime=skill_runtime,
                 )
 
-            self._mark_active_turn_finalizing(session_key)
+            active = self._active_turn
+            if active and active.session_key == session_key and not active.task.done():
+                active.interruptible = False
 
             if auto_memory_tool:
                 tools_used = [auto_memory_tool, *(tools_used or [])]
