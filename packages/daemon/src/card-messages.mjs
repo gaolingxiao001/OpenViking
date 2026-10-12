@@ -27,19 +27,23 @@ function cardThreadId(data) {
   return findField(data, 'thread_id');
 }
 
-export function registerCard(db, { messageId, profile, question = null, source, chatId, replyInThread, replyTarget, data, now = Date.now() }) {
+// The scope describes where the card landed, never the decision that asked for
+// it: a Weixin message may send a card to a Lark group. `instance` is the
+// delivering Connector. `inbound` is an accepted inbound in the destination chat
+// on that Connector (the replied-to message, or the decision when it sits
+// there); only it may vouch for the thread. `chat` supplies tenant and type.
+export function registerCard(db, { messageId, profile, question = null, instance, chatId, inbound = null, chat = null,
+  replyInThread, replyTarget, data, now = Date.now() }) {
   if (!/^om_[A-Za-z0-9_-]{8,}$/.test(messageId ?? '')) throw new Error('card delivery returned no valid message id');
-  const destination = findField(data, 'chat_id') || chatId || source?.chat_id;
+  const destination = findField(data, 'chat_id') || chatId;
   if (!/^oc_[A-Za-z0-9_-]{8,}$/.test(destination ?? '')) throw new Error('card destination could not be verified');
-  const sameChat = source?.chat_id === destination;
-  const threadId = replyInThread ? (cardThreadId(data) || source?.thread_id) : null;
+  const threadId = replyInThread ? (cardThreadId(data) || inbound?.thread_id) : null;
   if (replyInThread && !threadId) throw new Error('delivered card thread could not be verified');
-  const tenantKey = source?.tenant_key ?? null;
   const scope = {
-    instance: source?.connector_instance ?? 'lark',
-    conversation: { id: destination, type: sameChat ? source.chat_type : 'group',
-      tenant_id: tenantKey, thread_id: threadId },
-    threadRootId: replyInThread ? (findField(data, 'root_id') || source?.thread_root_id || replyTarget) : null,
+    instance,
+    conversation: { id: destination, type: chat?.chat_type ?? 'group',
+      tenant_id: chat?.tenant_key ?? null, thread_id: threadId },
+    threadRootId: replyInThread ? (findField(data, 'root_id') || inbound?.thread_root_id || replyTarget) : null,
   };
   db.prepare(`INSERT INTO lark_cards(message_id, profile, scope_json, question_json, expires_at_ms)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO NOTHING`).run(
