@@ -259,6 +259,12 @@ export class ActionService {
       if (fence) this.fence(fence.message_id, caller);
     }
     if (this.config.dryRun) return { dry_run: true };
+    // A Connector that is down and restarting gets no reservation: nothing was
+    // sent, and the same call can go through once it is back.
+    if (this.connectors.available?.(connector) === false) {
+      throw blocked('connector_unavailable',
+        `Delivery blocked: the ${connector} connector is temporarily unavailable and reconnects on its own. ${NO_ACTION}`);
+    }
     const spec = this.manifest(connector)?.actions[action] ?? {};
     const reservation = this.store.reserveOutbox({
       connector, action, idempotencyKey: key, payload: input, summary,

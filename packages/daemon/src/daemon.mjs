@@ -103,7 +103,7 @@ export class PersonalAgentDaemon {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
       this.ovContext = new OVSessionContext(this.store,
         this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath), this.logger,
-        { canCommit: () => !this.connectors?.subscriptionRunning
+        { canCommit: () => !this.connectors?.subscribed
           && !this.store.db.prepare("SELECT 1 FROM connector_events WHERE status = 'QUEUED' LIMIT 1").get() });
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
@@ -134,16 +134,20 @@ export class PersonalAgentDaemon {
         logger: this.logger.child({ component: 'roster' }),
       });
       registerNameResolver((chatId, userId) => this.roster.nameForId(chatId, userId));
+      // A Connector that fails check does not stop the others; it is retried
+      // once subscriptions start.
       const transportInfo = await this.connectors.preflight();
       this.config.profile = transportInfo.profile;
+      const checked = this.connectorIds.filter((id) => !(id in transportInfo.failed));
       this.logger.info('connector_preflight_ok', {
-        connectors: this.connectorIds,
+        connectors: checked,
+        failed: Object.keys(transportInfo.failed),
         version: transportInfo.version,
       });
       this.recordSystemActivity('system.preflight_ok', {
-        summary: `${this.connectorIds.join('、')} Connector 可用`,
+        summary: `${checked.join('、')} Connector 可用`,
         status: 'OK',
-        metadata: { connectors: this.connectorIds, version: transportInfo.version },
+        metadata: { connectors: checked, version: transportInfo.version },
       }, 'preflight-ok');
 
       this.chatNames = new ChatNameTracker({
@@ -249,17 +253,19 @@ export class PersonalAgentDaemon {
       }
       await this.connectors.startSubscription(
         (event) => this.harness.handleConnectorEvent(event),
-        (exit) => this.handleConnectorExit(exit),
+        (status) => this.handleConnectorStatus(status),
       );
 
       await delay(500);
-      if (!this.connectors.subscriptionRunning) {
-        throw new Error('a connector subscriber exited during startup');
+      if (!this.connectors.anySubscriptionRunning) {
+        throw new Error('every connector subscriber exited during startup');
       }
 
       this.store.closeRunningSubscriberActivities();
+      const running = Object.entries(this.connectors.snapshot())
+        .filter(([, connector]) => connector.running).map(([id]) => id);
       this.recordSystemActivity('system.subscriber_started', {
-        summary: `正在接收 ${this.connectorIds.join('、')} 事件`,
+        summary: `正在接收 ${running.join('、')} 事件`,
         status: 'RUNNING',
       }, 'subscriber-started');
 
@@ -352,12 +358,16 @@ export class PersonalAgentDaemon {
     this.chatNames?.refresh();
   }
 
+  // One Connector down while another still serves is `degraded`, and still
+  // ready: an expired Weixin login must not hold back or roll back a release.
   serviceSnapshot({ includeState = true } = {}) {
-    const healthy = !this.shuttingDown && Boolean(this.connectors?.subscriptionRunning);
+    const anyRunning = Boolean(this.connectors?.anySubscriptionRunning);
+    const allRunning = Boolean(this.connectors?.subscriptionRunning);
+    const healthy = !this.shuttingDown && anyRunning;
     const ready = healthy && this.ready;
     const body = {
-      status: ready ? 'ready' : (healthy ? 'starting' : 'unhealthy'),
-      subscriber: this.connectors?.subscriptionRunning ? 'running' : 'stopped',
+      status: ready ? (allRunning ? 'ready' : 'degraded') : (healthy ? 'starting' : 'unhealthy'),
+      subscriber: allRunning ? 'running' : (anyRunning ? 'degraded' : 'stopped'),
       connectors: this.connectors?.snapshot() ?? {},
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
       activeTurns: this.agentRuntime?.snapshot().work.turnInProgress ? 1 : 0,
@@ -367,19 +377,31 @@ export class PersonalAgentDaemon {
     return { healthy, ready, body };
   }
 
-  handleConnectorExit(exit) {
-    this.logger.error('connector_subscriber_exited', {
-      connector: exit.connector,
-      code: exit.code,
-      signal: exit.signal,
-      error: exit.stderr?.trim().slice(-2000),
+  // A Connector going down or coming back is recorded and nothing more: the
+  // ConnectorManager restarts it while the runtime and other Connectors keep
+  // running. During shutdown a worker may exit first (systemd signals the
+  // whole cgroup); that is not a failure.
+  handleConnectorStatus(status) {
+    if (this.shuttingDown) return;
+    const { connector, failures } = status;
+    if (status.status === 'recovered') {
+      this.logger.info('connector_recovered', { connector, failures });
+      this.recordSystemActivity('system.connector_recovered', {
+        summary: `${connector} Connector 已恢复`,
+        status: 'RUNNING',
+        metadata: { connector, failures },
+      });
+      return;
+    }
+    const error = safeError(status.error || `exit ${status.code ?? status.signal ?? 'unknown'}`);
+    this.logger.error('connector_failed', {
+      connector, code: status.code, signal: status.signal, failures, retryInMs: status.retryInMs, error,
     });
-    this.recordSystemActivity('system.subscriber_exit', {
-      summary: safeError(exit.stderr?.trim().slice(-2000) || `exit ${exit.code ?? exit.signal ?? 'unknown'}`),
+    this.recordSystemActivity('system.connector_failed', {
+      summary: `${connector} Connector 不可用，${Math.ceil(status.retryInMs / 1000)} 秒后重连：${error}`,
       status: 'FAILED',
-      metadata: { connector: exit.connector, code: exit.code, signal: exit.signal },
-    }, 'subscriber-exit');
-    void this.shutdown('subscriber_exit', 1).then(() => process.exit(1));
+      metadata: { connector, code: status.code, signal: status.signal, failures, retryInMs: status.retryInMs },
+    });
   }
 
   async shutdown(reason = 'shutdown', exitCode = 0) {

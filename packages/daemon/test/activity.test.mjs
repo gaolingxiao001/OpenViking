@@ -447,7 +447,7 @@ describe('daemon activity API', { concurrency: false }, () => {
       port: 0,
     }, quietLogger);
     daemon.store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
-    daemon.connectors = { subscriptionRunning: true, snapshot: () => ({}) };
+    daemon.connectors = { subscriptionRunning: true, anySubscriptionRunning: true, snapshot: () => ({}) };
     daemon.ready = true;
     daemon.store.recordActivity({
       eventKey: 'http:test',
