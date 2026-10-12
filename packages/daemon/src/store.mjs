@@ -254,6 +254,8 @@ export class Store {
         ON connector_events(connector_instance, message_id);
       CREATE INDEX IF NOT EXISTS connector_events_subject
         ON connector_events(connector_instance, subject_type, subject_id, seq);
+      CREATE INDEX IF NOT EXISTS connector_events_message_seq
+        ON connector_events(message_id, seq);
 
       -- Every external side effect, from any runtime or the daemon itself, is
       -- reserved here before its Connector is invoked. The journal row with
