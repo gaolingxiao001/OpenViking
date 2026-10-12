@@ -5,7 +5,6 @@ import {
   meetingActivityDebounceMs,
   meetingContextLines,
   namedValue,
-  normalizeMeetingEvent,
   object,
   pullEnvelope,
   semanticFragments,
@@ -64,7 +63,7 @@ export class MeetingAdapter {
 
   async _handleEvent(input) {
     if (this.stopped) return false;
-    const event = normalizeMeetingEvent(input);
+    const event = input;
     if (event.eventType === 'vc.bot.meeting_invited_v1') return this._handleInvite(event);
     if (event.eventType === 'vc.bot.meeting_activity_v1' && event.activityItems.length) {
       return this._handleActivityItems(event);
@@ -81,7 +80,7 @@ export class MeetingAdapter {
       eventType: event.eventType,
       activityType: event.activityType,
       occurredAtMs: event.createTimeMs,
-      payload: event.raw,
+      payload: event,
     });
     const gap = this.store.meetingHasSequenceGap(event.meetingId, event.sequence);
     this.store.updateMeetingProgress(event.meetingId, {

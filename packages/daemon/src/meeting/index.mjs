@@ -11,7 +11,6 @@ export {
 } from './events.mjs';
 export { MeetingStore, migrateMeetingStore } from './store.mjs';
 export { GenericDecisionAuthority } from './decision-authority.mjs';
-export { DecisionAuthorityServer } from './decision-socket.mjs';
 export { FlyReferenceRing } from './fly-reference.mjs';
 export { MeetingInputPort } from './input-port.mjs';
 export { MeetingAudioCoordinator, MeetingGenerationClock } from './live-coordinator.mjs';

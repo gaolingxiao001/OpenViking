@@ -250,7 +250,7 @@ export class VolcAgent {
         sessionId: this.sessionId,
         expectedUserEventId: pending.expectedUserEventId,
       });
-      const error = new Error('Volc managed turn recovery lost its Lark conversation scope');
+      const error = new Error('Volc managed turn recovery lost its event scope');
       queueMicrotask(() => this._failItems(seqs.map((seq) => ({ text: '', seq })), error));
       return;
     }
@@ -371,7 +371,10 @@ export class VolcAgent {
   _conversationKey(items) {
     const resolved = items.map((item) => {
       if (item.seq === null || item.seq === undefined) return null;
-      try { return this.store.inboundBySeq?.(item.seq)?.conversationKey ?? null; } catch { return null; }
+      try {
+        const event = this.store.inboundBySeq?.(item.seq);
+        return event?.scopeKey ?? event?.conversationKey ?? null;
+      } catch { return null; }
     });
     if (resolved.some((key) => !key)) return null;
     const keys = new Set(resolved);
@@ -444,7 +447,7 @@ export class VolcAgent {
   _startBatch(items) {
     const conversationKey = this._conversationKey(items);
     if (!conversationKey) {
-      this._failItems(items, new Error('Volc managed-agent turn requires exactly one Lark conversation scope'));
+      this._failItems(items, new Error('Volc managed-agent turn requires exactly one event scope'));
       this._drain();
       return;
     }

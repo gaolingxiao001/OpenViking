@@ -7,6 +7,7 @@ import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { safeError as safe } from './logger.mjs';
 import { activityPayload } from './activity.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
+import { agentToolEnv } from './actions/api.mjs';
 import { assemblePiConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
@@ -38,8 +39,8 @@ function appendBounded(current, chunk, label) {
   return next;
 }
 
-export function sanitizePiEnv(environment, profile = '') {
-  const safeEnv = sanitizeAgentChildEnv(environment, { profile });
+export function sanitizePiEnv(environment, profile = '', actions = null) {
+  const safeEnv = sanitizeAgentChildEnv(environment, { profile, actions });
   // Pi may use the locally configured Volcengine Ark provider. Unlike the
   // other agent runtimes, its model client runs in this child process, so it
   // needs that provider credential to make inference requests.
@@ -67,9 +68,8 @@ export function formatPiModelId(model) {
   return String(model.id ?? '');
 }
 
-// Persistent `pi --mode rpc` adapter. Pi's built-in bash tool invokes the
-// daemon-pinned lark-cli directly; unlike Codex and Claude, Pi has no MCP
-// client configuration surface to connect to the daemon's tool server.
+// Persistent `pi --mode rpc` adapter. Pi has no MCP client configuration
+// surface, so its bash tool reaches the daemon's agent tools through the CLI.
 export class PiAgent {
   constructor(config, store, logger, options = {}) {
     this.config = config;
@@ -78,7 +78,6 @@ export class PiAgent {
     this._spawn = options.spawn ?? nodeSpawn;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
-    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
@@ -221,7 +220,7 @@ export class PiAgent {
       try {
         child = this._spawn(this.config.piBin, args, {
           cwd: this.config.workspace,
-          env: sanitizePiEnv(process.env, this.config.profile),
+          env: sanitizePiEnv(process.env, this.larkProfile(), agentToolEnv(this.config, this.authorityToken)),
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -266,6 +265,11 @@ export class PiAgent {
     });
   }
 
+  // lark-cli stays available for non-message Lark operations.
+  larkProfile() {
+    return (this.config.connectors ?? [this.config.channel]).includes('lark') ? this.config.profile : '';
+  }
+
   _sessionDir() {
     const root = this.config.dataDir || os.tmpdir();
     const directory = path.join(root, 'pi-sessions');
@@ -292,7 +296,7 @@ export class PiAgent {
       ];
       if (this.model) args.push('--model', this.model);
 
-      const env = sanitizePiEnv(process.env, this.config.profile);
+      const env = sanitizePiEnv(process.env, this.larkProfile(), agentToolEnv(this.config, this.authorityToken));
 
       let child;
       try {

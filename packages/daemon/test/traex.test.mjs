@@ -100,7 +100,8 @@ describe('TraexAgent app-server backend', () => {
       ...baseConfig,
       projectDir: '/release',
       larkCliBin: '/fake/lark-cli',
-      larkToolServerPath: '/release/packages/daemon/src/lark-tools.mjs',
+      actionMcpPath: '/release/packages/daemon/src/actions/mcp.mjs',
+      actionSocketPath: '/tmp/traex-actions.sock',
       sendTimeoutMs: 5_000,
       maxReplyChars: 1_000,
       dryRun: true,
@@ -110,11 +111,13 @@ describe('TraexAgent app-server backend', () => {
 
     assert.equal(spawnCalls[0].bin, 'traecli');
     assert.deepEqual(spawnCalls[0].args.slice(0, 3), ['app-server', '--listen', 'stdio://']);
-    const rendered = spawnCalls[0].args.join('\n');
-    assert.match(rendered, /mcp_servers\.lark_daemon_im\.command/);
-    assert.match(rendered, /lark-tools\.mjs/);
-    assert.match(rendered, /test-profile/);
-    assert.match(rendered, /--database-path.*lark-daemon-test\.sqlite3/);
+    const rendered = spawnCalls[0].args.filter((arg) => !arg.startsWith('developer_instructions=')).join('\n');
+    assert.match(rendered, /mcp_servers\.personal_agent\.command/);
+    const toolArgs = spawnCalls[0].args.find((arg) => arg.startsWith('mcp_servers.personal_agent.args='));
+    assert.deepEqual(JSON.parse(toolArgs.slice(toolArgs.indexOf('=') + 1)), [
+      '/release/packages/daemon/src/actions/mcp.mjs',
+      '--socket', '/tmp/traex-actions.sock', '--authority', 'traex-token',
+    ]);
     assert.doesNotMatch(rendered, /model_reasoning_effort/);
     assert.doesNotMatch(rendered, /service_tier="fast"/);
     assert.doesNotMatch(rendered, /features\.fast_mode=true/);
@@ -123,6 +126,8 @@ describe('TraexAgent app-server backend', () => {
     assert.doesNotMatch(rendered, /features\.apps=false/);
     assert.doesNotMatch(rendered, /--effort/);
     assert.equal(spawnCalls[0].options.env.LARKSUITE_CLI_PROFILE, 'test-profile');
+    assert.equal(spawnCalls[0].options.env.PERSONAL_AGENT_SOCKET, '/tmp/traex-actions.sock');
+    assert.equal(spawnCalls[0].options.env.PERSONAL_AGENT_AUTHORITY, 'traex-token');
   });
 
   it('uses TraeX thread config and stores effort for the next session', async () => {

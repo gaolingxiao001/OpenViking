@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { chatEvent } from './event-fixture.mjs';
 import { describe, it } from 'node:test';
 import {
   EFFORT_LEVELS,
@@ -101,20 +102,20 @@ describe('parseCommand', () => {
 
 describe('commandCandidate', () => {
   it('passes p2p text through unchanged', () => {
-    assert.equal(commandCandidate({ chatType: 'p2p', content: ' /new ', mentions: [] }), '/new');
-    assert.equal(commandCandidate({ chatType: 'p2p', content: '普通消息', mentions: [] }), '普通消息');
+    assert.equal(commandCandidate(chatEvent({ chatType: 'p2p', content: ' /new ', mentions: [] })), '/new');
+    assert.equal(commandCandidate(chatEvent({ chatType: 'p2p', content: '普通消息', mentions: [] })), '普通消息');
   });
 
   it('never accepts slash commands in group chats, mentioned or not', () => {
-    assert.equal(commandCandidate({ chatType: 'group', content: '/help', mentions: [] }), null);
-    assert.equal(commandCandidate({ chatType: 'group', content: '/help' }), null);
+    assert.equal(commandCandidate(chatEvent({ chatType: 'group', content: '/help', mentions: [] })), null);
+    assert.equal(commandCandidate(chatEvent({ chatType: 'group', content: '/help' })), null);
     const mentions = [{ key: '@_user_1', name: 'Zayn', id: 'ou_bot12345678' }];
     assert.equal(
-      commandCandidate({ chatType: 'group', content: '@_user_1 /new', mentions }),
+      commandCandidate(chatEvent({ chatType: 'group', content: '@_user_1 /new', mentions })),
       null,
     );
     assert.equal(
-      commandCandidate({ chatType: 'group', content: '/model gpt-5.5 @_user_1', mentions }),
+      commandCandidate(chatEvent({ chatType: 'group', content: '/model gpt-5.5 @_user_1', mentions })),
       null,
     );
   });

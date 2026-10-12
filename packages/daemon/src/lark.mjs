@@ -1,12 +1,80 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { redactSensitive } from './logger.mjs';
 import { sanitizeNonArkChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { MEETING_EVENT_TYPES } from './meeting/index.mjs';
 
 export const SUBSCRIBED_EVENT_TYPES = Object.freeze([
   'im.message.receive_v1',
+  'card.action.trigger',
   ...MEETING_EVENT_TYPES,
 ]);
+
+const IMAGE_TYPES = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
+};
+const MAX_CHAT_PAGES = 10;
+
+function findField(value, field, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8) return null;
+  if (typeof value[field] === 'string' && value[field]) return value[field];
+  for (const child of Object.values(value)) {
+    const found = findField(child, field, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function deliveredMessage(data) {
+  const result = {};
+  for (const field of ['message_id', 'chat_id', 'thread_id', 'root_id']) {
+    const value = findField(data, field);
+    if (value) result[field] = value;
+  }
+  return result;
+}
+
+function oneLineLabel(value, max = 200) {
+  return String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function cleanMessage(message) {
+  const content = typeof message?.content === 'string' ? message.content : JSON.stringify(message?.content ?? '');
+  return {
+    message_id: String(message?.message_id ?? ''),
+    chat_id: String(message?.chat_id ?? ''),
+    msg_type: String(message?.msg_type ?? 'unknown').slice(0, 80),
+    create_time: String(message?.create_time ?? ''),
+    sender: {
+      id: String(message?.sender?.id ?? message?.sender?.sender_id ?? '').slice(0, 200),
+      name: oneLineLabel(message?.sender?.name),
+    },
+    content: oneLineLabel(content, 4_000),
+  };
+}
+
+function messageList(data) {
+  const raw = Array.isArray(data?.messages) ? data.messages : Array.isArray(data?.items) ? data.items : [];
+  return raw.map(cleanMessage).filter((message) => message.message_id);
+}
+
+// Lark rich text supports <at> tags. A resolved name written inline as
+// "@Name" becomes that person's mention in place; every other mention is
+// prefixed. @all is never sent.
+export function renderMentions(text, mentions = []) {
+  let rendered = text.trim().replace(/<at\b[^>]*\buser_id=["']all["'][^>]*>.*?<\/at>/gis, '所有人');
+  const inline = new Set();
+  for (const { id, name } of [...mentions].filter((item) => item.name).sort((a, b) => b.name.length - a.name.length)) {
+    if (!rendered.includes(`@${name}`)) continue;
+    rendered = rendered.split(`@${name}`).join(`<at user_id="${id}"></at>`);
+    inline.add(id);
+  }
+  const prefix = mentions.filter(({ id }) => !inline.has(id)).map(({ id }) => `<at user_id="${id}"></at>`).join(' ');
+  return prefix ? `${prefix} ${rendered}` : rendered;
+}
 
 function findChatName(value, depth = 0) {
   if (depth > 8 || value === null || value === undefined) return null;
@@ -97,7 +165,7 @@ export class LarkClient {
       cwd: this.config.projectDir,
       env: sanitizeNonArkChildEnv(process.env),
       shell: false,
-      detached: process.platform !== 'win32',
+      detached: this.config.connectorWorker ? false : process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     }));
     this.subscriber = child;
@@ -144,81 +212,185 @@ export class LarkClient {
     return Boolean(this.subscriber && this.subscriber.exitCode === null);
   }
 
-  // Direct quote-reply from the daemon itself (slash-command responses). Codex
-  // replies go through the MCP tool server instead; this path never carries
-  // model output.
-  async replyMessage(messageId, text) {
-    if (this.config.dryRun) return { sent: false, dryRun: true };
-    const result = await this.registry.run(this.config.larkCliBin, [
-      '--profile', this.profile,
-      'im', '+messages-reply', '--as', 'bot',
-      '--message-id', messageId,
-      '--text', text,
-      '--idempotency-key', randomUUID(),
-      '--format', 'json',
-    ], {
-      cwd: this.config.projectDir,
-      timeoutMs: this.config.sendTimeoutMs,
+  // IM operations behind the Core action routes. The Core has already checked
+  // authority, freshness, idempotency and content; these only speak lark-cli.
+  async im(args, label, { cwd = this.config.projectDir, timeoutMs = this.config.sendTimeoutMs } = {}) {
+    const result = await this.registry.run(this.config.larkCliBin, ['--profile', this.profile, 'im', ...args], {
+      cwd, timeoutMs,
     });
-    if (result.timedOut) throw new Error(`lark-cli reply timed out after ${this.config.sendTimeoutMs}ms`);
+    if (result.timedOut) throw new Error(`lark-cli ${label} timed out after ${timeoutMs}ms`);
     let parsed = null;
     try { parsed = JSON.parse(result.stdout); } catch {}
     if (result.code !== 0 || parsed?.ok === false) {
-      const detail = parsed?.error?.message || result.stderr.trim() || `exit ${result.code}`;
-      throw new Error(`lark-cli reply failed: ${detail.slice(-2000)}`);
+      const detail = parsed?.error?.message || result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
+      throw new Error(`lark-cli ${label} failed: ${redactSensitive(detail).slice(-2_000)}`);
     }
-    return { sent: true };
+    if (!parsed || typeof parsed !== 'object') throw new Error(`lark-cli ${label} returned invalid JSON`);
+    return parsed.data ?? parsed;
   }
 
-  // Chat member roster fetch (bot identity) for name<->open_id resolution.
-  // Returns the parsed lark-cli JSON payload; roster.mjs owns bucket parsing.
-  async listChatMembers(chatId) {
-    const result = await this.registry.run(this.config.larkCliBin, [
-      '--profile', this.profile,
-      'im', '+chat-members-list',
-      '--as', 'bot',
-      '--chat-id', chatId,
-      '--page-all',
+  async deliver(target, content, idempotencyKey) {
+    const suffix = ['--idempotency-key', idempotencyKey, '--format', 'json'];
+    let data;
+    if (content.type === 'markdown') {
+      data = await this.im([...target, '--markdown', renderMentions(content.text, content.mentions), ...suffix], 'send message');
+    } else if (content.type === 'file') {
+      // lark-cli accepts only cwd-relative upload paths.
+      const flag = IMAGE_TYPES[path.extname(content.path).toLowerCase()] ? '--image' : '--file';
+      data = await this.im([...target, flag, `./${path.basename(content.path)}`, ...suffix], 'send attachment',
+        { cwd: path.dirname(content.path) });
+    } else if (content.type === 'file_key') {
+      data = await this.im([...target, '--file', content.key, ...suffix], 'send attachment');
+    } else if (content.type === 'card') {
+      data = await this.im([...target, '--msg-type', 'interactive', '--content', JSON.stringify(content.card), ...suffix], 'send card');
+    } else {
+      throw new Error(`unsupported Lark content type: ${content.type}`);
+    }
+    return deliveredMessage(data);
+  }
+
+  sendMessage({ chat_id: chatId, content, idempotency_key: idempotencyKey }) {
+    return this.deliver(['+messages-send', '--as', 'bot', '--chat-id', chatId], content, idempotencyKey);
+  }
+
+  async replyMessage({ message_id: messageId, content, reply_in_thread: inThread = false, idempotency_key: idempotencyKey }) {
+    const delivered = await this.deliver([
+      '+messages-reply', '--as', 'bot', '--message-id', messageId, ...(inThread ? ['--reply-in-thread'] : []),
+    ], content, idempotencyKey);
+    // The reply shortcut may return only a message id. Card callbacks are routed
+    // by the delivered thread, so read it back instead of guessing from the root.
+    // The card is already sent: a failed lookup only leaves the thread unknown,
+    // which the Core reports as a callback registration warning.
+    if (content.type === 'card' && inThread && !delivered.thread_id && delivered.message_id) {
+      try {
+        const details = await this.im([
+          '+messages-mget', '--as', 'bot', '--message-ids', delivered.message_id, '--no-reactions', '--format', 'json',
+        ], 'resolve delivered thread');
+        return { ...deliveredMessage(details), ...delivered };
+      } catch {
+        return delivered;
+      }
+    }
+    return delivered;
+  }
+
+  async reactMessage({ message_id: messageId, emoji_type: emojiType }) {
+    const data = await this.im([
+      'reactions', 'create', '--as', 'bot',
+      '--params', JSON.stringify({ message_id: messageId }),
+      '--data', JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
       '--format', 'json',
-    ], {
-      cwd: this.config.projectDir,
-      timeoutMs: 15_000,
-    });
-    if (result.timedOut) throw new Error('lark-cli chat member lookup timed out after 15000ms');
-    if (result.code !== 0) {
-      throw new Error(result.stderr.trim().slice(-2000) || `lark-cli chat member lookup exited ${result.code}`);
+    ], 'react to message');
+    return { reaction_id: findField(data, 'reaction_id') };
+  }
+
+  async deleteReaction({ message_id: messageId, reaction_id: reactionId }) {
+    await this.im([
+      'reactions', 'delete', '--as', 'bot', '--message-id', messageId, '--reaction-id', reactionId, '--format', 'json',
+    ], 'delete reaction');
+    return { deleted: true };
+  }
+
+  async retractMessage({ message_id: messageId }) {
+    // lark-cli marks message deletion high-risk; the agent tool contract
+    // already requires an explicit user request, so confirm here.
+    await this.im([
+      'messages', 'delete', '--as', 'bot', '--params', JSON.stringify({ message_id: messageId }), '--format', 'json', '--yes',
+    ], 'retract message');
+    return { retracted: true };
+  }
+
+  async listChats({ query = '', limit = 100 } = {}) {
+    const chats = new Map();
+    let pageToken = '';
+    let hasMore = false;
+    for (let page = 0; page < MAX_CHAT_PAGES; page += 1) {
+      const data = await this.im([
+        '+chat-list', '--as', 'bot', '--types', 'group', '--sort', 'active_time', '--page-size', '100', '--format', 'json',
+        ...(pageToken ? ['--page-token', pageToken] : []),
+      ], 'list chats');
+      for (const chat of Array.isArray(data.chats) ? data.chats : []) {
+        const chatId = String(chat?.chat_id ?? '');
+        if (!chatId || chats.has(chatId)) continue;
+        chats.set(chatId, {
+          chat_id: chatId,
+          name: oneLineLabel(chat?.name),
+          chat_status: oneLineLabel(chat?.chat_status ?? 'unknown'),
+        });
+      }
+      hasMore = Boolean(data.has_more);
+      const next = typeof data.page_token === 'string' ? data.page_token : '';
+      if (!hasMore || !next || next === pageToken) break;
+      pageToken = next;
     }
-    let parsed;
-    try {
-      parsed = JSON.parse(result.stdout);
-    } catch {
-      throw new Error('lark-cli chat member lookup returned invalid JSON');
-    }
-    return parsed?.data ?? parsed;
+    const needle = String(query).trim().toLocaleLowerCase();
+    const matched = [...chats.values()].filter((chat) => !needle || chat.name.toLocaleLowerCase().includes(needle));
+    return { chats: matched.slice(0, limit), has_more: hasMore || matched.length > limit };
+  }
+
+  async listChatMessages({ chat_id: chatId, limit = 20, as = 'bot' }) {
+    const data = await this.im([
+      '+chat-messages-list', '--as', as, '--chat-id', chatId, '--sort', 'desc', '--page-size', String(limit), '--format', 'json',
+    ], 'list chat messages');
+    return { messages: messageList(data), has_more: Boolean(data.has_more) };
+  }
+
+  async searchMessages({ query, chat_id: chatId, start, end, limit = 20 }) {
+    const data = await this.im([
+      '+messages-search', '--as', 'user', '--query', query, '--page-size', String(limit), '--format', 'json',
+      ...(chatId ? ['--chat-id', chatId] : []), ...(start ? ['--start', start] : []), ...(end ? ['--end', end] : []),
+    ], 'search messages');
+    return { messages: messageList(data).slice(0, limit), has_more: Boolean(data.has_more) };
+  }
+
+  async listThreadMessages({ thread_id: threadId, limit = 50, as = 'bot' }) {
+    const data = await this.im([
+      '+threads-messages-list', '--as', as, '--thread', threadId, '--order', 'asc', '--page-size', String(limit), '--format', 'json',
+    ], 'list thread messages');
+    return { messages: messageList(data), has_more: Boolean(data.has_more) };
+  }
+
+  // Downloads one message resource into the private media directory. The
+  // file name is derived from (message, key) so a repeated view reuses it.
+  async getMedia({ message_id: messageId, key }) {
+    if (!key) throw new Error('Lark media requires the image_key or file_key from the message placeholder');
+    const kind = key.startsWith('img_') ? 'image' : 'file';
+    const directory = path.join(this.config.tempDir, 'media');
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const output = `lark-${createHash('sha256').update(`${messageId}:${key}`).digest('hex').slice(0, 24)}`;
+    const data = await this.im([
+      '+messages-resources-download', '--as', 'bot', '--message-id', messageId, '--file-key', key,
+      '--type', kind, '--output', output, '--format', 'json',
+    ], 'download message resource', { cwd: directory });
+    const saved = path.resolve(directory, typeof data?.saved_path === 'string' ? data.saved_path : output);
+    const name = path.basename(saved);
+    return { media: [{
+      path: saved, name, kind,
+      mime_type: IMAGE_TYPES[path.extname(name).toLowerCase()] ?? (kind === 'image' ? 'image/jpeg' : 'application/octet-stream'),
+      size: fs.statSync(saved).size,
+    }] };
+  }
+
+  // Reflect a settled choice without depending on the short-lived callback token.
+  async updateCard(messageId, card) {
+    if (this.config.dryRun) return { sent: false, dryRun: true };
+    return this.runJson([
+      '--profile', this.profile, 'im', 'messages', 'patch', '--as', 'bot',
+      '--message-id', messageId, '--data', JSON.stringify({ content: JSON.stringify(card) }),
+      '--format', 'json',
+    ], 'update answered card', this.config.sendTimeoutMs);
+  }
+
+  // Chat member roster fetch for name<->open_id resolution. Returns the parsed
+  // lark-cli JSON payload; roster.mjs owns bucket parsing.
+  listChatMembers(chatId) {
+    return this.im(['+chat-members-list', '--as', 'bot', '--chat-id', chatId, '--page-all', '--format', 'json'],
+      'chat member lookup', { timeoutMs: 15_000 });
   }
 
   async getChatName(chatId) {
-    const result = await this.registry.run(this.config.larkCliBin, [
-      '--profile', this.profile,
-      'im', 'chats', 'get',
-      '--as', 'bot',
-      '--chat-id', chatId,
-      '--format', 'json',
-    ], {
-      cwd: this.config.projectDir,
-      timeoutMs: 15_000,
-    });
-    if (result.timedOut) throw new Error('lark-cli chat lookup timed out after 15000ms');
-    if (result.code !== 0) {
-      throw new Error(result.stderr.trim().slice(-2000) || `lark-cli chat lookup exited ${result.code}`);
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(result.stdout);
-    } catch {
-      throw new Error('lark-cli chat lookup returned invalid JSON');
-    }
-    return findChatName(parsed);
+    return findChatName(await this.im(['chats', 'get', '--as', 'bot', '--chat-id', chatId, '--format', 'json'],
+      'chat lookup', { timeoutMs: 15_000 }));
   }
 
   async joinMeeting({ meetingNumber, callId = null, password = null }) {
@@ -298,7 +470,7 @@ export class LarkClient {
     return parsed;
   }
 
-  async stop() {
+  async stopSubscription() {
     this.stopping = true;
     const child = this.subscriber;
     if (!child?.pid) return;
@@ -310,5 +482,9 @@ export class LarkClient {
       ]);
     }
     terminateProcessTree(child, 'SIGKILL');
+  }
+
+  async stop() {
+    await this.stopSubscription();
   }
 }

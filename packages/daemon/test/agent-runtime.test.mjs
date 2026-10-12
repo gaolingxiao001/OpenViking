@@ -6,7 +6,8 @@ import { describe, it } from 'node:test';
 import { AgentRuntime } from '../src/agent-runtime.mjs';
 import { resolveRuntimeModelTarget as parseRuntimeModelTarget } from '../src/runtime-catalog.mjs';
 import { adaptRuntime } from '../src/runtime-adapter.mjs';
-import { LarkToolService } from '../src/lark-tools.mjs';
+import { ActionService } from '../src/actions/service.mjs';
+import { fakeConnectors } from './action-fixture.mjs';
 import { Store } from '../src/store.mjs';
 import { runClaudeRuntimeSimulation } from '../simulator/claude-runtime-simulator.mjs';
 
@@ -369,6 +370,12 @@ describe('global Codex/Claude hard switch', () => {
     ]).accepted, true);
     assert.equal(calls.length, 1);
 
+    assert.equal(runtime.submit([
+      { text: 'issue opened', scope: { kind: 'github', key: '["github","issue","owner/repo#123"]' } },
+      { text: 'issue labeled', scopeKey: '["github","issue","owner/repo#123"]' },
+    ]).accepted, true);
+    assert.equal(calls.length, 2);
+
     const effort = await runtime.transition({ kind: 'select-effort', effort: 'high' });
     assert.deepEqual(effort, {
       ok: false,
@@ -684,20 +691,9 @@ describe('global Codex/Claude hard switch', () => {
     const databasePath = path.join(directory, 'state.sqlite3');
     const store = new Store(databasePath, quietLogger);
     store.initializeCognition('codex', 'token-from-crashed-daemon');
-    let cliCalls = 0;
-    const staleService = new LarkToolService({
-      larkCliBin: '/fake/lark-cli',
-      profile: 'fixed-profile',
-      projectDir: '/safe/project',
-      databasePath,
-      runtimeToken: 'token-from-crashed-daemon',
-      timeoutMs: 1_000,
-      maxTextChars: 1_000,
-      dryRun: false,
-    }, async () => {
-      cliCalls += 1;
-      return { code: 0, signal: null, stdout: '{"ok":true}', stderr: '', timedOut: false };
-    });
+    const connectors = fakeConnectors();
+    const actions = new ActionService({ config: {}, store, connectors, logger: quietLogger });
+    const stale = { authority: 'token-from-crashed-daemon' };
     const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
       codexFactory: (options) => backend('codex', options),
     });
@@ -705,16 +701,33 @@ describe('global Codex/Claude hard switch', () => {
     try {
       await runtime.start();
       assert.notEqual(store.getCognitionState().authorityToken, 'token-from-crashed-daemon');
-      await assert.rejects(() => staleService.listChats(), /no longer owns/);
-      await assert.rejects(() => staleService.sendMessage({
+      await assert.rejects(() => actions.call('list_chats', {}, stale), /no longer owns/);
+      await assert.rejects(() => actions.call('send_message', {
         chat_id: 'oc_restart123456',
-        text: 'must stay fenced',
+        markdown: 'must stay fenced',
         decision_message_id: 'om_restart123456',
-      }), /no longer owns/);
-      assert.equal(cliCalls, 0);
+      }, stale), /no longer owns/);
+      assert.equal(connectors.calls.length, 0);
     } finally {
       await runtime.stop();
-      staleService.close();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('serves Weixin from any runtime that reaches the agent tools, but not from Volc', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-weixin-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000, connectors: ['weixin'] }, store, quietLogger, {
+      codexFactory: (options) => backend('codex', options),
+    });
+    try {
+      await runtime.start();
+      assert.equal(runtime.runtime, 'codex');
+      await assert.rejects(() => runtime.transition({ kind: 'select-model', selector: 'ark' }), /Volc/);
+      assert.equal(runtime.runtime, 'codex');
+    } finally {
+      await runtime.stop();
       store.close();
       fs.rmSync(directory, { recursive: true, force: true });
     }

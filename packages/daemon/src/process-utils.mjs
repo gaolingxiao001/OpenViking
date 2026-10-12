@@ -11,9 +11,13 @@ export function sanitizeNonArkChildEnv(environment) {
   return safeEnv;
 }
 
+// Agent runtimes reach the Core's tools through the local action socket; the
+// authority token fences a retired runtime. lark-cli keeps the bot profile for
+// non-message Lark operations.
 export function sanitizeAgentChildEnv(environment, {
   profile = '',
   stripClaudeCode = false,
+  actions = null,
 } = {}) {
   const safeEnv = {
     ...sanitizeNonArkChildEnv(environment),
@@ -25,6 +29,10 @@ export function sanitizeAgentChildEnv(environment, {
       || (stripClaudeCode && key === 'CLAUDECODE')) delete safeEnv[key];
   }
   if (profile) safeEnv.LARKSUITE_CLI_PROFILE = profile;
+  if (actions) {
+    safeEnv.PERSONAL_AGENT_SOCKET = actions.socketPath;
+    safeEnv.PERSONAL_AGENT_AUTHORITY = actions.authority ?? '';
+  }
   return applyOpenVikingChildEnv(safeEnv, environment);
 }
 
@@ -48,8 +56,9 @@ export function terminateProcessTree(child, signal = 'SIGTERM') {
 }
 
 export class ProcessRegistry {
-  constructor(logger) {
+  constructor(logger, { detached = process.platform !== 'win32' } = {}) {
     this.logger = logger;
+    this.detached = detached;
     this.children = new Set();
   }
 
@@ -77,7 +86,7 @@ export class ProcessRegistry {
         cwd,
         env,
         shell: false,
-        detached: process.platform !== 'win32',
+        detached: this.detached,
         stdio: ['pipe', 'pipe', 'pipe'],
       }));
       let stdout = '';

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { chatEvent } from './event-fixture.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -17,7 +18,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
 
       const delivered = env.codexInput();
       assert.equal(delivered.length, 1);
-      assert.match(delivered[0].text, /\[chat=oc-e2e msg=om-e2e time=.* from=ou-e2e\] 请回复我/);
+      assert.match(delivered[0].text, /\[chat=oc-e2e source=lark msg=om-e2e time=.* from=ou-e2e\] 请回复我/);
 
       assert.equal(env.daemon.store.stats().inbound.DONE, 1);
       // No outbox rows are ever created in steer mode.
@@ -121,7 +122,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
     }
   });
 
-  it('answers a slash command directly through lark-cli without waking codex', async () => {
+  it('answers a slash command through the outbox without waking codex', async () => {
     const env = await startMockEnv();
     try {
       env.receive(textMessage({ messageId: 'om-cmd', text: '/h' }));
@@ -133,6 +134,12 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
       assert.match(reply, /thread-mock/);      // reports the current session id
       assert.equal(env.codexInput().length, 0); // codex never woke up
       assert.equal(env.daemon.store.stats().inbound.RULE_IGNORED, 1);
+      // The daemon's own reply goes through the same outbox as agent deliveries.
+      assert.match(reply, /--idempotency-key ld_[a-f0-9]{40}/);
+      await env.waitFor(() => env.daemon.store.stats().outbox.SENT === 1);
+      assert.deepEqual(env.daemon.store.stats().outbox, { SENT: 1 });
+      const journal = env.daemon.store.cognitionJournal().filter((item) => item.kind === 'outbound');
+      assert.deepEqual(journal.map((item) => [item.status, item.messageId]), [['COMMITTED', 'om-mock-out']]);
     } finally {
       await env.stop();
     }
@@ -174,7 +181,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
 describe('ingress barrier', () => {
   it('answers /help immediately while a model turn is active', async () => {
     const daemon = new LarkDaemon(
-      { lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
+      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
       createLogger('error', { test: 'command-idle-barrier' }),
     );
     const order = [];
@@ -199,14 +206,10 @@ describe('ingress barrier', () => {
     };
     daemon.store = {
       appendCognitionJournal(entry) { order.push(`journal:${entry.kind}`); },
-      settleCognitionJournal() { order.push('journal:settled'); },
       recordActivity() { return true; },
     };
-    daemon.lark = {
-      async replyMessage() { order.push('command-reply'); },
-    };
-    daemon.liveness = {
-      touch() { order.push('liveness:touch'); },
+    daemon.actions = {
+      async replyToEvent() { order.push('command-reply'); return { ok: true }; },
     };
     const harness = new Harness({
       config: {},
@@ -216,7 +219,7 @@ describe('ingress barrier', () => {
       runtime: daemon.agentRuntime,
       onSlashCommand: (command, event, inbound) => daemon.handleSlashCommand(command, event, inbound),
     });
-    const event = {
+    const event = chatEvent({
       chatId: 'oc_command123456',
       threadId: null,
       messageId: 'om_command123456',
@@ -224,28 +227,21 @@ describe('ingress barrier', () => {
       content: '/help',
       conversationKey: 'profile:tenant:oc_command123456:main',
       chatType: 'p2p',
-    };
+    });
 
     const command = harness.enqueueIngress(
       () => daemon.handleSlashCommand({ name: 'help', arg: '' }, event, { seq: 1 }),
     );
     const following = harness.enqueueIngress(() => daemon.agentRuntime.submit([{ text: 'next', seq: 2 }]));
     await Promise.all([command, following]);
-    assert.deepEqual(order, [
-      'journal:control',
-      'journal:outbound',
-      'command-reply',
-      'journal:settled',
-      'liveness:touch',
-      'following-inbound',
-    ]);
+    assert.deepEqual(order, ['journal:control', 'command-reply', 'following-inbound']);
   });
 });
 
 describe('/model immediate switch', () => {
   it('executes /model without waiting for the stuck active turn', async () => {
     const daemon = new LarkDaemon(
-      { lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-model.lock') },
+      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-model.lock') },
       createLogger('error', { test: 'model-no-wait' }),
     );
     const order = [];
@@ -275,12 +271,13 @@ describe('/model immediate switch', () => {
     };
     daemon.store = {
       appendCognitionJournal() {},
-      settleCognitionJournal() {},
       recordActivity() { return true; },
     };
     const replies = [];
-    daemon.lark = { async replyMessage(messageId, text) { replies.push({ messageId, text }); } };
-    const event = {
+    daemon.actions = {
+      async replyToEvent(event, text) { replies.push({ messageId: event.messageId, text }); return { ok: true }; },
+    };
+    const event = chatEvent({
       chatId: 'oc_model123456',
       threadId: null,
       messageId: 'om_model123456',
@@ -288,7 +285,7 @@ describe('/model immediate switch', () => {
       content: '/model gpt-x',
       conversationKey: 'profile:tenant:oc_model123456:main',
       chatType: 'p2p',
-    };
+    });
 
     await daemon.handleSlashCommand({ name: 'model', arg: 'gpt-x' }, event, { seq: 1 });
     assert.deepEqual(order, ['setModel:gpt-x']);

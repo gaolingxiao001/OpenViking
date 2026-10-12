@@ -271,7 +271,8 @@ describe('Volc managed-agent runtime', () => {
     // The Ark agent template's own system field only carries persona; the
     // injected policy must also explain the [chat=... msg=...] line format
     // and the reply/silence rules, or MA has no way to know them.
-    assert.match(messageText, /Lark conversation format/);
+    assert.match(messageText, /Chat input format/);
+    assert.match(messageText, /source=github kind=issue.opened/);
     assert.match(messageText, /When to reply/);
     assert.match(messageText, /hello$/);
     assert.equal(agent.turnInProgress, false);
@@ -518,7 +519,7 @@ describe('Volc managed-agent runtime', () => {
   });
 
 
-  it('quarantines an accepted saved turn whose Lark conversation scope cannot be recovered', async () => {
+  it('quarantines an accepted saved turn whose event scope cannot be recovered', async () => {
     const data = store();
     const bootstrap = new VolcAgent(config(), data, quietLogger, {
       fetch: async (url, options = {}) => {
@@ -564,7 +565,7 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(recovered.sessionPoisoned, false);
     assert.equal(recovered.cognitionEpoch, 2);
     assert.equal(failures.length, 1);
-    assert.match(failures[0].error, /lost its Lark conversation scope/);
+    assert.match(failures[0].error, /lost its event scope/);
     await recovered.stop();
   });
 
@@ -686,7 +687,7 @@ describe('Volc managed-agent runtime', () => {
       quietLogger,
       { fetch: async () => json({}) },
     );
-    assert.match(agent.transportPolicy, /Lark conversation format/);
+    assert.match(agent.transportPolicy, /Chat input format/);
     assert.doesNotMatch(agent.transportPolicy, /## Persona and voice/);
   });
 
@@ -724,7 +725,14 @@ describe('Volc managed-agent runtime', () => {
     assert.equal(agent.turnFenceSeen, false);
   });
 
-  it('fails closed for a mixed or targetless conversation batch', () => {
+  it('resolves non-chat event scope from durable rows without a conversation', () => {
+    const data = store();
+    data.inboundBySeq = (seq) => ({ seq, scopeKey: '["calendar","event","meeting-42"]', conversationKey: null });
+    const agent = new VolcAgent(config(), data, quietLogger, { fetch: async () => json({}) });
+    assert.equal(agent._conversationKey([{ seq: 1 }, { seq: 2 }]), '["calendar","event","meeting-42"]');
+  });
+
+  it('fails closed for a mixed or targetless event batch', () => {
     const data = store();
     const failures = [];
     const agent = new VolcAgent(config(), data, quietLogger, {
@@ -737,7 +745,7 @@ describe('Volc managed-agent runtime', () => {
       { text: 'chat b', seq: 3 },
     ]), true);
     assert.equal(agent.turnActive, false);
-    assert.match(failures[0].error, /exactly one Lark conversation scope/);
+    assert.match(failures[0].error, /exactly one event scope/);
     assert.equal(agent.deliver('meeting without inbound target', null, 'receipt-1'), true);
     assert.equal(agent.turnActive, false);
     assert.equal(failures.length, 2);

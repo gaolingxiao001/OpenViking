@@ -1,28 +1,9 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { afterEach, describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 import {
-  DecisionAuthorityServer,
   MeetingInputPort,
   MeetingMediaSupervisor,
 } from '../src/meeting/index.mjs';
-import { claimDecisionCapability } from '../src/meeting/decision-socket.mjs';
-
-const directories = [];
-
-afterEach(() => {
-  for (const directory of directories.splice(0)) {
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-function temporaryPath(name) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'meeting-audio-review-'));
-  directories.push(directory);
-  return path.join(directory, name);
-}
 
 describe('meeting audio review fixes', () => {
   it('ACKs invalid finals but leaves durable spool failures retryable', async () => {
@@ -88,33 +69,6 @@ describe('meeting audio review fixes', () => {
     assert.equal(enqueueCalls, 1);
     assert.equal(acks.length, 3, 'spool failure remains unacked for worker retry');
     await media.stopAll();
-  });
-
-  it('redacts decision_ capabilities from authority socket errors', async () => {
-    const socketPath = temporaryPath('authority.sock');
-    const leaked = 'decision_this_must_never_cross_the_socket';
-    const server = new DecisionAuthorityServer({
-      socketPath,
-      authority: {
-        claim() { throw new Error(`rejected ${leaked}`); },
-      },
-      getRuntimeToken: () => 'runtime-review-token',
-    });
-    await server.start();
-    try {
-      await assert.rejects(
-        () => claimDecisionCapability({
-          socketPath,
-          runtimeToken: 'runtime-review-token',
-          capability: leaked,
-          action: 'send_lark_message',
-          target: 'oc_target12345678',
-        }),
-        (error) => error.message.includes('[CAPABILITY]') && !error.message.includes(leaked),
-      );
-    } finally {
-      await server.close();
-    }
   });
 
   it('records correction diagnostics without ACKing, spooling, or steering', async () => {

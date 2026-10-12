@@ -125,7 +125,7 @@ function inputPreview(input) {
     .map(([key, value]) => `${key}=${value}`).join(' '));
 }
 
-// 飞书出站有两条路：Codex/Claude 走 MCP 工具，Pi/方舟走 bash 调 lark-cli
+// 兼容旧版 MCP 投递与方舟 Worker 的 lark-cli；Core 投递以 outbox 结算为准。
 const CLI_DELIVERY = /lark-cli\S*\s+im\s+(?:\+messages-(reply|send)|reactions\s+create|messages\s+delete)\b/;
 
 function shellArg(command, flag) {
@@ -136,6 +136,7 @@ function shellArg(command, flag) {
 }
 
 function deliveryOf(tool) {
+  if (tool.delivery) return tool.delivery;
   const match = String(tool.name || '').match(LARK_DELIVERY);
   const args = parseJson(tool.input) || {};
   if (match) {
@@ -266,6 +267,18 @@ function buildModel(rows) {
       open.steps.push({ type: 'input', key: `in:${row.id}`, row, text: meta.input || row.summary, steered: true });
       continue;
     }
+    if (kind === 'delivery.sent') {
+      open.steps.push({
+        ...newTool(row),
+        key: `delivery:${row.id}`,
+        delivery: {
+          mode: ({ 'message.send': '发送', 'message.reply': '回复', 'message.react': '表态',
+            'message.retract': '撤回', 'message.reaction.delete': '移除表态' })[meta.action] || '投递',
+          text: row.summary || '',
+        },
+      });
+      continue;
+    }
     if (kind === 'agent.tool_called' || kind === 'agent.tool_completed' || kind === 'agent.tool') {
       const toolId = meta.toolId;
       const existing = toolId != null ? tools.get(toolId) : null;
@@ -284,7 +297,7 @@ function buildModel(rows) {
       continue;
     }
     if (kind === 'agent.note') {
-      // system-prompt 要求模型以 DELIVERED / NO_DELIVERY 结束本轮，是内部标记不是内容
+      // 兼容旧版 runtime 的内部完成标记。
       if (INTERNAL_MARKERS.has(String(row.summary || '').trim())) continue;
       open.steps.push({ type: 'note', key: `n:${row.id}`, row, text: row.summary });
       continue;
@@ -307,7 +320,7 @@ function buildModel(rows) {
 function foldBlankTools(steps) {
   const out = [];
   for (const step of steps) {
-    const blank = step.type === 'tool' && !step.running && !step.input && !step.output && !step.error;
+    const blank = step.type === 'tool' && !deliveryOf(step) && !step.running && !step.input && !step.output && !step.error;
     const prev = out.at(-1);
     if (blank && prev?.type === 'blank' && prev.name === step.label) {
       prev.count += 1;
@@ -413,7 +426,7 @@ function renderStep(step) {
     return el;
   }
   if (step.type === 'note') {
-    head.append(tag('模型文本', 'tag-note'), h('span', 'aux', '未发到飞书'));
+    head.append(tag('模型文本', 'tag-note'), h('span', 'aux', '未发送给用户'));
     el.append(head, block(step.key, '', step.text));
     return el;
   }
@@ -490,7 +503,7 @@ function renderTurn(turn, index) {
   if (turn.endRow && status.cls === 'failed' && turn.endRow.summary) {
     output.append(h('div', 'turn-error txt', turn.endRow.summary));
   } else if (!deliveries.length) {
-    output.append(h('div', 'io-empty', !turn.endRow ? '进行中…' : '没有发出飞书消息（静默或仅模型文本）'));
+    output.append(h('div', 'io-empty', !turn.endRow ? '进行中…' : '没有发出消息（静默或仅模型文本）'));
   }
   el.append(output);
   return el;

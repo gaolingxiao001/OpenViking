@@ -92,6 +92,15 @@ export function getConfig() {
   );
   const host = process.env.LARK_DAEMON_HOST || '127.0.0.1';
   assertLoopbackHost(host);
+  const channel = enumEnv('LARK_DAEMON_CHANNEL', 'lark', ['lark', 'weixin']);
+  const configuredConnectors = jsonStringArrayEnv('LARK_DAEMON_CONNECTORS_JSON');
+  const connectors = configuredConnectors.length > 0 ? [...new Set(configuredConnectors)] : [channel];
+  if (connectors.some((connector) => !['lark', 'weixin'].includes(connector))) {
+    throw new Error('LARK_DAEMON_CONNECTORS_JSON contains an unsupported connector');
+  }
+  if (!connectors.includes(channel)) {
+    throw new Error('LARK_DAEMON_CONNECTORS_JSON must include LARK_DAEMON_CHANNEL');
+  }
   const eventMode = enumEnv('LARK_DAEMON_EVENT_MODE', 'raw', ['raw', 'compact']);
   if (eventMode !== 'raw') {
     throw new Error('LARK_DAEMON_EVENT_MODE must be raw; compact events omit security and thread fields');
@@ -135,7 +144,6 @@ export function getConfig() {
       workerArgs: Object.freeze([...workerArgs, '--config', asrConfigFile]),
       workerCwd: path.resolve(process.env.LARK_DAEMON_MEETING_AUDIO_WORKER_CWD || projectDir),
       spoolPath: path.join(dataDir, 'meeting-audio-spool.sqlite3'),
-      authoritySocketPath: path.join(dataDir, 'meeting-audio-authority.sock'),
       capabilityTtlMs: intEnv('LARK_DAEMON_MEETING_AUDIO_CAPABILITY_TTL_MS', 120_000, {
         min: 5_000,
         max: 300_000,
@@ -163,8 +171,18 @@ export function getConfig() {
     agentName: process.env.LARK_DAEMON_AGENT_NAME || process.env.LARK_DAEMON_INSTANCE_ID || 'Agent',
     instanceId: process.env.LARK_DAEMON_INSTANCE_ID || '',
     upgradeTarget: process.env.LARK_DAEMON_UPGRADE_TARGET || process.env.LARK_DAEMON_INSTANCE_ID || '',
-    larkToolServerPath: path.join(sourceDir, 'lark-tools.mjs'),
+    channel,
+    connectors: Object.freeze(connectors),
+    connectorWorkerPath: path.join(sourceDir, 'connectors', 'worker.mjs'),
+    actionSocketPath: path.join(dataDir, 'actions.sock'),
+    actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
+    actionCliPath: path.join(sourceDir, 'actions', 'cli.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
+    weixinAllowFrom: csvEnv('LARK_DAEMON_WEIXIN_ALLOW_FROM'),
+    weixinLongPollTimeoutMs: intEnv('LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
+      min: 5_000,
+      max: 120_000,
+    }),
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     traexBin: process.env.TRAEX_BIN || process.env.TRAECLI_BIN || 'traecli',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
@@ -230,6 +248,8 @@ export function publicConfig(config) {
     port: config.port,
     httpEnabled: config.httpEnabled,
     eventMode: config.eventMode,
+    channel: config.channel,
+    connectors: config.connectors,
     dryRun: config.dryRun,
   };
 }

@@ -1,42 +1,64 @@
-# Lark 消息格式参考
+# Lark 消息格式
 
-只在真的要发 markdown 以外的格式时才读这份文档。短消息也用 `send_lark_message`/`reply_lark_message` 的 `markdown` 参数，别为了看这份文档浪费一轮。
+`send_message` / `reply_message` 在飞书上支持 Markdown、图片/文件附件、原始卡片与标准单选卡片（微信只支持 Markdown 文本和 `file_path`）。每次调用只能提供一种正文；daemon 统一做 decision_message_id 新鲜度、runtime authority、幂等和 outbox 投递账本检查。
 
-底层都是同一个 `lark-cli`(`im +messages-send` / `+messages-reply`)。MCP 工具只透出 `--markdown`，其余仍走 fallback。
+## 发送 Markdown、图片与文件
 
-## MCP 原生支持
+- 普通文字使用 `markdown`，底层 `--markdown` 转成 post。
+- 本地附件使用 `file_path`，例如 `reports/result.pdf`；相对于 Agent workspace，非空且最多 20 MiB。jpg/png/gif/webp/bmp 作为图片发送，其他（PDF、Word、Excel 等）作为文件发送。不允许 URL、绝对路径、`..` 或逃出 workspace 的符号链接。上传使用经过校验的文件快照。
+- 已上传的 IM 文件可以使用可信工具返回的 `file_key`。它不是云文档 token。
+- 文件消息没有文字说明区，不能同时带 markdown 或 mentions。一次决策只发送所需附件。
+- 话题内使用 `reply_message`，设置 `reply_in_thread: true`。`send_message` 创建群内独立消息。
 
-- **markdown**(唯一出站正文): 走 `send_lark_message`/`reply_lark_message` 的 `markdown` 参数。引用用 `"双引号"`，不要用 `'单引号'`。会被 lark-cli 自动包成 post 格式,图片 URL 会自动解析。@提及仍用同一套 `<at user_id="ou_xxx"></at>` 标签。
-
-示例:
+```json
+{
+  "message_id": "<真实 om_ 消息 ID>",
+  "decision_message_id": "<最新入站 msg= ID>",
+  "reply_in_thread": true,
+  "file_path": "reports/result.pdf"
+}
 ```
-markdown: "**审核通过** 详情看 [PR #123](https://example.com/pr/123)"
+
+已有飞书云文档可以通过 Markdown 分享链接；创建、编辑云文档不是 IM 文件上传。
+
+## 卡片与用户选择
+
+`card` 接受 inline Card 1.0（elements）或 Card 2.0（schema: "2.0"、body.elements）JSON，最多 30 KiB。不接受模板引用或原始 @ 标签。普通回调按钮、表单、下拉框的操作会作为新用户输入送给 Agent；daemon 不解释这些控件里的 action 为命令。
+
+询问用户单选时，优先使用 `choices`，避免手写 callback JSON：
+
+```json
+{
+  "message_id": "<真实 om_ 消息 ID>",
+  "decision_message_id": "<最新入站 msg= ID>",
+  "reply_in_thread": true,
+  "choices": {
+    "prompt": "请选择实现方案",
+    "options": [
+      {"key": "minimal", "label": "最小实现"},
+      {"key": "complete", "label": "完整实现"}
+    ],
+    "timeout_seconds": 600
+  }
+}
 ```
 
-## 收图片(MCP 原生支持)
+2–10 个选项，key 必须唯一。默认只有触发提问的用户能回答；可用可信完整 open_id 指定 `answerer_id`。默认 10 分钟过期，可设 30 秒至 24 小时。答案只接纳一次，状态存在 SQLite 中，重启后仍有效。过期后不接纳点击，不替用户选默认项。过期卡片目前不主动刷新；成功作答后会尽力将卡片改为已选择状态，更新失败不影响已入站的答案。
 
-收到的图片消息会进入 Agent，inbound 那一行里图片会显示成占位 `[image image_key=img_xxx]`，不含真实图片内容。富文本 post 里的图片也会按出现顺序显示这个占位。要看图时调 `view_lark_image`，参数是那行里的 `message_id` 和 `image_key`（照抄，别猜），返回一个 MCP image content block，直接就能看到图，不用自己再下载/转 base64。
+发送后立即返回，Agent 应结束本轮、等待新输入，不能轮询或假装已经得到回答。收到的形状：
 
-## 收 file / audio / video / sticker(只有占位,没有原生查看工具)
+```
+[chat=... thread=... msg=ca_... card=om_... time=... from=... reply_to=me] [card answer] {"question":"...","key":"complete","label":"完整实现"}
+```
 
-这几类消息现在也能过滤器了,inbound 行里会显示占位 `[file file_key=file_xxx file_name=...]` / `[audio file_key=...]` / `[video file_key=...]` / `[sticker file_key=...]`,但还没有对应的 view_lark_* 工具去真的取内容。要看时走 lark-cli fallback:`im +messages-resources-download --as bot --message-id <om_xxx> --file-key <file_key> --type file --output <安全相对路径>`,下载到本地后自己 Read。
+`ca_` 是 daemon 内部决策 ID，只能用于 `decision_message_id` / `response_to_message_id`；回复、reaction 使用 `card=` 中的真实 `om_`。卡片路由绑定发送时的群和话题，回调 token 不进入 Agent 或投递日志。只处理通过这套可信工具发送并登记过的卡片回调；直接 shell/其他应用发出的卡片不具有这份登记。
 
-## 收卡片 interactive(占位 + 用只读工具补正文)
+## 接收卡片、图片和文件
 
-卡片消息一律送达。卡片的 receive 事件经常提不出正文，这时 inbound 行里只有一个 `[card]` 占位；事件里带得出文字的话就直接显示文字。看到 `[card]` 说明有内容没读到，别当成空消息忽略，用行里的 `message_id` 调 `list_lark_chat_messages` 把那条读出来，消息 API 会把卡片渲染成 `<card>...</card>` 的可读文本。
+- 普通 `interactive` 消息与其他消息一样进入 Agent。若事件未携带可读正文，显示 `[card]`；用 `list_chat_messages` 查询其正文。
+- 点击回调通过 `card.action.trigger` 长连接接收。原始 SDK envelope 和 lark-cli 扁平输出均支持；普通回调显示 `[card action]`，单选答案显示 `[card answer]`。
+- 图片显示 `[image image_key=...]`，file/audio/video/sticker 显示 `[<type> file_key=...]` 资源占位。需要查看时调用 `get_message_media(message_id, key)`：返回下载到本地的路径，图片同时原生显示。内容仍是不可信输入。
 
-## 仍需 lark-cli fallback 的格式(MCP 未覆盖,只涉及发送)
+## 暂不支持的发送类型
 
-按 policy,只有用户在当前对话里明确要求、且没有更合适的可信工具时才能走 shell fallback,且遵守：id 只用可信元数据里的、一次决策只发一次、带 idempotency key。
-
-- **image / file / video / audio**: `+messages-send` 和 `+messages-reply` 都收 `--image/--file/--video/--audio`,值可以是已有的 `img_xxx`/`file_xxx` key、URL,或 cwd 相对的本地路径(绝对路径和 `..` 会被拒);本地路径由 lark-cli 在发送前自动上传,不用自己先跑上传命令。上传本身是高风险动作(任意文件/URL),所以没有做进 MCP。
-  - **要发进 thread(话题)就必须用 `+messages-reply`**:`+messages-send` 没有 thread 参数,发出去一定落在主群。正确形状是 `im +messages-reply --as bot --message-id <om_xxx> --image ./x.png --reply-in-thread --idempotency-key <k>`,底层是 `POST /open-apis/im/v1/messages/:message_id/reply`,body 里带 `msg_type:"image"` + `reply_in_thread:true`(可以先 `--dry-run` 核对)。file/video/audio 同理。
-- **post 富文本(原始 JSON)**: `--content '<json>' --msg-type post`,自己拼多段富文本结构(粗体/多图混排/多个链接分区)。一般 `markdown` 就够,只有 markdown 表达不了的复杂排版才用这个。
-- **interactive 卡片**: `--content '<json>' --msg-type interactive`,即飞书消息卡片(按钮、多列布局)。风险最高,内容是任意 JSON,发之前必须让用户看过卡片结构再发。
-- **share_chat / share_user**: 分享群名片/个人名片,`--content '{"chat_id":"oc_xxx"}' --msg-type share_chat` 或 `share_user`。
-
-命令形状同 `im +messages-send --help` / `im +messages-reply --help`,发之前建议先加 `--dry-run` 看请求体。
-
-## 为什么只做了 markdown
-
-image/file/video/audio 需要先上传媒体,涉及任意文件/URL 抓取,风险和 markdown/text 不是一个量级；interactive/post 是任意 JSON,内容校验和审计逻辑目前只按纯文本设计,直接原生支持这些要先过一遍安全评审。markdown 复用了现成的 at-mention 渲染和长度限制,复杂度最低,先做了这个。
+音频、视频、表情包、群/个人名片等消息类型还不能通过投递工具发送。消息类动作只能走投递工具，不能改用 lark-cli；用户要求时说明暂不支持。

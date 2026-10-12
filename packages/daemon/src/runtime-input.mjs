@@ -5,6 +5,43 @@ import { lookupMemberName } from './roster.mjs';
 
 // The submit-item contract shared by every runtime backend: a text line with an
 // optional inbound seq and delivery receipt id.
+export function eventDeliveryItem(event, seq = event.seq, overrides = {}) {
+  return {
+    seq, text: formatInboundLine(event),
+    conversationKey: event.conversationKey,
+    scopeKey: event.scopeKey,
+    scope: { kind: event.source, key: event.scopeKey, conversationKey: event.conversationKey },
+    chatType: event.kind.startsWith('message.') ? event.chatType : null,
+    ...(event.replyRoute ? { target: {
+      connector: event.connectorInstance, ...event.replyRoute,
+      chatId: event.chatId, threadId: event.threadId, messageId: event.messageId,
+    } } : {}),
+    ...overrides,
+  };
+}
+
+export function metadataTag(value) {
+  return String(value).replace(/[\s\[\]]/g, (character) => encodeURIComponent(character));
+}
+
+function eventContent(event) {
+  return [event.title, event.content,
+    ...(event.attachments ?? []).map((item) => `[attachment type=${metadataTag(item.type)} id=${metadataTag(item.id)}]`),
+  ].filter(Boolean).join('\n');
+}
+
+export function formatEventLine(event) {
+  const fields = [
+    `source=${metadataTag(event.source)}`,
+    ...(event.connectorInstance !== event.source ? [`instance=${metadataTag(event.connectorInstance)}`] : []),
+    `kind=${metadataTag(event.kind)}`, `event=${metadataTag(event.eventId)}`,
+    `subject=${metadataTag(event.subject.type)}:${metadataTag(event.subject.id)}`,
+    `time=${isoMinute(event.createTimeMs)}`,
+    ...(event.actor ? [`actor=${metadataTag(event.actor.type)}:${metadataTag(event.actor.id)}`] : []),
+  ];
+  return `[${fields.join(' ')}] ${oneLine(eventContent(event))}`;
+}
+
 export function deliveryItem({ text, seq = null, receiptId }) {
   return receiptId === null || receiptId === undefined
     ? { text, seq }
@@ -31,7 +68,8 @@ export function isoMinute(ms) {
   return `${new Date(ms).toISOString().slice(0, 16)}Z`;
 }
 
-function fromLabel(chatId, senderId, resolveName = null) {
+function fromLabel(chatId, senderId, resolveName = null, source = 'lark') {
+  if (source !== 'lark') return shortenId(senderId);
   if (resolveName) {
     try {
       const resolved = resolveName(chatId, senderId);
@@ -53,7 +91,7 @@ export function oneLine(text) {
 }
 
 function renderInboundContent(message) {
-  let content = String(message.content ?? '');
+  let content = eventContent(message);
   for (const mention of message.mentions ?? []) {
     if (typeof mention?.key !== 'string' || !mention.key) continue;
     const label = oneLine(mention.name).trim() || shortenId(mention.id);
@@ -63,6 +101,9 @@ function renderInboundContent(message) {
 }
 
 export function formatInboundLine(message, resolveName = null, authenticated = {}) {
+  if (message.kind && (!message.kind.startsWith('message.') || !message.chatId || !message.messageId)) {
+    return formatEventLine(message);
+  }
   const idleForMs = Number(authenticated?.idleForMs);
   const idleTag = Number.isFinite(idleForMs) && idleForMs >= 0
     ? ` idle=${Math.max(1, Math.floor(idleForMs / 1_000))}s`
@@ -72,12 +113,15 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     ? ` reply_to=${replyTo.kind === 'me'
       ? 'me'
       : replyTo.kind === 'user'
-        ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName)
+        ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName, message.source)
         : shortenId(replyTo.id)}`
     : '';
-  return `[chat=${chatTag(message.chatId, message.threadId)} msg=${message.messageId}`
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName)}`
-    + `${replyTag}${idleTag}] ${renderInboundContent(message)}`;
+  const line = `[chat=${chatTag(metadataTag(message.chatId), message.threadId)} source=${message.source || 'lark'}`
+    + (message.connectorInstance && message.connectorInstance !== message.source ? ` instance=${metadataTag(message.connectorInstance)}` : '')
+    + ` msg=${metadataTag(message.messageId)}`
+    + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source)}${replyTag}${idleTag}] ${renderInboundContent(message)}`;
+  return line;
 }
 
 // A quote-reply's target, resolved from local history: 'me' when the sender
@@ -87,11 +131,13 @@ export function resolveReplyTarget(store, message) {
   const parentId = message.parentId;
   if (!parentId || parentId === message.messageId) return null;
   if (message.threadRootId && parentId === message.threadRootId) return null;
-  const author = store.resolveMessageAuthor?.(parentId);
+  const author = store.resolveMessageAuthor?.(parentId, message.connectorInstance ?? message.source ?? 'lark');
   return author ?? { kind: 'unknown', id: parentId };
 }
 
 export function formatHistoryLine(item, resolveName = null) {
-  const from = item.direction === 'outbound' ? 'me' : fromLabel(item.chatId, item.actor, resolveName);
-  return `[chat=${chatTag(item.chatId, item.threadId)} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
+  if (item.envelope) return formatInboundLine(item, resolveName);
+  if (item.kind && !item.chatId) return formatEventLine(item);
+  const from = item.direction === 'outbound' ? 'me' : fromLabel(item.chatId, item.actor, resolveName, item.source);
+  return `[chat=${chatTag(item.chatId, item.threadId)} source=${item.source || 'lark'} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
 }

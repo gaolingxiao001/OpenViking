@@ -5,17 +5,19 @@ import { ProcessRegistry } from './process-utils.mjs';
 import { AgentRuntime } from './agent-runtime.mjs';
 import { Harness } from './harness.mjs';
 import { executeCommand } from './commands.mjs';
-import { LarkClient } from './lark.mjs';
+import { ConnectorManager } from './connectors/process.mjs';
+import { ActionService } from './actions/service.mjs';
+import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
-import { FailurePolicy, journaledReply } from './notices.mjs';
+import { FailurePolicy } from './notices.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
+import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import {
-  isMeetingEvent,
   MeetingPlugin,
 } from './meeting/index.mjs';
 
@@ -23,21 +25,37 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+class DisabledMeetingPlugin {
+  async prepare() { return this; }
+  attachHarness() { return this; }
+  async start() {}
+  async stop() {}
+  async handleEvent() { return false; }
+  onTurnFailed() {}
+  onTurnSucceeded() {}
+  onTurnAbandoned() {}
+  onAuthorityChanged() {}
+  prune() {}
+}
+
 // Composition root and process lifecycle. The moving parts live in their own
 // modules: the Harness owns the inbound pipe, FailurePolicy owns turn-failure
 // behavior, ChatNameTracker owns background naming, http-api owns the local
-// observation surface. LarkDaemon wires them together, starts them in order,
+// observation surface. PersonalAgentDaemon wires them together, starts them in order,
 // and tears them down in reverse.
-export class LarkDaemon {
+export class PersonalAgentDaemon {
   constructor(config, logger, { ovClient = null } = {}) {
-    this.config = config;
+    this.connectorIds = config.connectors ?? [config.channel ?? 'lark'];
+    this.config = { ...config, connectors: this.connectorIds };
     this.logger = logger;
     this.lock = new InstanceLock(config.lockPath);
     this.registry = new ProcessRegistry(logger);
     this.store = null;
     this.agentRuntime = null;
     this.harness = null;
-    this.lark = null;
+    this.connectors = null;
+    this.actions = null;
+    this.actionApi = null;
     this.meeting = null;
     this.liveness = null;
     this.roster = null;
@@ -85,50 +103,76 @@ export class LarkDaemon {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
       this.ovContext = new OVSessionContext(this.store,
         this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath), this.logger,
-        { canCommit: () => !this.lark?.subscriptionRunning
-          && !this.store.db.prepare("SELECT 1 FROM inbound WHERE status = 'QUEUED' LIMIT 1").get() });
+        { canCommit: () => !this.connectors?.subscriptionRunning
+          && !this.store.db.prepare("SELECT 1 FROM connector_events WHERE status = 'QUEUED' LIMIT 1").get() });
       this.recordSystemActivity('system.starting', {
-        summary: '本机飞书 Agent 正在启动',
+        summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
         status: 'STARTING',
         metadata: { eventMode: this.config.eventMode },
       }, 'starting');
       this.runMaintenance();
 
-      this.lark = new LarkClient(this.config, this.registry, this.logger.child({ component: 'lark' }));
-      this.meeting = new MeetingPlugin({
-        config: this.config,
-        store: this.store,
-        lark: this.lark,
-        registry: this.registry,
-        logger: this.logger.child({ component: 'meeting' }),
-      });
+      this.connectors = new ConnectorManager(
+        this.config,
+        this.registry,
+        this.logger.child({ component: 'connectors' }),
+      );
+      this.meeting = this.connectorIds.includes('lark')
+        ? new MeetingPlugin({
+          config: this.config,
+          store: this.store,
+          lark: this.connectors,
+          registry: this.registry,
+          logger: this.logger.child({ component: 'meeting' }),
+        })
+        : new DisabledMeetingPlugin();
       await this.meeting.prepare();
       // Best-effort member roster so inbound lines carry display names instead
       // of id stubs. The formatters read it through the process-wide resolver.
       this.roster = new ChatRoster({
-        fetchMembers: (chatId) => this.lark.listChatMembers(chatId),
+        fetchMembers: (chatId) => this.connectors.listChatMembers(chatId),
         logger: this.logger.child({ component: 'roster' }),
       });
       registerNameResolver((chatId, userId) => this.roster.nameForId(chatId, userId));
-      const larkInfo = await this.lark.preflight();
-      this.config.profile = larkInfo.profile;
-      this.logger.info('cli_preflight_ok', { larkVersion: larkInfo.version });
+      const transportInfo = await this.connectors.preflight();
+      this.config.profile = transportInfo.profile;
+      this.logger.info('connector_preflight_ok', {
+        connectors: this.connectorIds,
+        version: transportInfo.version,
+      });
       this.recordSystemActivity('system.preflight_ok', {
-        summary: 'lark-cli 可用',
+        summary: `${this.connectorIds.join('、')} Connector 可用`,
         status: 'OK',
-        metadata: { larkVersion: larkInfo.version },
+        metadata: { connectors: this.connectorIds, version: transportInfo.version },
       }, 'preflight-ok');
 
       this.chatNames = new ChatNameTracker({
         store: this.store,
-        lark: this.lark,
+        lark: this.connectors,
         logger: this.logger,
         isActive: () => this.ready && !this.shuttingDown,
       });
 
       this.liveness = new IdleLivenessExtension({
         thresholdMs: this.config.idleReactionAfterMs ?? 600_000,
-        enabled: !this.config.dryRun,
+        enabled: !this.config.dryRun && this.connectorIds.includes('lark'),
+      });
+      // Every outbound action, from any runtime or the daemon itself, goes
+      // through this one service and its outbox. Runtimes reach it over the
+      // local socket via the MCP adapter or the CLI.
+      this.actions = new ActionService({
+        config: this.config,
+        store: this.store,
+        connectors: this.connectors,
+        roster: this.roster,
+        liveness: this.liveness,
+        meetingEnabled: this.connectorIds.includes('lark'),
+        logger: this.logger.child({ component: 'actions' }),
+      });
+      this.actionApi = await startActionApi({
+        socketPath: this.config.actionSocketPath,
+        service: this.actions,
+        logger: this.logger.child({ component: 'action-api' }),
       });
 
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
@@ -146,7 +190,6 @@ export class LarkDaemon {
         onTurnAbandoned: (info) => {
           this.meeting?.onTurnAbandoned(info);
         },
-        onDeliverySucceeded: (info) => { void this.liveness?.onDeliverySucceeded(info); },
         onAvailable: () => { this.harness?.onAvailable(); },
         onAuthorityChanged: ({ authorityToken }) => {
           this.meeting?.onAuthorityChanged(authorityToken);
@@ -155,9 +198,8 @@ export class LarkDaemon {
       this.failurePolicy = new FailurePolicy({
         config: this.config,
         store: this.store,
-        lark: this.lark,
+        actions: this.actions,
         logger: this.logger,
-        liveness: this.liveness,
         runtime: this.agentRuntime,
         recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
         isStopping: () => this.shuttingDown,
@@ -170,10 +212,16 @@ export class LarkDaemon {
         runtime: this.agentRuntime,
         roster: this.roster,
         liveness: this.liveness,
-        meeting: this.meeting,
-        isMeetingEvent,
+        prepareEvent: (event) => event.source === 'lark' && event.kind === 'message.action'
+          ? resolveCardAction(this.store.db, event, this.config.profile) : event,
+        eventHandler: (event) => event.source === 'lark' && event.kind.startsWith('meeting.') && event.data.meeting
+          ? (accepted) => this.meeting.handleEvent(accepted.data.meeting) : null,
         onSlashCommand: (command, event, inbound) => this.handleSlashCommand(command, event, inbound),
         onInboundChat: (chatId) => this.chatNames.schedule(chatId),
+        afterEvent: (event) => {
+          const card = settledChoiceCard(event);
+          if (card) return this.connectors.updateCard(event.parentId, card);
+        },
         isStopping: () => this.shuttingDown,
       });
       this.meeting.attachHarness({
@@ -199,17 +247,19 @@ export class LarkDaemon {
           serviceSnapshot: (options) => this.serviceSnapshot(options),
         });
       }
-      this.lark.startSubscription(
-        (line) => this.harness.handleEventLine(line),
-        (exit) => this.handleSubscriberExit(exit),
+      await this.connectors.startSubscription(
+        (event) => this.harness.handleConnectorEvent(event),
+        (exit) => this.handleConnectorExit(exit),
       );
 
       await delay(500);
-      if (!this.lark.subscriptionRunning) throw new Error('lark-cli subscriber exited during startup');
+      if (!this.connectors.subscriptionRunning) {
+        throw new Error('a connector subscriber exited during startup');
+      }
 
       this.store.closeRunningSubscriberActivities();
       this.recordSystemActivity('system.subscriber_started', {
-        summary: '正在接收飞书消息事件',
+        summary: `正在接收 ${this.connectorIds.join('、')} 事件`,
         status: 'RUNNING',
       }, 'subscriber-started');
 
@@ -245,7 +295,7 @@ export class LarkDaemon {
   }
 
   // Slash commands never touch the model: execute deterministically against the
-  // runtime's connection state, then reply straight back through lark-cli.
+  // runtime's connection state, then reply on the event's own route.
   // Local commands are a priority control plane: read-only commands such as
   // /help and /status answer alongside an active turn; session-mutating
   // commands interrupt that turn inside executeCommand before rotating.
@@ -274,10 +324,8 @@ export class LarkDaemon {
       inboundSeq: inbound?.seq,
       metadata: { chatType: event.chatType },
     });
-    const sent = await journaledReply(
-      this, event, outcome.text, 'daemon_command_reply', `command-reply:${event.messageId}`,
-    );
-    if (!sent.ok && sent.stage === 'send') {
+    const sent = await this.actions.replyToEvent({ ...event, seq: inbound?.seq }, outcome.text, 'command-reply');
+    if (!sent.ok) {
       this.recordSystemActivity('command.reply_failed', {
         summary: safeChatLookupError(sent.error),
         status: 'FAILED',
@@ -305,11 +353,12 @@ export class LarkDaemon {
   }
 
   serviceSnapshot({ includeState = true } = {}) {
-    const healthy = !this.shuttingDown && Boolean(this.lark?.subscriptionRunning);
+    const healthy = !this.shuttingDown && Boolean(this.connectors?.subscriptionRunning);
     const ready = healthy && this.ready;
     const body = {
       status: ready ? 'ready' : (healthy ? 'starting' : 'unhealthy'),
-      subscriber: this.lark?.subscriptionRunning ? 'running' : 'stopped',
+      subscriber: this.connectors?.subscriptionRunning ? 'running' : 'stopped',
+      connectors: this.connectors?.snapshot() ?? {},
       uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
       activeTurns: this.agentRuntime?.snapshot().work.turnInProgress ? 1 : 0,
       scheduledConversations: 0,
@@ -318,8 +367,9 @@ export class LarkDaemon {
     return { healthy, ready, body };
   }
 
-  handleSubscriberExit(exit) {
-    this.logger.error('lark_subscriber_exited', {
+  handleConnectorExit(exit) {
+    this.logger.error('connector_subscriber_exited', {
+      connector: exit.connector,
       code: exit.code,
       signal: exit.signal,
       error: exit.stderr?.trim().slice(-2000),
@@ -327,7 +377,7 @@ export class LarkDaemon {
     this.recordSystemActivity('system.subscriber_exit', {
       summary: safeError(exit.stderr?.trim().slice(-2000) || `exit ${exit.code ?? exit.signal ?? 'unknown'}`),
       status: 'FAILED',
-      metadata: { code: exit.code, signal: exit.signal },
+      metadata: { connector: exit.connector, code: exit.code, signal: exit.signal },
     }, 'subscriber-exit');
     void this.shutdown('subscriber_exit', 1).then(() => process.exit(1));
   }
@@ -348,7 +398,9 @@ export class LarkDaemon {
       this.ovContext?.stop();
       this.maintenanceTimer = null;
       registerNameResolver(null);
-      try { await this.lark?.stop(); } catch (error) { this.logger.warn('subscriber_stop_failed', { error }); }
+      try { await this.connectors?.pauseSubscriptions(); } catch (error) {
+        this.logger.warn('connector_pause_failed', { error });
+      }
       // Fence model-owned meeting authority before stopping the model process:
       // first stop and drain local issuance, then revoke every outstanding cap
       // and close the only claim path.
@@ -362,7 +414,7 @@ export class LarkDaemon {
       // are killed. A mid-turn kill poisons the native transcript: resuming it
       // later patches the interrupted tool call, which mutates the message
       // history and forces a full prompt-cache rewrite at write price. Inbound
-      // is already stopped above, so no new work can start during the drain.
+      // is already paused above, so no new work can start during the drain.
       // Budget stays inside main.mjs's shutdownTimeoutMs + 2s force-exit timer.
       const drainMs = Math.max(0, Math.min((this.config.shutdownTimeoutMs ?? 20_000) - 8_000, 12_000));
       if (drainMs > 0 && this.agentRuntime?.turnInProgress) {
@@ -370,6 +422,12 @@ export class LarkDaemon {
         await Promise.race([this.agentRuntime.whenIdle(), delay(drainMs)]);
       }
       try { await this.agentRuntime?.stop(); } catch (error) { this.logger.warn('agent_runtime_stop_failed', { error }); }
+      try { await stopActionApi(this.actionApi); } catch (error) {
+        this.logger.warn('action_api_stop_failed', { error });
+      }
+      this.actionApi = null;
+      try { await this.actions?.close(); } catch (error) { this.logger.warn('actions_close_failed', { error }); }
+      try { await this.connectors?.stop(); } catch (error) { this.logger.warn('connector_stop_failed', { error }); }
       try { await this.registry.stopAll(Math.min(3_000, this.config.shutdownTimeoutMs)); } catch {}
       if (this.httpServer) {
         await Promise.race([
@@ -390,3 +448,6 @@ export class LarkDaemon {
     return this.shutdownPromise;
   }
 }
+
+// Compatibility export for callers that still import the historical class name.
+export const LarkDaemon = PersonalAgentDaemon;

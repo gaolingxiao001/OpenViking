@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { LarkDaemon } from '../src/daemon.mjs';
 import { startHttpApi } from '../src/http-api.mjs';
 import { Store } from '../src/store.mjs';
+import { chatEvent } from './event-fixture.mjs';
 
 const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const quietLogger = {
@@ -20,7 +21,7 @@ const quietLogger = {
 };
 
 function event(id, content = `message ${id}`, overrides = {}) {
-  return {
+  return chatEvent({
     type: 'im.message.receive_v1',
     eventId: `evt-${id}`,
     messageId: `om-${id}`,
@@ -39,7 +40,7 @@ function event(id, content = `message ${id}`, overrides = {}) {
     createTimeMs: 1_700_000_000_000,
     raw: {},
     ...overrides,
-  };
+  });
 }
 
 function request(port, pathname, { method = 'GET', headers = {} } = {}) {
@@ -210,7 +211,6 @@ describe('activity store', { concurrency: false }, () => {
       conversationKey: 'profile:tenant:oc-tool-chat-private:main',
     });
     const result = store.ingest(incoming, null, 1_700_000_180_000);
-    assert.equal(store.inboundSeqForMessageId(incoming.messageId), result.inbound.seq);
     store.recordActivity({
       eventKey: 'codex:tool:completed',
       kind: 'agent.tool',
@@ -441,12 +441,13 @@ describe('daemon activity API', { concurrency: false }, () => {
   beforeEach(async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-activity-http-'));
     daemon = new LarkDaemon({
+      dataDir: directory,
       projectDir,
       host: '127.0.0.1',
       port: 0,
     }, quietLogger);
     daemon.store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
-    daemon.lark = { subscriptionRunning: true };
+    daemon.connectors = { subscriptionRunning: true, snapshot: () => ({}) };
     daemon.ready = true;
     daemon.store.recordActivity({
       eventKey: 'http:test',

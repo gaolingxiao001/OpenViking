@@ -19,7 +19,6 @@ export class AgentRuntime {
     this.logger = logger;
     this.onTurnFailed = options.onTurnFailed ?? null;
     this.onTurnSucceeded = options.onTurnSucceeded ?? null;
-    this.onDeliverySucceeded = options.onDeliverySucceeded ?? null;
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.onAuthorityChanged = options.onAuthorityChanged ?? null;
@@ -66,7 +65,6 @@ export class AgentRuntime {
     return {
       onTurnFailed: this.onTurnFailed,
       onTurnSucceeded: this.onTurnSucceeded,
-      onDeliverySucceeded: this.onDeliverySucceeded,
       onTurnAbandoned: this.onTurnAbandoned,
       onAvailable: this.onAvailable,
       authorityToken: cognition.authorityToken,
@@ -103,6 +101,7 @@ export class AgentRuntime {
     const freshTarget = resolveRuntimeModelTarget(this.config.initialModel || '');
     const freshCognition = this.store.hasCognitionRuntime?.() === false;
     this.runtime = freshCognition ? freshTarget.runtime : persistedRuntime;
+    this._assertConnectorSupport(this.runtime);
     // A daemon generation must never inherit the previous process's authority.
     // If that process crashed with a detached MCP sidecar still alive, rotating
     // the token here fences it before the replacement backend starts.
@@ -113,6 +112,14 @@ export class AgentRuntime {
   }
 
   whenIdle() { return this.backend?.whenIdle() ?? Promise.resolve(); }
+
+  // Volc's tool executor is the remote Environment Worker, which only has the
+  // Lark CLI path; it cannot reach the daemon's agent tools.
+  _assertConnectorSupport(runtime) {
+    if (runtime === 'volc' && (this.config.connectors ?? [this.config.channel]).includes('weixin')) {
+      throw new Error('Weixin is not supported on the Volc runtime');
+    }
+  }
 
   prepareInputContext() { return this.backend?.prepareInputContext?.(); }
 
@@ -125,7 +132,8 @@ export class AgentRuntime {
     }
     const definition = getRuntimeDefinition(this.runtime);
     if (definition?.capabilities.scopePolicy === 'single-conversation') {
-      const scopes = new Set(items.map((item) => item?.scope?.conversationKey ?? item?.conversationKey));
+      const scopes = new Set(items.map((item) => item?.scope?.key ?? item?.scopeKey
+        ?? item?.scope?.conversationKey ?? item?.conversationKey));
       if (scopes.has(undefined) || scopes.has(null) || scopes.has('') || scopes.size !== 1) {
         return { accepted: false, reason: 'invalid-scope' };
       }
@@ -278,6 +286,7 @@ export class AgentRuntime {
   async _selectModel(value) {
     if (this.stopping) throw new Error('agent runtime is stopping');
     const target = resolveRuntimeModelTarget(value, this.runtime);
+    this._assertConnectorSupport(target.runtime);
     if (target.runtime === this.runtime) {
       // /m must not wait for a stuck turn, and every model change opens a
       // fresh session: interrupt the in-flight turn (its inbound rows stay in

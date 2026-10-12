@@ -2,14 +2,17 @@
   "name": "@lark-local/daemon",
   "version": "0.4.0",
   "private": true,
-  "description": "Lark subscription, Codex execution, SQLite state, and private activity API.",
+  "description": "Personal Agent connectors, runtime execution, SQLite state, and private activity API.",
   "type": "module",
   "engines": {
     "node": ">=22.5"
   },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0"
+  },
   "scripts": {
     "start": "node src/main.mjs",
-    "check": "for file in src/*.mjs scripts/*.mjs; do node --check \"$file\" || exit 1; done",
+    "check": "for file in src/*.mjs src/actions/*.mjs src/connectors/*.mjs src/weixin/*.mjs scripts/*.mjs; do node --check \"$file\" || exit 1; done",
     "test": "node --test test/*.test.mjs",
     "health": "node scripts/healthcheck.mjs"
   }
