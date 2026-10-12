@@ -1207,7 +1207,7 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
-    async def _commit_user_message(self, session: Session, msg: InboundMessage) -> None:
+    async def _append_user_message_to_session(self, session: Session, msg: InboundMessage) -> None:
         session.add_message("user", msg.content, sender_id=msg.sender_id)
         await self.sessions.save(session)
         active = self._active_turn
@@ -1215,7 +1215,7 @@ class AgentLoop:
             active.interruptible = True
 
     @staticmethod
-    def _without_committed_user_message(session: Session) -> Session:
+    def _history_without_current_user_message(session: Session) -> Session:
         history_session = session.clone()
         if history_session.messages and history_session.messages[-1].get("role") == "user":
             history_session.messages = history_session.messages[:-1]
@@ -1225,7 +1225,7 @@ class AgentLoop:
         session_key = msg.session_key
         skip_heartbeat = session_key.type == "cli"
         session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
-        await self._commit_user_message(session, msg)
+        await self._append_user_message_to_session(session, msg)
         return OutboundMessage(
             session_key=msg.session_key,
             content="",
@@ -2251,12 +2251,12 @@ class AgentLoop:
             if self.config.mode == BotMode.DEBUG:
                 # In debug mode, only record message to session, no processing or reply
                 await self._evaluate_previous_response_outcome(session, msg)
-                await self._commit_user_message(session, msg)
+                await self._append_user_message_to_session(session, msg)
                 return None
 
             if not msg.need_reply:
                 await self._evaluate_previous_response_outcome(session, msg)
-                await self._commit_user_message(session, msg)
+                await self._append_user_message_to_session(session, msg)
                 return OutboundMessage(
                     session_key=msg.session_key,
                     content="",
@@ -2285,7 +2285,7 @@ class AgentLoop:
             is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
             user_committed = False
             if not is_heartbeat:
-                await self._commit_user_message(session, msg)
+                await self._append_user_message_to_session(session, msg)
                 user_committed = True
 
             if self.sandbox_manager:
@@ -2325,7 +2325,7 @@ class AgentLoop:
             # Build initial messages (use OpenViking session context when enabled)
             provider_name = self.config.get_provider_name(self.model) if self.config else None
             history_session = (
-                self._without_committed_user_message(session) if user_committed else session
+                self._history_without_current_user_message(session) if user_committed else session
             )
             history = await self._build_prompt_history(
                 history_session,
