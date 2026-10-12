@@ -45,6 +45,8 @@ const DEFINITIONS = Object.freeze({
   'system.persist_failed': { category: 'system', severity: 'error', priority: 100, title: '事件落库失败' },
   'system.worker_failed': { category: 'system', severity: 'error', priority: 92, title: '会话处理失败' },
   'system.subscriber_exit': { category: 'system', severity: 'error', priority: 100, title: '飞书监听意外退出' },
+  'system.connector_failed': { category: 'system', severity: 'error', priority: 100, title: 'Connector 不可用' },
+  'system.connector_recovered': { category: 'system', severity: 'success', priority: 30, title: 'Connector 已恢复' },
   'system.startup_failed': { category: 'system', severity: 'error', priority: 100, title: '守护进程启动失败' },
   'system.maintenance': { category: 'system', severity: 'info', priority: 10, title: '状态清理完成' },
   'system.stopping': { category: 'system', severity: 'info', priority: 15, title: '守护进程停止中' },

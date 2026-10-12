@@ -23,7 +23,7 @@ Connector worker (protocol 0.2 NDJSON; Lark 长连接或微信长轮询)
       freshness → 内容/manifest 校验 → outbox+journal 预留)→ Connector action → 结算
 ```
 
-Connector 协议见 `docs/connector-protocol.md`。生命周期是 `spec → check → start → action → pause → stop`；stdout 只允许协议 NDJSON，日志写 stderr。新数据源按能力声明 `events/actions/search/sync`，出站动作与只读查询分别写进 manifest 的 `actions`/`queries`(Core 据此决定开放哪些 Agent 工具)。provider receive loop 留在 Connector，出站校验留在 Core。
+Connector 协议见 `docs/connector-protocol.md`。生命周期是 `spec → check → start → action → pause → stop`；stdout 只允许协议 NDJSON，日志写 stderr。新数据源按能力声明 `events/actions/search/sync`，出站动作与只读查询分别写进 manifest 的 `actions`/`queries`(Core 据此决定开放哪些 Agent 工具)。provider receive loop 留在 Connector，出站校验留在 Core。单个 Connector 退出或 check/start 失败只影响它自己:`ConnectorManager` 从 spec 开始按 5s/15s/1min/5min 退避重启，稳定运行 30s 才算恢复并清零退避;其余 Connector 和 runtime 不动，全部起不来才算启动失败。投递到不可用的 Connector 在预留 outbox 之前拦下(`connector_unavailable`);`/ready` 只要有一个 Connector 在跑就是 200,body `status=degraded`。
 
 Lark 原始事件解析在 `connectors/lark-events.mjs`；微信直接输出标准事件。Core 不接受原始 provider envelope。卡片插件只负责标准交互与已发送卡片的可信路由关联；会话键由 `event.mjs` 统一构造。此次未上线 schema 直接替换，无旧 inbound 表兼容视图或迁移。
 

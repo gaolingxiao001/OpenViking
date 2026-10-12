@@ -263,6 +263,27 @@ describe('agent tools', () => {
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n, 0);
   });
 
+  it('blocks a delivery to a Connector that is down without reserving it, so the retry goes through', async (t) => {
+    const { store, call, connectors } = setup(t, { ids: ['lark', 'weixin'] });
+    let weixinUp = false;
+    connectors.available = (id) => id !== 'weixin' || weixinUp;
+    store.ingest(chatEvent({ source: 'weixin', messageId: 'wx-decision-0001', chatId: 'wx-peer' }));
+    const reply = () => call('reply_message', { message_id: 'wx-decision-0001', markdown: '收到',
+      decision_message_id: 'wx-decision-0001' });
+
+    await assert.rejects(reply(), (error) => error.code === 'connector_unavailable'
+      && /weixin connector is temporarily unavailable.*No action was taken/.test(error.message));
+    assert.equal(connectors.calls.length, 0);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n, 0);
+    const [blocked] = store.listActivities({ limit: 10 }).activities.filter((activity) => activity.kind === 'delivery.blocked');
+    assert.equal(blocked.metadata.code, 'connector_unavailable');
+
+    weixinUp = true;
+    await reply();
+    assert.deepEqual(connectors.calls.map((entry) => [entry.connector, entry.action]), [['weixin', 'message.reply']]);
+    assert.equal(store.db.prepare("SELECT status FROM outbox").get().status, 'SENT');
+  });
+
   it('keeps one temporary working reaction per conversation and clears it on the next final delivery there', async (t) => {
     let reactions = 0;
     const run = (_connector, action) => {

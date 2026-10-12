@@ -65,7 +65,8 @@ function writeExecutable(file, source) {
 }
 
 // Fake lark-cli: --version/--help/doctor answer preflight; `event +subscribe`
-// tails EVENTS (NDJSON, appended by env.receive) until SIGTERM; +messages-reply
+// records its pid in SUBSCRIBER and tails EVENTS (NDJSON, appended by
+// env.receive) from the start until SIGTERM; +messages-reply
 // and +messages-send append their argv to REPLIES. Everything else gets a
 // generic ok JSON so best-effort lookups (roster, chat names) degrade quietly.
 function fakeLarkSource(dir) {
@@ -73,6 +74,7 @@ function fakeLarkSource(dir) {
     import fs from 'node:fs';
     const EVENTS = ${JSON.stringify(path.join(dir, 'events.ndjson'))};
     const REPLIES = ${JSON.stringify(path.join(dir, 'replies.ndjson'))};
+    const SUBSCRIBER = ${JSON.stringify(path.join(dir, 'subscriber.pid'))};
     const args = process.argv.slice(2);
     if (args.includes('--version')) { console.log('lark-cli 1.0.56'); process.exit(0); }
     if (args.includes('--help')) {
@@ -90,6 +92,7 @@ function fakeLarkSource(dir) {
       process.exit(0);
     }
     if (args.includes('event')) {
+      fs.writeFileSync(SUBSCRIBER, String(process.pid));
       // ponytail: 20ms file polling; appends are small enough to arrive whole.
       let offset = 0;
       const timer = setInterval(() => {
@@ -186,10 +189,13 @@ function readLines(file) {
   return content.split('\n').filter(Boolean);
 }
 
+// `prepare(dir)` runs before the daemon starts, e.g. to steer a fixture
+// Connector through files under `<dir>/data`.
 export async function startMockEnv({
   codex = {},
   identity = null,
   config: configOverrides = {},
+  prepare = null,
 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-mock-'));
   const binDir = path.join(dir, 'bin');
@@ -223,6 +229,9 @@ export async function startMockEnv({
     dataDir: path.join(dir, 'data'),
     databasePath: path.join(dir, 'data', 'state.sqlite3'),
     lockPath: path.join(dir, 'data', 'daemon.lock'),
+    // getConfig() derives the socket from the live dataDir; binding it would
+    // unlink a running daemon's socket.
+    actionSocketPath: path.join(dir, 'data', 'actions.sock'),
     tempDir: path.join(dir, 'data', 'tmp'),
     workspace: path.join(dir, 'workspace'),
     larkCliBin: fakeLark,
@@ -278,6 +287,17 @@ export async function startMockEnv({
       return readLines(path.join(dir, 'replies.ndjson')).map((line) => JSON.parse(line));
     },
 
+    // Drop the live Lark subscription, as a lost long connection would.
+    killLarkSubscriber() {
+      process.kill(Number(fs.readFileSync(path.join(dir, 'subscriber.pid'), 'utf8')), 'SIGKILL');
+    },
+
+    // [{ summary, metadata }] of every activity of one kind, oldest first.
+    activities(kind) {
+      return daemon.store.db.prepare('SELECT summary, detail_json FROM activities WHERE kind = ? ORDER BY id')
+        .all(kind).map((row) => ({ summary: row.summary, metadata: JSON.parse(row.detail_json || '{}') }));
+    },
+
     async waitFor(predicate, timeoutMs = 8_000) {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
@@ -312,6 +332,7 @@ export async function startMockEnv({
   };
 
   try {
+    prepare?.(dir);
     await daemon.start();
   } catch (error) {
     await env.stop().catch(() => {});

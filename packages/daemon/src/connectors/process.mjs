@@ -5,6 +5,15 @@ import { safeError } from '../logger.mjs';
 import { connectorManifest, parseProtocolLine, requestMessage } from './protocol.mjs';
 
 const defaultWorkerPath = fileURLToPath(new URL('./worker.mjs', import.meta.url));
+// Backoff between restarts of one failed Connector; the last delay repeats.
+// A restarted Connector counts as recovered once it has run this long, and its
+// backoff starts over. An expired login starts fine and fails seconds later.
+const RESTART_DELAYS_MS = [5_000, 15_000, 60_000, 300_000];
+const STABLE_AFTER_MS = 30_000;
+
+function unavailable(id) {
+  return Object.assign(new Error(`connector ${id} is temporarily unavailable`), { code: 'connector_unavailable' });
+}
 
 function appendTail(current, chunk, limit = 8_000) {
   const next = current + chunk;
@@ -46,10 +55,22 @@ export class ConnectorProcess {
     this.stopping = false;
     this.onEvent = null;
     this.onUnexpectedExit = null;
+    this.reportedError = null;
+    // Supervision state, kept by ConnectorManager.
+    this.failures = 0;
+    this.lastError = null;
+    this.retryAt = null;
+    this.retryTimer = null;
+    this.stableTimer = null;
+    this.runningSince = null;
   }
 
   spawn() {
     if (this.child) return;
+    if (this.stopping) throw new Error(`connector ${this.id} is stopping`);
+    this.stdoutBuffer = '';
+    this.stderrTail = '';
+    this.reportedError = null;
     const workerPath = this.config.connectorWorkerPath || defaultWorkerPath;
     const env = sanitizeNonArkChildEnv(process.env);
     env.PERSONAL_AGENT_CONNECTOR_CONFIG = JSON.stringify(childConfig(this.config, this.id));
@@ -70,16 +91,22 @@ export class ConnectorProcess {
     });
     child.once('error', (error) => this.failPending(error));
     child.once('exit', (code, signal) => {
+      // Already discarded: a failed attempt that is not reported as an exit.
+      if (this.child !== child) return;
       const wasStopping = this.stopping;
+      const onUnexpectedExit = this.onUnexpectedExit;
       this.child = null;
+      this.checked = false;
       this.started = false;
-      const error = new Error(
-        `connector ${this.id} exited ${code ?? signal ?? 'unknown'}${this.stderrTail ? `: ${this.stderrTail.trim().slice(-2_000)}` : ''}`,
-      );
+      this.onUnexpectedExit = null;
+      // The worker's own failure report says why (an expired login, say);
+      // the stderr tail is the fallback for a crash.
+      const detail = this.reportedError || this.stderrTail.trim().slice(-2_000);
+      const error = new Error(`connector ${this.id} exited ${code ?? signal ?? 'unknown'}${detail ? `: ${detail}` : ''}`);
       this.failPending(error);
       if (!wasStopping) {
         terminateProcessTree(child, 'SIGKILL');
-        this.onUnexpectedExit?.({ code, signal, stderr: safeError(error) });
+        onUnexpectedExit?.({ code, signal, stderr: safeError(error) });
       }
     });
   }
@@ -123,6 +150,7 @@ export class ConnectorProcess {
       return;
     }
     if (message.type === 'STATUS' && message.status === 'failed' && !this.stopping) {
+      if (typeof message.detail?.error === 'string') this.reportedError = message.detail.error.slice(-2_000);
       this.logger.error('connector_reported_failure', {
         connector: this.id,
         error: message.detail?.error,
@@ -138,10 +166,15 @@ export class ConnectorProcess {
     this.pending.clear();
   }
 
+  // Only preflight starts a worker. Any other request to a worker that is gone
+  // fails here instead of starting one that never passed check.
   request(operation, payload = {}, timeoutMs = 30_000) {
-    this.spawn();
     const message = requestMessage(operation, payload);
     return new Promise((resolve, reject) => {
+      if (!this.child) {
+        reject(unavailable(this.id));
+        return;
+      }
       const timer = setTimeout(() => {
         this.pending.delete(message.id);
         reject(new Error(`connector ${this.id} ${operation} timed out after ${timeoutMs}ms`));
@@ -159,6 +192,7 @@ export class ConnectorProcess {
   }
 
   async preflight() {
+    this.spawn();
     const spec = await this.request('spec', {}, 10_000);
     this.manifest = connectorManifest(spec?.manifest);
     if (this.manifest.name !== this.id) throw new Error(`connector spec name mismatch: ${this.id}`);
@@ -184,8 +218,26 @@ export class ConnectorProcess {
     return Boolean(this.started && this.child && this.child.exitCode === null);
   }
 
+  get available() {
+    return Boolean(this.child && this.checked && !this.stopping);
+  }
+
   invoke(name, input, timeoutMs = this.config.sendTimeoutMs ?? 30_000) {
+    if (!this.available) return Promise.reject(unavailable(this.id));
     return this.request('action', { name, input }, timeoutMs);
+  }
+
+  // Kills the worker without reporting an exit, so a failed start or restart
+  // attempt can begin again from a fresh process.
+  discard() {
+    const child = this.child;
+    this.child = null;
+    this.checked = false;
+    this.started = false;
+    this.onUnexpectedExit = null;
+    if (!child) return;
+    this.failPending(new Error(`connector ${this.id} worker was discarded`));
+    terminateProcessTree(child, 'SIGKILL');
   }
 
   async pauseSubscription() {
@@ -211,6 +263,9 @@ export class ConnectorProcess {
   }
 }
 
+// Supervises the Connector workers. Each one fails and recovers on its own: a
+// worker that exits, or fails check or start, is restarted with backoff while
+// the others keep running. Startup fails only if no Connector comes up.
 export class ConnectorManager {
   constructor(config, registry, logger) {
     this.config = config;
@@ -220,6 +275,13 @@ export class ConnectorManager {
       new ConnectorProcess(id, config, registry, logger.child({ connector: id })),
     ]));
     this.profile = config.profile || null;
+    this.restartDelaysMs = config.connectorRestartDelaysMs ?? RESTART_DELAYS_MS;
+    this.stableAfterMs = config.connectorStableAfterMs ?? STABLE_AFTER_MS;
+    this.onEvent = null;
+    this.onStatus = null;
+    // Subscriptions were started and not yet paused: inbound may arrive.
+    this.subscribed = false;
+    this.closed = false;
   }
 
   connector(id) {
@@ -228,23 +290,112 @@ export class ConnectorManager {
     return connector;
   }
 
+  // A Connector that fails check is left for startSubscription to retry.
   async preflight() {
-    const entries = await Promise.all([...this.connectors.entries()].map(async ([id, connector]) => (
-      [id, await connector.preflight()]
-    )));
-    const checked = Object.fromEntries(entries);
+    const entries = await Promise.all([...this.connectors.values()].map(async (connector) => {
+      try {
+        return [connector.id, await connector.preflight()];
+      } catch (error) {
+        connector.discard();
+        connector.lastError = safeError(error);
+        return [connector.id, null];
+      }
+    }));
+    const passed = entries.filter(([, info]) => info);
+    if (passed.length === 0) throw new Error(this.failureSummary());
+    const checked = Object.fromEntries(passed);
     this.profile = checked.lark?.profile || this.profile || checked.weixin?.profile;
     return {
       profile: this.profile,
-      version: entries.map(([id, info]) => `${id}:${info.version}`).join(', '),
-      connectors: Object.fromEntries(entries.map(([id, info]) => [id, info.manifest])),
+      version: passed.map(([id, info]) => `${id}:${info.version}`).join(', '),
+      connectors: Object.fromEntries(passed.map(([id, info]) => [id, info.manifest])),
+      failed: Object.fromEntries(entries.filter(([, info]) => !info).map(([id]) => [id, this.connector(id).lastError])),
     };
   }
 
-  async startSubscription(onEvent, onUnexpectedExit) {
-    await Promise.all([...this.connectors.values()].map((connector) => (
-      connector.startSubscription(onEvent, (exit) => onUnexpectedExit({ ...exit, connector: connector.id }))
-    )));
+  // onStatus({ status: 'failed' | 'recovered', connector, ... }) reports each
+  // Connector going down (with the retry delay) and coming back.
+  async startSubscription(onEvent, onStatus) {
+    this.onEvent = onEvent;
+    this.onStatus = onStatus;
+    this.subscribed = true;
+    await Promise.all([...this.connectors.values()].filter((connector) => connector.checked).map(async (connector) => {
+      try { await this.subscribe(connector); } catch (error) {
+        connector.discard();
+        connector.lastError = safeError(error);
+      }
+    }));
+    if (!this.anySubscriptionRunning) throw new Error(this.failureSummary());
+    for (const connector of this.connectors.values()) {
+      if (!connector.subscriptionRunning) this.fail(connector, connector.lastError);
+    }
+  }
+
+  async subscribe(connector) {
+    await connector.startSubscription(this.onEvent, (exit) => this.exited(connector, exit));
+    connector.runningSince = Date.now();
+    if (connector.failures > 0) {
+      connector.stableTimer = setTimeout(() => this.recovered(connector), this.stableAfterMs);
+      connector.stableTimer.unref?.();
+    }
+  }
+
+  recovered(connector) {
+    connector.stableTimer = null;
+    if (this.closed || !connector.subscriptionRunning) return;
+    const failures = connector.failures;
+    connector.failures = 0;
+    connector.lastError = null;
+    this.onStatus?.({ status: 'recovered', connector: connector.id, failures });
+  }
+
+  exited(connector, exit) {
+    if (connector.runningSince === null) return;
+    clearTimeout(connector.stableTimer);
+    connector.stableTimer = null;
+    connector.runningSince = null;
+    this.fail(connector, exit.stderr, { code: exit.code, signal: exit.signal });
+  }
+
+  fail(connector, error, exit = {}) {
+    if (this.closed) return;
+    const retryInMs = this.restartDelaysMs[Math.min(connector.failures, this.restartDelaysMs.length - 1)];
+    connector.failures += 1;
+    connector.lastError = error || `connector ${connector.id} failed`;
+    connector.retryAt = Date.now() + retryInMs;
+    clearTimeout(connector.retryTimer);
+    connector.retryTimer = setTimeout(() => void this.restart(connector), retryInMs);
+    connector.retryTimer.unref?.();
+    this.onStatus?.({ status: 'failed', connector: connector.id, error: connector.lastError,
+      failures: connector.failures, retryInMs, code: exit.code ?? null, signal: exit.signal ?? null });
+  }
+
+  // A fresh worker through the whole check and start again. A Weixin login
+  // renewed by the QR command is picked up here, without restarting the daemon.
+  async restart(connector) {
+    connector.retryTimer = null;
+    connector.retryAt = null;
+    if (this.closed) return;
+    try {
+      connector.discard();
+      await connector.preflight();
+      if (this.closed) throw new Error('connectors are stopping');
+      await this.subscribe(connector);
+    } catch (error) {
+      connector.discard();
+      this.fail(connector, safeError(error));
+      return;
+    }
+    if (this.closed) await connector.pauseSubscription().catch(() => {});
+  }
+
+  failureSummary() {
+    return [...this.connectors.values()]
+      .map((connector) => `${connector.id}: ${connector.lastError ?? 'not started'}`).join('; ');
+  }
+
+  available(id) {
+    return Boolean(this.connectors.get(id)?.available);
   }
 
   get subscriptionRunning() {
@@ -252,12 +403,31 @@ export class ConnectorManager {
       && [...this.connectors.values()].every((connector) => connector.subscriptionRunning);
   }
 
+  get anySubscriptionRunning() {
+    return [...this.connectors.values()].some((connector) => connector.subscriptionRunning);
+  }
+
+  state(connector) {
+    if (connector.subscriptionRunning) return 'running';
+    if (this.closed) return 'stopped';
+    return this.subscribed ? 'restarting' : 'starting';
+  }
+
   snapshot() {
-    return Object.fromEntries([...this.connectors.entries()].map(([id, connector]) => [id, {
-      running: connector.subscriptionRunning,
-      capabilities: connector.manifest?.capabilities ?? [],
-      version: connector.manifest?.version ?? null,
-    }]));
+    return Object.fromEntries([...this.connectors.entries()].map(([id, connector]) => {
+      const state = this.state(connector);
+      return [id, {
+        state,
+        running: state === 'running',
+        capabilities: connector.manifest?.capabilities ?? [],
+        version: connector.manifest?.version ?? null,
+        ...(state === 'restarting' ? {
+          failures: connector.failures,
+          error: connector.lastError,
+          retryAt: connector.retryAt ? new Date(connector.retryAt).toISOString() : null,
+        } : {}),
+      }];
+    }));
   }
 
   invoke(connector, action, input, timeoutMs) {
@@ -293,7 +463,21 @@ export class ConnectorManager {
   }
   listMeetingEvents(input) { return this.invoke('lark', 'meeting.events.list', input); }
 
+  // No restart is scheduled or completed once shutdown begins.
+  close() {
+    this.closed = true;
+    this.subscribed = false;
+    for (const connector of this.connectors.values()) {
+      clearTimeout(connector.retryTimer);
+      clearTimeout(connector.stableTimer);
+      connector.retryTimer = null;
+      connector.stableTimer = null;
+      connector.retryAt = null;
+    }
+  }
+
   async pauseSubscriptions() {
+    this.close();
     const results = await Promise.allSettled(
       [...this.connectors.values()].map((connector) => connector.pauseSubscription()),
     );
@@ -302,6 +486,7 @@ export class ConnectorManager {
   }
 
   async stop() {
+    this.close();
     await Promise.allSettled([...this.connectors.values()].map((connector) => connector.stop()));
   }
 }

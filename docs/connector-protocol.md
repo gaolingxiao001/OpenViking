@@ -27,6 +27,16 @@ The Core starts a Connector and calls these operations in order:
 5. `pause`: stop event intake while keeping actions available for Core shutdown draining.
 6. `stop`: drain and exit.
 
+Each Connector fails on its own. When a worker exits unexpectedly, or fails
+`check` or `start`, the Core restarts it from `spec` with backoff (5 s, 15 s,
+1 min, then every 5 min) while the runtime and the other Connectors keep
+running. It counts as recovered after 30 s of running, and its backoff starts
+over. A Connector that cannot go on (an expired login, a lost long connection)
+should send `STATUS failed` with a short `detail.error`, then exit; the Core
+shows that reason in Activity. Actions for a Connector that is down are refused
+before any outbox reservation (`connector_unavailable`). Startup fails only
+when no Connector passes `check` and `start`.
+
 Example manifest:
 
 ```json

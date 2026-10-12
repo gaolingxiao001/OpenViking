@@ -49,7 +49,7 @@ LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
 
 登录命令按实例读取 manifest，在终端输出二维码。手机确认后，token、机器人账号、扫码用户和长轮询游标保存在该实例的私有 SQLite 中。Core 随后启动独立微信 Connector；它调用 `notifyStart`，持续请求 `getupdates`，把入站文本、图片、文件和微信已有语音转写封装成 `EVENT` 交给 Agent。媒体保存在 `dataDir/weixin/media`。Agent 通过统一的 Agent 工具（Pi 用 `actions/cli.mjs`，Codex/TraeX/Claude 用 MCP 适配器）把查询和发送请求经 `dataDir/actions.sock` 交给 Core；Core 先写 outbox，再由 Connector 携带 `context_token` 和由幂等键派生的 `client_id` 调用 `sendmessage`。
 
-默认 allowlist 是扫码用户。`LARK_DAEMON_WEIXIN_ALLOW_FROM` 可配置逗号分隔的完整 iLink 用户 ID；不要填昵称。会话过期并出现 `ret=-14` 时，停止该实例，重新运行扫码命令，再启动。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
+默认 allowlist 是扫码用户。`LARK_DAEMON_WEIXIN_ALLOW_FROM` 可配置逗号分隔的完整 iLink 用户 ID；不要填昵称。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
 
 ### 方舟 Self-hosted Managed Agent
 
@@ -83,6 +83,8 @@ lark-daemon upgrade all
 pm2 status lark-daemon-<instance-id> lark-web lark-updater
 curl http://127.0.0.1:3737/ready
 ```
+
+只要还有一个 Connector 在运行，`/ready` 就返回 200；有 Connector 不可用时，body 的 `status` 是 `degraded`，`connectors.<id>` 带上 `error` 和下次重试时间 `retryAt`。
 
 ## 多个 agent
 
