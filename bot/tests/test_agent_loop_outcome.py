@@ -379,6 +379,64 @@ async def test_agent_loop_appends_current_user_after_model_without_prompt_duplic
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_interrupt_does_not_cancel_final_session_save(
+    make_loop, temp_dir: Path, monkeypatch
+):
+    bus = MessageBus()
+    config = Config(storage_workspace=str(temp_dir))
+    loop = make_loop(bus=bus, config=config)
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="final-save")
+    msg = InboundMessage(session_key=session_key, sender_id="user-1", content="finish cleanly")
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+    save_calls = 0
+    original_save = loop.sessions.save
+
+    async def fake_run_agent_loop(self, **kwargs):
+        return "final answer", None, [], {"prompt_tokens": 1, "completion_tokens": 1}, 1
+
+    async def blocking_save(session):
+        nonlocal save_calls
+        save_calls += 1
+        if len(session.messages) >= 2 and session.messages[-1].get("role") == "assistant":
+            save_started.set()
+            await release_save.wait()
+        await original_save(session)
+
+    fake_langfuse = _FakeLangfuseClient()
+    monkeypatch.setattr(AgentLoop, "_run_agent_loop", fake_run_agent_loop)
+    monkeypatch.setattr(loop.sessions, "save", blocking_save)
+    monkeypatch.setattr(
+        "vikingbot.agent.loop.LangfuseClient.get_instance",
+        staticmethod(lambda: fake_langfuse),
+    )
+
+    task = asyncio.create_task(loop._process_message_as_active_turn(msg))
+    try:
+        await asyncio.wait_for(save_started.wait(), timeout=2)
+
+        assert await loop.interrupt(session_key) is False
+
+        release_save.set()
+        response = await asyncio.wait_for(task, timeout=2)
+
+        assert response is not None
+        assert response.content == "final answer"
+        session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
+        assert [message["role"] for message in session.messages] == ["user", "assistant"]
+        assert [message["content"] for message in session.messages] == [
+            "finish cleanly",
+            "final answer",
+        ]
+        assert save_calls == 1
+    finally:
+        release_save.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_interrupt_active_turn_without_append_phase(make_loop, monkeypatch):
     loop = make_loop()
     session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-early")

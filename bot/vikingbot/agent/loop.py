@@ -2388,6 +2388,10 @@ class AgentLoop:
                 tools_used=tools_used,
             )
 
+            active = self._active_turn
+            if active and active.session_key == session_key:
+                self._active_turn = None
+
             is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
             if not (is_heartbeat and is_heartbeat_noop_response(final_content)):
                 # Write experience reminder into session history so it persists
