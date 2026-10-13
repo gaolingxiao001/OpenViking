@@ -581,6 +581,28 @@ describe('decision references', () => {
     assert.equal(connectors.calls.length, 4);
   });
 
+  it('points a stale decision at the newer input\'s event=, and a retry that follows the hint goes through', async (t) => {
+    const { store, call, connectors } = setup(t);
+    const reply = (decision) => call('reply_message', { message_id: 'om_question1234567', markdown: '好的', decision_id: decision });
+    const question = store.ingest(chatEvent({ messageId: 'om_question1234567', eventId: 'evt-question', chatId: 'oc_b12345678' })).inbound;
+    const followUp = chatEvent({ messageId: 'om_followUp123456', eventId: 'evt-follow-up', chatId: 'oc_b12345678' });
+    store.ingest(followUp);
+
+    const stale = await reply('evt-question').catch((error) => error);
+    assert.equal(stale.code, 'stale_decision');
+    assert.doesNotMatch(stale.message, /msg=/);
+    // Copy the tag the hint names from the newer input's line, as the model would.
+    const [, tag] = /use its (\w+)= as decision_id/.exec(stale.message);
+    const line = formatInboundLine(followUp);
+    const wrong = await reply(/ msg=(\S+)/.exec(line)[1]).catch((error) => error);
+    assert.equal(wrong.code, 'unknown_decision');
+    assert.match(wrong.message, /not the event= of an accepted .* \(msg= is not accepted\)/);
+    await reply(new RegExp(` ${tag}=(\\S+)`).exec(line)[1]);
+    // The reply still answers the question it targets.
+    assert.deepEqual(outbox(store), [question.seq]);
+    assert.equal(connectors.calls.length, 1);
+  });
+
   it('keys a delivery by its decision event', async (t) => {
     const { store, call, connectors } = setup(t);
     store.ingest(chatEvent({ messageId: 'om_again12345678', eventId: 'evt-again', chatId: 'oc_notify12345678' }));

@@ -206,7 +206,7 @@ export class ActionService {
     const newerSeq = this.store.newerAcceptedSeq(decision.scope_key, decision.seq);
     if (newerSeq !== null) {
       caller.trace.newerSeq = newerSeq;
-      throw blocked('stale_decision', 'Delivery blocked: a newer authenticated input arrived in the same chat/thread, or about the same subject. Reconsider with the new input, then use its msg= or event= as decision_id if the action still fits.');
+      throw blocked('stale_decision', 'Delivery blocked: a newer authenticated input arrived in the same chat/thread, or about the same subject. Reconsider with the new input, then use its event= as decision_id if the action still fits.');
     }
   }
 
