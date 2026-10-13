@@ -267,7 +267,7 @@ export class PiAgent {
 
   // lark-cli stays available for non-message Lark operations.
   larkProfile() {
-    return (this.config.connectors ?? [this.config.channel]).includes('lark') ? this.config.profile : '';
+    return this.config.connectors.includes('lark') ? this.config.profile : '';
   }
 
   _sessionDir() {
@@ -451,12 +451,6 @@ export class PiAgent {
   whenIdle() {
     if (!this.turnActive && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
-  }
-
-  primeCognition(text, syncedThroughSeq) {
-    void text;
-    void syncedThroughSeq;
-    return Promise.reject(new Error('standalone cognition catch-up is disabled; prefix the first real turn'));
   }
 
   _bodyFor(items) {

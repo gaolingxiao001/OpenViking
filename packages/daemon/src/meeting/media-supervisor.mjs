@@ -69,12 +69,6 @@ export class MeetingMediaSupervisor {
     return entry && ACTIVE_STATES.has(entry.state) ? snapshot(entry) : null;
   }
 
-  activeSessions() {
-    return [...this.sessions.values()]
-      .filter((entry) => ACTIVE_STATES.has(entry.state))
-      .map(snapshot);
-  }
-
   async start(value) {
     if (this.stopped) throw new Error('meeting media supervisor is stopped');
     const session = safeSession(value);

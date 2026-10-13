@@ -256,16 +256,6 @@ export class GenericDecisionAuthority {
     return true;
   }
 
-  decisionStatus(sessionEpoch, generation, decisionKey) {
-    const safeSessionEpoch = scalar(sessionEpoch, 'sessionEpoch');
-    const safeGeneration = scalar(generation, 'generation');
-    const safeDecisionKey = text(decisionKey, 'decisionKey');
-    const key = scopeKey(safeSessionEpoch, safeGeneration, safeDecisionKey);
-    if (this.claimedScopes.has(key)) return 'claimed';
-    const capability = this.byScope.get(key);
-    return capability && this.capabilities.has(capability) ? 'active' : 'missing';
-  }
-
   revokeSession(sessionEpoch) {
     const safeSessionEpoch = scalar(sessionEpoch, 'sessionEpoch');
     const sessionKey = this._sessionKey(safeSessionEpoch);

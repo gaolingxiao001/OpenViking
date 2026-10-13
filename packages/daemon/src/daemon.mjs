@@ -45,7 +45,7 @@ class DisabledMeetingPlugin {
 // and tears them down in reverse.
 export class PersonalAgentDaemon {
   constructor(config, logger, { ovClient = null } = {}) {
-    this.connectorIds = config.connectors ?? [config.channel ?? 'lark'];
+    this.connectorIds = config.connectors;
     this.config = { ...config, connectors: this.connectorIds };
     this.logger = logger;
     this.lock = new InstanceLock(config.lockPath);
@@ -103,12 +103,10 @@ export class PersonalAgentDaemon {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
       this.ovContext = new OVSessionContext(this.store,
         this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath), this.logger,
-        { canCommit: () => !this.connectors?.subscribed
-          && !this.store.db.prepare("SELECT 1 FROM connector_events WHERE status = 'QUEUED' LIMIT 1").get() });
+        { canCommit: () => !this.connectors?.subscribed });
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
         status: 'STARTING',
-        metadata: { eventMode: this.config.eventMode },
       }, 'starting');
       this.runMaintenance();
 
@@ -284,7 +282,6 @@ export class PersonalAgentDaemon {
       this.maintenanceTimer.unref();
       this.logger.info('daemon_ready', {
         address: this.config.httpEnabled ? `http://${this.config.host}:${this.config.port}` : 'disabled',
-        eventMode: this.config.eventMode,
       });
       this.recordSystemActivity('system.ready', {
         summary: '可以接收消息并按需回复',
@@ -470,6 +467,3 @@ export class PersonalAgentDaemon {
     return this.shutdownPromise;
   }
 }
-
-// Compatibility export for callers that still import the historical class name.
-export const LarkDaemon = PersonalAgentDaemon;

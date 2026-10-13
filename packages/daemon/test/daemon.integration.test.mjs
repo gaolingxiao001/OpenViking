@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { createLogger } from '../src/logger.mjs';
-import { LarkDaemon } from '../src/daemon.mjs';
+import { PersonalAgentDaemon } from '../src/daemon.mjs';
 import { Harness } from '../src/harness.mjs';
 import { startMockEnv, textMessage } from './mock-env.mjs';
 
@@ -18,7 +18,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
 
       const delivered = env.codexInput();
       assert.equal(delivered.length, 1);
-      assert.match(delivered[0].text, /\[chat=oc-e2e source=lark msg=om-e2e time=.* from=ou-e2e\] 请回复我/);
+      assert.match(delivered[0].text, /\[chat=oc-e2e source=lark msg=om-e2e event=evt-om-e2e time=.* from=ou-e2e\] 请回复我/);
 
       assert.equal(env.daemon.store.stats().inbound.DONE, 1);
       // No outbox rows are ever created in steer mode.
@@ -180,7 +180,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
 
 describe('ingress barrier', () => {
   it('answers /help immediately while a model turn is active', async () => {
-    const daemon = new LarkDaemon(
+    const daemon = new PersonalAgentDaemon(
       { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
       createLogger('error', { test: 'command-idle-barrier' }),
     );
@@ -240,7 +240,7 @@ describe('ingress barrier', () => {
 
 describe('/model immediate switch', () => {
   it('executes /model without waiting for the stuck active turn', async () => {
-    const daemon = new LarkDaemon(
+    const daemon = new PersonalAgentDaemon(
       { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-model.lock') },
       createLogger('error', { test: 'model-no-wait' }),
     );

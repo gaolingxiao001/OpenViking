@@ -182,7 +182,7 @@ lark-daemon upgrade all
 
 ## Activity 页面
 
-打开 [http://127.0.0.1:3737/](http://127.0.0.1:3737/) 可以查看本机活动账本：消息是否收到、Agent 为什么回复或保持静默、选择了哪种投递方式，以及发送是否成功。
+打开 [http://127.0.0.1:3737/](http://127.0.0.1:3737/) 可以查看本机活动账本：消息是否收到、Agent 每一轮做了什么（思考、工具调用）、选择了哪种投递方式，以及发送是否成功。
 
 - 默认进入当前认知会话（`/new`、同 runtime 的 `/model`、Codex/TraeX/Claude/Pi 切换 `/effort` 会开新会话；TraeX `/effort` 原地更新当前 thread settings）。顶栏可切换历史会话，或查看全部会话的完整账本。
 - 下方是按轨道排列的时间轴（回合 / 消息 / 助手 / 投递 / 命令 / 系统）；上方详情列表与播放头双向同步。
@@ -190,7 +190,7 @@ lark-daemon upgrade all
 - 历史会话不跟随实时更新，可一键回到当前会话；当前会话在拖离尾部后可回到最新。
 - 页面每 4 秒在本机刷新一次；没有外部资源或云端服务。
 
-这些活动作为保留历史的事件账本写入同一个 SQLite。升级时会为已有历史做一次幂等 backfill；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用、认知 epoch 和裁剪后的正文，不暴露飞书 message/chat ID、Codex/TraeX/Claude/Ark session、幂等键或 raw event。
+这些活动作为保留历史的事件账本写入同一个 SQLite；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用、认知 epoch 和裁剪后的正文，不暴露飞书 message/chat ID、Codex/TraeX/Claude/Ark session、幂等键或 raw event。
 
 ## Runtime 模块边界
 
@@ -206,7 +206,7 @@ Agent 工具只有一份定义与实现，在 Core 的 `ActionService`。Codex/T
 - 400ms 群聊窗口只做 transport batching，不创建 chat 专属的 Codex session、history 或 memory。进程在窗口内停止或崩溃，仍可能让已落库消息没来得及喂给 Codex；这版没有加入 durable replay 或 delivery ledger。
 - slash command 和后续消息经过同一条全局 ingress barrier，但命令本身不等待模型；只读命令并行回答，会话变更命令先中断旧 turn。会话变更先 prepare 新 session，再用一次 SQLite CAS 原子提交 epoch、session、authority 与 model/effort 设置（Codex/TraeX/Claude/Pi 的 effort 属于这类会话变更），最后做不可失败的本地 activation；prepare 或 CAS 失败时旧认知状态不变。跨 runtime switch 同样先 preflight 目标进程再交接，目标启动失败时仍留在旧 runtime。
 - SQLite 保留 active runtime/session、投递幂等账本和 OV 同步 outbox。跨 runtime 的历史上下文只从 OV session 组装（archive overview + live messages）；同一 native session 继续使用原生 compaction。OV 不可用或上下文不完整时 handoff fail closed，不回放本地 journal。详见 [OV session context](docs/ov-session-context.md)。
-- 收到的每条消息压缩成一行 `[chat=… msg=… time=… from=…] 正文`；`chat=`/`msg=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
+- 收到的每条消息压缩成一行 `[chat=… msg=… event=… time=… from=…] 正文`；`chat=`/`msg=`/`event=` 为完整 id（作为工具参数使用），thread 后缀与 `from=` 为短 stub。`msg=` 是回复目标，`event=` 是 `decision_id`；日历、issue 等非聊天事件没有 `msg=`，同样用 `event=` 发通知。新线程首轮注入跨聊天历史，以 `--- history above, new messages below ---` 分隔。
 - Codex/TraeX/Claude/Pi 通过 Core 的 Agent 工具执行消息动作。Self-hosted Ark 的原生工具循环由官方 Worker 执行：`agent.tool_use` 后 Session 会以 `requires_action` 暂停，Worker 回写关联的 `user.tool_result` 后继续，最终 `end_turn` 才结束本轮。daemon 不执行工具、不 POST tool result、不转发最终 `agent.message`，避免双重执行和重复投递。
 - Ark 不会把不同 chat/thread 合进同一个远端逻辑 turn。daemon 仍以 accepted `user.message` event id 做因果 fence，并持久化 turn/session 恢复信息；但 Worker 直接调用 CLI 的本地副作用不在 daemon SQLite journal 内。Worker/CLI timeout 或 crash 的重复执行保证由 Ark Worker 协议和 CLI 幂等键承担。
 - raw 飞书事件不会整包落库，避免保存事件 header 中的 token；正文只为会话上下文保留。

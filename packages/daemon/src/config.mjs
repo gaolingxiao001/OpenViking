@@ -101,10 +101,6 @@ export function getConfig() {
   if (!connectors.includes(channel)) {
     throw new Error('LARK_DAEMON_CONNECTORS_JSON must include LARK_DAEMON_CHANNEL');
   }
-  const eventMode = enumEnv('LARK_DAEMON_EVENT_MODE', 'raw', ['raw', 'compact']);
-  if (eventMode !== 'raw') {
-    throw new Error('LARK_DAEMON_EVENT_MODE must be raw; compact events omit security and thread fields');
-  }
   const promptDir = path.join(moduleDir, 'agent');
   if (pathsOverlap(workspace, projectDir)) {
     throw new Error('LARK_DAEMON_WORKSPACE must not overlap the running daemon directory');
@@ -219,7 +215,6 @@ export function getConfig() {
     port: intEnv('LARK_DAEMON_PORT', 3738, { min: 1, max: 65535 }),
     httpEnabled: boolEnv('LARK_DAEMON_HTTP_ENABLED', true),
     logLevel: enumEnv('LARK_DAEMON_LOG_LEVEL', 'info', ['debug', 'info', 'warn', 'error']),
-    eventMode,
     profile: daemonProfile || cliProfile,
     ignoredSenderIds: csvEnv('LARK_DAEMON_IGNORED_SENDER_IDS'),
     sendTimeoutMs: intEnv('LARK_DAEMON_SEND_TIMEOUT_MS', 30_000, { min: 1_000 }),
@@ -247,7 +242,6 @@ export function publicConfig(config) {
     host: config.host,
     port: config.port,
     httpEnabled: config.httpEnabled,
-    eventMode: config.eventMode,
     channel: config.channel,
     connectors: config.connectors,
     dryRun: config.dryRun,

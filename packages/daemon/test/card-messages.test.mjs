@@ -18,6 +18,7 @@ const profile = 'test-profile';
 const chatId = 'oc_cardtest123456';
 const userId = 'ou_answerer123456';
 const decisionId = 'om_question123456';
+const decisionEvent = 'evt-question';
 const remoteId = 'om_delivered123456';
 const authority = 'runtime-test-token';
 const question = { prompt: '选择实现方案', options: [{ key: 'small', label: '小改动' }, { key: 'full', label: '完整实现' }] };
@@ -34,7 +35,7 @@ function fixture(t, { thread = false, run } = {}) {
   const databasePath = path.join(directory, 'state.sqlite3');
   const store = new Store(databasePath, logger);
   store.initializeCognition('codex', authority);
-  store.ingest(normalizeEvent({ type: 'im.message.receive_v1', event_id: 'evt-question',
+  store.ingest(normalizeEvent({ type: 'im.message.receive_v1', event_id: decisionEvent,
     message_id: decisionId, chat_id: chatId, chat_type: 'group', message_type: 'text',
     sender_id: userId, sender_type: 'user', content: '做个选择',
     thread_id: thread ? 'omt_thread123456' : undefined,
@@ -80,7 +81,7 @@ it('sends a document snapshot from the workspace into the original thread and cl
     return success({ message_id: remoteId });
   } });
   fs.writeFileSync(path.join(f.workspace, '报告.pdf'), 'document bytes');
-  const input = { message_id: decisionId, decision_message_id: decisionId, reply_in_thread: true, file_path: '报告.pdf' };
+  const input = { message_id: decisionId, decision_id: decisionEvent, reply_in_thread: true, file_path: '报告.pdf' };
   const result = await f.call('reply_message', input);
   assert.equal(result.data.message_id, remoteId);
   assert.equal(fs.existsSync(staged), false);
@@ -99,9 +100,9 @@ it('rejects traversal, URLs, escaped symlinks, directories, oversized files, and
   const fd = fs.openSync(path.join(f.workspace, 'large.pdf'), 'w');
   fs.ftruncateSync(fd, MAX_FILE_BYTES + 1); fs.closeSync(fd);
   for (const file_path of ['../outside.pdf', '/tmp/outside.pdf', 'https://example.com/a', 'link.pdf', 'folder', 'large.pdf']) {
-    await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_message_id: decisionId, file_path }));
+    await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_id: decisionEvent, file_path }));
   }
-  await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_message_id: decisionId,
+  await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_id: decisionEvent,
     markdown: 'hi', file_key: 'file_existing123456' }), /exactly one of/);
   assert.equal(f.calls.length, 0);
 });
@@ -109,12 +110,12 @@ it('rejects traversal, URLs, escaped symlinks, directories, oversized files, and
 it('supports existing file keys, dry runs, and cleanup after an uncertain upload/send', async (t) => {
   const f = fixture(t, { run: () => { throw new Error('network lost'); } });
   f.service.config.dryRun = true;
-  assert.equal((await f.call('send_message', { chat_id: chatId, decision_message_id: decisionId,
+  assert.equal((await f.call('send_message', { chat_id: chatId, decision_id: decisionEvent,
     file_key: 'file_existing123456' })).data.dry_run, true);
   assert.equal(f.calls.length, 0);
   f.service.config.dryRun = false;
   fs.writeFileSync(path.join(f.workspace, 'report.docx'), 'report');
-  await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_message_id: decisionId,
+  await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_id: decisionEvent,
     file_path: 'report.docx' }), /network lost/);
   assert.deepEqual(fs.readdirSync(f.workspace), ['report.docx']);
   assert.deepEqual(fs.readdirSync(path.join(f.tempDir, 'outbox')), []);
@@ -124,7 +125,7 @@ it('supports existing file keys, dry runs, and cleanup after an uncertain upload
 
 it('sends a choice card and feeds a click to the agent with durable routing and a replyable card id', async (t) => {
   const f = fixture(t, { thread: true });
-  const result = await f.call('reply_message', { message_id: decisionId, decision_message_id: decisionId,
+  const result = await f.call('reply_message', { message_id: decisionId, decision_id: decisionEvent,
     reply_in_thread: true, choices: question });
   assert.equal(result.data.message_id, remoteId);
   assert.equal(result.data.delivery_warning, undefined);
@@ -160,8 +161,8 @@ it('sends a choice card and feeds a click to the agent with durable routing and 
   await harness.ingressBarrier;
   assert.equal(input.length, 1);
   const inbound = reopened.inboundBySeq(input[0].seq);
-  assert.equal(f.service.fence(inbound.messageId, { trace: {} }).message_id, inbound.messageId);
-  await f.call('reply_message', { message_id: remoteId, decision_message_id: inbound.messageId,
+  assert.equal(f.service.fence({ decision_id: inbound.eventId }, { trace: {} }).message_id, inbound.messageId);
+  await f.call('reply_message', { message_id: remoteId, decision_id: inbound.eventId,
     reply_in_thread: true, markdown: '继续执行完整实现' });
   const replyArgs = f.calls.at(-1).args;
   assert.equal(replyArgs[replyArgs.indexOf('--message-id') + 1], remoteId);
@@ -175,13 +176,13 @@ it('sends a choice card and feeds a click to the agent with durable routing and 
   });
   assert.equal(cancel.conversationKey, inbound.conversationKey);
   reopened.ingest(cancel);
-  assert.throws(() => f.service.fence(inbound.messageId, { trace: {} }), /newer authenticated message/);
+  assert.throws(() => f.service.fence({ decision_id: inbound.eventId }, { trace: {} }), /newer authenticated input/);
   harness.stop();
 });
 
 it('rejects unknown cards, wrong app/chat/user, invalid options, expired questions and ignored senders', async (t) => {
   const f = fixture(t);
-  await f.call('send_message', { chat_id: chatId, decision_message_id: decisionId, choices: question });
+  await f.call('send_message', { chat_id: chatId, decision_id: decisionEvent, choices: question });
   for (const changes of [
     { message_id: 'om_unknown123456' }, { chat_id: 'oc_otherchat1234' }, { operator_id: 'ou_otheruser1234' },
     { action_value: '{"lark_daemon_choice":"forged"}' },
@@ -201,7 +202,7 @@ it('resolves a newly created thread from the delivered card before accepting cal
     ? success({ items: [{ message_id: remoteId, chat_id: chatId,
       thread_id: 'omt_newthread12345', root_id: decisionId }] })
     : success({ message_id: remoteId }) });
-  const result = await f.call('reply_message', { message_id: decisionId, decision_message_id: decisionId,
+  const result = await f.call('reply_message', { message_id: decisionId, decision_id: decisionEvent,
     reply_in_thread: true, choices: question });
   assert.equal(result.data.delivery_warning, undefined);
   assert.equal(f.calls.length, 2);
@@ -217,7 +218,7 @@ it('reports a sent card with failed callback registration without inviting a dup
     if (args.includes('+messages-mget')) throw new Error('lookup failed');
     return success({ message_id: remoteId });
   } });
-  const args = { message_id: decisionId, decision_message_id: decisionId,
+  const args = { message_id: decisionId, decision_id: decisionEvent,
     reply_in_thread: true, choices: question };
   const result = await f.call('reply_message', args);
   assert.equal(result.data.message_id, remoteId);
@@ -231,7 +232,7 @@ it('reports a sent card with failed callback registration without inviting a dup
 
 it('accepts raw SDK form callbacks without leaking tokens and keeps separate actions on one card', async (t) => {
   const f = fixture(t);
-  await f.call('send_message', { chat_id: chatId, decision_message_id: decisionId,
+  await f.call('send_message', { chat_id: chatId, decision_id: decisionEvent,
     card: { schema: '2.0', body: { elements: [{ tag: 'markdown', content: 'Form' }] } } });
   for (const id of ['raw-one', 'raw-two']) {
     const event = normalizeCardAction(f.store.db, {
@@ -264,7 +265,7 @@ it('registers a cross-channel card where it landed, not where the decision came 
   const service = new ActionService({ config: { profile, workspace, tempDir: path.join(directory, 'tmp'),
     maxReplyChars: 30_000 }, store, connectors, logger });
   const send = (chat) => service.call('send_message', { source: 'lark', chat_id: chat,
-    decision_message_id: 'wx-decision-0001', card: { elements: [{ tag: 'markdown', content: 'vote' }] } }, { authority });
+    decision_id: 'message:wx-decision-0001', card: { elements: [{ tag: 'markdown', content: 'vote' }] } }, { authority });
 
   assert.equal((await send(chatId)).data.delivery_warning, undefined);
   const click = normalizeCardAction(store.db, callback({ message_id: 'om_crosscard12345' }), profile);
@@ -286,6 +287,6 @@ it('validates card structure, size, mentions and choice keys without invoking th
     { card: { elements: [{ tag: 'markdown', content: 'x'.repeat(40000) }] } },
     { choices: { ...question, options: [question.options[0], question.options[0]] } },
     { choices: { ...question, timeout_seconds: 1 } },
-  ]) await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_message_id: decisionId, ...body }));
+  ]) await assert.rejects(() => f.call('send_message', { chat_id: chatId, decision_id: decisionEvent, ...body }));
   assert.equal(f.calls.length, 0);
 });

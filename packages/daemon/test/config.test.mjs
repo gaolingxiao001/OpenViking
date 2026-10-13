@@ -74,13 +74,6 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.throws(() => getConfig(), /must match LARKSUITE_CLI_PROFILE/);
   });
 
-  it('accepts only raw event mode', () => {
-    setEnv('LARK_DAEMON_EVENT_MODE', 'raw');
-    assert.equal(getConfig().eventMode, 'raw');
-    setEnv('LARK_DAEMON_EVENT_MODE', 'compact');
-    assert.throws(() => getConfig(), /must be raw/);
-  });
-
   it('rejects a non-loopback health server', () => {
     setEnv('LARK_DAEMON_HOST', '0.0.0.0');
     assert.throws(() => getConfig(), /loopback/);

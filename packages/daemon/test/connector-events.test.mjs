@@ -13,7 +13,7 @@ import { ProcessRegistry } from '../src/process-utils.mjs';
 import { Store } from '../src/store.mjs';
 import { Harness } from '../src/harness.mjs';
 import { FailurePolicy } from '../src/notices.mjs';
-import { formatInboundLine, formatHistoryLine } from '../src/runtime-input.mjs';
+import { formatInboundLine } from '../src/runtime-input.mjs';
 import { formatCognitionJournalLine, cognitionHistoryPrefix } from '../src/cognition.mjs';
 import { WeixinClient } from '../src/weixin/client.mjs';
 import { chatEvent } from './event-fixture.mjs';
@@ -120,9 +120,6 @@ it('preserves standard event context through the journal and OpenViking history'
   }) }, 1, 1).text;
   assert.match(prefix, /source=github kind=issue.opened/);
   assert.doesNotMatch(prefix, /chat=unknown/);
-  const restored = store.history(10)[0];
-  assert.deepEqual(restored.actor, event.actor);
-  assert.equal(formatHistoryLine(restored), text);
 });
 
 it('retains non-chat inputs during closed admission and drains them with chat inputs', async (t) => {

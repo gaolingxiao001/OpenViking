@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { LarkDaemon } from '../src/daemon.mjs';
+import { PersonalAgentDaemon } from '../src/daemon.mjs';
 import {
   FlyReferenceRing,
   GenericDecisionAuthority,
@@ -838,7 +838,7 @@ assert gate.accept(unknown_b, "provider-request-3")["accepted"]
 
   it('closes the meeting plugin before stopping the model runtime', async () => {
     const order = [];
-    const daemon = new LarkDaemon({
+    const daemon = new PersonalAgentDaemon({
       dataDir: directory,
       lockPath: path.join(directory, 'unused.lock'),
       shutdownTimeoutMs: 100,

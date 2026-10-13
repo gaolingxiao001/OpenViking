@@ -79,7 +79,6 @@ export function migrateMeetingStore(db) {
       occurred_at_ms INTEGER NOT NULL,
       received_at_ms INTEGER NOT NULL,
       payload_json TEXT NOT NULL,
-      journal_seq INTEGER,
       inbox_batch_id INTEGER,
       inbox_read_at_ms INTEGER
     );
@@ -97,49 +96,6 @@ export function migrateMeetingStore(db) {
       UNIQUE(meeting_id, first_event_id, last_event_id)
     );
   `);
-  const columns = new Set(
-    db.prepare('PRAGMA table_info(meeting_events)').all().map((row) => row.name),
-  );
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    if (!columns.has('revision_of')) {
-      db.exec('ALTER TABLE meeting_events ADD COLUMN revision_of TEXT');
-    }
-    if (!columns.has('semantic_fingerprint')) {
-      db.exec('ALTER TABLE meeting_events ADD COLUMN semantic_fingerprint TEXT');
-    }
-    if (!columns.has('inbox_batch_id')) {
-      db.exec('ALTER TABLE meeting_events ADD COLUMN inbox_batch_id INTEGER');
-    }
-    if (!columns.has('inbox_read_at_ms')) {
-      db.exec('ALTER TABLE meeting_events ADD COLUMN inbox_read_at_ms INTEGER');
-    }
-    db.exec(`
-      UPDATE meeting_events
-      SET inbox_read_at_ms = COALESCE(inbox_read_at_ms, received_at_ms)
-      WHERE journal_seq IS NOT NULL
-    `);
-    const unclassified = db.prepare(`
-      SELECT id, payload_json, activity_type
-      FROM meeting_events
-      WHERE semantic_fingerprint IS NULL
-    `).all();
-    const updateFingerprint = db.prepare(`
-      UPDATE meeting_events SET semantic_fingerprint = ? WHERE id = ?
-    `);
-    for (const row of unclassified) {
-      updateFingerprint.run(
-        meetingEventFingerprint(parsePayload(row.payload_json), row.activity_type),
-        row.id,
-      );
-    }
-    db.exec('COMMIT');
-  } catch (error) {
-    try {
-      db.exec('ROLLBACK');
-    } catch {}
-    throw error;
-  }
   db.exec(`
     CREATE INDEX IF NOT EXISTS meeting_events_pending_v2
       ON meeting_events(meeting_id, inbox_batch_id, id);
@@ -394,8 +350,8 @@ export class MeetingStore {
         INSERT OR IGNORE INTO meeting_events(
           event_key, revision_of, semantic_fingerprint, meeting_id,
           event_type, activity_type, occurred_at_ms, received_at_ms,
-          payload_json, journal_seq, inbox_batch_id, inbox_read_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+          payload_json, inbox_batch_id, inbox_read_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
       `).run(
         revisionKey,
         eventKey,
@@ -413,8 +369,8 @@ export class MeetingStore {
       INSERT OR IGNORE INTO meeting_events(
         event_key, revision_of, semantic_fingerprint, meeting_id,
         event_type, activity_type, occurred_at_ms, received_at_ms,
-        payload_json, journal_seq, inbox_batch_id, inbox_read_at_ms
-      ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        payload_json, inbox_batch_id, inbox_read_at_ms
+      ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `).run(
       eventKey,
       fingerprint,

@@ -270,7 +270,7 @@ export class ConnectorManager {
   constructor(config, registry, logger) {
     this.config = config;
     this.logger = logger;
-    this.connectors = new Map((config.connectors ?? [config.channel]).map((id) => [
+    this.connectors = new Map(config.connectors.map((id) => [
       id,
       new ConnectorProcess(id, config, registry, logger.child({ connector: id })),
     ]));

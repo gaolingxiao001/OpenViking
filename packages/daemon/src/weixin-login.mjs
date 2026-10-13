@@ -23,7 +23,7 @@ const deployment = loadDeploymentManifest(process.env);
 applyDeploymentDaemonEnv(process.env, deployment);
 applyDeploymentAgentEnv(process.env, deployment, instanceId);
 const config = getConfig();
-if (!(config.connectors ?? [config.channel]).includes('weixin')) {
+if (!config.connectors.includes('weixin')) {
   throw new Error('Selected deployment instance does not configure the weixin connector');
 }
 const state = new WeixinState(config.dataDir);

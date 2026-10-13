@@ -728,8 +728,7 @@ function renderStats() {
     ['已运行', service ? fmtDur((service.uptimeSeconds || 0) * 1000) : '—'],
   ];
   if (o) {
-    rows.push(['今日', `收 ${o.receivedToday} · 回 ${o.sentToday} · 静默 ${o.silentToday}`]);
-    rows.push(['排队', String(o.queued), o.queued ? 'warn' : '']);
+    rows.push(['今日', `收 ${o.receivedToday} · 回 ${o.sentToday}`]);
     rows.push(['需关注', String(o.attention), o.attention ? 'bad' : '']);
   }
   dom.stats.replaceChildren(...rows.flatMap(([key, value, cls]) => [h('dt', '', key), h('dd', cls || '', value)]));

@@ -19,8 +19,6 @@ class VolcApiError extends Error {
 }
 
 const VOLC_RUNTIME = getRuntimeDefinition('volc');
-export const VOLC_MODELS = VOLC_RUNTIME.models;
-export const VOLC_EFFORTS = VOLC_RUNTIME.efforts;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -412,10 +410,6 @@ export class VolcAgent {
   whenIdle() {
     if (!this.turnActive && !this.turnCompleting && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
-  }
-
-  primeCognition() {
-    return Promise.reject(new Error('standalone cognition catch-up is disabled; prefix the first real turn'));
   }
 
   _bodyFor(items) {

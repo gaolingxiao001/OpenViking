@@ -5,8 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { DatabaseSync } from 'node:sqlite';
-import { LarkDaemon } from '../src/daemon.mjs';
+import { PersonalAgentDaemon } from '../src/daemon.mjs';
 import { startHttpApi } from '../src/http-api.mjs';
 import { Store } from '../src/store.mjs';
 import { chatEvent } from './event-fixture.mjs';
@@ -340,29 +339,6 @@ describe('activity store', { concurrency: false }, () => {
     );
   });
 
-  it('backfills inbound activities once and stays idempotent across reopens', () => {
-    store.ingest(event('legacy', 'legacy body'), null, 1_600_000_000_000);
-    store.close();
-
-    const legacy = new DatabaseSync(databasePath);
-    legacy.exec('DROP TABLE activities');
-    legacy.close();
-
-    store = new Store(databasePath, quietLogger);
-    const first = store.listActivities({ limit: 100 }).activities;
-    assert.deepEqual(first.map((item) => item.kind), ['message.received']);
-    assert.equal(first.every((item) => item.metadata.backfilled === true), true);
-    const firstCount = store.stats().activities;
-
-    store.close();
-    store = new Store(databasePath, quietLogger);
-    assert.equal(store.stats().activities, firstCount);
-    assert.deepEqual(
-      store.listActivities({ limit: 100 }).activities.map((item) => item.id),
-      first.map((item) => item.id),
-    );
-  });
-
   it('lists cognition epochs as selectable activity sessions without native ids', () => {
     store.initializeCognition('codex', 'tok-1');
     store.recordActivity({
@@ -440,7 +416,7 @@ describe('daemon activity API', { concurrency: false }, () => {
 
   beforeEach(async () => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-activity-http-'));
-    daemon = new LarkDaemon({
+    daemon = new PersonalAgentDaemon({
       dataDir: directory,
       projectDir,
       host: '127.0.0.1',

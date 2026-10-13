@@ -20,8 +20,14 @@ export function eventDeliveryItem(event, seq = event.seq, overrides = {}) {
   };
 }
 
+// Percent-encodes what would break a tag (whitespace, brackets) and `%` itself,
+// so readMetadataTag gives back the exact id a tool argument copied from a tag.
 export function metadataTag(value) {
-  return String(value).replace(/[\s\[\]]/g, (character) => encodeURIComponent(character));
+  return String(value).replace(/[\s\[\]%]/g, (character) => encodeURIComponent(character));
+}
+
+export function readMetadataTag(value) {
+  return decodeURIComponent(value);
 }
 
 function eventContent(event) {
@@ -118,7 +124,7 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     : '';
   const line = `[chat=${chatTag(metadataTag(message.chatId), message.threadId)} source=${message.source || 'lark'}`
     + (message.connectorInstance && message.connectorInstance !== message.source ? ` instance=${metadataTag(message.connectorInstance)}` : '')
-    + ` msg=${metadataTag(message.messageId)}`
+    + ` msg=${metadataTag(message.messageId)} event=${metadataTag(message.eventId)}`
     + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
     + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source)}${replyTag}${idleTag}] ${renderInboundContent(message)}`;
   return line;
@@ -135,9 +141,3 @@ export function resolveReplyTarget(store, message) {
   return author ?? { kind: 'unknown', id: parentId };
 }
 
-export function formatHistoryLine(item, resolveName = null) {
-  if (item.envelope) return formatInboundLine(item, resolveName);
-  if (item.kind && !item.chatId) return formatEventLine(item);
-  const from = item.direction === 'outbound' ? 'me' : fromLabel(item.chatId, item.actor, resolveName, item.source);
-  return `[chat=${chatTag(item.chatId, item.threadId)} source=${item.source || 'lark'} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
-}

@@ -10,14 +10,22 @@ const SOURCE = {
   type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$',
   description: 'Connector of the target, as in the source= metadata tag. Optional when the target id appeared in daemon-authenticated metadata or only one connector supports this tool.',
 };
+// An input reference is the event= value copied exactly as the tag shows it; the
+// Core decodes it and resolves it to one accepted inbound event.
+const REF = '^[^\\s\\[\\]\\u0000-\\u001f\\u007f]{1,4096}$';
 const DECISION = {
-  type: 'string', pattern: ID,
-  description: 'Newest daemon-authenticated inbound msg= id you have seen in this exact chat/thread. Freshness fence: the action is blocked if anything newer has arrived there.',
+  type: 'string', pattern: REF,
+  description: 'The input this action decides on: event= (never msg=) of the newest daemon-authenticated input you have seen in that chat/thread, or about that subject for a non-chat event. Copy the value exactly. Freshness fence: the action is blocked if anything newer has arrived there.',
+};
+const DECISION_INSTANCE = {
+  type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$',
+  description: 'Optional instance that received the decision input: its instance= value, or its source= value when it has none. Not the delivery target. Needed only when decision_id is reported ambiguous across instances.',
 };
 const RESPONSE_TO = {
-  type: 'string', pattern: ID,
-  description: 'Optional authenticated inbound msg= id this delivery fulfills. Defaults to decision_message_id. Attribution only; it must be in the same chat/thread and no newer than decision_message_id.',
+  type: 'string', pattern: REF,
+  description: 'Optional event= of the earlier input this delivery fulfills. Defaults to decision_id. Attribution only; it must be from the same chat/thread or subject and no newer than decision_id.',
 };
+const DECISION_FIELDS = { decision_id: DECISION, decision_instance: DECISION_INSTANCE, response_to_id: RESPONSE_TO };
 const IDEMPOTENCY = {
   type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$',
   description: 'Optional stable key to reuse if intentionally retrying the same delivery.',
@@ -49,27 +57,27 @@ export const TOOLS = [
     name: 'send_message',
     action: 'message.send',
     title: 'Send a message to a chat',
-    description: 'Send one bot message to a chat: exactly one of markdown, file_path, file_key, card, or choices. Use a full chat id from daemon-authenticated metadata or list_chats. For a thread, use reply_message with reply_in_thread. choices returns immediately; the answer arrives later as authenticated card input. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
+    description: 'Send one bot message to a chat: exactly one of markdown, file_path, file_key, card, or choices. Use a full chat id from daemon-authenticated metadata or list_chats. For a thread, use reply_message with reply_in_thread. choices returns immediately; the answer arrives later as authenticated card input. A non-chat event (calendar, issue, ...) is acted on through this tool with its event= as decision_id. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
     inputSchema: schema({
       source: SOURCE,
       chat_id: { type: 'string', pattern: ID, description: 'Full chat id (the chat= value). Never guess or shorten.' },
       ...CONTENT_PROPERTIES, ...MENTIONS,
-      decision_message_id: DECISION, response_to_message_id: RESPONSE_TO, idempotency_key: IDEMPOTENCY,
-    }, ['chat_id', 'decision_message_id']),
+      ...DECISION_FIELDS, idempotency_key: IDEMPOTENCY,
+    }, ['chat_id', 'decision_id']),
     annotations: WRITE,
   },
   {
     name: 'reply_message',
     action: 'message.reply',
     title: 'Reply to a message',
-    description: 'Reply as the bot to one message with exactly one of markdown, file_path, file_key, card, or choices. Lark: set reply_in_thread to continue or start its thread; for a card action, message_id is its card= id and decision_message_id its ca_ msg= id. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
+    description: 'Reply as the bot to one message with exactly one of markdown, file_path, file_key, card, or choices. Lark: set reply_in_thread to continue or start its thread; for a card action, message_id is its card= id. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
     inputSchema: schema({
       source: SOURCE,
       message_id: { type: 'string', pattern: ID, description: 'Full message id (msg= or card=) to reply to. Never guess or shorten.' },
       ...CONTENT_PROPERTIES, ...MENTIONS,
       reply_in_thread: { type: 'boolean', default: false, description: 'Lark only: reply inside the message thread.' },
-      decision_message_id: DECISION, response_to_message_id: RESPONSE_TO, idempotency_key: IDEMPOTENCY,
-    }, ['message_id', 'decision_message_id']),
+      ...DECISION_FIELDS, idempotency_key: IDEMPOTENCY,
+    }, ['message_id', 'decision_id']),
     annotations: WRITE,
   },
   {
@@ -82,8 +90,8 @@ export const TOOLS = [
       message_id: { type: 'string', pattern: ID, description: 'Full message id to react to.' },
       emoji_type: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$', description: 'Exact emoji type, such as OK, THUMBSUP, DONE, THANKS, OnIt, or LGTM.' },
       temporary: { type: 'boolean', default: false, description: 'Transient OnIt working indicator, not a final response.' },
-      decision_message_id: DECISION, response_to_message_id: RESPONSE_TO,
-    }, ['message_id', 'emoji_type', 'decision_message_id']),
+      ...DECISION_FIELDS,
+    }, ['message_id', 'emoji_type', 'decision_id']),
     annotations: WRITE,
   },
   {

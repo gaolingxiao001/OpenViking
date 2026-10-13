@@ -1,4 +1,4 @@
-// Shared mock environment for harness e2e tests: a real LarkDaemon wired to a
+// Shared mock environment for harness e2e tests: a real PersonalAgentDaemon wired to a
 // fake lark-cli (events fed dynamically through an NDJSON file) and a fake
 // codex app-server (scriptable turn outcome, records everything it is told).
 // OpenViking is quiet by default; pass { identity } to serve a fake identity
@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { getConfig, projectDir } from '../src/config.mjs';
 import { createLogger } from '../src/logger.mjs';
-import { LarkDaemon } from '../src/daemon.mjs';
+import { PersonalAgentDaemon } from '../src/daemon.mjs';
 
 // Raw Lark im.message.receive_v1 envelope with test defaults. Every field the
 // normalizer reads can be overridden; `text` becomes the JSON content body.
@@ -251,7 +251,7 @@ export async function startMockEnv({
     meetingAudio: null,
     ...configOverrides,
   };
-  const daemon = new LarkDaemon(config, createLogger('error', { test: 'mock-env' }), {
+  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), {
     ovClient: {
       messages: new Map(),
       async create(sessionId) { return { session_id: sessionId, uri: `viking://session/${sessionId}` }; },
