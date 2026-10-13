@@ -13,6 +13,7 @@ const NO_ACTION = 'No action was taken.';
 
 const HANDLERS = {
   send_message: 'sendMessage',
+  notify_owner: 'notifyOwner',
   reply_message: 'replyMessage',
   react_to_message: 'reactToMessage',
   retract_message: 'retractMessage',
@@ -231,7 +232,45 @@ export class ActionService {
     return responseTo;
   }
 
-  async content(input, connector, action, { chatId, fence, caller }) {
+  // Whether this decision may make this delivery: the one place delivery rules
+  // live, so routing rules (a source that may also reach a group, say) can be
+  // added here later. Today a non-chat event may only notify the owner, and an
+  // action a Connector marks `owner` needs a chat message the owner sent.
+  authorize(fence, { connector, action, toOwner = false }) {
+    if (!fence.conv_key && !toOwner) {
+      throw blocked('owner_only', `Delivery blocked: a non-chat event can only notify the owner; use notify_owner. ${NO_ACTION}`);
+    }
+    if (this.manifest(connector).actions[action]?.owner && !this.fromOwner(fence)) {
+      throw blocked('owner_only', `Delivery blocked: only the owner can ask for this ${connector} action, in a chat message of their own. ${NO_ACTION}`);
+    }
+  }
+
+  fromOwner(fence) {
+    const owner = this.connectors.owner?.(fence.connector_instance) ?? null;
+    return Boolean(fence.conv_key && owner && fence.sender_id === owner.id);
+  }
+
+  // Where a notice to the owner goes: the primary IM (config.channel), or the
+  // IM a chat message named. Picking another IM when the primary is down
+  // belongs here too.
+  ownerRoute(fence, source, caller) {
+    if (source !== undefined && !fence.conv_key) {
+      throw blocked('invalid_input', `notify_owner takes source only when a chat message asked to be told on that IM; omit it for a non-chat event. ${NO_ACTION}`);
+    }
+    const connector = source ?? this.config.channel;
+    caller.trace.action = 'message.send';
+    caller.trace.connector = connector;
+    if (!this.supporting('message.send', 'actions').includes(connector)) {
+      throw blocked('unsupported', `${connector} cannot notify the owner. ${NO_ACTION}`);
+    }
+    const owner = this.connectors.owner?.(connector) ?? null;
+    if (!owner) {
+      throw blocked('owner_unknown', `Delivery blocked: the owner's ${connector} identity is unknown (for Lark, the daemon profile needs a lark-cli user login). ${NO_ACTION}`);
+    }
+    return { connector, owner };
+  }
+
+  async content(input, connector, action, { chatId, fence, caller, answerer = fence.sender_id }) {
     const spec = this.manifest(connector).actions[action];
     let content;
     try {
@@ -252,7 +291,7 @@ export class ActionService {
         content.canonical = [...content.canonical, mentions];
       }
       if (content.question) {
-        content.question.answerer_id ||= fence.sender_id;
+        content.question.answerer_id ||= answerer;
         if (!/^ou_[A-Za-z0-9_-]{8,}$/.test(content.question.answerer_id ?? '')) {
           throw blocked('invalid_content', 'choices requires a trusted user answerer_id');
         }
@@ -353,6 +392,7 @@ export class ActionService {
   async sendMessage(input, caller) {
     const connector = this.route(caller, 'message.send', 'actions', input.source, { chatId: input.chat_id });
     const fence = this.fence(input, caller);
+    this.authorize(fence, { connector, action: 'message.send' });
     const responseTo = this.attribution(caller, input.response_to_id, fence);
     const content = await this.content(input, connector, 'message.send', { chatId: input.chat_id, fence, caller });
     try {
@@ -373,6 +413,30 @@ export class ActionService {
     }
   }
 
+  async notifyOwner(input, caller) {
+    const fence = this.fence(input, caller);
+    const { connector, owner } = this.ownerRoute(fence, input.source, caller);
+    this.authorize(fence, { connector, action: 'message.send', toOwner: true });
+    const responseTo = this.attribution(caller, input.response_to_id, fence);
+    const content = await this.content(input, connector, 'message.send', { chatId: null, fence, caller, answerer: owner.id });
+    try {
+      const result = await this.deliver({
+        caller, connector, action: 'message.send',
+        input: { ...owner.target, content: content.payload },
+        key: this.key(input.idempotency_key, 'notify', connector, eventRef(fence), eventRef(responseTo), owner.id, content.canonical),
+        summary: content.summary,
+        scope: {},
+        fence,
+        inboundSeq: responseTo.seq,
+        metadata: { notify: 'owner', decisionEvent: fence.event_id },
+      });
+      const warning = this.rememberCard(content, result, { connector, chatId: null, seen: [fence] });
+      return this.deliveryResult(result, `notification to the owner on ${connector}`, warning);
+    } finally {
+      content.cleanup();
+    }
+  }
+
   async replyMessage(input, caller) {
     const connector = this.route(caller, 'message.reply', 'actions', input.source, { messageId: input.message_id });
     const inThread = input.reply_in_thread === true;
@@ -380,9 +444,12 @@ export class ActionService {
       throw blocked('unsupported', `${connector} does not support thread replies. ${NO_ACTION}`);
     }
     const fence = this.fence(input, caller);
+    this.authorize(fence, { connector, action: 'message.reply' });
     const target = this.messageScope(connector, input.message_id);
     const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
-    const chatId = target?.chat_id ?? fence.chat_id;
+    // The reply lands where its target is. A target outside any chat (a mail)
+    // has no chat: it never borrows the decision's.
+    const chatId = target ? target.chat_id : fence.chat_id;
     const content = await this.content(input, connector, 'message.reply', { chatId, fence, caller });
     try {
       const result = await this.deliver({
@@ -391,9 +458,11 @@ export class ActionService {
         key: this.key(input.idempotency_key, 'reply', connector, eventRef(fence), eventRef(responseTo),
           input.message_id, inThread, content.canonical),
         summary: content.summary,
-        scope: { chatId, threadId: target?.thread_id ?? null, convKey: responseTo.conv_key },
+        scope: { chatId, threadId: target?.thread_id ?? null, convKey: target ? target.conv_key : responseTo.conv_key },
         fence,
         inboundSeq: responseTo.seq,
+        // Non-chat history is rendered from the event it answers.
+        metadata: target && !target.chat_id && target.event_json ? { event: JSON.parse(target.event_json) } : {},
       });
       const warning = this.rememberCard(content, result, {
         connector, chatId, seen: [this.store.eventByMessageId(input.message_id, connector), fence],
@@ -411,6 +480,7 @@ export class ActionService {
     const temporary = input.temporary === true;
     if (temporary && input.emoji_type !== 'OnIt') throw blocked('invalid_input', 'temporary reactions must use the OnIt emoji');
     const fence = this.fence(input, caller);
+    this.authorize(fence, { connector, action: 'message.react' });
     if (temporary && !fence.conv_key) throw blocked('invalid_input', 'temporary reaction scope could not be verified');
     const target = this.messageScope(connector, input.message_id);
     const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });

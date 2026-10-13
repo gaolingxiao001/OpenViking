@@ -37,6 +37,20 @@ const MANIFESTS = Object.freeze({
     auth_schema: EMPTY_SCHEMA,
     config_schema: EMPTY_SCHEMA,
   }),
+  // A mailbox the owner reads over IMAP and answers over SMTP. A reply speaks
+  // as the owner to whoever wrote, so only the owner may ask for one (`owner`).
+  // SMTP has no idempotency key: an uncertain send is never retried.
+  email: connectorManifest({
+    name: 'email',
+    version: 'imap-smtp-v1',
+    capabilities: ['events', 'actions'],
+    actions: {
+      'message.reply': { content: ['markdown'], owner: true },
+    },
+    queries: [],
+    auth_schema: EMPTY_SCHEMA,
+    config_schema: EMPTY_SCHEMA,
+  }),
 });
 
 export function getConnectorManifest(id) {

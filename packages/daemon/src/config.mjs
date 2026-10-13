@@ -95,12 +95,14 @@ export function getConfig() {
   const channel = enumEnv('LARK_DAEMON_CHANNEL', 'lark', ['lark', 'weixin']);
   const configuredConnectors = jsonStringArrayEnv('LARK_DAEMON_CONNECTORS_JSON');
   const connectors = configuredConnectors.length > 0 ? [...new Set(configuredConnectors)] : [channel];
-  if (connectors.some((connector) => !['lark', 'weixin'].includes(connector))) {
+  if (connectors.some((connector) => !['lark', 'weixin', 'email'].includes(connector))) {
     throw new Error('LARK_DAEMON_CONNECTORS_JSON contains an unsupported connector');
   }
   if (!connectors.includes(channel)) {
     throw new Error('LARK_DAEMON_CONNECTORS_JSON must include LARK_DAEMON_CHANNEL');
   }
+  // The mailbox account and its client password, in a file only the daemon user can read.
+  const emailConfigFile = connectors.includes('email') ? privateRegularFileEnv('LARK_DAEMON_EMAIL_CONFIG_FILE') : null;
   const promptDir = path.join(moduleDir, 'agent');
   if (pathsOverlap(workspace, projectDir)) {
     throw new Error('LARK_DAEMON_WORKSPACE must not overlap the running daemon directory');
@@ -175,6 +177,7 @@ export function getConfig() {
     actionCliPath: path.join(sourceDir, 'actions', 'cli.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     weixinAllowFrom: csvEnv('LARK_DAEMON_WEIXIN_ALLOW_FROM'),
+    emailConfigFile,
     weixinLongPollTimeoutMs: intEnv('LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
       min: 5_000,
       max: 120_000,

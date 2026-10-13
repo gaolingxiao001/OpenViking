@@ -146,7 +146,24 @@ export class LarkClient {
     return {
       profile: this.profile,
       version: `${version.stdout}\n${version.stderr}`.trim().split(/\r?\n/).at(-1),
+      owner: await this.owner(prefix),
     };
+  }
+
+  // The owner is the user this profile is logged in as (the identity
+  // search_messages reads with). Without a user login there is no owner, and
+  // the Core refuses to notify one; the Connector itself still runs.
+  async owner(prefix) {
+    const status = await this.registry.run(this.config.larkCliBin, [...prefix, 'auth', 'status', '--json'], {
+      timeoutMs: 10_000,
+    });
+    let openId = null;
+    try { openId = JSON.parse(status.stdout)?.identities?.user?.openId ?? null; } catch {}
+    if (status.code !== 0 || typeof openId !== 'string' || !/^ou_[A-Za-z0-9_-]+$/.test(openId)) {
+      this.logger.warn('lark_owner_unknown', { reason: status.code !== 0 ? 'auth_status_failed' : 'no_user_login' });
+      return null;
+    }
+    return { id: openId, target: { user_id: openId } };
   }
 
   startSubscription(onLine, onUnexpectedExit) {
@@ -249,8 +266,10 @@ export class LarkClient {
     return deliveredMessage(data);
   }
 
-  sendMessage({ chat_id: chatId, content, idempotency_key: idempotencyKey }) {
-    return this.deliver(['+messages-send', '--as', 'bot', '--chat-id', chatId], content, idempotencyKey);
+  // A chat, or one user's direct chat with the bot (the owner, for a notice).
+  sendMessage({ chat_id: chatId, user_id: userId, content, idempotency_key: idempotencyKey }) {
+    const target = userId ? ['--user-id', userId] : ['--chat-id', chatId];
+    return this.deliver(['+messages-send', '--as', 'bot', ...target], content, idempotencyKey);
   }
 
   async replyMessage({ message_id: messageId, content, reply_in_thread: inThread = false, idempotency_key: idempotencyKey }) {

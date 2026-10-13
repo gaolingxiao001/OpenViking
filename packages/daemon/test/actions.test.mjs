@@ -8,26 +8,29 @@ import { fileURLToPath } from 'node:url';
 import { ActionService } from '../src/actions/service.mjs';
 import { startActionApi, stopActionApi } from '../src/actions/api.mjs';
 import { createMcpHandler } from '../src/actions/mcp.mjs';
+import { formatCognitionJournalLine } from '../src/cognition.mjs';
 import { formatInboundLine } from '../src/runtime-input.mjs';
 import { Store } from '../src/store.mjs';
-import { chatEvent, subjectEvent } from './event-fixture.mjs';
+import { chatEvent, mailEvent, subjectEvent } from './event-fixture.mjs';
 import { fakeConnectors } from './action-fixture.mjs';
 
 const TOKEN = 'runtime-token';
+const OWNER = { id: 'ou_owner12345678', target: { user_id: 'ou_owner12345678' } };
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const cliPath = fileURLToPath(new URL('../src/actions/cli.mjs', import.meta.url));
 
-function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, meetingEnabled = false, ovClient = null } = {}) {
+function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, meetingEnabled = false, ovClient = null,
+  owners = { lark: OWNER }, channel = 'lark' } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
   const store = new Store(path.join(directory, 'state.sqlite3'), logger);
   store.initializeCognition('codex', TOKEN);
-  const connectors = fakeConnectors({ ids, run });
+  const connectors = fakeConnectors({ ids, run, owners });
   const logs = [];
   const record = (level) => (message, fields = {}) => logs.push({ level, message, ...fields });
   const service = new ActionService({
-    config: { workspace, tempDir: path.join(directory, 'tmp'), maxReplyChars: 1_000 },
+    config: { workspace, tempDir: path.join(directory, 'tmp'), maxReplyChars: 1_000, channel },
     store, connectors, roster, liveness, meetingEnabled, ovClient,
     logger: { debug() {}, info: record('info'), warn: record('warn'), error: record('error'), child() { return this; } },
   });
@@ -46,7 +49,7 @@ describe('agent tools', () => {
     assert.ok(names(lark.service).includes('read_meeting_inbox'));
     const weixin = setup(t, { ids: ['weixin'] });
     assert.deepEqual(names(weixin.service), [
-      'send_message', 'reply_message', 'get_message_media', 'read_openviking_session_context',
+      'send_message', 'notify_owner', 'reply_message', 'get_message_media', 'read_openviking_session_context',
     ]);
   });
 
@@ -511,8 +514,8 @@ it('finds decisions, reply targets, newer inputs and orphaned conversations thro
 // A decision names one accepted inbound event by its event= id. Freshness,
 // attribution and idempotency all follow that event.
 describe('decision references', () => {
-  const send = (call, decision, extra = {}) => call('send_message', {
-    chat_id: 'oc_notify12345678', markdown: '会议 10 分钟后开始', decision_id: decision, ...extra,
+  const send = (call, decision, extra = {}) => call('notify_owner', {
+    markdown: '会议 10 分钟后开始', decision_id: decision, ...extra,
   });
   const outbox = (store) => store.db.prepare('SELECT inbound_seq FROM outbox ORDER BY id').all().map((row) => row.inbound_seq);
 
@@ -637,5 +640,92 @@ describe('decision references', () => {
     await assert.rejects(pending, (error) => error.code === 'stale_decision');
     assert.equal(connectors.calls.length, 0);
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n, 0);
+  });
+});
+
+// The owner is the person the agent works for. A non-chat event reaches people
+// only as a notice to the owner, on an IM the Core picks; an action that speaks
+// for the owner (a mail reply) needs a chat message the owner sent.
+describe('owner notices and owner-only actions', () => {
+  const outboundLines = (store) => store.cognitionJournal().filter((item) => item.kind === 'outbound').map(formatCognitionJournalLine);
+
+  it('notifies the owner on the primary IM, and lets a non-chat event do nothing else', async (t) => {
+    const { store, call, connectors } = setup(t);
+    const reminder = store.ingest(subjectEvent({ eventId: 'reminder-1' })).inbound;
+    store.ingest(chatEvent({ messageId: 'om_group12345678', eventId: 'evt-group', chatId: 'oc_group12345678', chatType: 'group' }));
+
+    for (const [tool, input] of [
+      ['send_message', { chat_id: 'oc_group12345678', markdown: 'leak' }],
+      ['reply_message', { message_id: 'om_group12345678', markdown: 'leak' }],
+      ['react_to_message', { message_id: 'om_group12345678', emoji_type: 'OK' }],
+    ]) {
+      await assert.rejects(call(tool, { ...input, decision_id: 'reminder-1' }),
+        (error) => error.code === 'owner_only' && /use notify_owner/.test(error.message));
+    }
+    // Only a chat message may name the IM.
+    await assert.rejects(call('notify_owner', { markdown: 'x', decision_id: 'reminder-1', source: 'lark' }),
+      (error) => error.code === 'invalid_input' && /only when a chat message asked/.test(error.message));
+    assert.equal(connectors.calls.length, 0);
+
+    const result = await call('notify_owner', { markdown: '1:1 十分钟后开始', decision_id: 'reminder-1' });
+    assert.match(result.text, /^Delivered notification to the owner on lark\./);
+    assert.deepEqual(connectors.calls.map(({ connector, action, input }) => [connector, action, input.user_id, input.chat_id]),
+      [['lark', 'message.send', OWNER.id, undefined]]);
+    assert.deepEqual(store.db.prepare('SELECT chat_id, conv_key, inbound_seq FROM outbox').all().map((row) => ({ ...row })),
+      [{ chat_id: null, conv_key: null, inbound_seq: reminder.seq }]);
+    // History shows a notice to the owner, not a message in some chat.
+    assert.match(outboundLines(store)[0], /^\[source=lark to=owner in_reply_to_event=reminder-1 time=\S+ from=me\] 1:1 十分钟后开始$/);
+  });
+
+  it('tells the owner on the IM a chat message named, and still sends across IMs for a chat', async (t) => {
+    const { store, call, connectors } = setup(t, { ids: ['lark', 'weixin'],
+      owners: { lark: OWNER, weixin: { id: 'wx-owner', target: { chat_id: 'wx-owner' } } } });
+    store.ingest(chatEvent({ source: 'weixin', messageId: 'wx-msg-1', eventId: 'wx-evt-1', chatId: 'wx-owner', senderId: 'wx-owner' }));
+    store.ingest(chatEvent({ messageId: 'om_group12345678', eventId: 'evt-group', chatId: 'oc_group12345678', chatType: 'group' }));
+
+    // "在飞书上提醒我": the chat message picks the IM, the Core picks the person.
+    await call('notify_owner', { markdown: '提醒你', decision_id: 'wx-evt-1', source: 'lark' });
+    // Without source the primary IM is used.
+    await call('notify_owner', { markdown: '提醒你 2', decision_id: 'wx-evt-1' });
+    // "在飞书那个群里说一声": a chat decision keeps send_message to any chat.
+    await call('send_message', { chat_id: 'oc_group12345678', markdown: '大家好', decision_id: 'wx-evt-1' });
+    assert.deepEqual(connectors.calls.map(({ connector, input }) => [connector, input.user_id ?? input.chat_id]), [
+      ['lark', OWNER.id], ['lark', OWNER.id], ['lark', 'oc_group12345678'],
+    ]);
+
+    const unknown = setup(t, { owners: {} });
+    unknown.store.ingest(subjectEvent({ eventId: 'reminder-1' }));
+    await assert.rejects(unknown.call('notify_owner', { markdown: 'x', decision_id: 'reminder-1' }),
+      (error) => error.code === 'owner_unknown' && /lark-cli user login/.test(error.message));
+    assert.equal(unknown.connectors.calls.length, 0);
+  });
+
+  it('replies to a mail only when the owner asked in a chat, and records it against the mail', async (t) => {
+    const { store, call, connectors } = setup(t, { ids: ['lark', 'email'],
+      run: (connector) => (connector === 'email' ? { sent: true } : { message_id: 'om_delivered123456' }) });
+    const mail = mailEvent({ uid: 7 });
+    store.ingest(mail);
+    store.ingest(chatEvent({ messageId: 'om_alice12345678', eventId: 'evt-alice', chatId: 'oc_group12345678',
+      chatType: 'group', senderId: 'ou_alice12345678' }));
+    const ask = store.ingest(chatEvent({ messageId: 'om_owner12345678', eventId: 'evt-owner', chatId: 'oc_p2p12345678',
+      senderId: OWNER.id })).inbound;
+
+    // The mail line carries its reply target.
+    assert.match(formatInboundLine(mail), /^\[source=email kind=email\.received msg=mail:1:7 event=imap:1:7 subject=thread:gmail:100 /);
+    const reply = (decision) => call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: decision });
+    // The mail itself, or someone else in a group, cannot make the agent answer it.
+    await assert.rejects(reply('imap:1:7'), (error) => error.code === 'owner_only');
+    await assert.rejects(reply('evt-alice'), (error) => error.code === 'owner_only' && /only the owner can ask/.test(error.message));
+    assert.equal(connectors.calls.length, 0);
+
+    const result = await reply('evt-owner');
+    assert.match(result.text, /^Delivered reply to message_id=mail:1:7\./);
+    assert.deepEqual(connectors.calls.map(({ connector, action, input }) => [connector, action, input.message_id]),
+      [['email', 'message.reply', 'mail:1:7']]);
+    // The reply is not a message in the owner's chat: no chat, attributed to the ask.
+    assert.deepEqual(store.db.prepare('SELECT connector, chat_id, conv_key, inbound_seq FROM outbox').all().map((row) => ({ ...row })),
+      [{ connector: 'email', chat_id: null, conv_key: null, inbound_seq: ask.seq }]);
+    assert.match(outboundLines(store)[0],
+      /^\[source=email action=message\.reply in_reply_to_event=imap:1:7 subject=thread:gmail:100 time=\S+ from=me\] 周四可以$/);
   });
 });

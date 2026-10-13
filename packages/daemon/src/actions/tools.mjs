@@ -57,13 +57,28 @@ export const TOOLS = [
     name: 'send_message',
     action: 'message.send',
     title: 'Send a message to a chat',
-    description: 'Send one bot message to a chat: exactly one of markdown, file_path, file_key, card, or choices. Use a full chat id from daemon-authenticated metadata or list_chats. For a thread, use reply_message with reply_in_thread. choices returns immediately; the answer arrives later as authenticated card input. A non-chat event (calendar, issue, ...) is acted on through this tool with its event= as decision_id. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
+    description: 'Send one bot message to a chat: exactly one of markdown, file_path, file_key, card, or choices. Use a full chat id from daemon-authenticated metadata or list_chats. For a thread, use reply_message with reply_in_thread. choices returns immediately; the answer arrives later as authenticated card input. The decision must be a chat message; a non-chat event (email, calendar, issue, ...) can only notify_owner. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
     inputSchema: schema({
       source: SOURCE,
       chat_id: { type: 'string', pattern: ID, description: 'Full chat id (the chat= value). Never guess or shorten.' },
       ...CONTENT_PROPERTIES, ...MENTIONS,
       ...DECISION_FIELDS, idempotency_key: IDEMPOTENCY,
     }, ['chat_id', 'decision_id']),
+    annotations: WRITE,
+  },
+  {
+    name: 'notify_owner',
+    action: 'message.send',
+    title: 'Notify the owner',
+    description: 'Send one bot message to the owner (the person this agent works for) in their direct chat. The daemon picks the IM and the recipient; there is no chat id to pass. This is the only delivery a non-chat event (email, calendar, issue, ...) allows: use it when the owner should know about that event now. Exactly one of markdown, file_path, file_key, card, or choices. In a chat, answer in that chat instead, unless the owner explicitly asks to be told on another IM.',
+    inputSchema: schema({
+      source: {
+        type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$',
+        description: 'Only when the decision is a chat message in which the owner explicitly named the IM to be told on (for example lark). Omit it otherwise: the daemon picks the IM.',
+      },
+      ...CONTENT_PROPERTIES,
+      ...DECISION_FIELDS, idempotency_key: IDEMPOTENCY,
+    }, ['decision_id']),
     annotations: WRITE,
   },
   {

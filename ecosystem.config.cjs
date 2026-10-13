@@ -65,6 +65,7 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_HTTP_ENABLED: 'true',
       LARK_DAEMON_CHANNEL: agent.channel,
       LARK_DAEMON_CONNECTORS_JSON: JSON.stringify(agent.connectors),
+      LARK_DAEMON_EMAIL_CONFIG_FILE: agent.emailConfig || undefined,
       LARK_DAEMON_PORT: String(agent.port),
       LARK_DAEMON_PROFILE: agent.profile,
       LARKSUITE_CLI_PROFILE: agent.profile,

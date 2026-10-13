@@ -68,6 +68,26 @@ describe('configuration safety', { concurrency: false }, () => {
     }
   });
 
+  it('takes a mailbox only with a private account file, and never as the primary IM', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-email-config-'));
+    const accountFile = path.join(directory, 'email.json');
+    fs.writeFileSync(accountFile, '{}', { mode: 0o644 });
+    setEnv('LARK_DAEMON_CHANNEL', 'lark');
+    setEnv('LARK_DAEMON_CONNECTORS_JSON', '["lark","email"]');
+    try {
+      setEnv('LARK_DAEMON_EMAIL_CONFIG_FILE', undefined);
+      assert.throws(() => getConfig(), /LARK_DAEMON_EMAIL_CONFIG_FILE must be an absolute path/);
+      setEnv('LARK_DAEMON_EMAIL_CONFIG_FILE', accountFile);
+      assert.throws(() => getConfig(), /EMAIL_CONFIG_FILE must have mode 0600/);
+      fs.chmodSync(accountFile, 0o600);
+      assert.deepEqual([getConfig().connectors, getConfig().emailConfigFile], [['lark', 'email'], accountFile]);
+      setEnv('LARK_DAEMON_CHANNEL', 'email');
+      assert.throws(() => getConfig(), /LARK_DAEMON_CHANNEL/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rejects a mismatched daemon and lark-cli profile', () => {
     setEnv('LARK_DAEMON_PROFILE', 'cli_expected');
     setEnv('LARKSUITE_CLI_PROFILE', 'cli_wrong');
@@ -190,6 +210,18 @@ describe('release-owned system prompt', () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('adds the mail rules only when a mailbox is connected, on Lark and Weixin alike', () => {
+    const rules = /^# Email$/m;
+    assert.doesNotMatch(loadSystemPrompt({ connectors: ['lark'] }), rules);
+    for (const connectors of [['lark', 'email'], ['weixin', 'email']]) {
+      const policy = loadSystemPrompt({ connectors });
+      assert.match(policy, rules);
+      assert.match(policy, /Reply to a mail only when the owner explicitly asks you to in a chat/);
+      assert.match(policy, /A non-chat event reaches people only through notify_owner/);
+    }
+    assert.match(loadSystemPrompt({ connectors: ['weixin', 'email'] }), /^# Weixin conversation policy/);
   });
 
   it('configures one release prompt with no mutable kernel paths', () => {

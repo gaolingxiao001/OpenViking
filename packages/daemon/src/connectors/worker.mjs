@@ -3,6 +3,7 @@ import { ProcessRegistry } from '../process-utils.mjs';
 import { safeError } from '../logger.mjs';
 import { LarkClient } from '../lark.mjs';
 import { WeixinClient } from '../weixin/client.mjs';
+import { EmailClient } from '../email/client.mjs';
 import { getConnectorManifest } from './catalog.mjs';
 import { normalizeLarkEvent } from './lark-events.mjs';
 import { invokeOperation } from './operations.mjs';
@@ -63,7 +64,7 @@ const logger = workerLogger(config.logLevel);
 // Provider subprocesses stay in the worker's process group. Killing a failed
 // Connector therefore also reaps lark-cli and any short-lived command child.
 const registry = new ProcessRegistry(logger, { detached: false });
-const Client = connectorId === 'weixin' ? WeixinClient : LarkClient;
+const Client = { weixin: WeixinClient, email: EmailClient }[connectorId] ?? LarkClient;
 const client = new Client(config, registry, logger);
 let checked = false;
 let started = false;

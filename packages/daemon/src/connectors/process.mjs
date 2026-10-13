@@ -15,6 +15,15 @@ function unavailable(id) {
   return Object.assign(new Error(`connector ${id} is temporarily unavailable`), { code: 'connector_unavailable' });
 }
 
+// The owner as a Connector reported it at check: `id` is how the owner appears
+// as an event actor there, `target` the message.send input that reaches them.
+function ownerIdentity(value) {
+  if (!value || typeof value !== 'object') return null;
+  const { id, target } = value;
+  if (typeof id !== 'string' || !id || !target || typeof target !== 'object' || Array.isArray(target)) return null;
+  return Object.freeze({ id, target: Object.freeze({ ...target }) });
+}
+
 function appendTail(current, chunk, limit = 8_000) {
   const next = current + chunk;
   return next.length <= limit ? next : next.slice(-limit);
@@ -30,6 +39,7 @@ function childConfig(config, connector) {
     larkCliBin: config.larkCliBin,
     weixinAllowFrom: [...(config.weixinAllowFrom ?? [])],
     weixinLongPollTimeoutMs: config.weixinLongPollTimeoutMs,
+    emailConfigFile: config.emailConfigFile,
     retentionMs: config.retentionMs,
     maxEventBytes: config.maxEventBytes,
     sendTimeoutMs: config.sendTimeoutMs,
@@ -50,6 +60,8 @@ export class ConnectorProcess {
     this.pending = new Map();
     this.manifest = null;
     this.profile = id === 'lark' ? config.profile : null;
+    // Kept across restarts: the last owner this Connector reported.
+    this.owner = null;
     this.checked = false;
     this.started = false;
     this.stopping = false;
@@ -199,6 +211,7 @@ export class ConnectorProcess {
     const checked = await this.request('check', {}, 30_000);
     this.checked = true;
     this.profile = checked?.profile || this.profile;
+    this.owner = ownerIdentity(checked?.owner) ?? this.owner;
     return {
       profile: this.profile,
       version: checked?.version || this.manifest.version,
@@ -396,6 +409,10 @@ export class ConnectorManager {
 
   available(id) {
     return Boolean(this.connectors.get(id)?.available);
+  }
+
+  owner(id) {
+    return this.connectors.get(id)?.owner ?? null;
   }
 
   get subscriptionRunning() {
