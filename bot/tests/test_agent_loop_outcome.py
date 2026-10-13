@@ -325,7 +325,7 @@ async def test_agent_loop_passes_configured_temperature_to_provider(make_loop, t
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_commits_current_user_before_model_without_prompt_duplication(
+async def test_agent_loop_appends_current_user_after_model_without_prompt_duplication(
     make_loop, temp_dir: Path, monkeypatch
 ):
     seen = {}
@@ -365,7 +365,7 @@ async def test_agent_loop_commits_current_user_before_model_without_prompt_dupli
     )
 
     assert response is not None
-    assert seen["persisted_before_model"] == ["old user", "old assistant", "new question"]
+    assert seen["persisted_before_model"] == ["old user", "old assistant"]
     assert seen["prompt_user_messages"].count("new question") == 1
     persisted = SessionManager(config.bot_data_path).get_or_create(
         session_key, skip_heartbeat=True
@@ -376,6 +376,37 @@ async def test_agent_loop_commits_current_user_before_model_without_prompt_dupli
         "new question",
         "final answer",
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_active_turn_without_append_phase(make_loop, monkeypatch):
+    loop = make_loop()
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-early")
+    msg = InboundMessage(session_key=session_key, sender_id="user-1", content="stop early")
+    started = asyncio.Event()
+
+    async def slow_process_message(_msg):
+        started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(loop, "_process_message", slow_process_message)
+
+    task = asyncio.create_task(loop._process_message_as_active_turn(msg))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        assert await loop.interrupt(session_key) is True
+
+        outbound = await asyncio.wait_for(task, timeout=2)
+        assert outbound.event_type == OutboundEventType.INTERRUPT
+
+        session = loop.sessions.get_or_create(session_key)
+        assert [message["role"] for message in session.messages] == ["user"]
+        assert session.messages[0]["content"] == "stop early"
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

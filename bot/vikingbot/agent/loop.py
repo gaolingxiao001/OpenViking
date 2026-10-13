@@ -272,7 +272,6 @@ class _ActiveTurn:
 
     session_key: SessionKey
     task: asyncio.Task
-    interruptible: bool = False
     interrupted: bool = False
 
 
@@ -1167,9 +1166,7 @@ class AgentLoop:
     async def interrupt(self, session_key: SessionKey) -> bool:
         """Interrupt the active or already queued turn for a session."""
         active = self._active_turn
-        if active and active.session_key == session_key:
-            if not active.interruptible or active.task.done():
-                return False
+        if active and active.session_key == session_key and not active.task.done():
             active.interrupted = True
             active.task.cancel()
             return True
@@ -1191,12 +1188,7 @@ class AgentLoop:
         except asyncio.CancelledError:
             if active.interrupted:
                 logger.info(f"Interrupted message from {msg.session_key}")
-                return OutboundMessage(
-                    session_key=msg.session_key,
-                    content="",
-                    event_type=OutboundEventType.INTERRUPT,
-                    metadata={**(msg.metadata or {}), "reason": "interrupted"},
-                )
+                return await self._complete_interrupted_message(msg)
             raise
         finally:
             if self._active_turn and self._active_turn.task is task:
@@ -1210,9 +1202,6 @@ class AgentLoop:
     async def _append_user_message_to_session(self, session: Session, msg: InboundMessage) -> None:
         session.add_message("user", msg.content, sender_id=msg.sender_id)
         await self.sessions.save(session)
-        active = self._active_turn
-        if active and active.session_key == msg.session_key and not active.task.done():
-            active.interruptible = True
 
     async def _complete_interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
         session_key = msg.session_key
@@ -2355,19 +2344,6 @@ class AgentLoop:
                         exp_exclude_uris.append(uri)
                 session.metadata["recalled_exp_uris"] = exp_exclude_uris
 
-            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
-            user_appended_to_session = False
-            if not is_heartbeat:
-                if newly_recalled_exp_content:
-                    session.add_message(
-                        "user",
-                        f"[Experience Reminder]\n## Relevant Agent Experience\n{newly_recalled_exp_content}",
-                        exp_uris=newly_recalled_exp_uris,
-                        experience_reminder=True,
-                    )
-                await self._append_user_message_to_session(session, msg)
-                user_appended_to_session = True
-
             # Run agent loop within a stable response identity for tracing/tool spans.
             response_id = uuid.uuid4().hex
             agent_turns: list[dict[str, Any]] = []
@@ -2394,10 +2370,6 @@ class AgentLoop:
                     skill_runtime=skill_runtime,
                 )
 
-            active = self._active_turn
-            if active and active.session_key == session_key and not active.task.done():
-                active.interruptible = False
-
             if auto_memory_tool:
                 tools_used = [auto_memory_tool, *(tools_used or [])]
 
@@ -2416,18 +2388,18 @@ class AgentLoop:
                 tools_used=tools_used,
             )
 
+            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))
             if not (is_heartbeat and is_heartbeat_noop_response(final_content)):
                 # Write experience reminder into session history so it persists
                 # across turns and survives bot restarts (in JSONL).
-                if not user_appended_to_session:
-                    if newly_recalled_exp_content:
-                        session.add_message(
-                            "user",
-                            f"[Experience Reminder]\n## Relevant Agent Experience\n{newly_recalled_exp_content}",
-                            exp_uris=newly_recalled_exp_uris,
-                            experience_reminder=True,
-                        )
-                    session.add_message("user", msg.content, sender_id=msg.sender_id)
+                if newly_recalled_exp_content:
+                    session.add_message(
+                        "user",
+                        f"[Experience Reminder]\n## Relevant Agent Experience\n{newly_recalled_exp_content}",
+                        exp_uris=newly_recalled_exp_uris,
+                        experience_reminder=True,
+                    )
+                session.add_message("user", msg.content, sender_id=msg.sender_id)
                 session.add_message(
                     "assistant",
                     final_content,
