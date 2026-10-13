@@ -227,6 +227,8 @@ describe('email connector', () => {
     const { client, events } = await start();
     imap.deliver(mail({ id: 'q1@example.com', headers: ['Reply-To: Bob <bob@example.com>', 'References: <root@example.com>'] }));
     await until(() => events.length === 1);
+    // The event says where a reply would go, for the owner's approval card.
+    assert.deepEqual(events[0].data.reply, { to: [{ name: 'Bob', address: 'bob@example.com' }], subject: 'Re: Thursday?' });
 
     assert.deepEqual(await client.replyMessage({ message_id: 'mail:1:1', content: { type: 'markdown', text: '周四可以\n三点见' },
       idempotency_key: 'ld_reply1' }), { sent: true });

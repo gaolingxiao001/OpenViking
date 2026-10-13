@@ -218,8 +218,8 @@ describe('release-owned system prompt', () => {
     for (const connectors of [['lark', 'email'], ['weixin', 'email']]) {
       const policy = loadSystemPrompt({ connectors });
       assert.match(policy, rules);
-      assert.match(policy, /Reply to a mail only when the owner explicitly asks you to in a chat/);
-      assert.match(policy, /A non-chat event reaches people only through notify_owner/);
+      assert.match(policy, /You never send mail\./);
+      assert.match(policy, /A non-chat event reaches people only through the owner/);
     }
     assert.match(loadSystemPrompt({ connectors: ['weixin', 'email'] }), /^# Weixin conversation policy/);
   });

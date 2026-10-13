@@ -5,10 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { EDITABLE_CHARS, approvalCard, approvedText } from '../src/actions/approval.mjs';
 import { ActionService } from '../src/actions/service.mjs';
 import { startActionApi, stopActionApi } from '../src/actions/api.mjs';
 import { createMcpHandler } from '../src/actions/mcp.mjs';
+import { resolveCardAction } from '../src/card-messages.mjs';
 import { formatCognitionJournalLine } from '../src/cognition.mjs';
+import { eventMessage } from '../src/connectors/protocol.mjs';
+import { normalizeEvent } from '../src/event.mjs';
 import { formatInboundLine } from '../src/runtime-input.mjs';
 import { Store } from '../src/store.mjs';
 import { chatEvent, mailEvent, subjectEvent } from './event-fixture.mjs';
@@ -20,7 +24,7 @@ const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return 
 const cliPath = fileURLToPath(new URL('../src/actions/cli.mjs', import.meta.url));
 
 function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, meetingEnabled = false, ovClient = null,
-  owners = { lark: OWNER }, channel = 'lark' } = {}) {
+  owners = { lark: OWNER }, channel = 'lark', profile = undefined } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
@@ -30,7 +34,7 @@ function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, 
   const logs = [];
   const record = (level) => (message, fields = {}) => logs.push({ level, message, ...fields });
   const service = new ActionService({
-    config: { workspace, tempDir: path.join(directory, 'tmp'), maxReplyChars: 1_000, channel },
+    config: { workspace, tempDir: path.join(directory, 'tmp'), maxReplyChars: 1_000, channel, profile },
     store, connectors, roster, liveness, meetingEnabled, ovClient,
     logger: { debug() {}, info: record('info'), warn: record('warn'), error: record('error'), child() { return this; } },
   });
@@ -700,32 +704,105 @@ describe('owner notices and owner-only actions', () => {
     assert.equal(unknown.connectors.calls.length, 0);
   });
 
-  it('replies to a mail only when the owner asked in a chat, and records it against the mail', async (t) => {
-    const { store, call, connectors } = setup(t, { ids: ['lark', 'email'],
-      run: (connector) => (connector === 'email' ? { sent: true } : { message_id: 'om_delivered123456' }) });
+  // The owner's click on a card is the only thing that sends a mail.
+  const PROFILE = 'test-profile';
+  const CARD = 'om_card12345678';
+  const mailSetup = (t) => setup(t, { ids: ['lark', 'email'], profile: PROFILE,
+    run: (connector) => (connector === 'email' ? { sent: true } : { message_id: CARD, chat_id: 'oc_p2p12345678' }) });
+  const click = (store, { choice = 'send', form = undefined, operator = OWNER.id, id = 'card-click-1' } = {}) => {
+    const event = normalizeEvent(eventMessage('lark', {
+      id, kind: 'message.action', occurred_at: Date.now(),
+      subject: { type: 'message', id: CARD }, actor: { type: 'user', id: operator },
+      message: { id: `ca_${id}`, type: 'card_action' }, content: { text: '[card action]' },
+      data: { interaction: { message_id: CARD, conversation_id: 'oc_p2p12345678', tag: 'button',
+        value: { lark_daemon_choice: choice }, ...(form ? { form } : {}) } },
+    }));
+    return resolveCardAction(store.db, event, PROFILE);
+  };
+
+  it('puts a mail reply on a card for the owner, whoever proposed it, and sends no mail', async (t) => {
+    const { store, call, connectors } = mailSetup(t);
+    // The reviewer's case: an old owner message, then a mail steering the model.
+    store.ingest(chatEvent({ messageId: 'om_hello12345678', eventId: 'evt-hello', chatId: 'oc_p2p12345678', senderId: OWNER.id }));
     const mail = mailEvent({ uid: 7 });
     store.ingest(mail);
     store.ingest(chatEvent({ messageId: 'om_alice12345678', eventId: 'evt-alice', chatId: 'oc_group12345678',
       chatType: 'group', senderId: 'ou_alice12345678' }));
-    const ask = store.ingest(chatEvent({ messageId: 'om_owner12345678', eventId: 'evt-owner', chatId: 'oc_p2p12345678',
-      senderId: OWNER.id })).inbound;
-
     // The mail line carries its reply target.
     assert.match(formatInboundLine(mail), /^\[source=email kind=email\.received msg=mail:1:7 event=imap:1:7 subject=thread:gmail:100 /);
-    const reply = (decision) => call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: decision });
-    // The mail itself, or someone else in a group, cannot make the agent answer it.
-    await assert.rejects(reply('imap:1:7'), (error) => error.code === 'owner_only');
-    await assert.rejects(reply('evt-alice'), (error) => error.code === 'owner_only' && /only the owner can ask/.test(error.message));
-    assert.equal(connectors.calls.length, 0);
 
-    const result = await reply('evt-owner');
-    assert.match(result.text, /^Delivered reply to message_id=mail:1:7\./);
-    assert.deepEqual(connectors.calls.map(({ connector, action, input }) => [connector, action, input.message_id]),
-      [['email', 'message.reply', 'mail:1:7']]);
-    // The reply is not a message in the owner's chat: no chat, attributed to the ask.
-    assert.deepEqual(store.db.prepare('SELECT connector, chat_id, conv_key, inbound_seq FROM outbox').all().map((row) => ({ ...row })),
-      [{ connector: 'email', chat_id: null, conv_key: null, inbound_seq: ask.seq }]);
-    assert.match(outboundLines(store)[0],
-      /^\[source=email action=message\.reply in_reply_to_event=imap:1:7 subject=thread:gmail:100 time=\S+ from=me\] 周四可以$/);
+    const reply = (decision, text) => call('reply_message', { message_id: 'mail:1:7', markdown: text, decision_id: decision });
+    for (const [decision, text] of [['evt-hello', 'borrowed'], ['imap:1:7', 'proposed'], ['evt-alice', 'asked by a colleague']]) {
+      const result = await reply(decision, text);
+      assert.match(result.text, /^Nothing was sent yet: the draft is on a card in the owner's direct chat \(lark\)/);
+    }
+    // Three cards to the owner, no mail.
+    assert.deepEqual(connectors.calls.map(({ connector, action, input }) => [connector, action, input.user_id, input.content.type]),
+      Array(3).fill(['lark', 'message.send', OWNER.id, 'card']));
+    const [card] = connectors.calls.map(({ input }) => input.content.card);
+    assert.equal(card.schema, '2.0');
+    const form = card.body.elements.find((element) => element.tag === 'form');
+    assert.equal(form.elements[0].default_value, 'borrowed');
+    // Exact, yet no email address for Lark's audit to refuse.
+    assert.match(card.body.elements[0].text.content, /^收件人：alice＠example\.com\n主题：Re: 周四开会？$/);
+    assert.doesNotMatch(JSON.stringify(card), /[\w.+-]+@[\w-]+\.[\w.]+/);
+    const [question] = store.db.prepare('SELECT question_json FROM lark_cards').all().map((row) => JSON.parse(row.question_json));
+    assert.deepEqual([question.kind, question.answerer_id, question.draft.message_id], ['approval', OWNER.id, 'mail:1:7']);
+
+    await assert.rejects(call('reply_message', { source: 'email', message_id: 'mail:9:9', markdown: 'x', decision_id: 'evt-hello' }),
+      (error) => error.code === 'invalid_target');
+  });
+
+  it('sends the approved draft as the owner left it, once, and shows the outcome on the card', async (t) => {
+    const { store, call, connectors } = mailSetup(t);
+    store.ingest(mailEvent({ uid: 7 }));
+    await call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: 'imap:1:7' });
+    const mail = store.db.prepare("SELECT seq FROM connector_events WHERE event_id = 'imap:1:7'").get();
+
+    // Only the owner can answer it.
+    assert.throws(() => click(store, { operator: 'ou_alice12345678' }), /card answerer is not authorized/);
+    const pressed = click(store, { form: { reply_body: '周五下午三点可以，回头见' } });
+    assert.equal(store.ingest(pressed).inbound.status, 'DONE');
+    const settled = await new ActionService({ config: { maxReplyChars: 1_000 }, store, connectors, logger }).settleApproval(pressed);
+    assert.deepEqual([settled.state, settled.edited], ['sent', true]);
+    const sent = connectors.calls.filter(({ connector }) => connector === 'email');
+    assert.deepEqual(sent.map(({ action, input }) => [action, input.message_id, input.content.text]),
+      [['message.reply', 'mail:1:7', '周五下午三点可以，回头见']]);
+    assert.deepEqual(connectors.updates.map(({ messageId, card }) => [messageId, card.header.title.content]), [[CARD, '已发送']]);
+    // Recorded against the mail, with no chat.
+    const row = store.db.prepare("SELECT chat_id, conv_key, inbound_seq FROM outbox WHERE connector = 'email'").get();
+    assert.deepEqual({ ...row }, { chat_id: null, conv_key: null, inbound_seq: mail.seq });
+    assert.match(outboundLines(store).at(-1),
+      /^\[source=email action=message\.reply in_reply_to_event=imap:1:7 subject=thread:gmail:100 time=\S+ from=me\] 周五下午三点可以，回头见$/);
+
+    // A second press does not settle it again.
+    assert.equal(store.ingest(click(store, { id: 'card-click-2' })).filterReason, 'card_already_answered_or_expired');
+  });
+
+  it('shows a draft too long for a card input read-only, and an empty edit falls back to the draft', () => {
+    const draft = { text: 'x'.repeat(EDITABLE_CHARS + 1), to: [{ name: 'Bob', address: 'bob@example.com' }], subject: 'Re: hi' };
+    const card = approvalCard(draft);
+    assert.equal(card.body.elements.some((element) => element.tag === 'form'), false);
+    assert.deepEqual(card.body.elements.filter((element) => element.tag === 'button')
+      .map((element) => element.behaviors[0].value.lark_daemon_choice), ['send', 'cancel']);
+    assert.equal(approvedText(draft, { reply_body: '   ' }), draft.text);
+    // A card never carries an @ (Lark refuses addresses); the approved text gets them back.
+    const signed = approvalCard({ ...draft, text: '好的\n— bob@example.com' });
+    assert.equal(signed.body.elements.find((element) => element.tag === 'form').elements[0].default_value, '好的\n— bob＠example.com');
+    assert.doesNotMatch(JSON.stringify(signed), /@/);
+    assert.equal(approvedText(draft, { reply_body: '好的\n— bob＠example.com' }), '好的\n— bob@example.com');
+    assert.equal(approvedText(draft, undefined), draft.text);
+  });
+
+  it('drops the draft when the owner declines it', async (t) => {
+    const { store, call, connectors } = mailSetup(t);
+    store.ingest(mailEvent({ uid: 7 }));
+    await call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: 'imap:1:7' });
+    const declined = click(store, { choice: 'cancel' });
+    store.ingest(declined);
+    const settled = await new ActionService({ config: { maxReplyChars: 1_000 }, store, connectors, logger }).settleApproval(declined);
+    assert.equal(settled.state, 'cancelled');
+    assert.equal(connectors.calls.filter(({ connector }) => connector === 'email').length, 0);
+    assert.equal(connectors.updates[0].card.header.title.content, '已取消，没有发送');
   });
 });

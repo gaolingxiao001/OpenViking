@@ -216,8 +216,17 @@ export class PersonalAgentDaemon {
         liveness: this.liveness,
         prepareEvent: (event) => event.source === 'lark' && event.kind === 'message.action'
           ? resolveCardAction(this.store.db, event, this.config.profile) : event,
-        eventHandler: (event) => event.source === 'lark' && event.kind.startsWith('meeting.') && event.data.meeting
-          ? (accepted) => this.meeting.handleEvent(accepted.data.meeting) : null,
+        eventHandler: (event) => {
+          // The owner answered an approval card: the Core sends or drops the
+          // draft itself, off the ingress queue (an SMTP send may be slow).
+          if (event.question?.kind === 'approval') {
+            return (accepted) => { void this.actions.settleApproval(accepted).catch((error) => {
+              this.logger.error('approval_settle_failed', { error: safeError(error) });
+            }); };
+          }
+          return event.source === 'lark' && event.kind.startsWith('meeting.') && event.data.meeting
+            ? (accepted) => this.meeting.handleEvent(accepted.data.meeting) : null;
+        },
         onSlashCommand: (command, event, inbound) => this.handleSlashCommand(command, event, inbound),
         onInboundChat: (chatId) => this.chatNames.schedule(chatId),
         afterEvent: (event) => {

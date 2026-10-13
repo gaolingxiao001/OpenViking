@@ -62,6 +62,19 @@ function mailText(mail) {
   ].join('\n').trim();
 }
 
+// Who a reply goes to: Reply-To, else From. A mail the owner sent goes to its
+// other recipients instead. The Core shows the same list on the approval card.
+export function replyRecipients(mail, own) {
+  let to = mail.replyTo.length ? mail.replyTo : mail.from ? [mail.from] : [];
+  const others = mail.to.filter((recipient) => recipient.address !== own);
+  if (to.every((recipient) => recipient.address === own) && others.length > 0) to = others;
+  return to;
+}
+
+export function replySubject(subject) {
+  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
 function sleep(ms, stopped) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -216,20 +229,19 @@ export class EmailClient {
         })),
       },
       message: { id: messageId, type: 'email' },
+      // What a reply would look like, for the owner to check before it is sent.
+      data: { reply: { to: replyRecipients(mail, this.account.address), subject: replySubject(mail.subject) } },
     })));
     this.logger.info('email_reported', { uid: item.uid, bulk: mail.bulk });
   }
 
-  // A plain-text reply to a mail this Connector reported, to its Reply-To (or
-  // From), threaded under it. A mail the owner sent goes to its other recipients.
+  // A plain-text reply to a mail this Connector reported, threaded under it.
   async replyMessage({ message_id: messageId, content, idempotency_key: idempotencyKey }) {
     if (content?.type !== 'markdown') throw new Error('email replies are plain text only');
     const original = this.state.mail(messageId);
     if (!original) throw new Error('That mail is no longer available to reply to');
     const own = this.account.address;
-    let to = original.replyTo.length ? original.replyTo : original.from ? [original.from] : [];
-    const others = original.to.filter((recipient) => recipient.address !== own);
-    if (to.every((recipient) => recipient.address === own) && others.length > 0) to = others;
+    const to = replyRecipients(original, own);
     if (to.length === 0) throw new Error('That mail has no address to reply to');
     const raw = buildReply({
       from: { name: this.account.name, address: own }, to, original, text: content.text,

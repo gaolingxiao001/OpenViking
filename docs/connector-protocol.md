@@ -72,9 +72,10 @@ Capabilities are optional modules:
 Connector. `content` lists the message bodies an action accepts (`markdown`,
 `file`, `file_key`, `card`); `mentions` and `thread` opt into those Lark
 features; `idempotent: true` means the provider honours the idempotency key, so
-the Core may retry an `UNCERTAIN` attempt with the same key; `owner: true` means
-the action speaks for the owner (an email reply), so the Core runs it only for a
-chat message the owner sent. `queries` lists the
+the Core may retry an `UNCERTAIN` attempt with the same key; `approval: true`
+means the action speaks for the owner (an email reply), so the Core never runs it
+for the agent: it puts the draft on a card in the owner's direct chat and runs
+it only when the owner presses send there. `queries` lists the
 read-only operations. The Core offers an agent tool only when some configured
 Connector declares the operation behind it, and checks every call against the
 target Connector's declaration.
@@ -242,10 +243,20 @@ a non-chat event may only notify the owner, through `notify_owner`: the agent
 passes no chat id, and the Core sends to the owner's `target` on the primary
 IM (`LARK_DAEMON_CHANNEL`). A chat message may name another IM (`source`) when
 the owner asked to be told there. A chat decision keeps every other delivery
-tool, across Connectors too. An action declared `owner` (an email reply) needs
-a chat decision whose sender is that chat Connector's owner. A reply is
-recorded where its target is: one to a mail has no chat, and its history line
-is rendered from the mail's event.
+tool, across Connectors too.
+
+An action declared `approval` (an email reply) is authorized by the owner, not
+by a decision: who asked does not matter, since a decision only proves which
+input the agent acted on, and an old message from the owner stays fresh in its
+own chat however many mails arrive. Any decision, the mail itself included, may
+propose one; the Core sends the owner a card on the primary IM with the
+recipients and subject (from the mail event's `data.reply`) and the draft in an
+editable input (read-only beyond 1000 characters), registered as a question
+only the owner can answer, once, within three days. On send the Core delivers
+the text the owner left there, with a key per card so it goes out at most once,
+and updates the card to sent, cancelled, not sent or uncertain. The model is
+not involved after proposing. A reply is recorded where its target is: one to
+a mail has no chat, and its history line is rendered from the mail's event.
 
 The Core derives the idempotency key from the decision and response events'
 `(instance, event_id)`, the target and the canonical payload, so two events with
@@ -288,7 +299,7 @@ Results report the delivered `message_id` and, where known, `chat_id`,
 | Operation | Lark | Weixin | Email |
 | --- | --- | --- | --- |
 | `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | — |
-| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | markdown (plain text); owner only |
+| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | markdown (plain text); owner approval on a Lark card |
 | `message.react`, `message.retract` | yes | — | — |
 | `message.media` (query) | download by image/file key | downloaded inbound media | — |
 | `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — | — |

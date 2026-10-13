@@ -6,6 +6,7 @@ import { meetingContextLines } from '../meeting/index.mjs';
 import { OVSessionClient } from '../ov-session-context.mjs';
 import { opaqueRef, safeError } from '../logger.mjs';
 import { readMetadataTag } from '../runtime-input.mjs';
+import { approvalCard, approvalQuestion, approvedText, settledApprovalCard } from './approval.mjs';
 import { resolveContent } from './content.mjs';
 import { TOOLS, publicTool, validateInput } from './tools.mjs';
 
@@ -234,20 +235,12 @@ export class ActionService {
 
   // Whether this decision may make this delivery: the one place delivery rules
   // live, so routing rules (a source that may also reach a group, say) can be
-  // added here later. Today a non-chat event may only notify the owner, and an
-  // action a Connector marks `owner` needs a chat message the owner sent.
-  authorize(fence, { connector, action, toOwner = false }) {
+  // added here later. Today a non-chat event may only reach the owner: a
+  // notice, or a draft the owner approves.
+  authorize(fence, { toOwner = false } = {}) {
     if (!fence.conv_key && !toOwner) {
       throw blocked('owner_only', `Delivery blocked: a non-chat event can only notify the owner; use notify_owner. ${NO_ACTION}`);
     }
-    if (this.manifest(connector).actions[action]?.owner && !this.fromOwner(fence)) {
-      throw blocked('owner_only', `Delivery blocked: only the owner can ask for this ${connector} action, in a chat message of their own. ${NO_ACTION}`);
-    }
-  }
-
-  fromOwner(fence) {
-    const owner = this.connectors.owner?.(fence.connector_instance) ?? null;
-    return Boolean(fence.conv_key && owner && fence.sender_id === owner.id);
   }
 
   // Where a notice to the owner goes: the primary IM (config.channel), or the
@@ -392,7 +385,7 @@ export class ActionService {
   async sendMessage(input, caller) {
     const connector = this.route(caller, 'message.send', 'actions', input.source, { chatId: input.chat_id });
     const fence = this.fence(input, caller);
-    this.authorize(fence, { connector, action: 'message.send' });
+    this.authorize(fence);
     const responseTo = this.attribution(caller, input.response_to_id, fence);
     const content = await this.content(input, connector, 'message.send', { chatId: input.chat_id, fence, caller });
     try {
@@ -416,7 +409,7 @@ export class ActionService {
   async notifyOwner(input, caller) {
     const fence = this.fence(input, caller);
     const { connector, owner } = this.ownerRoute(fence, input.source, caller);
-    this.authorize(fence, { connector, action: 'message.send', toOwner: true });
+    this.authorize(fence, { toOwner: true });
     const responseTo = this.attribution(caller, input.response_to_id, fence);
     const content = await this.content(input, connector, 'message.send', { chatId: null, fence, caller, answerer: owner.id });
     try {
@@ -444,7 +437,8 @@ export class ActionService {
       throw blocked('unsupported', `${connector} does not support thread replies. ${NO_ACTION}`);
     }
     const fence = this.fence(input, caller);
-    this.authorize(fence, { connector, action: 'message.reply' });
+    if (this.manifest(connector).actions['message.reply'].approval) return this.proposeReply(input, caller, connector, fence);
+    this.authorize(fence);
     const target = this.messageScope(connector, input.message_id);
     const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     // The reply lands where its target is. A target outside any chat (a mail)
@@ -475,12 +469,110 @@ export class ActionService {
     }
   }
 
+  // A reply the owner must approve (a mail): the draft goes to the owner on a
+  // card, never to the target. Any decision may propose one, the mail itself
+  // included; the owner's press on that card is what sends it.
+  async proposeReply(input, caller, connector, fence) {
+    const target = this.store.eventByMessageId(input.message_id, connector);
+    if (!target || target.chat_id) {
+      throw blocked('invalid_target', `message_id must be a mail this daemon received (its msg= value). ${NO_ACTION}`);
+    }
+    const { connector: im, owner } = this.ownerRoute(fence, undefined, caller);
+    caller.trace.approval = connector;
+    if (!this.manifest(im).actions['message.send'].content?.includes('card')) {
+      throw blocked('unsupported', `Approving a ${connector} reply needs a card, which ${im} cannot show. ${NO_ACTION}`);
+    }
+    this.authorize(fence, { toOwner: true });
+    const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
+    let draftText;
+    try {
+      const content = resolveContent(input, { workspace: this.config.workspace, maxTextChars: this.config.maxReplyChars,
+        snapshotDir: path.join(this.config.tempDir, 'outbox') });
+      content.cleanup();
+      if (content.type !== 'markdown') throw new Error(`${connector} replies are plain text only; use markdown`);
+      draftText = content.payload.text;
+    } catch (error) {
+      throw blocked('invalid_content', error.message);
+    }
+    const mail = JSON.parse(target.event_json);
+    const draft = {
+      connector, action: 'message.reply', message_id: input.message_id, text: draftText,
+      to: mail.data?.reply?.to ?? [], subject: mail.data?.reply?.subject ?? mail.content?.title ?? '',
+      responseSeq: responseTo.seq,
+    };
+    const question = approvalQuestion(draft, owner.id);
+    const result = await this.deliver({
+      caller, connector: im, action: 'message.send',
+      input: { ...owner.target, content: { type: 'card', card: approvalCard(draft) } },
+      key: this.key(input.idempotency_key, 'approval', connector, eventRef(fence), input.message_id, draftText),
+      summary: `[mail reply draft for the owner to approve] ${draftText}`,
+      scope: {},
+      fence,
+      inboundSeq: responseTo.seq,
+      metadata: { notify: 'owner', decisionEvent: fence.event_id },
+    });
+    const warning = this.rememberCard({ type: 'card', question }, result, { connector: im, chatId: null, seen: [fence] });
+    if (result.dry_run) return this.deliveryResult(result, 'approval card');
+    if (warning) return this.deliveryResult(result, 'approval card', `${warning} The reply cannot be approved; draft it again.`);
+    return {
+      text: result.duplicate
+        ? 'This draft is already waiting for the owner. Nothing more to do.'
+        : `Nothing was sent yet: the draft is on a card in the owner's direct chat (${im}). The reply goes out only when the owner presses send there, possibly after editing it. Do not send or repeat it another way.`,
+      data: result,
+    };
+  }
+
+  // The owner pressed a button on an approval card: send the draft as they left
+  // it, or drop it, then show the outcome on the card. Runs outside the model;
+  // the card answer was already accepted once (first press wins).
+  async settleApproval(event) {
+    const { draft } = event.question;
+    const cardId = event.parentId;
+    const trace = { purpose: 'approval', connector: draft.connector, action: draft.action, choice: event.answer.key };
+    let settled;
+    if (event.answer.key !== 'send') {
+      settled = { state: 'cancelled' };
+    } else {
+      const text = approvedText(draft, event.data.interaction?.form);
+      if (text.length > this.config.maxReplyChars) {
+        settled = { state: 'failed', text, note: `超过 ${this.config.maxReplyChars} 字，没有发送。` };
+      } else {
+        const mail = this.store.eventByMessageId(draft.message_id, draft.connector);
+        try {
+          const result = await this.deliver({
+            caller: { trace }, connector: draft.connector, action: draft.action,
+            input: { message_id: draft.message_id, content: { type: 'markdown', text } },
+            // One approval sends at most once, whatever was edited.
+            key: actionKey('approved', draft.connector, cardId),
+            summary: text,
+            scope: {},
+            inboundSeq: draft.responseSeq,
+            metadata: mail?.event_json ? { event: JSON.parse(mail.event_json) } : {},
+          });
+          settled = { state: 'sent', text, edited: text !== draft.text, duplicate: Boolean(result.duplicate) };
+        } catch (error) {
+          // Blocked before the Connector was asked: nothing went out.
+          settled = trace.invoked
+            ? { state: 'uncertain', text, note: '邮件服务器没有确认收到，可能已经发出，不会自动重发。' }
+            : { state: 'failed', text, note: `没有发出：${safeError(error)}` };
+        }
+      }
+    }
+    this.logger.info('approval_settled', { ...trace, outcome: settled.state, edited: settled.edited ?? false });
+    try {
+      await this.connectors.updateCard(cardId, settledApprovalCard(draft, settled));
+    } catch (error) {
+      this.logger.warn('approval_card_update_failed', { error: safeError(error) });
+    }
+    return settled;
+  }
+
   async reactToMessage(input, caller) {
     const connector = this.route(caller, 'message.react', 'actions', input.source, { messageId: input.message_id });
     const temporary = input.temporary === true;
     if (temporary && input.emoji_type !== 'OnIt') throw blocked('invalid_input', 'temporary reactions must use the OnIt emoji');
     const fence = this.fence(input, caller);
-    this.authorize(fence, { connector, action: 'message.react' });
+    this.authorize(fence);
     if (temporary && !fence.conv_key) throw blocked('invalid_input', 'temporary reaction scope could not be verified');
     const target = this.messageScope(connector, input.message_id);
     const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });

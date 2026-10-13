@@ -10,9 +10,12 @@ export const larkSuccess = (data) => ({ code: 0, stdout: JSON.stringify({ ok: tr
 // recorded. `run(connector, action, input)` scripts the Connector's answer.
 export function fakeConnectors({ ids = ['lark'], run = null, owners = {} } = {}) {
   const calls = [];
+  const updates = [];
   return {
     calls,
+    updates,
     owners,
+    async updateCard(messageId, card) { updates.push({ messageId, card }); },
     manifests: () => ids.map((id) => [id, getConnectorManifest(id)]),
     owner: (id) => owners[id] ?? null,
     async invoke(connector, action, input) {
