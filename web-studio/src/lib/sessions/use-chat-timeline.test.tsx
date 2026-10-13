@@ -379,6 +379,44 @@ describe('useChat event timeline', () => {
     expect(result.current.messages).toEqual([])
   })
 
+  it('requests backend interrupt when unmounted during a stream', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
+      fetchSse('/stream', {
+        signal,
+        fetch: vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(streamController) {
+                controller = streamController
+              },
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+        ),
+      }),
+    )
+
+    const { result, unmount } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: false,
+        sessionId: 'session-1',
+      }),
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('hello')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      unmount()
+      controller.close()
+      await sendPromise
+    })
+
+    expect(interruptChatSessionMock).toHaveBeenCalledWith('session-1')
+  })
+
   it('keeps reasoning and tool timeline when aborted before content arrives', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>
     const encoder = new TextEncoder()

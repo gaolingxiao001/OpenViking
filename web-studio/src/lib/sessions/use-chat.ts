@@ -280,6 +280,13 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     setIteration(0)
   }, [abort, initialMessages])
 
+  useEffect(
+    () => () => {
+      abort({ closeLocalStream: true, discardPartial: true })
+    },
+    [abort],
+  )
+
   const send = useCallback(
     async (message: string, sendOptions?: SendOptions) => {
       if (status === 'streaming') return

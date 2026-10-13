@@ -104,6 +104,53 @@ async def test_feedback_proxy_forwards_request(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_interrupt_proxy_forwards_session_interrupt(monkeypatch):
+    forwarded = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"interrupted": true}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"interrupted": True}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, timeout):
+            forwarded["url"] = url
+            forwarded["headers"] = headers
+            forwarded["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(bot_router_module, "BOT_API_URL", "http://127.0.0.1:18790")
+    monkeypatch.setattr(bot_router_module, "BOT_API_KEY", "gateway-secret")
+    monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
+
+    app = FastAPI()
+    app.state.config = SimpleNamespace(get_effective_auth_mode=lambda: AuthMode.DEV)
+    app.state.auth_plugin = DevAuthPlugin()
+    app.include_router(bot_router_module.router, prefix="/bot/v1")
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/bot/v1/sessions/session%201/interrupt")
+
+    assert response.status_code == 200
+    assert response.json() == {"interrupted": True}
+    assert forwarded["url"] == "http://127.0.0.1:18790/bot/v1/sessions/session%201/interrupt"
+    assert forwarded["headers"]["X-Gateway-Token"] == "gateway-secret"
+    assert forwarded["timeout"] == 30.0
+
+
+@pytest.mark.asyncio
 async def test_chat_proxy_attaches_authenticated_openviking_connection(monkeypatch):
     forwarded = {}
 
