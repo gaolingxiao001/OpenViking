@@ -104,3 +104,22 @@ export function settledApprovalCard(draft, { state, text: sent = draft.text, not
     ] },
   };
 }
+
+const NOTES = {
+  sent: 'mail reply sent',
+  cancelled: 'mail reply cancelled',
+  failed: 'mail reply not sent',
+  uncertain: 'mail reply outcome uncertain',
+};
+
+// What the model is told once the owner has answered: the text that actually
+// went out (the owner may have edited it), or that nothing did and why.
+export function approvalNote(draft, settled) {
+  return `[${NOTES[settled.state]}] ${JSON.stringify({
+    subject: draft.subject,
+    to: draft.to.map(({ name, address }) => (name ? `${name} <${address}>` : address)),
+    ...(settled.state === 'cancelled' ? {} : { text: settled.text ?? draft.text }),
+    ...(settled.edited ? { edited_by_owner: true } : {}),
+    ...(settled.note ? { note: settled.note } : {}),
+  })}`;
+}

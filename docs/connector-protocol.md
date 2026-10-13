@@ -254,8 +254,9 @@ recipients and subject (from the mail event's `data.reply`) and the draft in an
 editable input (read-only beyond 1000 characters), registered as a question
 only the owner can answer, once, within three days. On send the Core delivers
 the text the owner left there, with a key per card so it goes out at most once,
-and updates the card to sent, cancelled, not sent or uncertain. The model is
-not involved after proposing. A reply is recorded where its target is: one to
+and updates the card to sent, cancelled, not sent or uncertain. The model has no
+part in that; afterwards the Core tells it, as a line in the owner's chat, what
+actually went out (with the owner's edits) or that nothing did. A reply is recorded where its target is: one to
 a mail has no chat, and its history line is rendered from the mail's event.
 
 The Core derives the idempotency key from the decision and response events'

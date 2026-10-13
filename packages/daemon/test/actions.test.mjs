@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { EDITABLE_CHARS, approvalCard, approvedText } from '../src/actions/approval.mjs';
+import { EDITABLE_CHARS, approvalCard, approvalNote, approvedText } from '../src/actions/approval.mjs';
 import { ActionService } from '../src/actions/service.mjs';
 import { startActionApi, stopActionApi } from '../src/actions/api.mjs';
 import { createMcpHandler } from '../src/actions/mcp.mjs';
@@ -13,6 +13,7 @@ import { resolveCardAction } from '../src/card-messages.mjs';
 import { formatCognitionJournalLine } from '../src/cognition.mjs';
 import { eventMessage } from '../src/connectors/protocol.mjs';
 import { normalizeEvent } from '../src/event.mjs';
+import { Harness } from '../src/harness.mjs';
 import { formatInboundLine } from '../src/runtime-input.mjs';
 import { Store } from '../src/store.mjs';
 import { chatEvent, mailEvent, subjectEvent } from './event-fixture.mjs';
@@ -755,6 +756,8 @@ describe('owner notices and owner-only actions', () => {
 
   it('sends the approved draft as the owner left it, once, and shows the outcome on the card', async (t) => {
     const { store, call, connectors } = mailSetup(t);
+    // The owner's direct chat with the bot, where the card lands.
+    store.ingest(chatEvent({ messageId: 'om_hello12345678', eventId: 'evt-hello', chatId: 'oc_p2p12345678', senderId: OWNER.id }));
     store.ingest(mailEvent({ uid: 7 }));
     await call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: 'imap:1:7' });
     const mail = store.db.prepare("SELECT seq FROM connector_events WHERE event_id = 'imap:1:7'").get();
@@ -777,6 +780,18 @@ describe('owner notices and owner-only actions', () => {
 
     // A second press does not settle it again.
     assert.equal(store.ingest(click(store, { id: 'card-click-2' })).filterReason, 'card_already_answered_or_expired');
+
+    // The model then hears, in the owner's chat, what actually went out.
+    const input = [];
+    const harness = new Harness({ config: {}, store, logger, recordActivity() {},
+      runtime: { snapshot: () => ({ session: { connected: true }, work: { turnInProgress: false } }),
+        submit: (items) => { input.push(...items); return { accepted: true }; } } });
+    await harness.deliverNote(pressed, approvalNote(pressed.question.draft, settled));
+    assert.equal(input.length, 1);
+    assert.equal(input[0].seq, null);
+    assert.equal(input[0].text.replace(/ time=\S+/, ''), '[chat=oc_p2p12345678 source=lark msg=ca_card-click-1 event=card-click-1 '
+      + `card=${CARD} from=${OWNER.id.slice(0, 11)} reply_to=me] [mail reply sent] `
+      + '{"subject":"Re: 周四开会？","to":["alice@example.com"],"text":"周五下午三点可以，回头见","edited_by_owner":true}');
   });
 
   it('shows a draft too long for a card input read-only, and an empty edit falls back to the draft', () => {
@@ -802,6 +817,7 @@ describe('owner notices and owner-only actions', () => {
     store.ingest(declined);
     const settled = await new ActionService({ config: { maxReplyChars: 1_000 }, store, connectors, logger }).settleApproval(declined);
     assert.equal(settled.state, 'cancelled');
+    assert.equal(approvalNote(declined.question.draft, settled), '[mail reply cancelled] {"subject":"Re: 周四开会？","to":["alice@example.com"]}');
     assert.equal(connectors.calls.filter(({ connector }) => connector === 'email').length, 0);
     assert.equal(connectors.updates[0].card.header.title.content, '已取消，没有发送');
   });
