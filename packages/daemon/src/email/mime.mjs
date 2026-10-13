@@ -5,7 +5,17 @@ import { createHash } from 'node:crypto';
 // structure is parsed without decoding and each part is decoded from its own
 // bytes with its own charset.
 
+// Everything below is sender-controlled, so every piece is bounded before it
+// is decoded or reported, and every pass over it is linear: one crafted mail
+// must not stall the mailbox.
 const MAX_TEXT_CHARS = 6_000;
+// The readable text keeps 6000 characters; a part is read no further than this.
+const MAX_PART_BYTES = 256 * 1024;
+const MAX_HEADER_CHARS = 64 * 1024;
+const MAX_SUBJECT_CHARS = 300;
+const MAX_NAME_CHARS = 100;
+// RFC 5321: a path holds at most 256 octets, so an address at most 254.
+const MAX_ADDRESS_CHARS = 254;
 
 function bytes(binary) {
   return Buffer.from(binary, 'latin1');
@@ -74,7 +84,7 @@ function parseHeaders(binary) {
     const colon = line.indexOf(':');
     if (colon <= 0) continue;
     const name = line.slice(0, colon).trim().toLowerCase();
-    const value = bytes(line.slice(colon + 1)).toString('utf8').trim();
+    const value = bytes(line.slice(colon + 1, colon + 1 + MAX_HEADER_CHARS)).toString('utf8').trim();
     if (!headers.has(name)) headers.set(name, []);
     headers.get(name).push(value);
   }
@@ -171,28 +181,48 @@ export function parseAddresses(value) {
   for (const item of splitAddressList(String(value ?? '').replace(/^[^:<>"]*:(.*);\s*$/, '$1'))) {
     const angle = /<([^<>]*)>\s*$/.exec(item);
     const address = (angle ? angle[1] : item).trim().replace(/^mailto:/i, '');
-    if (!/^[^\s@<>]+@[^\s@<>]+$/.test(address)) continue;
+    if (address.length > MAX_ADDRESS_CHARS || !/^[^\s@<>]+@[^\s@<>]+$/.test(address)) continue;
     const rawName = angle ? item.slice(0, angle.index).trim() : '';
-    const name = decodeWords(rawName.replace(/^"(.*)"$/, '$1').replace(/\\(.)/g, '$1')).trim();
+    const name = decodeWords(rawName.replace(/^"(.*)"$/, '$1').replace(/\\(.)/g, '$1')).trim().slice(0, MAX_NAME_CHARS);
     result.push({ name, address: address.toLowerCase() });
   }
   return result;
 }
 
 // `<a@b>` -> `a@b`; a list of them (References) -> in order.
+// One that could not fit a header line (RFC 5322: 998 octets) is no id.
 export function messageIds(value) {
-  return [...String(value ?? '').matchAll(/<([^<>\s]+)>/g)].map((match) => match[1]);
+  return [...String(value ?? '').matchAll(/<([^<>\s]+)>/g)].map((match) => match[1]).filter((id) => id.length <= 998);
 }
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
+// Drops script, style and head blocks in one forward pass: an unclosed block
+// ends the text instead of being searched for again from every opening tag.
+function withoutBlocks(html) {
+  const lower = html.toLowerCase();
+  const opening = /<(script|style|head)\b/g;
+  let out = '';
+  let from = 0;
+  for (let match = opening.exec(lower); match; match = opening.exec(lower)) {
+    out += html.slice(from, match.index);
+    const close = lower.indexOf(`</${match[1]}`, opening.lastIndex);
+    if (close < 0) return out;
+    const end = lower.indexOf('>', close);
+    if (end < 0) return out;
+    from = end + 1;
+    opening.lastIndex = from;
+  }
+  return out + html.slice(from);
+}
+
+// A tag never spans another `<`, which keeps each pattern linear.
 export function htmlToText(html) {
-  return String(html)
-    .replace(/<(script|style|head)\b[\s\S]*?<\/\1\s*>/gi, '')
+  return withoutBlocks(String(html))
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|tr|li|h[1-6]|blockquote|table)\s*>/gi, '\n')
-    .replace(/<li\b[^>]*>/gi, '- ')
-    .replace(/<[^>]+>/g, '')
+    .replace(/<li\b[^<>]*>/gi, '- ')
+    .replace(/<[^<>]*>/g, '')
     .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name) => {
       if (name[0] === '#') {
         const code = name[1].toLowerCase() === 'x' ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
@@ -250,10 +280,11 @@ export function parseMail(raw, { maxTextChars = MAX_TEXT_CHARS } = {}) {
     || !(part.type.startsWith('text/') || part.type === 'message/delivery-status');
   const plain = parts.find((part) => part.type === 'text/plain' && !isAttachment(part));
   const html = parts.find((part) => part.type === 'text/html' && !isAttachment(part));
-  let text = plain ? decodeCharset(plain.data, plain.charset) : html ? htmlToText(decodeCharset(html.data, html.charset)) : '';
+  const read = (part) => decodeCharset(part.data.subarray(0, MAX_PART_BYTES), part.charset);
+  let text = plain ? read(plain) : html ? htmlToText(read(html)) : '';
   text = text.replace(/\r\n/g, '\n').trim();
-  const truncated = text.length > maxTextChars;
-  if (truncated) text = `${text.slice(0, maxTextChars)}\n[truncated: ${text.length - maxTextChars} more characters]`;
+  const partTooLong = (plain ?? html)?.data.length > MAX_PART_BYTES;
+  if (text.length > maxTextChars || partTooLong) text = `${text.slice(0, maxTextChars)}\n[truncated]`;
   const attachments = parts.filter(isAttachment).map((part) => ({
     name: part.filename || part.type, type: part.type, size: part.data.length,
   }));
@@ -264,7 +295,7 @@ export function parseMail(raw, { maxTextChars = MAX_TEXT_CHARS } = {}) {
     messageId: messageIds(header(headers, 'message-id'))[0] ?? null,
     inReplyTo: messageIds(header(headers, 'in-reply-to'))[0] ?? null,
     references: messageIds(headers.get('references')?.join(' ') ?? ''),
-    subject: decodeWords(header(headers, 'subject')).trim(),
+    subject: decodeWords(header(headers, 'subject')).trim().slice(0, MAX_SUBJECT_CHARS),
     from: parseAddresses(header(headers, 'from'))[0] ?? null,
     replyTo: parseAddresses(header(headers, 'reply-to')),
     to: parseAddresses(headers.get('to')?.join(', ') ?? ''),

@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { EmailClient } from '../src/email/client.mjs';
+import { EmailState } from '../src/email/state.mjs';
 import { fetchAttributes, parseResponse } from '../src/email/imap.mjs';
-import { buildReply, isOwnMessageId, parseAddresses, parseMail, replyMessageId } from '../src/email/mime.mjs';
+import { buildReply, htmlToText, isOwnMessageId, parseAddresses, parseMail, replyMessageId } from '../src/email/mime.mjs';
 import { normalizeEvent } from '../src/event.mjs';
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
@@ -21,7 +22,7 @@ function mail({ from = 'Alice <alice@example.com>', to = ME, subject = 'Thursday
 
 // A scripted IMAP server: the commands it was sent, the mailbox, and IDLE
 // sessions to wake with `deliver(raw)`.
-async function fakeImap(t, { mails = [], uidValidity = 1 } = {}) {
+async function fakeImap(t, { mails = [], uidValidity = 1, gmail = true } = {}) {
   const state = { mails: mails.map((raw, index) => ({ uid: index + 1, raw })), commands: [], idlers: new Set(), sockets: new Set() };
   const server = net.createServer((socket) => {
     state.sockets.add(socket);
@@ -55,7 +56,7 @@ async function fakeImap(t, { mails = [], uidValidity = 1 } = {}) {
           if (command.includes(`"${PASSWORD}"`)) ok();
           else socket.write(`${tag} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n`);
         } else if (command === 'CAPABILITY') {
-          socket.write('* CAPABILITY IMAP4rev1 IDLE X-GM-EXT-1\r\n');
+          socket.write(`* CAPABILITY IMAP4rev1 IDLE${gmail ? ' X-GM-EXT-1' : ''}\r\n`);
           ok();
         } else if (command.startsWith('EXAMINE ')) {
           socket.write(`* ${state.mails.length} EXISTS\r\n* OK [UIDVALIDITY ${uidValidity}] ok\r\n* OK [UIDNEXT ${uidNext}] ok\r\n`);
@@ -164,8 +165,8 @@ function plainTls(options) {
   return socket;
 }
 
-async function setup(t, { mails = [], password = PASSWORD } = {}) {
-  const imap = await fakeImap(t, { mails });
+async function setup(t, { mails = [], password = PASSWORD, gmail = true } = {}) {
+  const imap = await fakeImap(t, { mails, gmail });
   const smtp = await fakeSmtp(t);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'email-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -263,6 +264,46 @@ describe('email connector', () => {
     assert.deepEqual(second.events.map((event) => event.eventId), ['imap:1:2', 'imap:1:3']);
   });
 
+  it('reports a mail whose ids, sender or subject are too long to use as is', async (t) => {
+    const { imap, start, config } = await setup(t, { gmail: false });
+    const { events, exits } = await start();
+    const long = (length) => `${'r'.repeat(length)}@example.com`;
+    // Without a Gmail thread id, the thread comes from References.
+    imap.deliver(mail({ id: 'first@example.com', headers: [`References: <${long(1_100)}>`] }));
+    imap.deliver(mail({ id: 'second@example.com', from: `Mallory <${long(1_100)}>` }));
+    imap.deliver(mail({ id: 'third@example.com', subject: 's'.repeat(1_200_000) }));
+    imap.deliver(mail({ id: 'fourth@example.com', headers: ['References: <root@example.com>'] }));
+    await until(() => events.length === 4);
+
+    assert.deepEqual(exits, []);
+    // A thread is a fixed-size digest of its first Message-ID.
+    assert.ok(events.every((event) => /^mid:[0-9a-f]{32}$/.test(event.subject.id)));
+    assert.equal(new Set(events.map((event) => event.subject.id)).size, 4);
+    // A sender address no SMTP path can hold is no sender.
+    assert.equal(events[1].actor, null);
+    assert.equal(events[2].title.length, 300);
+    assert.ok(Math.max(...events.map((event) => JSON.stringify(event.envelope).length)) < 20_000);
+    assert.deepEqual(new EmailState(config.dataDir).cursor('INBOX'), { uidValidity: 1, lastUid: 4 });
+  });
+
+  it('passes over a mail it cannot read, and the next one still arrives', async (t) => {
+    const { imap, start, config } = await setup(t);
+    const { client, events, exits } = await start();
+    const report = client.report.bind(client);
+    client.report = (item, ...rest) => {
+      if (item.uid === 1) throw new Error('unreadable');
+      return report(item, ...rest);
+    };
+    imap.deliver(mail({ id: 'broken@example.com' }));
+    imap.deliver(mail({ id: 'fine@example.com' }));
+    await until(() => events.length === 1);
+    assert.deepEqual(exits, []);
+    assert.equal(events[0].eventId, 'imap:1:2');
+    // Not retried: the cursor is past it, and no reply headers were kept.
+    assert.deepEqual(new EmailState(config.dataDir).cursor('INBOX'), { uidValidity: 1, lastUid: 2 });
+    assert.equal(client.state.mail('mail:1:1'), null);
+  });
+
   it('fails its check on a wrong password without echoing it', async (t) => {
     const { config } = await setup(t, { password: 'wrong-password' });
     const client = new EmailClient(config, null, quiet, { connectTls: plainTls });
@@ -297,7 +338,16 @@ describe('mail parsing', () => {
       '<style>p{}</style><p>Hello&nbsp;<b>there</b></p><ul><li>one</li><li>two</li></ul>=E4=BD=A0'].join('\r\n');
     assert.equal(parseMail(Buffer.from(html)).text, 'Hello there\n- one\n- two\n你');
     const long = parseMail(Buffer.from(`Subject: x\r\n\r\n${'a'.repeat(50)}`), { maxTextChars: 10 }).text;
-    assert.equal(long, `${'a'.repeat(10)}\n[truncated: 40 more characters]`);
+    assert.equal(long, `${'a'.repeat(10)}\n[truncated]`);
+  });
+
+  it('turns hostile HTML into text in linear time', () => {
+    for (const html of ['<script>x'.repeat(30_000), '<'.repeat(256 * 1024), '<li '.repeat(60_000)]) {
+      const started = Date.now();
+      parseMail(Buffer.from(`Subject: x\r\nContent-Type: text/html\r\n\r\n${html}`));
+      assert.ok(Date.now() - started < 1_000, `took ${Date.now() - started} ms`);
+    }
+    assert.equal(htmlToText('a<script>1<b>2</script >b<style>c'), 'ab');
   });
 
   it('builds a reply that keeps one Re: and the thread', () => {

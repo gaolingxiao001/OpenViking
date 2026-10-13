@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { eventMessage } from '../connectors/protocol.mjs';
+import { safeError } from '../logger.mjs';
 import { ImapConnection } from './imap.mjs';
 import { buildReply, isOwnMessageId, parseMail, replyMessageId } from './mime.mjs';
 import { sendMail, verifySmtp } from './smtp.mjs';
@@ -16,6 +18,7 @@ const FETCH_BATCH = 10;
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 const MAX_LISTED = 10;
 const MAX_ATTACHMENTS = 20;
+const MAX_REPLY_RECIPIENTS = 20;
 
 // The account file: { address, password, imap: { host, port }, smtp: { host,
 // port, secure? }, username?, name? }. The password is a client (app) password.
@@ -73,6 +76,14 @@ export function replyRecipients(mail, own) {
 
 export function replySubject(subject) {
   return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+// A thread as a subject id: Gmail's numeric thread id, or a digest of the
+// thread's first Message-ID, which the sender controls and may make any length.
+function threadId(item, mail, fallback) {
+  if (/^\d{1,32}$/.test(item.thread ?? '')) return `gmail:${item.thread}`;
+  const root = mail.references[0] ?? mail.inReplyTo ?? mail.messageId ?? fallback;
+  return `mid:${createHash('sha256').update(root).digest('hex').slice(0, 32)}`;
 }
 
 function sleep(ms, stopped) {
@@ -189,7 +200,13 @@ export class EmailClient {
           .map((item) => ({ ...item, truncated: true })) : []),
       ].sort((left, right) => left.uid - right.uid);
       for (const item of fetched) {
-        this.report(item, cursor.uidValidity, onLine);
+        // One mail that cannot be read is passed over, never retried: the
+        // cursor moves on so the mail after it still arrives.
+        try {
+          this.report(item, cursor.uidValidity, onLine);
+        } catch (error) {
+          this.logger.warn('email_unreadable', { uid: item.uid, error: safeError(error) });
+        }
         cursor.lastUid = Math.max(cursor.lastUid, item.uid);
         this.state.saveCursor(MAILBOX, cursor);
       }
@@ -208,18 +225,11 @@ export class EmailClient {
     }
     if (item.truncated) mail.text = `[mail body not fetched: ${Math.round(item.size / 1_048_576)} MiB]`;
     const messageId = `mail:${uidValidity}:${item.uid}`;
-    this.state.remember(messageId, {
-      messageId: mail.messageId, subject: mail.subject, references: mail.references,
-      from: mail.from, replyTo: mail.replyTo, to: mail.to,
-    });
-    const threadId = item.thread
-      ? `gmail:${item.thread}`
-      : mail.references[0] ?? mail.inReplyTo ?? mail.messageId ?? messageId;
-    onLine(JSON.stringify(eventMessage('email', {
+    const line = JSON.stringify(eventMessage('email', {
       id: `imap:${uidValidity}:${item.uid}`,
       kind: mail.bulk ? 'email.list' : 'email.received',
       occurred_at: item.internalDate ?? mail.date ?? Date.now(),
-      subject: { type: 'thread', id: threadId },
+      subject: { type: 'thread', id: threadId(item, mail, messageId) },
       actor: mail.from ? { type: 'email', id: mail.from.address } : null,
       content: {
         title: mail.subject,
@@ -230,8 +240,15 @@ export class EmailClient {
       },
       message: { id: messageId, type: 'email' },
       // What a reply would look like, for the owner to check before it is sent.
-      data: { reply: { to: replyRecipients(mail, this.account.address), subject: replySubject(mail.subject) } },
-    })));
+      data: { reply: { to: replyRecipients(mail, this.account.address).slice(0, MAX_REPLY_RECIPIENTS), subject: replySubject(mail.subject) } },
+    }));
+    // The event is built and checked before the reply headers are kept, so a
+    // mail that fails leaves nothing behind.
+    this.state.remember(messageId, {
+      messageId: mail.messageId, subject: mail.subject, references: mail.references,
+      from: mail.from, replyTo: mail.replyTo, to: mail.to,
+    });
+    onLine(line);
     this.logger.info('email_reported', { uid: item.uid, bulk: mail.bulk });
   }
 
