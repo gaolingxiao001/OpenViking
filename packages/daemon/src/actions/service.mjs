@@ -5,6 +5,7 @@ import { registerCard } from '../card-messages.mjs';
 import { meetingContextLines } from '../meeting/index.mjs';
 import { OVSessionClient } from '../ov-session-context.mjs';
 import { opaqueRef, safeError } from '../logger.mjs';
+import { readMetadataTag } from '../runtime-input.mjs';
 import { resolveContent } from './content.mjs';
 import { TOOLS, publicTool, validateInput } from './tools.mjs';
 
@@ -31,6 +32,12 @@ function blocked(code, message) {
 
 function actionKey(...parts) {
   return `ld_${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 40)}`;
+}
+
+// An inbound event in an idempotency key: the same event whichever id named it,
+// and distinct per instance.
+function eventRef(row) {
+  return [row.connector_instance, row.event_id];
 }
 
 function messageLines(messages, { withChat = false } = {}) {
@@ -165,35 +172,61 @@ export class ActionService {
     return candidates[0];
   }
 
-  // Freshness fence: the decision must be an accepted inbound with nothing
-  // newer in its conversation.
-  fence(decisionMessageId, caller) {
-    const row = this.store.eventByMessageId(decisionMessageId);
-    if (!row || row.status !== 'DONE') {
-      throw blocked('unknown_decision', `Delivery blocked: decision_message_id is not an accepted daemon-authenticated inbound. ${NO_ACTION}`);
+  // The accepted inbound events an input reference names. The reference is a
+  // msg= or event= value as its tag showed it; msg= is only an alias for the
+  // event that carried it. Callers accept one match and never pick among several.
+  inputEvents(ref, instance = null) {
+    let id;
+    try { id = readMetadataTag(ref); } catch { return []; }
+    return this.store.acceptedEventsByRef(id, instance);
+  }
+
+  // Freshness fence: the decision must resolve to exactly one accepted inbound
+  // event with nothing newer accepted in its scope (the chat/thread, or the
+  // subject of a non-chat event).
+  fence(input, caller) {
+    const rows = this.inputEvents(input.decision_id, input.decision_instance ?? null);
+    if (rows.length === 0) {
+      throw blocked('unknown_decision', `Delivery blocked: decision_id is not an accepted daemon-authenticated input. ${NO_ACTION}`);
     }
-    Object.assign(caller.trace, { decisionSeq: row.seq, conversationRef: opaqueRef(row.conv_key) });
+    if (rows.length > 1) {
+      throw blocked('decision_ambiguous', `Delivery blocked: decision_id matches ${rows.length} accepted inputs. Pass that line's event= as decision_id, and its instance (or source) as decision_instance. ${NO_ACTION}`);
+    }
+    const [row] = rows;
+    Object.assign(caller.trace, { decisionSeq: row.seq, conversationRef: opaqueRef(row.scope_key) });
     caller.convKey = row.conv_key;
-    const newerSeq = this.store.newerEventSeq(row);
-    if (newerSeq !== null) {
-      caller.trace.newerSeq = newerSeq;
-      throw blocked('stale_decision', 'Delivery blocked: a newer authenticated message arrived in the same chat/thread. Reconsider with the new steered input, then use its msg= id if the action still fits.');
-    }
+    this.assertFresh(row, caller);
     return row;
   }
 
-  // Attribution is separate from freshness. An implicit target (the message
-  // replied or reacted to) counts only when its scope can be proven.
+  // Checks the event the decision first resolved to, by its own scope and seq.
+  // Looking the alias up again could land on a newer event under the same id
+  // and let a stale decision through.
+  assertFresh(decision, caller) {
+    const newerSeq = this.store.newerAcceptedSeq(decision.scope_key, decision.seq);
+    if (newerSeq !== null) {
+      caller.trace.newerSeq = newerSeq;
+      throw blocked('stale_decision', 'Delivery blocked: a newer authenticated input arrived in the same chat/thread, or about the same subject. Reconsider with the new input, then use its msg= or event= as decision_id if the action still fits.');
+    }
+  }
+
+  // Attribution is separate from freshness: a response may fulfill an earlier
+  // input in the decision's scope, never a newer one. response_to_id resolves on
+  // the decision's instance; an implicit target (the message replied or reacted
+  // to) counts only when it is one such event on the same connector.
   attribution(caller, explicit, fence, implicit = null) {
     let responseTo = fence;
-    const candidate = explicit ?? implicit;
-    if (candidate && candidate !== fence.message_id) {
-      const row = this.store.eventByMessageId(candidate);
-      if (row?.status === 'DONE' && row.conv_key && row.conv_key === fence.conv_key && row.seq <= fence.seq) {
-        responseTo = row;
-      } else if (explicit !== undefined) {
-        throw blocked('attribution_rejected', `Delivery blocked: response_to_message_id must be an accepted inbound in the same chat/thread and no newer than decision_message_id. ${NO_ACTION}`);
+    const inScope = (row) => row.scope_key === fence.scope_key && row.seq <= fence.seq;
+    if (explicit !== undefined) {
+      const rows = this.inputEvents(explicit, fence.connector_instance);
+      if (rows.length !== 1 || !inScope(rows[0])) {
+        throw blocked('attribution_rejected', `Delivery blocked: response_to_id must name one accepted input from the same chat/thread or subject, no newer than decision_id. ${NO_ACTION}`);
       }
+      [responseTo] = rows;
+    } else if (implicit && implicit.connector === fence.connector_instance) {
+      const rows = this.store.acceptedEventsByRef(implicit.messageId, fence.connector_instance)
+        .filter((row) => row.message_id === implicit.messageId);
+      if (rows.length === 1 && inScope(rows[0])) [responseTo] = rows;
     }
     caller.trace.responseSeq = responseTo.seq;
     return responseTo;
@@ -256,7 +289,7 @@ export class ActionService {
     // before the reservation, with no await in between.
     if (caller.authority) {
       this.assertAuthority(caller.authority);
-      if (fence) this.fence(fence.message_id, caller);
+      if (fence) this.assertFresh(fence, caller);
     }
     if (this.config.dryRun) return { dry_run: true };
     // A Connector that is down and restarting gets no reservation: nothing was
@@ -293,10 +326,10 @@ export class ActionService {
     return { ...result, outbox_id: reservation.id };
   }
 
-  // Scope of a target message: an inbound this daemon accepted, or one of its
-  // own deliveries.
-  messageScope(messageId) {
-    return this.store.eventByMessageId(messageId) ?? this.store.deliveredMessage(messageId);
+  // Scope of a target message on its connector: an inbound this daemon
+  // accepted, or one of its own deliveries.
+  messageScope(connector, messageId) {
+    return this.store.eventByMessageId(messageId, connector) ?? this.store.deliveredMessage(messageId, connector);
   }
 
   // Registers a delivered card against where it landed. `seen` are inbounds that
@@ -320,14 +353,14 @@ export class ActionService {
 
   async sendMessage(input, caller) {
     const connector = this.route(caller, 'message.send', 'actions', input.source, { chatId: input.chat_id });
-    const fence = this.fence(input.decision_message_id, caller);
-    const responseTo = this.attribution(caller, input.response_to_message_id, fence);
+    const fence = this.fence(input, caller);
+    const responseTo = this.attribution(caller, input.response_to_id, fence);
     const content = await this.content(input, connector, 'message.send', { chatId: input.chat_id, fence, caller });
     try {
       const result = await this.deliver({
         caller, connector, action: 'message.send',
         input: { chat_id: input.chat_id, content: content.payload },
-        key: this.key(input.idempotency_key, 'send', connector, fence.message_id, responseTo.message_id, input.chat_id, content.canonical),
+        key: this.key(input.idempotency_key, 'send', connector, eventRef(fence), eventRef(responseTo), input.chat_id, content.canonical),
         summary: content.summary,
         scope: { chatId: input.chat_id, convKey: responseTo.conv_key },
         fence,
@@ -347,16 +380,16 @@ export class ActionService {
     if (inThread && !this.manifest(connector).actions['message.reply'].thread) {
       throw blocked('unsupported', `${connector} does not support thread replies. ${NO_ACTION}`);
     }
-    const fence = this.fence(input.decision_message_id, caller);
-    const target = this.messageScope(input.message_id);
-    const responseTo = this.attribution(caller, input.response_to_message_id, fence, input.message_id);
+    const fence = this.fence(input, caller);
+    const target = this.messageScope(connector, input.message_id);
+    const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     const chatId = target?.chat_id ?? fence.chat_id;
     const content = await this.content(input, connector, 'message.reply', { chatId, fence, caller });
     try {
       const result = await this.deliver({
         caller, connector, action: 'message.reply',
         input: { message_id: input.message_id, content: content.payload, reply_in_thread: inThread },
-        key: this.key(input.idempotency_key, 'reply', connector, fence.message_id, responseTo.message_id,
+        key: this.key(input.idempotency_key, 'reply', connector, eventRef(fence), eventRef(responseTo),
           input.message_id, inThread, content.canonical),
         summary: content.summary,
         scope: { chatId, threadId: target?.thread_id ?? null, convKey: responseTo.conv_key },
@@ -364,7 +397,7 @@ export class ActionService {
         inboundSeq: responseTo.seq,
       });
       const warning = this.rememberCard(content, result, {
-        connector, chatId, seen: [this.store.eventByMessageId(input.message_id), fence],
+        connector, chatId, seen: [this.store.eventByMessageId(input.message_id, connector), fence],
         replyInThread: inThread, replyTarget: input.message_id,
       });
       if (!result.dry_run) await this.clearTemporaryReaction(fence.conv_key);
@@ -378,14 +411,14 @@ export class ActionService {
     const connector = this.route(caller, 'message.react', 'actions', input.source, { messageId: input.message_id });
     const temporary = input.temporary === true;
     if (temporary && input.emoji_type !== 'OnIt') throw blocked('invalid_input', 'temporary reactions must use the OnIt emoji');
-    const fence = this.fence(input.decision_message_id, caller);
+    const fence = this.fence(input, caller);
     if (temporary && !fence.conv_key) throw blocked('invalid_input', 'temporary reaction scope could not be verified');
-    const target = this.messageScope(input.message_id);
-    const responseTo = this.attribution(caller, input.response_to_message_id, fence, input.message_id);
+    const target = this.messageScope(connector, input.message_id);
+    const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     const result = await this.deliver({
       caller, connector, action: 'message.react',
       input: { message_id: input.message_id, emoji_type: input.emoji_type },
-      key: this.key(null, 'reaction', connector, fence.message_id, responseTo.message_id, input.message_id, input.emoji_type, temporary),
+      key: this.key(null, 'reaction', connector, eventRef(fence), eventRef(responseTo), input.message_id, input.emoji_type, temporary),
       summary: `[reaction ${input.emoji_type}]`,
       scope: { chatId: target?.chat_id ?? fence.chat_id, threadId: target?.thread_id ?? null, convKey: responseTo.conv_key },
       fence,
@@ -405,7 +438,7 @@ export class ActionService {
 
   async retractMessage(input, caller) {
     const connector = this.route(caller, 'message.retract', 'actions', input.source, { messageId: input.message_id });
-    const target = this.store.deliveredMessage(input.message_id);
+    const target = this.store.deliveredMessage(input.message_id, connector);
     const result = await this.deliver({
       caller, connector, action: 'message.retract',
       input: { message_id: input.message_id },

@@ -244,8 +244,10 @@ export class Store {
         UNIQUE(connector_instance, event_id)
       );
 
-      CREATE INDEX IF NOT EXISTS connector_events_conv_status_seq
-        ON connector_events(conv_key, status, seq);
+      CREATE INDEX IF NOT EXISTS connector_events_scope_status_seq
+        ON connector_events(scope_key, status, seq);
+      CREATE INDEX IF NOT EXISTS connector_events_event
+        ON connector_events(event_id);
       CREATE INDEX IF NOT EXISTS connector_events_received_at
         ON connector_events(received_at_ms);
       CREATE INDEX IF NOT EXISTS connector_events_chat
@@ -1673,17 +1675,32 @@ export class Store {
     this.db.prepare("UPDATE cognition_journal SET status = 'CANCELLED' WHERE dedupe_key = ?").run(`outbox:${id}`);
   }
 
-  // The newest accepted-or-ignored inbound row for a message id on any connector.
-  eventByMessageId(messageId) {
-    return this.db.prepare('SELECT * FROM connector_events WHERE message_id = ? ORDER BY seq DESC LIMIT 1')
-      .get(messageId) ?? null;
+  // The newest accepted-or-ignored inbound row for a message id on one connector.
+  // Only the message's place (chat, thread) is read from it, which every event
+  // about that message shares.
+  eventByMessageId(messageId, connector) {
+    return this.db.prepare(`SELECT * FROM connector_events WHERE connector_instance = ? AND message_id = ?
+      ORDER BY seq DESC LIMIT 1`).get(connector, messageId) ?? null;
   }
 
-  // The newest accepted inbound after `row` in its conversation, if any.
-  newerEventSeq(row) {
+  // Accepted inbound events a tool reference can name: by event id, or by the
+  // message id the event carried. One row per event, oldest first; an event
+  // matching on both ids is still one row.
+  acceptedEventsByRef(ref, instance = null) {
+    return this.db.prepare(`
+      SELECT * FROM connector_events WHERE event_id = ? AND status = 'DONE'
+      UNION
+      SELECT * FROM connector_events WHERE message_id = ? AND status = 'DONE'
+      ORDER BY seq
+    `).all(ref, ref).filter((row) => instance === null || row.connector_instance === instance);
+  }
+
+  // The newest accepted inbound received after seq in that scope, if any. Core
+  // receive order, never provider timestamps.
+  newerAcceptedSeq(scopeKey, seq) {
     const newer = this.db.prepare(`
-      SELECT MAX(seq) AS seq FROM connector_events WHERE conv_key = ? AND status = 'DONE' AND seq > ?
-    `).get(row.conv_key, row.seq);
+      SELECT MAX(seq) AS seq FROM connector_events WHERE scope_key = ? AND status = 'DONE' AND seq > ?
+    `).get(scopeKey, seq);
     return newer?.seq == null ? null : number(newer.seq);
   }
 
@@ -1712,10 +1729,10 @@ export class Store {
         WHERE +connector_instance = ? AND tenant_key IS NOT NULL ORDER BY seq DESC LIMIT 1`).get(connector)?.tenant_key ?? null };
   }
 
-  // Scope of a message this bot delivered (for replies/reactions to it).
-  deliveredMessage(messageId) {
+  // Scope of a message this bot delivered on a connector (for replies/reactions to it).
+  deliveredMessage(messageId, connector) {
     return this.db.prepare(`SELECT connector, chat_id, conv_key FROM outbox
-      WHERE remote_message_id = ? ORDER BY id DESC LIMIT 1`).get(messageId) ?? null;
+      WHERE remote_message_id = ? AND connector = ? ORDER BY id DESC LIMIT 1`).get(messageId, connector) ?? null;
   }
 
   // Cross-chat history injected into a fresh thread's first turn. DONE rows include

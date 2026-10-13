@@ -1,6 +1,6 @@
 # Lark 消息格式
 
-`send_message` / `reply_message` 在飞书上支持 Markdown、图片/文件附件、原始卡片与标准单选卡片（微信只支持 Markdown 文本和 `file_path`）。每次调用只能提供一种正文；daemon 统一做 decision_message_id 新鲜度、runtime authority、幂等和 outbox 投递账本检查。
+`send_message` / `reply_message` 在飞书上支持 Markdown、图片/文件附件、原始卡片与标准单选卡片（微信只支持 Markdown 文本和 `file_path`）。每次调用只能提供一种正文；daemon 统一做 decision_id 新鲜度、runtime authority、幂等和 outbox 投递账本检查。
 
 ## 发送 Markdown、图片与文件
 
@@ -13,7 +13,7 @@
 ```json
 {
   "message_id": "<真实 om_ 消息 ID>",
-  "decision_message_id": "<最新入站 msg= ID>",
+  "decision_id": "<最新入站 msg= 或 event= ID>",
   "reply_in_thread": true,
   "file_path": "reports/result.pdf"
 }
@@ -30,7 +30,7 @@
 ```json
 {
   "message_id": "<真实 om_ 消息 ID>",
-  "decision_message_id": "<最新入站 msg= ID>",
+  "decision_id": "<最新入站 msg= 或 event= ID>",
   "reply_in_thread": true,
   "choices": {
     "prompt": "请选择实现方案",
@@ -48,10 +48,10 @@
 发送后立即返回，Agent 应结束本轮、等待新输入，不能轮询或假装已经得到回答。收到的形状：
 
 ```
-[chat=... thread=... msg=ca_... card=om_... time=... from=... reply_to=me] [card answer] {"question":"...","key":"complete","label":"完整实现"}
+[chat=... thread=... msg=ca_... event=... card=om_... time=... from=... reply_to=me] [card answer] {"question":"...","key":"complete","label":"完整实现"}
 ```
 
-`ca_` 是 daemon 内部决策 ID，只能用于 `decision_message_id` / `response_to_message_id`；回复、reaction 使用 `card=` 中的真实 `om_`。卡片路由绑定发送时的群和话题，回调 token 不进入 Agent 或投递日志。只处理通过这套可信工具发送并登记过的卡片回调；直接 shell/其他应用发出的卡片不具有这份登记。
+`ca_` 是 daemon 内部决策 ID，只能用于 `decision_id` / `response_to_id`；回复、reaction 使用 `card=` 中的真实 `om_`。卡片路由绑定发送时的群和话题，回调 token 不进入 Agent 或投递日志。只处理通过这套可信工具发送并登记过的卡片回调；直接 shell/其他应用发出的卡片不具有这份登记。
 
 ## 接收卡片、图片和文件
 

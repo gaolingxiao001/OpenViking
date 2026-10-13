@@ -18,7 +18,7 @@ export const CONTENT_PROPERTIES = {
         label: { type: 'string', minLength: 1, maxLength: 100 },
       },
     } },
-    answerer_id: { type: 'string', pattern: '^ou_[A-Za-z0-9_-]{8,}$', description: 'Optional user allowed to answer. Defaults to the author of decision_message_id.' },
+    answerer_id: { type: 'string', pattern: '^ou_[A-Za-z0-9_-]{8,}$', description: 'Optional user allowed to answer. Defaults to the author of decision_id.' },
     timeout_seconds: { type: 'integer', minimum: 30, maximum: 86400, default: 600 },
   } },
 };

@@ -18,7 +18,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
 
       const delivered = env.codexInput();
       assert.equal(delivered.length, 1);
-      assert.match(delivered[0].text, /\[chat=oc-e2e source=lark msg=om-e2e time=.* from=ou-e2e\] 请回复我/);
+      assert.match(delivered[0].text, /\[chat=oc-e2e source=lark msg=om-e2e event=evt-om-e2e time=.* from=ou-e2e\] 请回复我/);
 
       assert.equal(env.daemon.store.stats().inbound.DONE, 1);
       // No outbox rows are ever created in steer mode.

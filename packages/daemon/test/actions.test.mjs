@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { ActionService } from '../src/actions/service.mjs';
 import { startActionApi, stopActionApi } from '../src/actions/api.mjs';
 import { createMcpHandler } from '../src/actions/mcp.mjs';
+import { formatInboundLine } from '../src/runtime-input.mjs';
 import { Store } from '../src/store.mjs';
-import { chatEvent } from './event-fixture.mjs';
+import { chatEvent, subjectEvent } from './event-fixture.mjs';
 import { fakeConnectors } from './action-fixture.mjs';
 
 const TOKEN = 'runtime-token';
@@ -52,10 +53,10 @@ describe('agent tools', () => {
   it('validates input against the tool schema before any connector call', async (t) => {
     const { call, connectors, inbound } = setup(t);
     inbound({ messageId: 'om_a' });
-    await assert.rejects(() => call('send_message', { chat_id: 'oc_chat12345678', text: 'legacy', decision_message_id: 'om_a' }), /unknown field: text/);
-    await assert.rejects(() => call('send_message', { chat_id: 'oc_chat12345678', markdown: 'x' }), /decision_message_id is required/);
-    await assert.rejects(() => call('react_to_message', { message_id: 'om_a', emoji_type: '1bad', decision_message_id: 'om_a' }), /emoji_type has an invalid format/);
-    await assert.rejects(() => call('send_message', { chat_id: 'oc_chat12345678', decision_message_id: 'om_a' }), /message body is required/);
+    await assert.rejects(() => call('send_message', { chat_id: 'oc_chat12345678', text: 'legacy', decision_id: 'om_a' }), /unknown field: text/);
+    await assert.rejects(() => call('send_message', { chat_id: 'oc_chat12345678', markdown: 'x' }), /decision_id is required/);
+    await assert.rejects(() => call('react_to_message', { message_id: 'om_a', emoji_type: '1bad', decision_id: 'om_a' }), /emoji_type has an invalid format/);
+    await assert.rejects(() => call('send_message', { chat_id: 'oc_chat12345678', decision_id: 'om_a' }), /message body is required/);
     await assert.rejects(() => call('no_such_tool', {}), /unknown tool/);
     assert.equal(connectors.calls.length, 0);
   });
@@ -66,7 +67,7 @@ describe('agent tools', () => {
     store.initializeCognition('claude', 'new-owner');
     await assert.rejects(() => call('list_chats', {}), /no longer owns/);
     await assert.rejects(() => call('send_message', {
-      chat_id: 'oc-chat', markdown: 'late', decision_message_id: 'om_decision123456',
+      chat_id: 'oc-chat', markdown: 'late', decision_id: 'om_decision123456',
     }), /no longer owns/);
     assert.equal(connectors.calls.length, 0);
   });
@@ -78,23 +79,23 @@ describe('agent tools', () => {
     const latest = inbound({ messageId: 'om_latestDecision', chatId: 'oc_steer12345678' });
     inbound({ messageId: 'om_otherScope1234', chatId: 'oc_other12345678' });
 
-    await call('send_message', { chat_id: 'oc_steer12345678', markdown: 'fast answer B', decision_message_id: 'om_latestDecision' });
+    await call('send_message', { chat_id: 'oc_steer12345678', markdown: 'fast answer B', decision_id: 'om_latestDecision' });
     await call('send_message', { chat_id: 'oc_steer12345678', markdown: 'finished answer A',
-      decision_message_id: 'om_latestDecision', response_to_message_id: 'om_olderDecision1' });
-    await call('reply_message', { message_id: 'om_otherOlder1234', markdown: 'answer A2', decision_message_id: 'om_latestDecision' });
+      decision_id: 'om_latestDecision', response_to_id: 'om_olderDecision1' });
+    await call('reply_message', { message_id: 'om_otherOlder1234', markdown: 'answer A2', decision_id: 'om_latestDecision' });
     assert.deepEqual(
       store.db.prepare('SELECT inbound_seq FROM outbox ORDER BY id').all().map((row) => row.inbound_seq),
       [latest.seq, older.seq, olderTwo.seq],
     );
 
     await assert.rejects(() => call('send_message', { chat_id: 'oc_steer12345678', markdown: 'cross scope',
-      decision_message_id: 'om_latestDecision', response_to_message_id: 'om_otherScope1234' }), /same chat\/thread and no newer/);
+      decision_id: 'om_latestDecision', response_to_id: 'om_otherScope1234' }), /same chat\/thread or subject, no newer/);
     await assert.rejects(() => call('send_message', { chat_id: 'oc_steer12345678', markdown: 'future',
-      decision_message_id: 'om_olderDecision1', response_to_message_id: 'om_latestDecision' }), /newer authenticated message/);
+      decision_id: 'om_olderDecision1', response_to_id: 'om_latestDecision' }), /newer authenticated input/);
     await assert.rejects(() => call('send_message', { chat_id: 'oc_steer12345678', markdown: 'stale',
-      decision_message_id: 'om_olderDecision1' }), /newer authenticated message/);
+      decision_id: 'om_olderDecision1' }), /newer authenticated input/);
     await assert.rejects(() => call('send_message', { chat_id: 'oc_steer12345678', markdown: 'unknown',
-      decision_message_id: 'om_neverReceived1' }), /not an accepted daemon-authenticated inbound/);
+      decision_id: 'om_neverReceived1' }), /not an accepted daemon-authenticated input/);
     assert.equal(connectors.calls.length, 3, 'invalid attribution and stale fences stop before the connector');
 
     // Each call leaves one agent_tool line; refusals carry the seqs that explain them.
@@ -120,7 +121,7 @@ describe('agent tools', () => {
   it('reserves every delivery in the outbox and journal; a repeat returns the earlier result', async (t) => {
     const { store, call, connectors, inbound } = setup(t);
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
-    const input = { chat_id: 'oc_chat12345678', markdown: 'hello', decision_message_id: 'om_decision123456' };
+    const input = { chat_id: 'oc_chat12345678', markdown: 'hello', decision_id: 'om_decision123456' };
     const first = await call('send_message', input);
     assert.match(first.text, /^Delivered message to chat_id=oc_chat12345678\. message_id=om_delivered123456/);
     const [{ connector, action, input: sent }] = connectors.calls;
@@ -155,9 +156,9 @@ describe('agent tools', () => {
     const { store, call, connectors, inbound } = setup(t, { ids: ['lark', 'weixin'], run });
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
     inbound({ source: 'weixin', messageId: 'wx_peer_1', chatId: 'peer@im.wechat', chatType: 'p2p' });
-    const send = { chat_id: 'oc_chat12345678', markdown: 'once', decision_message_id: 'om_decision123456' };
-    const react = { message_id: 'om_decision123456', emoji_type: 'OK', decision_message_id: 'om_decision123456' };
-    const weixin = { message_id: 'wx_peer_1', markdown: 'hi', decision_message_id: 'wx_peer_1' };
+    const send = { chat_id: 'oc_chat12345678', markdown: 'once', decision_id: 'om_decision123456' };
+    const react = { message_id: 'om_decision123456', emoji_type: 'OK', decision_id: 'om_decision123456' };
+    const weixin = { message_id: 'wx_peer_1', markdown: 'hi', decision_id: 'wx_peer_1' };
     for (const [tool, input] of [['send_message', send], ['react_to_message', react], ['reply_message', weixin]]) {
       await assert.rejects(() => call(tool, input), /timed out/);
     }
@@ -180,25 +181,25 @@ describe('agent tools', () => {
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
     inbound({ source: 'weixin', messageId: 'wx_peer_1', chatId: 'peer@im.wechat', chatType: 'p2p' });
 
-    await call('reply_message', { message_id: 'wx_peer_1', markdown: 'hi', decision_message_id: 'wx_peer_1' });
-    await call('reply_message', { message_id: 'om_decision123456', markdown: 'hi', decision_message_id: 'om_decision123456' });
+    await call('reply_message', { message_id: 'wx_peer_1', markdown: 'hi', decision_id: 'wx_peer_1' });
+    await call('reply_message', { message_id: 'om_decision123456', markdown: 'hi', decision_id: 'om_decision123456' });
     await call('list_chats', {});
     assert.deepEqual(connectors.calls.map((item) => [item.connector, item.action]), [
       ['weixin', 'message.reply'], ['lark', 'message.reply'], ['lark', 'chat.list'],
     ]);
 
-    await assert.rejects(() => call('react_to_message', { message_id: 'wx_peer_1', emoji_type: 'OK', decision_message_id: 'wx_peer_1' }),
+    await assert.rejects(() => call('react_to_message', { message_id: 'wx_peer_1', emoji_type: 'OK', decision_id: 'wx_peer_1' }),
       /weixin does not support message.react/);
-    await assert.rejects(() => call('send_message', { chat_id: 'oc_neverSeen1234', markdown: 'x', decision_message_id: 'om_decision123456' }),
+    await assert.rejects(() => call('send_message', { chat_id: 'oc_neverSeen1234', markdown: 'x', decision_id: 'om_decision123456' }),
       /pass source \(one of: lark, weixin\)/);
-    await call('send_message', { source: 'lark', chat_id: 'oc_neverSeen1234', markdown: 'x', decision_message_id: 'om_decision123456' });
+    await call('send_message', { source: 'lark', chat_id: 'oc_neverSeen1234', markdown: 'x', decision_id: 'om_decision123456' });
     assert.equal(connectors.calls.at(-1).connector, 'lark');
   });
 
   it('checks message content against the connector manifest', async (t) => {
     const { call, connectors, inbound } = setup(t, { ids: ['weixin'] });
     inbound({ source: 'weixin', messageId: 'wx_peer_1', chatId: 'peer@im.wechat', chatType: 'p2p' });
-    const base = { message_id: 'wx_peer_1', decision_message_id: 'wx_peer_1' };
+    const base = { message_id: 'wx_peer_1', decision_id: 'wx_peer_1' };
     await assert.rejects(() => call('reply_message', { ...base, card: { elements: [] } }), /weixin cannot send card messages/);
     await assert.rejects(() => call('reply_message', { ...base, markdown: 'x', mention_user_ids: ['ou_someone12345'] }),
       /mentions are not supported/);
@@ -214,7 +215,7 @@ describe('agent tools', () => {
     } });
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
     fs.writeFileSync(path.join(workspace, 'chart.png'), 'png bytes');
-    await call('send_message', { chat_id: 'oc_chat12345678', file_path: 'chart.png', decision_message_id: 'om_decision123456' });
+    await call('send_message', { chat_id: 'oc_chat12345678', file_path: 'chart.png', decision_id: 'om_decision123456' });
     assert.equal(seen.type, 'file');
     assert.equal(seen.name, 'chart.png');
     assert.equal(seen.bytes, 'png bytes');
@@ -232,7 +233,7 @@ describe('agent tools', () => {
     inbound({ messageId: 'om_target12345678', chatId: 'oc_decision123456' });
     inbound({ messageId: 'om_decision123456', chatId: 'oc_decision123456' });
     await call('reply_message', { message_id: 'om_target12345678', markdown: '@Alice please check',
-      mention_names: ['Alice'], mention_user_ids: ['ou_bob1234567890'], decision_message_id: 'om_decision123456' });
+      mention_names: ['Alice'], mention_user_ids: ['ou_bob1234567890'], decision_id: 'om_decision123456' });
     assert.deepEqual(lookups, ['oc_decision123456']);
     assert.deepEqual(connectors.calls[0].input.content.mentions, [
       { id: 'ou_bob1234567890' }, { name: 'Alice', id: 'ou_alice12345678' },
@@ -248,13 +249,13 @@ describe('agent tools', () => {
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
 
     const stale = call('send_message', { chat_id: 'oc_chat12345678', markdown: '@Alice hi',
-      mention_names: ['Alice'], decision_message_id: 'om_decision123456' });
+      mention_names: ['Alice'], decision_id: 'om_decision123456' });
     inbound({ messageId: 'om_newer123456789', chatId: 'oc_chat12345678' });
     finishLookup();
     await assert.rejects(stale, (error) => error.code === 'stale_decision');
 
     const revoked = call('reply_message', { message_id: 'om_newer123456789', markdown: '@Alice hi',
-      mention_names: ['Alice'], decision_message_id: 'om_newer123456789' });
+      mention_names: ['Alice'], decision_id: 'om_newer123456789' });
     store.initializeCognition('claude', 'new-owner');
     finishLookup();
     await assert.rejects(revoked, (error) => error.code === 'authority_revoked');
@@ -269,7 +270,7 @@ describe('agent tools', () => {
     connectors.available = (id) => id !== 'weixin' || weixinUp;
     store.ingest(chatEvent({ source: 'weixin', messageId: 'wx-decision-0001', chatId: 'wx-peer' }));
     const reply = () => call('reply_message', { message_id: 'wx-decision-0001', markdown: '收到',
-      decision_message_id: 'wx-decision-0001' });
+      decision_id: 'wx-decision-0001' });
 
     await assert.rejects(reply(), (error) => error.code === 'connector_unavailable'
       && /weixin connector is temporarily unavailable.*No action was taken/.test(error.message));
@@ -294,13 +295,13 @@ describe('agent tools', () => {
     const { store, service, call, connectors, inbound } = setup(t, { run });
     inbound({ messageId: 'om_scopeA12345678', chatId: 'oc_scopeA12345678' });
     inbound({ messageId: 'om_scopeB12345678', chatId: 'oc_scopeB12345678' });
-    await call('react_to_message', { message_id: 'om_scopeA12345678', emoji_type: 'OnIt', temporary: true, decision_message_id: 'om_scopeA12345678' });
+    await call('react_to_message', { message_id: 'om_scopeA12345678', emoji_type: 'OnIt', temporary: true, decision_id: 'om_scopeA12345678' });
     assert.equal(service.temporaryReactions.size, 1);
 
-    await call('send_message', { chat_id: 'oc_scopeB12345678', markdown: 'other scope', decision_message_id: 'om_scopeB12345678' });
+    await call('send_message', { chat_id: 'oc_scopeB12345678', markdown: 'other scope', decision_id: 'om_scopeB12345678' });
     assert.equal(service.temporaryReactions.size, 1, 'a delivery elsewhere must not clear it');
 
-    await call('react_to_message', { message_id: 'om_scopeA12345678', emoji_type: 'OK', decision_message_id: 'om_scopeA12345678' });
+    await call('react_to_message', { message_id: 'om_scopeA12345678', emoji_type: 'OK', decision_id: 'om_scopeA12345678' });
     assert.equal(service.temporaryReactions.size, 0);
     const deletion = connectors.calls.find((item) => item.action === 'message.reaction.delete');
     assert.deepEqual(deletion.input, { message_id: 'om_scopeA12345678', reaction_id: 'reaction_1' });
@@ -308,7 +309,7 @@ describe('agent tools', () => {
       ['other scope', '[reaction OK]'], 'the cleared working reaction leaves the observable history');
 
     await assert.rejects(() => call('react_to_message', { message_id: 'om_scopeA12345678', emoji_type: 'OK', temporary: true,
-      decision_message_id: 'om_scopeA12345678' }), /must use the OnIt emoji/);
+      decision_id: 'om_scopeA12345678' }), /must use the OnIt emoji/);
   });
 
   it('never reports a final delivery as failed because working reaction cleanup failed', async (t) => {
@@ -318,8 +319,8 @@ describe('agent tools', () => {
     };
     const { service, call, inbound } = setup(t, { run });
     inbound({ messageId: 'om_cleanup1234567', chatId: 'oc_cleanup1234567' });
-    await call('react_to_message', { message_id: 'om_cleanup1234567', emoji_type: 'OnIt', temporary: true, decision_message_id: 'om_cleanup1234567' });
-    const sent = await call('send_message', { chat_id: 'oc_cleanup1234567', markdown: 'finished', decision_message_id: 'om_cleanup1234567' });
+    await call('react_to_message', { message_id: 'om_cleanup1234567', emoji_type: 'OnIt', temporary: true, decision_id: 'om_cleanup1234567' });
+    const sent = await call('send_message', { chat_id: 'oc_cleanup1234567', markdown: 'finished', decision_id: 'om_cleanup1234567' });
     assert.equal(sent.data.message_id, 'om_delivered123456');
     assert.equal(service.temporaryReactions.size, 0);
   });
@@ -328,7 +329,7 @@ describe('agent tools', () => {
     let touches = 0;
     const { service, call, inbound } = setup(t, { liveness: { touch() { touches += 1; } } });
     const event = inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
-    await call('react_to_message', { message_id: 'om_decision123456', emoji_type: 'OK', decision_message_id: 'om_decision123456' });
+    await call('react_to_message', { message_id: 'om_decision123456', emoji_type: 'OK', decision_id: 'om_decision123456' });
     await service.replyToEvent(event, 'notice', 'failure-notice');
     assert.equal(touches, 2);
   });
@@ -350,7 +351,7 @@ describe('agent tools', () => {
     const { store, service, call, connectors, inbound } = setup(t);
     service.config.dryRun = true;
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
-    const result = await call('send_message', { chat_id: 'oc_chat12345678', markdown: 'x', decision_message_id: 'om_decision123456' });
+    const result = await call('send_message', { chat_id: 'oc_chat12345678', markdown: 'x', decision_id: 'om_decision123456' });
     assert.match(result.text, /Dry run only/);
     assert.equal(connectors.calls.length, 0);
     assert.deepEqual(store.stats().outbox, {});
@@ -417,7 +418,7 @@ describe('agent tool front-ends', () => {
     assert.ok(listed.result.tools.every((tool) => !('action' in tool)));
 
     const sent = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'send_message',
-      arguments: { chat_id: 'oc_chat12345678', markdown: 'hi', decision_message_id: 'om_decision123456' } } });
+      arguments: { chat_id: 'oc_chat12345678', markdown: 'hi', decision_id: 'om_decision123456' } } });
     assert.match(sent.result.content[0].text, /Delivered message/);
     assert.equal(sent.result.structuredContent.message_id, 'om_delivered123456');
 
@@ -426,9 +427,9 @@ describe('agent tool front-ends', () => {
     assert.deepEqual(media.result.content[1], { type: 'image', data: Buffer.from('png').toString('base64'), mimeType: 'image/png' });
 
     const stale = await handle({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'send_message',
-      arguments: { chat_id: 'oc_chat12345678', markdown: 'hi', decision_message_id: 'om_unknown123456' } } });
+      arguments: { chat_id: 'oc_chat12345678', markdown: 'hi', decision_id: 'om_unknown123456' } } });
     assert.equal(stale.result.isError, true);
-    assert.match(stale.result.content[0].text, /not an accepted daemon-authenticated inbound/);
+    assert.match(stale.result.content[0].text, /not an accepted daemon-authenticated input/);
 
     const retired = createMcpHandler({ socketPath, authority: 'retired', client: 'mcp' });
     const fenced = await retired({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'list_chats', arguments: {} } });
@@ -453,16 +454,16 @@ describe('agent tool front-ends', () => {
     });
 
     const sent = await run(['reply_message'], JSON.stringify({
-      message_id: 'om_decision123456', markdown: 'it\'s "quoted"\nand multi-line', decision_message_id: 'om_decision123456',
+      message_id: 'om_decision123456', markdown: 'it\'s "quoted"\nand multi-line', decision_id: 'om_decision123456',
     }));
     assert.equal(sent.code, 0, sent.stderr);
     assert.match(sent.stdout, /^Delivered reply to message_id=om_decision123456/);
     assert.equal(connectors.calls[0].input.content.text, 'it\'s "quoted"\nand multi-line');
     assert.equal(logs.find((line) => line.message === 'agent_tool').via, 'cli');
 
-    const failed = await run(['send_message', '{"chat_id":"oc_chat12345678","markdown":"x","decision_message_id":"om_missing12345"}']);
+    const failed = await run(['send_message', '{"chat_id":"oc_chat12345678","markdown":"x","decision_id":"om_missing12345"}']);
     assert.equal(failed.code, 1);
-    assert.match(failed.stderr, /not an accepted daemon-authenticated inbound/);
+    assert.match(failed.stderr, /not an accepted daemon-authenticated input/);
 
     const listed = await run(['--list']);
     assert.match(listed.stdout, /^send_message: /m);
@@ -477,18 +478,133 @@ describe('agent tool front-ends', () => {
   });
 });
 
-it('finds decisions and reply targets by message id through an index', (t) => {
+it('finds decisions, reply targets and newer inputs through indexes', (t) => {
   const { store } = setup(t);
   const plans = [];
   const prepare = store.db.prepare.bind(store.db);
   store.db.prepare = (sql) => {
-    if (/FROM connector_events WHERE message_id = \?/.test(sql)) plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => row.detail).join(' '));
+    if (/FROM connector_events/.test(sql)) plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => row.detail).join(' '));
     return prepare(sql);
   };
   // An id that is not an inbound (a reply to the bot's own message) used to
   // scan the whole event history before falling through to the outbox.
-  store.eventByMessageId('om_unknown12345678');
+  store.acceptedEventsByRef('om_unknown12345678');
+  store.eventByMessageId('om_unknown12345678', 'lark');
   store.connectorForMessage('om_unknown12345678');
-  assert.equal(plans.length, 2);
-  for (const plan of plans) assert.match(plan, /USING INDEX connector_events_message_seq/);
+  store.newerAcceptedSeq('["lark","issue","owner/repo#1"]', 1);
+  assert.equal(plans.length, 4);
+  assert.match(plans[0], /USING INDEX connector_events_event .*USING INDEX connector_events_message_seq/);
+  assert.match(plans[1], /USING INDEX connector_events_message \(connector_instance=\? AND message_id=\?\)/);
+  assert.match(plans[2], /USING INDEX connector_events_message_seq/);
+  assert.match(plans[3], /USING COVERING INDEX connector_events_scope_status_seq/);
+});
+
+// A decision names one accepted inbound event, by its event= or by the msg= it
+// carried. Freshness, attribution and idempotency all follow that event.
+describe('decision references', () => {
+  const send = (call, decision, extra = {}) => call('send_message', {
+    chat_id: 'oc_notify12345678', markdown: '会议 10 分钟后开始', decision_id: decision, ...extra,
+  });
+  const outbox = (store) => store.db.prepare('SELECT inbound_seq FROM outbox ORDER BY id').all().map((row) => row.inbound_seq);
+
+  it('acts on a non-chat event by the event= value its line shows, special characters included', async (t) => {
+    const { store, call, connectors } = setup(t);
+    const event = subjectEvent({ source: 'github', eventId: 'owner/repo#123 comment 50%', kind: 'issue.commented',
+      subjectType: 'issue', subjectId: 'owner/repo#123' });
+    const { seq } = store.ingest(event).inbound;
+    const shown = /event=(\S+)/.exec(formatInboundLine(event))[1];
+    assert.equal(shown, 'owner/repo#123%20comment%2050%25');
+
+    await send(call, shown);
+    assert.deepEqual(outbox(store), [seq]);
+    // No line ever shows the raw id: a space cannot survive inside a tag.
+    await assert.rejects(send(call, 'owner/repo#123 comment 50%'), /decision_id has an invalid format/);
+    assert.equal(connectors.calls.length, 1);
+  });
+
+  it('fences a non-chat decision by its subject and lets the newest one fulfil an earlier request there', async (t) => {
+    const { store, call, connectors } = setup(t);
+    const issue = (eventId, subjectId) => subjectEvent({ source: 'github', eventId, kind: 'issue.updated',
+      subjectType: 'issue', subjectId });
+    const opened = store.ingest(issue('issue-1-opened', 'owner/repo#1')).inbound;
+    store.ingest(issue('issue-2-opened', 'owner/repo#2'));
+    // Another subject is another scope.
+    await send(call, 'issue-1-opened');
+
+    store.ingest(issue('issue-1-commented', 'owner/repo#1'));
+    await assert.rejects(send(call, 'issue-1-opened', { markdown: 'late' }), (error) => error.code === 'stale_decision');
+    // A new comment does not cancel the request before it.
+    await send(call, 'issue-1-commented', { markdown: 'done', response_to_id: 'issue-1-opened' });
+    await assert.rejects(send(call, 'issue-1-opened', { markdown: 'future', response_to_id: 'issue-1-commented' }),
+      (error) => error.code === 'stale_decision');
+    assert.deepEqual(outbox(store), [opened.seq, opened.seq]);
+    assert.equal(connectors.calls.length, 2);
+  });
+
+  it('refuses an id that names several events instead of taking the newest', async (t) => {
+    const { store, call, connectors } = setup(t);
+    // One instance: an event id that is another event's message id.
+    const chat = store.ingest(chatEvent({ messageId: 'om_shared12345678', eventId: 'evt-chat-1', chatId: 'oc_a12345678' })).inbound;
+    store.ingest(subjectEvent({ source: 'lark', eventId: 'om_shared12345678', subjectType: 'doc', subjectId: 'doc-1' }));
+    // One message, two events: the original and an edit.
+    const created = store.ingest(chatEvent({ messageId: 'om_twice123456789', eventId: 'evt-created', chatId: 'oc_b12345678' })).inbound;
+    store.ingest(chatEvent({ messageId: 'om_twice123456789', eventId: 'evt-edited', chatId: 'oc_b12345678',
+      kind: 'message.updated' }));
+    // Two instances of one source, each with its own reminder-1.
+    store.ingest(subjectEvent({ instance: 'calendar-personal', eventId: 'reminder-1' }));
+    const work = store.ingest(subjectEvent({ instance: 'calendar-work', eventId: 'reminder-1' })).inbound;
+
+    for (const [id, instance] of [['om_shared12345678'], ['om_shared12345678', 'lark'], ['om_twice123456789'], ['reminder-1']]) {
+      await assert.rejects(send(call, id, instance ? { decision_instance: instance } : {}),
+        (error) => error.code === 'decision_ambiguous' && /event=/.test(error.message));
+    }
+    await assert.rejects(send(call, 'evt-edited', { response_to_id: 'om_twice123456789' }),
+      (error) => error.code === 'attribution_rejected');
+    assert.equal(connectors.calls.length, 0);
+
+    // The line's event=, plus the instance where instances repeat an id, names one.
+    await send(call, 'evt-chat-1');
+    await send(call, 'evt-edited', { response_to_id: 'evt-created' });
+    await assert.rejects(send(call, 'evt-created', { markdown: 'stale' }), (error) => error.code === 'stale_decision');
+    await send(call, 'reminder-1', { decision_instance: 'calendar-work' });
+    assert.deepEqual(outbox(store), [chat.seq, created.seq, work.seq]);
+    assert.equal(connectors.calls.length, 3);
+  });
+
+  it('keys a delivery by the event, whichever id named it', async (t) => {
+    const { store, call, connectors } = setup(t);
+    store.ingest(chatEvent({ messageId: 'om_alias12345678', eventId: 'evt-alias', chatId: 'oc_notify12345678' }));
+    await send(call, 'om_alias12345678');
+    assert.equal((await send(call, 'evt-alias')).data.duplicate, true);
+
+    // The same reminder text for two events, or for one event id on two
+    // instances, is a separate delivery each time.
+    store.ingest(subjectEvent({ eventId: 'reminder-1', subjectId: 'evt_1' }));
+    store.ingest(subjectEvent({ eventId: 'reminder-2', subjectId: 'evt_2' }));
+    store.ingest(subjectEvent({ instance: 'calendar-work', eventId: 'reminder-1', subjectId: 'evt_1' }));
+    for (const [id, instance] of [['reminder-1', 'calendar'], ['reminder-2', 'calendar'], ['reminder-1', 'calendar-work']]) {
+      assert.equal((await send(call, id, { decision_instance: instance })).data.duplicate, undefined);
+    }
+    assert.equal(connectors.calls.length, 4);
+    assert.equal(new Set(connectors.calls.map((entry) => entry.input.idempotency_key)).size, 4);
+  });
+
+  it('re-checks the event it resolved, not its alias, after an awaited preparation', async (t) => {
+    let finishLookup = null;
+    const roster = { resolveNames: (_chatId, names) => new Promise((resolve) => {
+      finishLookup = () => resolve(names.map((name) => ({ name, id: 'ou_alice12345678' })));
+    }) };
+    const { store, call, connectors, inbound } = setup(t, { roster });
+    inbound({ messageId: 'om_racing12345678', eventId: 'evt-first', chatId: 'oc_chat12345678' });
+
+    const pending = call('send_message', { chat_id: 'oc_chat12345678', markdown: '@Alice hi',
+      mention_names: ['Alice'], decision_id: 'om_racing12345678' });
+    // The same message comes back as a new event while the lookup awaits. Its
+    // alias now names that newer event; the decision is still the first one.
+    inbound({ messageId: 'om_racing12345678', eventId: 'evt-second', chatId: 'oc_chat12345678', kind: 'message.updated' });
+    finishLookup();
+    await assert.rejects(pending, (error) => error.code === 'stale_decision');
+    assert.equal(connectors.calls.length, 0);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n, 0);
+  });
 });
