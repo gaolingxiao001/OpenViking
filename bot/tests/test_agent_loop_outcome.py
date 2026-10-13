@@ -464,7 +464,7 @@ async def test_agent_loop_interrupt_queued_turn_saves_user_without_calling_provi
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_interrupt_queued_turns_use_one_interrupt_per_pending_message(make_loop):
+async def test_agent_loop_interrupt_queued_turns_marks_all_current_pending_messages(make_loop):
     bus = MessageBus()
     provider = _RecordingProvider()
     loop = make_loop(bus=bus, provider=provider)
@@ -478,18 +478,24 @@ async def test_agent_loop_interrupt_queued_turns_use_one_interrupt_per_pending_m
     )
 
     assert await loop.interrupt(session_key) is True
+    await bus.publish_inbound(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="third queued")
+    )
 
     run_task = asyncio.create_task(loop.run())
     try:
-        interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
-        assert interrupted.content == ""
+        first_interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
+        second_interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
         response = await _consume_outbound_event(bus, OutboundEventType.RESPONSE)
 
         session = loop.sessions.get_or_create(session_key)
+        assert first_interrupted.content == ""
+        assert second_interrupted.content == ""
         assert response.content == "ok"
         assert [message["content"] for message in session.messages] == [
             "first queued",
             "second queued",
+            "third queued",
             "ok",
         ]
         assert len(provider.calls) == 1

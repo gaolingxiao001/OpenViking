@@ -1173,7 +1173,7 @@ class AgentLoop:
         pending_count = self.bus.count_pending_inbound_session(session_key)
         queued_interrupts = self._queued_interrupt_counts.get(session_key, 0)
         if queued_interrupts < pending_count:
-            self._queued_interrupt_counts[session_key] = queued_interrupts + 1
+            self._queued_interrupt_counts[session_key] = pending_count
             return True
         return False
 
