@@ -244,6 +244,8 @@ export class Store {
         UNIQUE(connector_instance, event_id)
       );
 
+      CREATE INDEX IF NOT EXISTS connector_events_conv_status_seq
+        ON connector_events(conv_key, status, seq);
       CREATE INDEX IF NOT EXISTS connector_events_scope_status_seq
         ON connector_events(scope_key, status, seq);
       CREATE INDEX IF NOT EXISTS connector_events_event
@@ -1683,16 +1685,16 @@ export class Store {
       ORDER BY seq DESC LIMIT 1`).get(connector, messageId) ?? null;
   }
 
-  // Accepted inbound events a tool reference can name: by event id, or by the
-  // message id the event carried. One row per event, oldest first; an event
-  // matching on both ids is still one row.
-  acceptedEventsByRef(ref, instance = null) {
-    return this.db.prepare(`
-      SELECT * FROM connector_events WHERE event_id = ? AND status = 'DONE'
-      UNION
-      SELECT * FROM connector_events WHERE message_id = ? AND status = 'DONE'
-      ORDER BY seq
-    `).all(ref, ref).filter((row) => instance === null || row.connector_instance === instance);
+  // Accepted inbound events with this event id: at most one per instance.
+  acceptedEvents(eventId, instance = null) {
+    return this.db.prepare("SELECT * FROM connector_events WHERE event_id = ? AND status = 'DONE' ORDER BY seq")
+      .all(eventId).filter((row) => instance === null || row.connector_instance === instance);
+  }
+
+  // Accepted inbound events that carried this message on one instance.
+  acceptedMessageEvents(messageId, instance) {
+    return this.db.prepare(`SELECT * FROM connector_events
+      WHERE connector_instance = ? AND message_id = ? AND status = 'DONE'`).all(instance, messageId);
   }
 
   // The newest accepted inbound received after seq in that scope, if any. Core

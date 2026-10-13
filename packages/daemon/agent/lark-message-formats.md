@@ -13,7 +13,7 @@
 ```json
 {
   "message_id": "<真实 om_ 消息 ID>",
-  "decision_id": "<最新入站 msg= 或 event= ID>",
+  "decision_id": "<最新入站 event= ID>",
   "reply_in_thread": true,
   "file_path": "reports/result.pdf"
 }
@@ -30,7 +30,7 @@
 ```json
 {
   "message_id": "<真实 om_ 消息 ID>",
-  "decision_id": "<最新入站 msg= 或 event= ID>",
+  "decision_id": "<最新入站 event= ID>",
   "reply_in_thread": true,
   "choices": {
     "prompt": "请选择实现方案",
@@ -51,7 +51,7 @@
 [chat=... thread=... msg=ca_... event=... card=om_... time=... from=... reply_to=me] [card answer] {"question":"...","key":"complete","label":"完整实现"}
 ```
 
-`ca_` 是 daemon 内部决策 ID，只能用于 `decision_id` / `response_to_id`；回复、reaction 使用 `card=` 中的真实 `om_`。卡片路由绑定发送时的群和话题，回调 token 不进入 Agent 或投递日志。只处理通过这套可信工具发送并登记过的卡片回调；直接 shell/其他应用发出的卡片不具有这份登记。
+`ca_` 是 daemon 内部 ID，不能用于任何工具参数；`decision_id` 用这一行的 `event=`，回复、reaction 使用 `card=` 中的真实 `om_`。卡片路由绑定发送时的群和话题，回调 token 不进入 Agent 或投递日志。只处理通过这套可信工具发送并登记过的卡片回调；直接 shell/其他应用发出的卡片不具有这份登记。
 
 ## 接收卡片、图片和文件
 

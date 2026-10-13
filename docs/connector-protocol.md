@@ -204,12 +204,12 @@ executes. The socket is mode `0600`. Agent runtimes never open a Connector
 state database or call a provider API to send messages.
 
 Every delivery names the input it acts on as `decision_id`: that input's
-`event=`, or its `msg=` as an alias, copied as the tag shows it. The Core
-resolves it to one accepted event `(instance, event_id, seq, scope_key)`;
-`decision_instance` narrows the lookup to one instance. A reference that matches
-several accepted events (an event id equal to another event's message id,
-several events about one message, one event id on two instances) is refused
-with `decision_ambiguous`, never settled by taking the newest.
+`event=`, copied as the tag shows it; a `msg=` is never a reference, since one
+message can carry several events and a message id can equal another event's id.
+The Core resolves it to one accepted event `(instance, event_id, seq,
+scope_key)`. Event ids are unique only per instance, so an id accepted on
+several instances is refused with `decision_ambiguous` until `decision_instance`
+names one; it is never settled by taking the newest.
 
 The freshness fence is a conservative default: a decision is stale once the
 Core has accepted a later event in its scope, the conversation for chat events
@@ -223,9 +223,8 @@ share a subject (so a new occurrence makes the previous reminder stale) or each
 have their own.
 
 The Core derives the idempotency key from the decision and response events'
-`(instance, event_id)`, the target and the canonical payload, so one event named
-by `msg=` or `event=` is one delivery while two events with the same text are two
-(a caller-supplied key is bound to that payload), reserves it in
+`(instance, event_id)`, the target and the canonical payload, so two events with
+the same text are two deliveries (a caller-supplied key is bound to that payload), reserves it in
 `outbox` together with a `PENDING` outbound journal row, and only then sends the
 Connector `action` request. It records `SENT` only after the Connector replies
 successfully; any failure, or a process exit between remote acceptance and the

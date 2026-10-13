@@ -172,13 +172,13 @@ export class ActionService {
     return candidates[0];
   }
 
-  // The accepted inbound events an input reference names. The reference is a
-  // msg= or event= value as its tag showed it; msg= is only an alias for the
-  // event that carried it. Callers accept one match and never pick among several.
+  // The accepted inbound events an input reference names: the event= value as
+  // its tag showed it, on every instance unless one is given. Callers accept one
+  // match and never pick among several.
   inputEvents(ref, instance = null) {
     let id;
     try { id = readMetadataTag(ref); } catch { return []; }
-    return this.store.acceptedEventsByRef(id, instance);
+    return this.store.acceptedEvents(id, instance);
   }
 
   // Freshness fence: the decision must resolve to exactly one accepted inbound
@@ -187,10 +187,10 @@ export class ActionService {
   fence(input, caller) {
     const rows = this.inputEvents(input.decision_id, input.decision_instance ?? null);
     if (rows.length === 0) {
-      throw blocked('unknown_decision', `Delivery blocked: decision_id is not an accepted daemon-authenticated input. ${NO_ACTION}`);
+      throw blocked('unknown_decision', `Delivery blocked: decision_id is not the event= of an accepted daemon-authenticated input (msg= is not accepted). ${NO_ACTION}`);
     }
     if (rows.length > 1) {
-      throw blocked('decision_ambiguous', `Delivery blocked: decision_id matches ${rows.length} accepted inputs. Pass that line's event= as decision_id, and its instance (or source) as decision_instance. ${NO_ACTION}`);
+      throw blocked('decision_ambiguous', `Delivery blocked: decision_id is an event on ${rows.length} instances. Pass that line's instance= (or source= when it has none) as decision_instance. ${NO_ACTION}`);
     }
     const [row] = rows;
     Object.assign(caller.trace, { decisionSeq: row.seq, conversationRef: opaqueRef(row.scope_key) });
@@ -213,7 +213,7 @@ export class ActionService {
   // Attribution is separate from freshness: a response may fulfill an earlier
   // input in the decision's scope, never a newer one. response_to_id resolves on
   // the decision's instance; an implicit target (the message replied or reacted
-  // to) counts only when it is one such event on the same connector.
+  // to) counts only when exactly one such event carried it on that connector.
   attribution(caller, explicit, fence, implicit = null) {
     let responseTo = fence;
     const inScope = (row) => row.scope_key === fence.scope_key && row.seq <= fence.seq;
@@ -224,8 +224,7 @@ export class ActionService {
       }
       [responseTo] = rows;
     } else if (implicit && implicit.connector === fence.connector_instance) {
-      const rows = this.store.acceptedEventsByRef(implicit.messageId, fence.connector_instance)
-        .filter((row) => row.message_id === implicit.messageId);
+      const rows = this.store.acceptedMessageEvents(implicit.messageId, fence.connector_instance);
       if (rows.length === 1 && inScope(rows[0])) [responseTo] = rows;
     }
     caller.trace.responseSeq = responseTo.seq;

@@ -705,7 +705,7 @@ describe('global Codex/Claude hard switch', () => {
       await assert.rejects(() => actions.call('send_message', {
         chat_id: 'oc_restart123456',
         markdown: 'must stay fenced',
-        decision_id: 'om_restart123456',
+        decision_id: 'message:om_restart123456',
       }, stale), /no longer owns/);
       assert.equal(connectors.calls.length, 0);
     } finally {
