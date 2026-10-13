@@ -4,9 +4,9 @@ import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs
 import { agentToolEnv, agentToolServer } from './actions/api.mjs';
 import { safeError as safe } from './logger.mjs';
 import { activityPayload } from './activity.mjs';
-import { cognitionHistoryPrefix, CognitionLimitError, HISTORY_SEPARATOR } from './cognition.mjs';
+import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
-import { deliveryItem, formatHistoryLine, receiptIds, withReceiptIds } from './runtime-input.mjs';
+import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
 
 const CODEX_RUNTIME = getRuntimeDefinition('codex');
@@ -304,12 +304,6 @@ export class CodexAgent {
   whenIdle() {
     if (!this.turnInProgress && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
-  }
-
-  primeCognition(text, syncedThroughSeq) {
-    void text;
-    void syncedThroughSeq;
-    return Promise.reject(new Error('standalone cognition catch-up is disabled; prefix the first real turn'));
   }
 
   // ---- outbound state machine -------------------------------------------------
@@ -1111,28 +1105,6 @@ export class CodexAgent {
     this._drain();
     this._notifyAvailable();
     return this.threadId;
-  }
-
-  // Clears connection state for a child we are intentionally replacing, without
-  // entering the reconnect loop (unlike _handleExit on an unexpected death).
-  _handleExitDetached(child) {
-    if (this.child !== child) return;
-    this.child = null;
-    this.threadId = null;
-    this.activeTurnId = null;
-    this.startingTurn = false;
-    this.modelWorking = false;
-    this.modelStartedAtMs = null;
-    this.startingItems = [];
-    this.startingJournalThroughSeq = 0;
-    this.startingOwner = null;
-    this.activeOwner = null;
-    this.activeInboundSeqs = [];
-    this.activeReceiptIds = [];
-    for (const pending of this.pending.values()) {
-      try { pending.reject(new Error(`${this.runtimeLabel} connection replaced`)); } catch { /* ignore */ }
-    }
-    this.pending.clear();
   }
 
   // Model/effort values ride on the next turn/start (see _startTurn) when the

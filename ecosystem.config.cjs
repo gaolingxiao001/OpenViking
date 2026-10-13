@@ -63,7 +63,6 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_UPGRADE_TARGET: agent.id,
       LARK_DAEMON_HOST: '127.0.0.1',
       LARK_DAEMON_HTTP_ENABLED: 'true',
-      LARK_DAEMON_EVENT_MODE: 'raw',
       LARK_DAEMON_CHANNEL: agent.channel,
       LARK_DAEMON_CONNECTORS_JSON: JSON.stringify(agent.connectors),
       LARK_DAEMON_PORT: String(agent.port),

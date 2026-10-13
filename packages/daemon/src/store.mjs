@@ -4,7 +4,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { opaqueRef } from './logger.mjs';
 import {
   activityDefinition,
-  activityPhase,
   cleanActivityMetadata,
   cleanActivityText,
   reasonLabel,
@@ -108,8 +107,8 @@ function sourceRefFromConversationKey(value) {
 }
 
 const PUBLIC_METADATA_KEYS = new Set([
-  'action', 'attempt', 'backfilled', 'batchSize', 'bytes', 'chatType',
-  'code', 'codexVersion', 'deliveryMode', 'dryRun', 'eventMode', 'exitCode',
+  'action', 'attempt', 'batchSize', 'bytes', 'chatType',
+  'code', 'codexVersion', 'deliveryMode', 'dryRun', 'exitCode',
   'durationMs', 'expired', 'filterReason', 'inboundSeqs', 'interruptedTurns', 'itemType', 'larkVersion',
   'connector', 'source', 'eventKind',
   'messageType', 'outboxes', 'reason', 'reasonCode', 'removed',
@@ -180,19 +179,9 @@ export class Store {
     this.migrate();
     this.prepare();
     this.meetings = new MeetingStore(this.db, (fn) => this.transaction(fn));
-    this.backfillChatSources();
-    this.backfillActivities();
-    this.backfillActivitySources();
-    this.backfillActivitySourceNames();
   }
 
   migrate() {
-    // Retired pre-release tables: the per-turn outbox, its turns, and the
-    // Weixin-only connector_outbox. Nothing reads them.
-    if (this.db.prepare("SELECT 1 FROM pragma_table_info('outbox') WHERE name = 'turn_id'").get()) {
-      this.db.exec('DROP TABLE outbox');
-    }
-    this.db.exec('DROP TABLE IF EXISTS turns; DROP TABLE IF EXISTS connector_outbox;');
     migrateCardMessages(this.db);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -375,29 +364,6 @@ export class Store {
       UPDATE outbox SET status = 'UNCERTAIN' WHERE status = 'PENDING';
     `);
     migrateMeetingStore(this.db);
-    const activityColumns = new Set(
-      this.db.prepare('PRAGMA table_info(activities)').all().map((row) => row.name),
-    );
-    if (!activityColumns.has('source_ref')
-      || !activityColumns.has('source_type')
-      || !activityColumns.has('source_name')) {
-      this.db.exec('BEGIN IMMEDIATE');
-      try {
-        if (!activityColumns.has('source_ref')) {
-          this.db.exec('ALTER TABLE activities ADD COLUMN source_ref TEXT');
-        }
-        if (!activityColumns.has('source_type')) {
-          this.db.exec('ALTER TABLE activities ADD COLUMN source_type TEXT');
-        }
-        if (!activityColumns.has('source_name')) {
-          this.db.exec('ALTER TABLE activities ADD COLUMN source_name TEXT');
-        }
-        this.db.exec('COMMIT');
-      } catch (error) {
-        try { this.db.exec('ROLLBACK'); } catch {}
-        throw error;
-      }
-    }
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS activities_source
         ON activities(source_ref, id DESC)
@@ -448,10 +414,6 @@ export class Store {
         conv_key, source_ref, source_type, source_name, turn_id, inbound_seq, outbox_id,
         status, detail_json, occurred_at_ms, recorded_at_ms
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    this.updateActivitySourceStatement = this.db.prepare(`
-      UPDATE activities SET source_ref = ?, source_type = ?, source_name = ?
-      WHERE id = ? AND source_ref IS NULL
     `);
     this.getActivitySourceByInboundStatement = this.db.prepare(`
       SELECT connector_events.chat_id, connector_events.chat_type, connector_events.source,
@@ -563,36 +525,6 @@ export class Store {
     return number(result.changes) > 0;
   }
 
-  backfillActivitySources() {
-    return this.transaction(() => {
-      let updated = 0;
-      const rows = this.db.prepare(`
-        SELECT id, conv_key, inbound_seq, outbox_id, turn_id, detail_json
-        FROM activities
-        WHERE source_ref IS NULL
-          AND (inbound_seq IS NOT NULL OR outbox_id IS NOT NULL OR turn_id IS NOT NULL)
-        ORDER BY id
-      `).all();
-      for (const row of rows) {
-        const source = this.resolveActivitySource({
-          inboundSeq: row.inbound_seq,
-          outboxId: row.outbox_id,
-          turnId: row.turn_id,
-          conversationKey: row.conv_key,
-          chatType: parseJsonObject(row.detail_json).chatType,
-        });
-        if (!source.sourceRef) continue;
-        updated += number(this.updateActivitySourceStatement.run(
-          source.sourceRef,
-          source.sourceType,
-          source.sourceName,
-          row.id,
-        ).changes);
-      }
-      return updated;
-    });
-  }
-
   rememberChatSource(chatId, chatType, now = Date.now()) {
     if (!chatId || !['p2p', 'group'].includes(chatType)) return false;
     const result = this.upsertChatSourceStatement.run(
@@ -603,30 +535,6 @@ export class Store {
       now,
     );
     return number(result.changes) > 0;
-  }
-
-  backfillChatSources() {
-    return this.transaction(() => {
-      let updated = 0;
-      const rows = this.db.prepare(`
-        SELECT chat_id, chat_type,
-               MIN(received_at_ms) AS created_at_ms,
-               MAX(received_at_ms) AS updated_at_ms
-        FROM connector_events
-        WHERE source = 'lark' AND chat_type IN ('p2p', 'group')
-        GROUP BY chat_id, chat_type
-      `).all();
-      for (const row of rows) {
-        updated += number(this.upsertChatSourceStatement.run(
-          row.chat_id,
-          opaqueRef(row.chat_id),
-          row.chat_type,
-          number(row.created_at_ms),
-          number(row.updated_at_ms),
-        ).changes);
-      }
-      return updated;
-    });
   }
 
   chatNameLookupCandidate(chatId, now = Date.now()) {
@@ -675,79 +583,12 @@ export class Store {
     ).changes) > 0;
   }
 
-  backfillActivitySourceNames() {
-    return number(this.db.prepare(`
-      UPDATE activities
-      SET source_name = (
-        SELECT chat_sources.name
-        FROM chat_sources
-        WHERE chat_sources.source_ref = activities.source_ref
-      )
-      WHERE source_name IS NULL
-        AND EXISTS (
-          SELECT 1 FROM chat_sources
-          WHERE chat_sources.source_ref = activities.source_ref
-            AND chat_sources.name IS NOT NULL
-        )
-    `).run().changes);
-  }
-
   closeRunningSubscriberActivities(status = 'STOPPED') {
     const safeStatus = status === 'FAILED' ? 'FAILED' : 'STOPPED';
     return number(this.db.prepare(`
       UPDATE activities SET status = ?
       WHERE kind = 'system.subscriber_started' AND status = 'RUNNING'
     `).run(safeStatus).changes);
-  }
-
-  backfillActivities(now = Date.now()) {
-    return this.transaction(() => {
-      let inserted = 0;
-      const pending = [];
-      const add = (activity) => {
-        pending.push(activity);
-      };
-
-      for (const row of this.db.prepare('SELECT * FROM connector_events ORDER BY seq').all()) {
-        const expired = row.filter_reason === 'queue_expired';
-        const ignored = row.status === 'RULE_IGNORED' && !expired;
-        const queueRejected = ['queue_total_full', 'queue_conversation_full', 'queue_expired']
-          .includes(row.filter_reason);
-        add({
-          eventKey: `inbound:${row.seq}:${expired ? 'expired' : ignored ? 'ignored' : 'received'}`,
-          kind: expired ? 'message.expired' : ignored ? 'message.ignored' : 'message.received',
-          conversationKey: row.conv_key,
-          inboundSeq: number(row.seq),
-          status: row.status,
-          severity: queueRejected ? 'warn' : undefined,
-          priority: queueRejected ? 85 : undefined,
-          summary: expired
-            ? (row.content || '排队时间过长，消息未交给 Agent')
-            : ignored
-              ? `未进入 Agent：${reasonLabel(row.filter_reason)}`
-              : row.content,
-          occurredAtMs: number(row.received_at_ms),
-          metadata: {
-            chatType: row.chat_type,
-            messageType: row.message_type,
-            filterReason: row.filter_reason,
-          },
-        });
-      }
-
-      pending.sort((left, right) => (
-        Number(left.occurredAtMs ?? 0) - Number(right.occurredAtMs ?? 0)
-        || activityPhase(left.kind) - activityPhase(right.kind)
-        || left.eventKey.localeCompare(right.eventKey)
-      ));
-      for (const activity of pending) {
-        if (this.recordActivity({
-          ...activity,
-          metadata: { ...activity.metadata, backfilled: true },
-        }, now)) inserted += 1;
-      }
-      return inserted;
-    });
   }
 
   // Cognition epochs are the durable "sessions" the Activity page can pick:
@@ -882,8 +723,6 @@ export class Store {
     const scalar = (sql, ...params) => number(this.db.prepare(sql).get(...params).count);
     return {
       attention: scalar(`SELECT COUNT(*) AS count FROM outbox WHERE status = 'UNCERTAIN'`),
-      active: scalar(`SELECT COUNT(*) AS count FROM outbox WHERE status = 'PENDING'`),
-      queued: scalar(`SELECT COUNT(*) AS count FROM connector_events WHERE status = 'QUEUED'`),
       receivedToday: scalar(`SELECT COUNT(*) AS count FROM connector_events WHERE received_at_ms >= ?`, startMs),
       sentToday: scalar(`SELECT COUNT(*) AS count FROM outbox WHERE status = 'SENT' AND sent_at_ms >= ?`, startMs),
     };
@@ -1737,37 +1576,12 @@ export class Store {
       WHERE remote_message_id = ? AND connector = ? ORDER BY id DESC LIMIT 1`).get(messageId, connector) ?? null;
   }
 
-  // Cross-chat history injected into a fresh thread's first turn. DONE rows include
-  // every accepted sender, including bot/app messages. Outbound replies re-enter only
-  // if Lark emits them back as inbound events.
-  // ponytail: a resumed thread keeps codex's in-process context, but a fresh thread
-  // after a policy change loses prior answers that Lark did not emit back.
-  history(limit, beforeSeq = null) {
-    if (limit <= 0) return [];
-    const rows = this.db.prepare(`
-      SELECT *
-      FROM connector_events
-      WHERE status = 'DONE' AND seq < ?
-      ORDER BY received_at_ms DESC, seq DESC
-      LIMIT ?
-    `).all(beforeSeq ?? Number.MAX_SAFE_INTEGER, limit);
-    return rows.reverse().map((row) => ({
-      ...rowToInbound(row),
-      atMs: number(row.received_at_ms),
-      direction: 'inbound',
-      source: row.source || 'lark',
-      chatId: row.chat_id,
-      threadId: row.thread_id,
-      text: row.content,
-    }));
-  }
-
   prune(retentionMs, now = Date.now()) {
     const cutoff = now - retentionMs;
     const removed = this.transaction(() => {
       const inbound = this.db.prepare(`
         DELETE FROM connector_events
-        WHERE received_at_ms < ? AND status IN ('DONE', 'DEAD', 'RULE_IGNORED')
+        WHERE received_at_ms < ?
       `).run(cutoff);
       const meeting = this.meetings.prune(cutoff);
       const outbox = this.db.prepare(`

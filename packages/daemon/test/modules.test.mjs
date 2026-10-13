@@ -100,7 +100,6 @@ describe('module boundaries', () => {
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
     assert.equal(alpha.env.LARK_DAEMON_PORT, '3738');
     assert.equal(alpha.env.LARK_DAEMON_HTTP_ENABLED, 'true');
-    assert.equal(alpha.env.LARK_DAEMON_EVENT_MODE, 'raw');
     assert.equal(alpha.env.LARK_DAEMON_PROFILE, 'cli_alpha');
     assert.equal(alpha.env.LARKSUITE_CLI_PROFILE, 'cli_alpha');
     assert.equal(alpha.env.LARK_DAEMON_AGENT_NAME, 'Alpha');

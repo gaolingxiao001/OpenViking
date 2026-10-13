@@ -19,8 +19,6 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
 const CLAUDE_RUNTIME = getRuntimeDefinition('claude');
-export const CLAUDE_MODELS = CLAUDE_RUNTIME.models;
-export const CLAUDE_EFFORTS = CLAUDE_RUNTIME.efforts;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -392,12 +390,6 @@ export class ClaudeAgent {
   whenIdle() {
     if (!this.turnActive && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
-  }
-
-  primeCognition(text, syncedThroughSeq) {
-    void text;
-    void syncedThroughSeq;
-    return Promise.reject(new Error('standalone cognition catch-up is disabled; prefix the first real turn'));
   }
 
   _bodyFor(items) {

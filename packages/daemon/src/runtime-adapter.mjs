@@ -88,13 +88,8 @@ export class RuntimeAdapter {
     return this.#implementation.cancelSessionRotation?.();
   }
 
+  // The runtimes keep these as plain fields; only this adapter sets them.
   applyCognition({ epoch, authorityToken, syncedThroughSeq = 0 }) {
-    if (typeof this.#implementation.applyCognition === 'function') {
-      this.#implementation.applyCognition({ epoch, authorityToken, syncedThroughSeq });
-      return;
-    }
-    // Compatibility seam while the protocol implementations remain focused on
-    // transport behavior. Only this adapter may touch their legacy fields.
     this.#implementation.cognitionEpoch = epoch;
     this.#implementation.authorityToken = authorityToken;
     this.#implementation.syncedThroughSeq = syncedThroughSeq;

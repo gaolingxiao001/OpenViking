@@ -182,7 +182,7 @@ lark-daemon upgrade all
 
 ## Activity 页面
 
-打开 [http://127.0.0.1:3737/](http://127.0.0.1:3737/) 可以查看本机活动账本：消息是否收到、Agent 为什么回复或保持静默、选择了哪种投递方式，以及发送是否成功。
+打开 [http://127.0.0.1:3737/](http://127.0.0.1:3737/) 可以查看本机活动账本：消息是否收到、Agent 每一轮做了什么（思考、工具调用）、选择了哪种投递方式，以及发送是否成功。
 
 - 默认进入当前认知会话（`/new`、同 runtime 的 `/model`、Codex/TraeX/Claude/Pi 切换 `/effort` 会开新会话；TraeX `/effort` 原地更新当前 thread settings）。顶栏可切换历史会话，或查看全部会话的完整账本。
 - 下方是按轨道排列的时间轴（回合 / 消息 / 助手 / 投递 / 命令 / 系统）；上方详情列表与播放头双向同步。
@@ -190,7 +190,7 @@ lark-daemon upgrade all
 - 历史会话不跟随实时更新，可一键回到当前会话；当前会话在拖离尾部后可回到最新。
 - 页面每 4 秒在本机刷新一次；没有外部资源或云端服务。
 
-这些活动作为保留历史的事件账本写入同一个 SQLite。升级时会为已有历史做一次幂等 backfill；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用、认知 epoch 和裁剪后的正文，不暴露飞书 message/chat ID、Codex/TraeX/Claude/Ark session、幂等键或 raw event。
+这些活动作为保留历史的事件账本写入同一个 SQLite；普通状态清理不会删除 activity。监听启动记录在新进程接管或正常停止时会收口，因此历史启动仍可见，但只有当前监听显示“进行中”。网页 API 只返回脱敏后的来源/会话引用、认知 epoch 和裁剪后的正文，不暴露飞书 message/chat ID、Codex/TraeX/Claude/Ark session、幂等键或 raw event。
 
 ## Runtime 模块边界
 

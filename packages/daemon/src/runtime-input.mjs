@@ -141,9 +141,3 @@ export function resolveReplyTarget(store, message) {
   return author ?? { kind: 'unknown', id: parentId };
 }
 
-export function formatHistoryLine(item, resolveName = null) {
-  if (item.envelope) return formatInboundLine(item, resolveName);
-  if (item.kind && !item.chatId) return formatEventLine(item);
-  const from = item.direction === 'outbound' ? 'me' : fromLabel(item.chatId, item.actor, resolveName, item.source);
-  return `[chat=${chatTag(item.chatId, item.threadId)} source=${item.source || 'lark'} time=${isoMinute(item.atMs)} from=${from}] ${oneLine(item.text)}`;
-}

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, describe, it } from 'node:test';
 import { ActivityWebServer } from '../src/server.mjs';
 
 const moduleDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

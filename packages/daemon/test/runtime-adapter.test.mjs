@@ -42,7 +42,7 @@ describe('RuntimeAdapter contract', () => {
     assert.deepEqual(managedCalls, [[{ id: 'sesn-new' }, { persist: false }]]);
   });
 
-  it('owns the legacy cognition mutation seam', () => {
+  it('sets the cognition fields of the runtime it wraps', () => {
     const implementation = {};
     const adapter = new RuntimeAdapter('test', implementation);
     adapter.applyCognition({ epoch: 3, authorityToken: 'token-next', syncedThroughSeq: 0 });

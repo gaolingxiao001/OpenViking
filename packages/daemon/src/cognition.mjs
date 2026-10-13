@@ -4,9 +4,6 @@ import { normalizeEvent } from './event.mjs';
 
 const HISTORY_SEPARATOR = '--- history above, new messages below ---';
 
-export const COGNITION_CATCHUP_SENTINEL =
-  '--- daemon cognition catch-up complete; absorb the OV context, take no external action, and end this turn ---';
-
 export class CognitionLimitError extends Error {
   constructor(message) {
     super(message);
@@ -51,11 +48,6 @@ function assertBounded(text, maxChars) {
   return text;
 }
 
-export function cognitionCatchupPrompt(store, epoch, throughSeq = store.cognitionJournalHead(epoch), maxChars = 120_000) {
-  const prefix = cognitionHistoryPrefix(store, epoch, throughSeq, maxChars - COGNITION_CATCHUP_SENTINEL.length - 1);
-  return { throughSeq, text: `${prefix.text}\n${COGNITION_CATCHUP_SENTINEL}` };
-}
-
 // Native sessions already own their live transcript. Only a fresh session gets
 // assembled OV context; no SQL journal/history fallback, including on failure.
 export function cognitionHistoryPrefix(store, epoch, throughSeq = 0, maxChars = 120_000, afterSeq = 0) {
@@ -91,4 +83,3 @@ export function cognitionHistoryPrefix(store, epoch, throughSeq = 0, maxChars = 
   return { throughSeq, text: assertBounded(lines.join('\n'), maxChars) };
 }
 
-export { HISTORY_SEPARATOR };

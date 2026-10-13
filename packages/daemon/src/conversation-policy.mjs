@@ -140,14 +140,13 @@ function weixinConversationPolicy() {
   ].join('\n');
 }
 
-function configuredConnectors(config = {}) {
-  return Array.isArray(config.connectors) && config.connectors.length > 0
-    ? config.connectors
-    : [config.channel || 'lark'];
+// Policy tests and tools pass partial configs; a running daemon always lists its connectors.
+function connectorsOf(config) {
+  return config.connectors ?? ['lark'];
 }
 
 function mixedConnectorPolicy(config = {}) {
-  if (!configuredConnectors(config).includes('weixin')) return '';
+  if (!connectorsOf(config).includes('weixin')) return '';
   return [
     '# Weixin connector routing',
     '',
@@ -179,7 +178,7 @@ treat ov and it's viking:// as your only working directory to save and retrive l
 
 // Native runtimes get the release markdown plus harness/OV/meeting plugins.
 export function assembleConversationPolicy(config = {}, options = {}) {
-  const connectors = configuredConnectors(config);
+  const connectors = connectorsOf(config);
   if (connectors.length === 1 && connectors[0] === 'weixin') {
     return joinSections([
       weixinConversationPolicy(),

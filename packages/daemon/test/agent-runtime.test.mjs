@@ -256,6 +256,7 @@ describe('global Codex/Claude hard switch', () => {
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     const selected = [];
     const runtime = new AgentRuntime({
+      connectors: ['lark'],
       initialModel: 'ark',
       cognitionMaxChars: 120_000,
     }, store, quietLogger, {
@@ -535,7 +536,7 @@ describe('global Codex/Claude hard switch', () => {
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     store.initializeCognition('volc', 'old-token');
     let instance;
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({ connectors: ['lark'], cognitionMaxChars: 120_000 }, store, quietLogger, {
       volcFactory: (options) => {
         instance = backend('volc', options);
         instance.threadId = 'sesn-old123456';

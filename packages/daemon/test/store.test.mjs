@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/store.mjs';
 import { cognitionHistoryPrefix } from '../src/cognition.mjs';
 import { chatEvent } from './event-fixture.mjs';
@@ -118,29 +117,6 @@ describe('Store', () => {
       lookup_status: 'RESOLVED',
       failure_count: 0,
     });
-  });
-
-  it('migrates existing group inbound rows into due chat sources', () => {
-    const legacyGroup = event('legacy-source', 'legacy group message', {
-      chatId: 'oc-legacy-source',
-      conversationKey: 'default:tenant:oc-legacy-source:main',
-    });
-    store.ingest(legacyGroup, null, 1_600_000_000_000);
-    const databasePath = path.join(directory, 'state.sqlite3');
-    store.close();
-
-    const legacy = new DatabaseSync(databasePath);
-    legacy.exec('DROP TABLE chat_sources');
-    legacy.exec('ALTER TABLE activities DROP COLUMN source_name');
-    legacy.close();
-
-    store = new Store(databasePath, quietLogger);
-    const source = store.chatNameLookupCandidate(legacyGroup.chatId, Date.now());
-    assert.ok(source);
-    assert.equal(source.chatType, 'group');
-    assert.equal(source.lookupStatus, 'PENDING');
-    assert.equal(source.name, null);
-    assert.equal(JSON.stringify(store.listActivities({ limit: 10 })).includes(legacyGroup.chatId), false);
   });
 
   it('does not persist raw event envelopes and blanks ignored content', () => {
@@ -547,24 +523,6 @@ describe('Store', () => {
     assert.equal(store.getManagedSessionPoison('volc'), null);
     assert.equal(store.getGlobalSession().sessionId, 'sesn-clean123456');
     assert.equal(store.getGlobalSession().syncedThroughSeq, 0);
-  });
-
-  it('returns cross-chat DONE history tagged by chat, oldest first', () => {
-    const a = event('a', 'from chat A', { conversationKey: 'default:tenant:oc-a:main', chatId: 'oc-a' });
-    const b = event('b', 'from chat B', { conversationKey: 'default:tenant:oc-b:main', chatId: 'oc-b' });
-    store.ingest(a, null, 1_000);
-    store.ingest(b, null, 2_000);
-    const history = store.history(30);
-    assert.deepEqual(history.map((row) => row.chatId), ['oc-a', 'oc-b']);
-    assert.equal(history.every((row) => row.direction === 'inbound'), true);
-    assert.deepEqual(store.history(0), []);
-  });
-
-  it('cuts history off before a given seq so the current batch is not duplicated', () => {
-    store.ingest(event('one', 'earlier message'), null, 1_000);
-    const current = store.ingest(event('two', 'current message'), null, 2_000);
-    const history = store.history(30, current.inbound.seq);
-    assert.deepEqual(history.map((row) => row.text), ['earlier message']);
   });
 
   it('prunes old inbound but keeps the append-only activity ledger', () => {
