@@ -1199,15 +1199,12 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
-    async def _append_user_message_to_session(self, session: Session, msg: InboundMessage) -> None:
-        session.add_message("user", msg.content, sender_id=msg.sender_id)
-        await self.sessions.save(session)
-
     async def _complete_interrupted_message(self, msg: InboundMessage) -> OutboundMessage:
         session_key = msg.session_key
         skip_heartbeat = session_key.type == "cli"
         session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
-        await self._append_user_message_to_session(session, msg)
+        session.add_message("user", msg.content, sender_id=msg.sender_id)
+        await self.sessions.save(session)
         return OutboundMessage(
             session_key=msg.session_key,
             content="",
@@ -2233,12 +2230,14 @@ class AgentLoop:
             if self.config.mode == BotMode.DEBUG:
                 # In debug mode, only record message to session, no processing or reply
                 await self._evaluate_previous_response_outcome(session, msg)
-                await self._append_user_message_to_session(session, msg)
+                session.add_message("user", msg.content, sender_id=msg.sender_id)
+                await self.sessions.save(session)
                 return None
 
             if not msg.need_reply:
                 await self._evaluate_previous_response_outcome(session, msg)
-                await self._append_user_message_to_session(session, msg)
+                session.add_message("user", msg.content, sender_id=msg.sender_id)
+                await self.sessions.save(session)
                 return OutboundMessage(
                     session_key=msg.session_key,
                     content="",
