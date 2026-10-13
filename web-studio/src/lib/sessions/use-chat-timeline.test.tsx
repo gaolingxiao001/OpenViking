@@ -6,12 +6,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchSse } from '#/lib/sse'
 import { useChat } from './use-chat'
 
-const { sendChatStreamMock } = vi.hoisted(() => ({
-  sendChatStreamMock: vi.fn(),
-}))
+const { addMessageMock, interruptChatSessionMock, sendChatStreamMock } =
+  vi.hoisted(() => ({
+    addMessageMock: vi.fn(),
+    interruptChatSessionMock: vi.fn(),
+    sendChatStreamMock: vi.fn(),
+  }))
 
 vi.mock('./api', () => ({
-  addMessage: vi.fn(),
+  addMessage: addMessageMock,
+  interruptChatSession: interruptChatSessionMock,
   sendChatStream: sendChatStreamMock,
   serializeParts: vi.fn(),
 }))
@@ -43,6 +47,9 @@ function streamMessages(events: Array<{ event: string; data: unknown }>) {
 
 describe('useChat event timeline', () => {
   beforeEach(() => {
+    addMessageMock.mockReset()
+    interruptChatSessionMock.mockReset()
+    interruptChatSessionMock.mockResolvedValue({ interrupted: false })
     sendChatStreamMock.mockReset()
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(0)
@@ -247,6 +254,129 @@ describe('useChat event timeline', () => {
       type: 'text',
     })
     expect(streamReleased).toBe(true)
+  })
+
+  it('requests a backend interrupt before falling back to local abort', async () => {
+    sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
+      fetchSse('/stream', {
+        signal,
+        fetch: vi
+          .fn()
+          .mockResolvedValue(
+            new Response(new ReadableStream<Uint8Array>(), {
+              headers: { 'Content-Type': 'text/event-stream' },
+            }),
+          ),
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: false,
+        sessionId: 'session-1',
+      }),
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('hello')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      result.current.abort()
+      await sendPromise
+    })
+
+    expect(interruptChatSessionMock).toHaveBeenCalledWith('session-1')
+    expect(result.current.status).toBe('idle')
+  })
+
+  it('stops streaming and persists only the user message when interrupted', async () => {
+    let streamReleased = false
+    async function* stream() {
+      try {
+        yield {
+          data: JSON.stringify({
+            event: 'interrupt',
+            data: { reason: 'user' },
+          }),
+          event: '',
+          id: '',
+        }
+        await new Promise(() => {})
+      } finally {
+        streamReleased = true
+      }
+    }
+    sendChatStreamMock.mockResolvedValue(stream())
+
+    const { result } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: true,
+        sessionId: 'session-1',
+      }),
+    )
+
+    await act(async () => {
+      await result.current.send('hello')
+    })
+
+    expect(result.current.status).toBe('idle')
+    expect(result.current.streamingParts).toEqual([])
+    expect(result.current.messages).toHaveLength(1)
+    expect(result.current.messages[0]?.role).toBe('user')
+    expect(addMessageMock).toHaveBeenCalledTimes(1)
+    expect(addMessageMock).toHaveBeenCalledWith('session-1', 'user', 'hello')
+    expect(streamReleased).toBe(true)
+  })
+
+  it('requests backend interrupt but discards partial output on reset', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
+    sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
+      fetchSse('/stream', {
+        signal,
+        fetch: vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(streamController) {
+                controller = streamController
+              },
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+        ),
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: false,
+        sessionId: 'session-1',
+      }),
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('hello')
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            event: 'content_delta',
+            data: 'partial',
+          })}\n\n`,
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      result.current.reset()
+      await sendPromise
+    })
+
+    expect(interruptChatSessionMock).toHaveBeenCalledWith('session-1')
+    expect(result.current.status).toBe('idle')
+    expect(result.current.streamingParts).toEqual([])
+    expect(result.current.messages).toEqual([])
   })
 
   it('keeps reasoning and tool timeline when aborted before content arrives', async () => {

@@ -493,6 +493,38 @@ export async function sendChat(
   return response.data as BotChatResponse
 }
 
+export type InterruptChatSessionResult = {
+  interrupted: boolean
+}
+
+export async function interruptChatSession(
+  sessionId: string,
+): Promise<InterruptChatSessionResult> {
+  const baseUrl = ovClient.getOptions().baseUrl
+  const response = await fetch(
+    `${baseUrl}/bot/v1/sessions/${encodeURIComponent(sessionId)}/interrupt`,
+    {
+      method: 'POST',
+      headers: buildFetchHeaders(),
+    },
+  )
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new OvClientError({
+      code: 'BOT_INTERRUPT_FAILED',
+      message: extractErrorMessage(
+        text,
+        `Bot interrupt failed (${response.status})`,
+      ),
+      responseBody: text,
+      statusCode: response.status,
+    })
+  }
+
+  return response.json().catch(() => ({ interrupted: false }))
+}
+
 // ---------------------------------------------------------------------------
 // Part serialization helpers (Message → API request format)
 // ---------------------------------------------------------------------------

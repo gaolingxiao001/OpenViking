@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { OvClientError } from '#/lib/ov-client'
+import { OvClientError, ovClient } from '#/lib/ov-client'
 
 import {
   fetchSessionFirstTitle,
   fetchSessionMessages,
+  interruptChatSession,
   serializeParts,
 } from './api'
 
@@ -202,5 +203,62 @@ describe('fetchSessionFirstTitle', () => {
     expect(peak).toBe(4)
     expect(results.every((result) => result.status === 'rejected')).toBe(true)
     expect(getSessionBySessionIdMock).toHaveBeenCalledTimes(12)
+  })
+})
+
+describe('interruptChatSession', () => {
+  beforeEach(() => {
+    ovClient.setOptions({ baseUrl: 'http://localhost:1933' })
+    ovClient.setConnection({
+      accountId: 'account-1',
+      apiKey: 'api-key-1',
+      identityHeaders: true,
+      userId: 'user-1',
+    })
+  })
+
+  it('posts to the scoped bot interrupt endpoint with auth headers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ interrupted: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(interruptChatSession('session 1')).resolves.toEqual({
+      interrupted: true,
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:1933/bot/v1/sessions/session%201/interrupt',
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'api-key-1',
+          'X-OpenViking-Account': 'account-1',
+          'X-OpenViking-User': 'user-1',
+        },
+        method: 'POST',
+      },
+    )
+  })
+
+  it('throws a client error when backend interrupt fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: 'not running' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 503,
+        }),
+      ),
+    )
+
+    await expect(interruptChatSession('session-1')).rejects.toMatchObject({
+      code: 'BOT_INTERRUPT_FAILED',
+      message: 'not running',
+      statusCode: 503,
+    })
   })
 })

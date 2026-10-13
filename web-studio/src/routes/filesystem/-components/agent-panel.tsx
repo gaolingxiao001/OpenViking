@@ -100,7 +100,7 @@ export function AgentPanel({
   const handleNewSession = useCallback(() => {
     if (isCreatingSession) return
     creationGenerationRef.current += 1
-    chat.abort()
+    chat.abort({ closeLocalStream: true, discardPartial: true })
     chat.setMessages([])
     creationStartedRef.current = false
     setSessionError(null)
@@ -114,7 +114,7 @@ export function AgentPanel({
   const handleSwitchSession = useCallback(
     (nextSessionId: string) => {
       creationGenerationRef.current += 1
-      chat.abort()
+      chat.abort({ closeLocalStream: true, discardPartial: true })
       creationStartedRef.current = false
       setSessionError(null)
       setIsCreatingSession(false)
@@ -331,7 +331,10 @@ export function AgentPanel({
                           )
                           if (session.session_id === sessionId) {
                             creationGenerationRef.current += 1
-                            chat.abort()
+                            chat.abort({
+                              closeLocalStream: true,
+                              discardPartial: true,
+                            })
                             chat.setMessages([])
                             creationStartedRef.current = false
                             setIsCreatingSession(false)
