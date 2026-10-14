@@ -497,6 +497,45 @@ export type InterruptChatSessionResult = {
   interrupted: boolean
 }
 
+export type SteerChatSessionResult = {
+  accepted: boolean
+}
+
+export async function steerChatSession(
+  sessionId: string,
+  request: BotChatRequest,
+): Promise<SteerChatSessionResult> {
+  const baseUrl = ovClient.getOptions().baseUrl
+  const conn = ovClient.getConnection()
+  const response = await fetch(
+    `${baseUrl}/bot/v1/sessions/${encodeURIComponent(sessionId)}/steer`,
+    {
+      method: 'POST',
+      headers: buildFetchHeaders(),
+      body: JSON.stringify({
+        ...request,
+        session_id: sessionId,
+        user_id: request.user_id || conn.userId || undefined,
+      }),
+    },
+  )
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new OvClientError({
+      code: 'BOT_STEER_FAILED',
+      message: extractErrorMessage(
+        text,
+        `Bot steer failed (${response.status})`,
+      ),
+      responseBody: text,
+      statusCode: response.status,
+    })
+  }
+
+  return response.json().catch(() => ({ accepted: false }))
+}
+
 export async function interruptChatSession(
   sessionId: string,
 ): Promise<InterruptChatSessionResult> {

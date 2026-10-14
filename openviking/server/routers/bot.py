@@ -370,6 +370,56 @@ async def interrupt_session(
         )
 
 
+@router.post("/sessions/{session_id}/steer")
+async def steer_session(
+    session_id: str,
+    request: Request,
+    _ctx: RequestContext = Depends(get_request_context),
+):
+    """Append user input to an active streaming bot session."""
+    bot_url = get_bot_url()
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON in request body",
+        )
+
+    try:
+        async with _create_bot_proxy_client() as client:
+            headers = {"Content-Type": "application/json"}
+            if BOT_API_KEY:
+                headers["X-Gateway-Token"] = BOT_API_KEY
+
+            response = await client.post(
+                f"{bot_url}/bot/v1/sessions/{quote(session_id, safe='')}/steer",
+                json=_attach_openviking_connection(body, request, _ctx),
+                headers=headers,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.RequestError as e:
+        logger.error(f"Failed to connect to bot service: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Bot service unavailable: {str(e)}",
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Bot service returned error: {e}")
+        if e.response.status_code < 500:
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=e.response.text,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Bot service error: {e.response.text}",
+        )
+
+
 @router.post("/chat/stream")
 async def chat_stream(
     request: Request,

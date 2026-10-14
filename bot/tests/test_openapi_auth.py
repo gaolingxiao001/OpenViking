@@ -263,6 +263,40 @@ class TestOpenAPIAuth:
         assert response.status_code == 409
         assert message_bus.inbound_size == 0
 
+    def test_steer_requires_existing_in_flight_request(self, message_bus, temp_workspace):
+        channel = OpenAPIChannel(OpenAPIChannelConfig(), message_bus, temp_workspace)
+
+        response = _make_client(channel).post(
+            "/bot/v1/sessions/same-session/steer",
+            json={"message": "follow up"},
+        )
+
+        assert response.status_code == 409
+        assert message_bus.inbound_size == 0
+
+    @pytest.mark.asyncio
+    async def test_steer_publishes_inbound_message_for_pending_session(
+        self, message_bus, temp_workspace
+    ):
+        channel = OpenAPIChannel(OpenAPIChannelConfig(), message_bus, temp_workspace)
+        scope = channel._principal_scope("standalone")
+        storage_key = channel._scoped_session_id(scope, "same-session")
+        channel._pending[storage_key] = PendingResponse()
+
+        response = _make_client(channel).post(
+            "/bot/v1/sessions/same-session/steer",
+            json={"message": "follow up", "user_id": "user-1"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"accepted": True}
+        msg = await asyncio.wait_for(message_bus.consume_inbound(), timeout=1)
+        assert msg.session_key == SessionKey(
+            type="cli", channel_id="default", chat_id=storage_key
+        )
+        assert msg.content == "follow up"
+        assert msg.sender_id == "user-1"
+
     def test_scoped_session_id_stays_logical_while_storage_path_is_portable(
         self, message_bus, temp_workspace
     ):

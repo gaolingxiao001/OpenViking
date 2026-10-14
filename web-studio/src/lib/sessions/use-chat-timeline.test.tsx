@@ -6,17 +6,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchSse } from '#/lib/sse'
 import { useChat } from './use-chat'
 
-const { addMessageMock, interruptChatSessionMock, sendChatStreamMock } =
+const {
+  addMessageMock,
+  interruptChatSessionMock,
+  sendChatStreamMock,
+  steerChatSessionMock,
+} =
   vi.hoisted(() => ({
     addMessageMock: vi.fn(),
     interruptChatSessionMock: vi.fn(),
     sendChatStreamMock: vi.fn(),
+    steerChatSessionMock: vi.fn(),
   }))
 
 vi.mock('./api', () => ({
   addMessage: addMessageMock,
   interruptChatSession: interruptChatSessionMock,
   sendChatStream: sendChatStreamMock,
+  steerChatSession: steerChatSessionMock,
   serializeParts: vi.fn(),
 }))
 
@@ -51,6 +58,8 @@ describe('useChat event timeline', () => {
     interruptChatSessionMock.mockReset()
     interruptChatSessionMock.mockResolvedValue({ interrupted: false })
     sendChatStreamMock.mockReset()
+    steerChatSessionMock.mockReset()
+    steerChatSessionMock.mockResolvedValue({ accepted: true })
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(0)
       return 1
@@ -415,6 +424,61 @@ describe('useChat event timeline', () => {
     })
 
     expect(interruptChatSessionMock).toHaveBeenCalledWith('session-1')
+  })
+
+  it('steers new user input into an active stream without opening another stream', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    sendChatStreamMock.mockResolvedValue(
+      fetchSse('/stream', {
+        fetch: vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(streamController) {
+                controller = streamController
+              },
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+        ),
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: false,
+        sessionId: 'session-1',
+      }),
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('hello')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(result.current.status).toBe('streaming')
+
+    await act(async () => {
+      await result.current.send('follow up')
+    })
+
+    expect(sendChatStreamMock).toHaveBeenCalledTimes(1)
+    expect(steerChatSessionMock).toHaveBeenCalledWith('session-1', {
+      message: 'follow up',
+    })
+    expect(result.current.messages.map((message) => message.role)).toEqual([
+      'user',
+      'user',
+    ])
+    expect(result.current.messages[1]?.parts).toEqual([
+      { type: 'text', text: 'follow up' },
+    ])
+
+    await act(async () => {
+      controller.close()
+      await sendPromise
+    })
   })
 
   it('keeps reasoning and tool timeline when aborted before content arrives', async () => {

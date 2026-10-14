@@ -15,6 +15,7 @@ import {
   addMessage,
   interruptChatSession,
   sendChatStream,
+  steerChatSession,
   serializeParts,
 } from './api'
 import { parseSseStream, streamEventDataToText } from './sse'
@@ -289,12 +290,23 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
   const send = useCallback(
     async (message: string, sendOptions?: SendOptions) => {
-      if (status === 'streaming') return
-
       const isFirstExchange = messagesRef.current.length === 0
       const displayMessage = sendOptions?.displayMessage ?? message
 
       const userMsg = createUserMessage(displayMessage)
+
+      if (status === 'streaming') {
+        setMessages((prev) => [...prev, userMsg])
+        setError(undefined)
+        try {
+          await steerChatSession(sessionId, { message })
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err))
+          throw err
+        }
+        return
+      }
+
       setMessages((prev) => [...prev, userMsg])
       setStatus('streaming')
       setError(undefined)

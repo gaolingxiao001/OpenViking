@@ -6,6 +6,7 @@ import {
   fetchSessionFirstTitle,
   fetchSessionMessages,
   interruptChatSession,
+  steerChatSession,
   serializeParts,
 } from './api'
 
@@ -259,6 +260,70 @@ describe('interruptChatSession', () => {
       code: 'BOT_INTERRUPT_FAILED',
       message: 'not running',
       statusCode: 503,
+    })
+  })
+})
+
+describe('steerChatSession', () => {
+  beforeEach(() => {
+    ovClient.setOptions({ baseUrl: 'http://localhost:1933' })
+    ovClient.setConnection({
+      accountId: 'account-1',
+      apiKey: 'api-key-1',
+      identityHeaders: true,
+      userId: 'user-1',
+    })
+  })
+
+  it('posts the message to the scoped bot steer endpoint with auth headers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ accepted: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      steerChatSession('session 1', { message: 'next input' }),
+    ).resolves.toEqual({ accepted: true })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost:1933/bot/v1/sessions/session%201/steer',
+      {
+        body: JSON.stringify({
+          message: 'next input',
+          session_id: 'session 1',
+          user_id: 'user-1',
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': 'api-key-1',
+          'X-OpenViking-Account': 'account-1',
+          'X-OpenViking-User': 'user-1',
+        },
+        method: 'POST',
+      },
+    )
+  })
+
+  it('throws a client error when backend steer fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: 'no active request' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 409,
+        }),
+      ),
+    )
+
+    await expect(
+      steerChatSession('session-1', { message: 'next input' }),
+    ).rejects.toMatchObject({
+      code: 'BOT_STEER_FAILED',
+      message: 'no active request',
+      statusCode: 409,
     })
   })
 })

@@ -563,6 +563,18 @@ class OpenAPIChannel(BaseChannel):
             interrupted = await channel._agent_loop.interrupt(session_key)
             return {"interrupted": interrupted}
 
+        @router.post("/sessions/{session_id}/steer")
+        async def steer_session(
+            session_id: str,
+            request: ChatRequest,
+            http_request: Request,
+            auth: GatewayRequestAuth = Depends(verify_gateway_request),
+        ):
+            """Append user input to an active streaming turn."""
+            await channel._prepare_chat_request(http_request, request, auth)
+            request.session_id = session_id
+            return await channel._handle_chat_steer(request)
+
         # ========== Bot Channel Routes ==========
 
         @router.post("/chat/channel", response_model=ChatResponse)
@@ -1603,6 +1615,41 @@ class OpenAPIChannel(BaseChannel):
                 "X-VikingBot-Session-ID": session_id,
             },
         )
+
+    async def _handle_chat_steer(self, request: ChatRequest) -> dict[str, bool]:
+        """Append input to an existing streaming chat request."""
+        session_id = request.session_id
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+
+        storage_key = self._scoped_session_id(request._principal_scope, session_id)
+        if storage_key not in self._pending:
+            raise HTTPException(
+                status_code=409,
+                detail="Session has no active request to steer",
+            )
+
+        user_id = self._request_user_id(request)
+        if storage_key in self._sessions:
+            self._sessions[storage_key]["last_active"] = datetime.now()
+            self._sessions[storage_key]["message_count"] += 1
+
+        session_key = SessionKey(
+            type="cli",
+            channel_id=self.config.channel_id(),
+            chat_id=storage_key,
+        )
+        msg = InboundMessage(
+            session_key=session_key,
+            sender_id=user_id,
+            actor_peer_id=self._request_actor_peer_id(request, user_id),
+            content=self._request_content(request),
+            media=self._request_media(request),
+            metadata=self._request_metadata(request),
+            openviking_connection=self._request_openviking_connection(request),
+        )
+        await self.bus.publish_inbound(msg)
+        return {"accepted": True}
 
     async def _handle_bot_chat(self, channel_id: str, request: ChatRequest) -> ChatResponse:
         """Handle a BotChannel chat request."""
