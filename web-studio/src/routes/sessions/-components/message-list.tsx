@@ -131,7 +131,7 @@ interface MessageListProps {
   messages: Message[]
   streaming?: {
     parts?: MessagePart[]
-    pendingMessages?: Message[]
+    userMessages?: Message[]
     iteration: number
   }
   onResourceClick?: (uri: string) => void
@@ -161,7 +161,6 @@ export function MessageList({
     streaming && safeMessages.at(-1)?.role === 'assistant'
       ? safeMessages.pop()
       : undefined
-  const pendingMessages = streaming?.pendingMessages ?? []
   return (
     <>
       {safeMessages.map((msg, idx) => {
@@ -194,22 +193,14 @@ export function MessageList({
           onResourceClick={onResourceClick}
         />
       )}
-      {pendingMessages.map((msg, idx) => {
-        const previous = idx > 0 ? pendingMessages[idx - 1] : null
-        const sameRole =
-          previous?.role === msg.role &&
-          (!previous.turn_id ||
-            !msg.turn_id ||
-            previous.turn_id === msg.turn_id)
-        return (
-          <UserMessage
-            key={msg.id}
-            message={msg}
-            compact={sameRole}
-            expanded={isExpanded}
-          />
-        )
-      })}
+      {streaming?.userMessages?.map((message, index) => (
+        <UserMessage
+          key={message.id}
+          message={message}
+          compact={index > 0}
+          expanded={isExpanded}
+        />
+      ))}
     </>
   )
 }

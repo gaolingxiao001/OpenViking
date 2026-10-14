@@ -183,7 +183,12 @@ async def test_steer_proxy_forwards_message_body(monkeypatch):
     monkeypatch.setattr(bot_router_module, "_create_bot_proxy_client", lambda: FakeClient())
 
     app = FastAPI()
-    app.state.config = ServerConfig(auth_mode="trusted", host="127.0.0.1", port=1944)
+    app.state.config = ServerConfig(
+        auth_mode="trusted",
+        host="127.0.0.1",
+        port=1944,
+        root_api_key="active-user-key",
+    )
     app.state.auth_plugin = TrustedAuthPlugin()
     app.include_router(bot_router_module.router, prefix="/bot/v1")
     transport = httpx.ASGITransport(app=app)

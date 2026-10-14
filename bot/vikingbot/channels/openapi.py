@@ -255,8 +255,8 @@ class OpenAPIChannel(BaseChannel):
         Handle outbound messages - routes to pending responses.
         This is called by the message bus dispatcher.
         """
-        # Check if this message is for a BotChannel
-        if msg.session_key.type == "bot_api":
+        is_bot_channel = msg.session_key.type == "bot_api"
+        if is_bot_channel:
             channel_id = msg.session_key.channel_id
             session_id = msg.session_key.chat_id
 
@@ -270,49 +270,15 @@ class OpenAPIChannel(BaseChannel):
                     f"No pending request for BotChannel {channel_id} session: {session_id}"
                 )
                 return
+        else:
+            pending = self._pending.get(msg.session_key.chat_id)
+            if not pending:
+                return
 
-            if (
-                msg.event_type == OutboundEventType.RESPONSE
-                or msg.event_type == OutboundEventType.NO_REPLY
-            ):
-                pending.set_response_id(msg.response_id)
-                pending.relevant_memories = (msg.metadata or {}).get("relevant_memories")
-                pending.token_usage = msg.token_usage
-                await pending.add_event(
-                    "response",
-                    {"content": msg.content or "", "response_id": msg.response_id},
-                )
-                pending.set_final(msg.content or "")
-                await pending.close_stream()
-            elif msg.event_type == OutboundEventType.INTERRUPT:
-                pending.set_response_id(msg.response_id)
-                await pending.add_event("interrupt", msg.metadata or {})
-                pending.set_final(msg.content or "")
-                await pending.close_stream()
-            elif msg.event_type == OutboundEventType.REASONING:
-                await pending.add_event("reasoning", msg.content)
-            elif msg.event_type == OutboundEventType.CONTENT_DELTA:
-                await pending.add_event("content_delta", msg.content)
-            elif msg.event_type == OutboundEventType.REASONING_DELTA:
-                await pending.add_event("reasoning_delta", msg.content)
-            elif msg.event_type == OutboundEventType.TOOL_CALL:
-                await pending.add_event("tool_call", msg.content)
-            elif msg.event_type == OutboundEventType.TOOL_RESULT:
-                await pending.add_event("tool_result", msg.content)
-            elif msg.event_type == OutboundEventType.ITERATION:
-                await pending.add_event("iteration", msg.content)
-            return
-
-        # Handle as normal OpenAPIChannel message
-        session_id = msg.session_key.chat_id
-        pending = self._pending.get(session_id)
-
-        if not pending:
-            # No pending request for this session, ignore
-            return
-
-        if msg.event_type == OutboundEventType.RESPONSE:
-            # Final response - add to stream first
+        is_response = msg.event_type == OutboundEventType.RESPONSE or (
+            is_bot_channel and msg.event_type == OutboundEventType.NO_REPLY
+        )
+        if is_response:
             pending.set_response_id(msg.response_id)
             pending.token_usage = msg.token_usage
             pending.relevant_memories = (msg.metadata or {}).get("relevant_memories")
@@ -1624,20 +1590,11 @@ class OpenAPIChannel(BaseChannel):
             )
 
         user_id = self._request_user_id(request)
-        if storage_key in self._sessions:
-            self._sessions[storage_key]["last_active"] = datetime.now()
-            self._sessions[storage_key]["message_count"] += 1
-
         session_key = SessionKey(
             type="cli",
             channel_id=self.config.channel_id(),
             chat_id=storage_key,
         )
-        if self._agent_loop is not None and not self._agent_loop.can_steer(session_key):
-            raise HTTPException(
-                status_code=409,
-                detail="Session has no active turn to steer",
-            )
         msg = InboundMessage(
             session_key=session_key,
             sender_id=user_id,
@@ -1647,7 +1604,14 @@ class OpenAPIChannel(BaseChannel):
             metadata=self._request_metadata(request),
             openviking_connection=self._request_openviking_connection(request),
         )
-        await self.bus.publish_inbound(msg)
+        if self._agent_loop is None or not self._agent_loop.steer(msg):
+            raise HTTPException(
+                status_code=409,
+                detail="Session has no active turn to steer",
+            )
+        if storage_key in self._sessions:
+            self._sessions[storage_key]["last_active"] = datetime.now()
+            self._sessions[storage_key]["message_count"] += 1
         return {"accepted": True}
 
     async def _handle_bot_chat(self, channel_id: str, request: ChatRequest) -> ChatResponse:

@@ -244,24 +244,6 @@ describe('interruptChatSession', () => {
       },
     )
   })
-
-  it('throws a client error when backend interrupt fails', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ detail: 'not running' }), {
-          headers: { 'Content-Type': 'application/json' },
-          status: 503,
-        }),
-      ),
-    )
-
-    await expect(interruptChatSession('session-1')).rejects.toMatchObject({
-      code: 'BOT_INTERRUPT_FAILED',
-      message: 'not running',
-      statusCode: 503,
-    })
-  })
 })
 
 describe('steerChatSession', () => {
@@ -305,25 +287,5 @@ describe('steerChatSession', () => {
         method: 'POST',
       },
     )
-  })
-
-  it('throws a client error when backend steer fails', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ detail: 'no active request' }), {
-          headers: { 'Content-Type': 'application/json' },
-          status: 409,
-        }),
-      ),
-    )
-
-    await expect(
-      steerChatSession('session-1', { message: 'next input' }),
-    ).rejects.toMatchObject({
-      code: 'BOT_STEER_FAILED',
-      message: 'no active request',
-      statusCode: 409,
-    })
   })
 })

@@ -85,7 +85,10 @@ function SessionThread({ sessionId, draft = false, onPersisted }: ThreadProps) {
           creating.current = false
         }
       }
-      void chat.send(message)
+      const sending = chat.send(message)
+      if (chat.status === 'streaming') {
+        await sending
+      }
       return true
     },
     [chat, createSession, sessionId, onPersisted],
@@ -112,8 +115,8 @@ function SessionThread({ sessionId, draft = false, onPersisted }: ThreadProps) {
     })
   }, [
     chat.messages.length,
-    chat.pendingSteerMessages.length,
     chat.streamingParts,
+    chat.streamingUserMessages.length,
   ])
 
   const [showBackground, setShowBackground] = useState(false)
@@ -180,7 +183,7 @@ function SessionThread({ sessionId, draft = false, onPersisted }: ThreadProps) {
               isStreaming
                 ? {
                     parts: chat.streamingParts,
-                    pendingMessages: chat.pendingSteerMessages,
+                    userMessages: chat.streamingUserMessages,
                     iteration: chat.iteration,
                   }
                 : undefined

@@ -25,7 +25,13 @@ vi.mock('#/lib/sessions/use-sessions', () => ({
   useSessionMessages: m.history,
 }))
 vi.mock('#/lib/sessions/use-chat', () => ({
-  useChat: () => ({ messages: [], status: 'idle', send: m.send }),
+  useChat: () => ({
+    messages: [],
+    status: 'idle',
+    streamingParts: [],
+    streamingUserMessages: [],
+    send: m.send,
+  }),
 }))
 vi.mock('./memory-impact', () => ({ MemoryImpact: () => null }))
 vi.mock('./composer', () => ({
@@ -125,4 +131,12 @@ it('loads persisted history and continues after switching tabs', async () => {
   })
   expect(m.create).toHaveBeenCalledExactlyOnceWith('draft')
   expect(m.send).toHaveBeenLastCalledWith('second')
+})
+
+it('releases the composer after starting an existing session stream', async () => {
+  m.send.mockReturnValue(new Promise<void>(() => {}))
+  render(<Thread sessionId="existing" />)
+
+  await expect(m.onSend!('first')).resolves.toBe(true)
+  expect(m.send).toHaveBeenCalledWith('first')
 })

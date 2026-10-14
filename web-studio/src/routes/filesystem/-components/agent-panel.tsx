@@ -144,9 +144,9 @@ export function AgentPanel({
   }, [
     chat.messages.length,
     chat.streamingContent,
-    chat.pendingSteerMessages.length,
     chat.streamingReasoning,
     chat.streamingToolCalls,
+    chat.streamingUserMessages.length,
   ])
 
   const send = useCallback(
@@ -174,7 +174,10 @@ export function AgentPanel({
           }
         }
       }
-      void chat.send(message)
+      const sending = chat.send(message)
+      if (chat.status === 'streaming') {
+        await sending
+      }
       return true
     },
     [chat, createSession, onSessionChange, persistedSessionId, sessionId],
@@ -245,7 +248,7 @@ export function AgentPanel({
                   ? {
                       iteration: chat.iteration,
                       parts: chat.streamingParts,
-                      pendingMessages: chat.pendingSteerMessages,
+                      userMessages: chat.streamingUserMessages,
                     }
                   : undefined
               }

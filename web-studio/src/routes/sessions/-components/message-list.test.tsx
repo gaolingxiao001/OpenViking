@@ -133,24 +133,17 @@ describe('MessageList reasoning', () => {
   })
 })
 
-describe('MessageList pending steers', () => {
-  it('renders optimistic steer messages after the streaming assistant', () => {
+describe('MessageList streaming user input', () => {
+  it('renders accepted input after the current assistant output', () => {
     const { container } = render(
       <MessageList
-        messages={[
-          {
-            id: 'message-1',
-            role: 'user',
-            parts: [{ type: 'text', text: 'first question' }],
-            created_at: '2026-09-13T00:00:00Z',
-          },
-        ]}
+        messages={[]}
         streaming={{
           iteration: 1,
           parts: [{ type: 'text', text: 'answer still streaming' }],
-          pendingMessages: [
+          userMessages: [
             {
-              id: 'pending-steer',
+              id: 'accepted-input',
               role: 'user',
               parts: [{ type: 'text', text: 'follow up' }],
               created_at: '2026-09-13T00:00:01Z',
@@ -160,7 +153,7 @@ describe('MessageList pending steers', () => {
       />,
     )
 
-    const text = container.textContent ?? ''
+    const text = container.textContent
     expect(text.indexOf('answer still streaming')).toBeLessThan(
       text.indexOf('follow up'),
     )

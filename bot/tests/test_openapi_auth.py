@@ -5,6 +5,7 @@
 import asyncio
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -274,16 +275,13 @@ class TestOpenAPIAuth:
         assert response.status_code == 409
         assert message_bus.inbound_size == 0
 
-    @pytest.mark.asyncio
-    async def test_steer_publishes_inbound_message_for_pending_session(
-        self, message_bus, temp_workspace
-    ):
+    def test_steer_attaches_message_to_active_turn(self, message_bus, temp_workspace):
         class FakeAgentLoop:
             def __init__(self):
-                self.session_key = None
+                self.msg = None
 
-            def can_steer(self, session_key):
-                self.session_key = session_key
+            def steer(self, msg):
+                self.msg = msg
                 return True
 
         agent_loop = FakeAgentLoop()
@@ -304,21 +302,18 @@ class TestOpenAPIAuth:
 
         assert response.status_code == 200
         assert response.json() == {"accepted": True}
-        assert agent_loop.session_key == SessionKey(
+        assert agent_loop.msg.session_key == SessionKey(
             type="cli", channel_id="default", chat_id=storage_key
         )
-        msg = await asyncio.wait_for(message_bus.consume_inbound(), timeout=1)
-        assert msg.session_key == SessionKey(
-            type="cli", channel_id="default", chat_id=storage_key
-        )
-        assert msg.content == "follow up"
-        assert msg.sender_id == "user-1"
+        assert agent_loop.msg.content == "follow up"
+        assert agent_loop.msg.sender_id == "user-1"
+        assert message_bus.inbound_size == 0
 
     def test_steer_rejects_pending_session_without_active_turn(
         self, message_bus, temp_workspace
     ):
         class FakeAgentLoop:
-            def can_steer(self, session_key):
+            def steer(self, msg):
                 return False
 
         channel = OpenAPIChannel(
@@ -330,6 +325,10 @@ class TestOpenAPIAuth:
         scope = channel._principal_scope("standalone")
         storage_key = channel._scoped_session_id(scope, "same-session")
         channel._pending[storage_key] = PendingResponse()
+        channel._sessions[storage_key] = {
+            "last_active": datetime.fromisoformat("2026-01-01T00:00:00"),
+            "message_count": 1,
+        }
 
         response = _make_client(channel).post(
             "/bot/v1/sessions/same-session/steer",
@@ -337,6 +336,10 @@ class TestOpenAPIAuth:
         )
 
         assert response.status_code == 409
+        assert channel._sessions[storage_key] == {
+            "last_active": datetime.fromisoformat("2026-01-01T00:00:00"),
+            "message_count": 1,
+        }
         assert message_bus.inbound_size == 0
 
     def test_scoped_session_id_stays_logical_while_storage_path_is_portable(
