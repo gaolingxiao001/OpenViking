@@ -121,30 +121,6 @@ class _SnapshotMixin:
     def _restore_reindex_context(ctx: RequestContext) -> RequestContext:
         return replace(ctx, bypass_acl=True)
 
-    async def system_sync_status(
-        self, uri: str, ctx: Optional[RequestContext] = None
-    ) -> Dict[str, Any]:
-        """Return multi-write sync status for one Viking URI subtree."""
-        await self._ensure_access(uri, ctx)
-        real_ctx = self._ctx_or_default(ctx)
-        path = self._uri_to_path(uri, ctx=ctx)
-        return await self._async_agfs.system_sync_status(
-            path,
-            fs_ctx={"account_id": real_ctx.account_id},
-        )
-
-    async def system_sync_retry(
-        self, uri: str, ctx: Optional[RequestContext] = None
-    ) -> Dict[str, Any]:
-        """Retry multi-write sync for one Viking URI subtree."""
-        await self._ensure_access(uri, ctx, action=AclAction.WRITE)
-        real_ctx = self._ctx_or_default(ctx)
-        path = self._uri_to_path(uri, ctx=ctx)
-        return await self._async_agfs.system_sync_retry(
-            path,
-            fs_ctx={"account_id": real_ctx.account_id},
-        )
-
     async def get_gitignore(self, ctx: Optional[RequestContext] = None) -> str:
         """Return the account-level .ovgitignore content, or an empty string if absent.
 
@@ -460,7 +436,9 @@ class _SnapshotMixin:
                     ctx=real_ctx,
                 )
             try:
-                result = await self._async_agfs.run("git_restore", **kwargs)
+                result = await self._async_agfs.run(
+                    "git_restore", **kwargs, ctx=self._pathlock_fs_ctx(real_ctx, lease)
+                )
             except GitRestoreWritebackPartialError as exc:
                 # The ref already advanced — capture the exception and
                 # finish the lock scope cleanly. Reindex scheduling and

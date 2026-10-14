@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterable
 from urllib.parse import quote, unquote
@@ -80,7 +81,6 @@ class OpenVikingStore(BaseStore):
         root_uri: str = "viking://~/memories/langgraph_store",
         index: bool | list[str] | None = None,
         wait: bool = True,
-        timeout: float | None = None,
         search_fetch_limit: int = 50,
         auto_initialize: bool = True,
     ):
@@ -100,7 +100,6 @@ class OpenVikingStore(BaseStore):
         self.root_uri: str = root_uri.rstrip("/")
         self.index: bool | list[str] | None = index
         self.wait: bool = wait
-        self.timeout: float | None = timeout
         self.search_fetch_limit: int = search_fetch_limit
         self._client_cache: Any = None
 
@@ -160,7 +159,7 @@ class OpenVikingStore(BaseStore):
         self,
         namespace: tuple[str, ...],
         key: str,
-        value: dict[str, Any],
+        value: Mapping[str, Any],
         index: bool | list[str] | None = None,
         *,
         ttl: Any = None,
@@ -173,7 +172,7 @@ class OpenVikingStore(BaseStore):
         namespace = tuple(namespace)
         now = datetime.now(timezone.utc)
         data_uri = self._data_uri(namespace, key)
-        record = self._write_record(data_uri, namespace, key, value, now)
+        record = self._write_record(data_uri, namespace, key, dict(value), now)
 
         effective_index = self.index if index is None else index
         index_uri = self._index_uri(namespace, key)
@@ -308,21 +307,17 @@ class OpenVikingStore(BaseStore):
         value: dict[str, Any],
         now: datetime,
     ) -> dict[str, Any]:
-        record = _store_record(namespace, key, value, created_at=now, updated_at=now)
-        content = json.dumps(record, ensure_ascii=False, indent=2)
         try:
-            self._write_create(uri, content)
+            existing = self._read_record(uri)
+        except Exception:
+            record = _store_record(namespace, key, value, created_at=now, updated_at=now)
+            self._write_create(uri, json.dumps(record, ensure_ascii=False, indent=2))
             return record
-        except Exception as create_exc:
-            try:
-                existing = self._read_record(uri)
-            except Exception:
-                raise create_exc
 
-            created_at = _parse_dt(existing["created_at"])
-            record = _store_record(namespace, key, value, created_at=created_at, updated_at=now)
-            self._write_replace(uri, json.dumps(record, ensure_ascii=False, indent=2))
-            return record
+        created_at = _parse_dt(existing["created_at"])
+        record = _store_record(namespace, key, value, created_at=created_at, updated_at=now)
+        self._write_replace(uri, json.dumps(record, ensure_ascii=False, indent=2))
+        return record
 
     def _write(self, uri: str, content: str) -> None:
         try:
@@ -343,7 +338,6 @@ class OpenVikingStore(BaseStore):
             content=content,
             mode="create",
             wait=self.wait,
-            timeout=self.timeout,
         )
 
     def _write_replace(self, uri: str, content: str) -> None:
@@ -354,7 +348,6 @@ class OpenVikingStore(BaseStore):
             content=content,
             mode="replace",
             wait=self.wait,
-            timeout=self.timeout,
         )
 
     def _remove(self, uri: str) -> None:
