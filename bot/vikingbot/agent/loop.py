@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -267,12 +267,35 @@ class _PlainTextFinal:
 
 
 @dataclass(slots=True)
+class _PreparedSteer:
+    """Preprocessed same-session input to merge into an active agent loop."""
+
+    msg: InboundMessage
+    prompt_messages: list[dict[str, Any]]
+    newly_recalled_exp_uris: list[str]
+    newly_recalled_exp_content: str
+    auto_memory_tool: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _SteerTask:
+    """A queued same-session input being prepared for the active turn."""
+
+    msg: InboundMessage
+    task: asyncio.Task[_PreparedSteer]
+    consumed: bool = False
+
+
+@dataclass(slots=True)
 class _ActiveTurn:
     """The single turn currently running in the serial AgentLoop."""
 
     session_key: SessionKey
     task: asyncio.Task
     interrupted: bool = False
+    steer_tasks: list[_SteerTask] = field(default_factory=list)
+    consumed_steers: list[_PreparedSteer] = field(default_factory=list)
+    watcher_task: asyncio.Task | None = None
 
 
 class AgentIterationLimitExceeded(RuntimeError):
@@ -1183,6 +1206,7 @@ class AgentLoop:
         task = asyncio.create_task(self._process_message(msg))
         active = _ActiveTurn(msg.session_key, task)
         self._active_turn = active
+        active.watcher_task = asyncio.create_task(self._watch_active_turn_steer_inputs(active))
         try:
             return await task
         except asyncio.CancelledError:
@@ -1193,6 +1217,204 @@ class AgentLoop:
         finally:
             if self._active_turn and self._active_turn.task is task:
                 self._active_turn = None
+            if active.watcher_task:
+                active.watcher_task.cancel()
+                await asyncio.gather(active.watcher_task, return_exceptions=True)
+            pending_msgs: list[InboundMessage] = []
+            for steer in active.steer_tasks:
+                if steer.consumed:
+                    continue
+                if not steer.task.done():
+                    steer.task.cancel()
+                pending_msgs.append(steer.msg)
+            if pending_msgs:
+                self.bus.prepend_inbound(pending_msgs)
+            await asyncio.gather(
+                *(steer.task for steer in active.steer_tasks),
+                return_exceptions=True,
+            )
+
+    async def _watch_active_turn_steer_inputs(self, active: _ActiveTurn) -> None:
+        while not active.task.done():
+            self._drain_active_turn_steer_inputs(active)
+            try:
+                await self.bus.wait_for_inbound_change()
+            except asyncio.CancelledError:
+                raise
+
+    def _drain_active_turn_steer_inputs(self, active: _ActiveTurn) -> None:
+        if active.interrupted or active.task.done():
+            return
+        messages = self.bus.drain_pending_inbound_session(
+            active.session_key,
+            predicate=self._is_steer_candidate,
+        )
+        for msg in messages:
+            active.steer_tasks.append(
+                _SteerTask(msg=msg, task=asyncio.create_task(self._prepare_steer_message(msg)))
+            )
+
+    @staticmethod
+    def _is_steer_candidate(msg: InboundMessage) -> bool:
+        content = msg.content.strip()
+        return bool(msg.need_reply and not content.startswith("/"))
+
+    def _steer_prompt_tail(self, prepared_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        tail: list[dict[str, Any]] = []
+        for message in reversed(prepared_messages):
+            if message.get("role") == "system":
+                break
+            tail.append(message)
+        tail.reverse()
+        return tail[-3:]
+
+    async def _prepare_steer_message(self, msg: InboundMessage) -> _PreparedSteer:
+        session_key = msg.session_key
+        skip_heartbeat = session_key.type == "cli"
+        session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
+        ov_tools_enable = self._get_ov_tools_enable(session_key)
+        disabled_tools = msg.metadata.get("disabled_tools", []) if msg.metadata else []
+        if not isinstance(disabled_tools, list):
+            disabled_tools = []
+        openviking_connection = getattr(msg, "openviking_connection", None)
+        if not isinstance(openviking_connection, dict):
+            openviking_connection = None
+        msg.openviking_connection = openviking_connection
+        actor_peer_id = getattr(msg, "actor_peer_id", None) or msg.sender_id
+        msg.actor_peer_id = actor_peer_id
+        memory_peer_ids = self._metadata_memory_peer_ids(msg.metadata)
+        memory_owner_user_ids = self._metadata_memory_owner_user_ids(msg.metadata)
+        channel_config = self._get_channel_config(session_key)
+        profile_user_list = []
+        if channel_config and ov_tools_enable:
+            profile_user_list = getattr(channel_config, "profile_user_list", [])
+            if not memory_peer_ids:
+                memory_peer_ids = self._channel_memory_peer_ids(channel_config)
+            if not memory_owner_user_ids:
+                memory_owner_user_ids = self._channel_memory_owner_user_ids(channel_config)
+
+        is_group_chat = msg.metadata.get("chat_type") == "group" if msg.metadata else False
+        message_workspace = (
+            self.sandbox_manager.get_workspace_path(session_key)
+            if self.sandbox_manager
+            else self.workspace
+        )
+        message_context = ContextBuilder(
+            message_workspace,
+            sandbox_manager=self.sandbox_manager,
+            sender_id=msg.sender_id,
+            actor_peer_id=actor_peer_id,
+            sender_name=msg.sender_name,
+            is_group_chat=is_group_chat,
+            eval=self._eval,
+            openviking_connection=openviking_connection,
+            enable_subagents=self._subagents_enabled(),
+            config=self.config,
+        )
+        exp_exclude_uris = session.metadata.get("recalled_exp_uris", [])
+        if not isinstance(exp_exclude_uris, list):
+            exp_exclude_uris = []
+        prepared_messages = await message_context.build_messages(
+            history=[],
+            current_message=msg.content,
+            media=msg.media if msg.media else None,
+            session_key=msg.session_key,
+            ov_tools_enable=ov_tools_enable,
+            profile_user_list=profile_user_list,
+            memory_peer_ids=memory_peer_ids,
+            memory_owner_user_ids=memory_owner_user_ids,
+            exp_exclude_uris=exp_exclude_uris,
+        )
+        auto_memory_tool = None
+        if ov_tools_enable and message_context.latest_relevant_memories:
+            auto_memory_tool = await self._publish_auto_memory_context(
+                session_key=session_key,
+                query=msg.content,
+                result=message_context.latest_relevant_memories,
+            )
+        return _PreparedSteer(
+            msg=msg,
+            prompt_messages=self._steer_prompt_tail(prepared_messages),
+            newly_recalled_exp_uris=list(
+                getattr(message_context, "latest_recalled_exp_uris", [])
+            ),
+            newly_recalled_exp_content=getattr(
+                message_context, "latest_recalled_exp_content", ""
+            ),
+            auto_memory_tool=auto_memory_tool,
+        )
+
+    async def _consume_ready_steers(
+        self,
+        session_key: SessionKey,
+        *,
+        allow_wait: bool = False,
+    ) -> list[_PreparedSteer]:
+        active = self._active_turn
+        if active is None or active.session_key != session_key:
+            return []
+        self._drain_active_turn_steer_inputs(active)
+        if allow_wait:
+            await asyncio.sleep(0)
+            self._drain_active_turn_steer_inputs(active)
+        ready: list[_PreparedSteer] = []
+        for steer in active.steer_tasks:
+            if steer.consumed:
+                continue
+            if not steer.task.done():
+                if allow_wait:
+                    prepared = await steer.task
+                else:
+                    continue
+            else:
+                prepared = steer.task.result()
+            steer.consumed = True
+            active.consumed_steers.append(prepared)
+            ready.append(prepared)
+        return ready
+
+    def _append_prepared_steer_messages(
+        self,
+        messages: list[dict[str, Any]],
+        steers: list[_PreparedSteer],
+    ) -> list[dict[str, Any]]:
+        for steer in steers:
+            messages.extend(steer.prompt_messages)
+        return messages
+
+    def _append_consumed_steers_to_session(
+        self,
+        session: Session,
+        steers: list[_PreparedSteer],
+    ) -> None:
+        for steer in steers:
+            if steer.newly_recalled_exp_content:
+                session.add_message(
+                    "user",
+                    "[Experience Reminder]\n"
+                    f"## Relevant Agent Experience\n{steer.newly_recalled_exp_content}",
+                    exp_uris=steer.newly_recalled_exp_uris,
+                    experience_reminder=True,
+                )
+            session.add_message("user", steer.msg.content, sender_id=steer.msg.sender_id)
+
+    def _append_interrupted_steers_to_session(
+        self,
+        session: Session,
+        active: _ActiveTurn,
+    ) -> None:
+        for steer in active.steer_tasks:
+            if steer.task.done() and not steer.task.cancelled():
+                try:
+                    prepared = steer.task.result()
+                except Exception:
+                    prepared = None
+                if prepared is not None:
+                    self._append_consumed_steers_to_session(session, [prepared])
+                    steer.consumed = True
+                    continue
+            session.add_message("user", steer.msg.content, sender_id=steer.msg.sender_id)
+            steer.consumed = True
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -1204,6 +1426,9 @@ class AgentLoop:
         skip_heartbeat = session_key.type == "cli"
         session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
         session.add_message("user", msg.content, sender_id=msg.sender_id)
+        active = self._active_turn
+        if active and active.session_key == session_key:
+            self._append_interrupted_steers_to_session(session, active)
         await self.sessions.save(session)
         return OutboundMessage(
             session_key=msg.session_key,
@@ -1494,6 +1719,11 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            messages = self._append_prepared_steer_messages(
+                messages,
+                await self._consume_ready_steers(session_key, allow_wait=iteration > 1),
+            )
 
             if context_compact_budget is not None:
                 current_chars = sum(
@@ -2371,6 +2601,15 @@ class AgentLoop:
 
             if auto_memory_tool:
                 tools_used = [auto_memory_tool, *(tools_used or [])]
+            active = self._active_turn
+            consumed_steers = (
+                list(active.consumed_steers)
+                if active is not None and active.session_key == session_key
+                else []
+            )
+            for steer in consumed_steers:
+                if steer.auto_memory_tool:
+                    tools_used.append(steer.auto_memory_tool)
 
             # Log response preview
             preview = final_content[:300] + "..." if len(final_content) > 300 else final_content
@@ -2387,7 +2626,6 @@ class AgentLoop:
                 tools_used=tools_used,
             )
 
-            active = self._active_turn
             if active and active.session_key == session_key:
                 self._active_turn = None
 
@@ -2403,6 +2641,7 @@ class AgentLoop:
                         experience_reminder=True,
                     )
                 session.add_message("user", msg.content, sender_id=msg.sender_id)
+                self._append_consumed_steers_to_session(session, consumed_steers)
                 session.add_message(
                     "assistant",
                     final_content,

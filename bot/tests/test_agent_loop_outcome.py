@@ -154,6 +154,81 @@ class _ImageRegistry:
         )
 
 
+class _SteerProvider(LLMProvider):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    async def chat(self, messages, tools=None, **kwargs):
+        self.calls.append(copy.deepcopy(messages))
+        if len(self.calls) == 1:
+            return LLMResponse(
+                content="checking",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-1",
+                        name="wait_for_steer",
+                        arguments={},
+                        tokens=1,
+                    )
+                ],
+            )
+        return LLMResponse(content="steered final")
+
+    def get_default_model(self) -> str:
+        return "fake-model"
+
+
+class _BlockingSteerRegistry:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def get_definitions(self, **kwargs):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "wait_for_steer",
+                    "description": "Wait until the test releases the tool.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+    async def execute(self, tool_name, arguments, **kwargs):
+        self.started.set()
+        await self.release.wait()
+        return "tool result"
+
+
+class _InterruptAfterSteerProvider(LLMProvider):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+        self.second_call_started = asyncio.Event()
+
+    async def chat(self, messages, tools=None, **kwargs):
+        self.calls.append(copy.deepcopy(messages))
+        if len(self.calls) == 1:
+            return LLMResponse(
+                content="checking",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-1",
+                        name="wait_for_steer",
+                        arguments={},
+                        tokens=1,
+                    )
+                ],
+            )
+        self.second_call_started.set()
+        await asyncio.Future()
+
+    def get_default_model(self) -> str:
+        return "fake-model"
+
+
 async def _consume_outbound_event(
     bus: MessageBus, event_type: OutboundEventType, timeout: float = 2
 ) -> object:
@@ -558,6 +633,157 @@ async def test_agent_loop_interrupt_queued_turns_marks_all_current_pending_messa
         ]
         assert len(provider.calls) == 1
     finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_steers_same_session_input_into_next_tool_turn(
+    make_loop, temp_dir: Path
+):
+    bus = MessageBus()
+    provider = _SteerProvider()
+    tools = _BlockingSteerRegistry()
+    loop = make_loop(
+        bus=bus,
+        provider=provider,
+        config=Config(storage_workspace=str(temp_dir)),
+        max_iterations=3,
+    )
+    loop.tools = tools
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="steer-session")
+
+    run_task = asyncio.create_task(loop.run())
+    try:
+        await bus.publish_inbound(
+            InboundMessage(session_key=session_key, sender_id="user-1", content="first request")
+        )
+        await asyncio.wait_for(tools.started.wait(), timeout=2)
+        await bus.publish_inbound(
+            InboundMessage(session_key=session_key, sender_id="user-1", content="steer update")
+        )
+
+        await asyncio.sleep(0)
+        tools.release.set()
+
+        response = await _consume_outbound_event(bus, OutboundEventType.RESPONSE)
+
+        assert response.content == "steered final"
+        assert len(provider.calls) == 2
+        second_call_user_text = "\n".join(
+            str(message.get("content"))
+            for message in provider.calls[1]
+            if message.get("role") == "user"
+        )
+        assert "first request" in second_call_user_text
+        assert "steer update" in second_call_user_text
+
+        session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
+        assert [message["role"] for message in session.messages] == [
+            "user",
+            "user",
+            "assistant",
+        ]
+        assert [message["content"] for message in session.messages] == [
+            "first request",
+            "steer update",
+            "steered final",
+        ]
+        assert bus.inbound_size == 0
+    finally:
+        tools.release.set()
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_after_steer_preserves_all_consumed_user_inputs(
+    make_loop, temp_dir: Path
+):
+    bus = MessageBus()
+    provider = _InterruptAfterSteerProvider()
+    tools = _BlockingSteerRegistry()
+    loop = make_loop(
+        bus=bus,
+        provider=provider,
+        config=Config(storage_workspace=str(temp_dir)),
+        max_iterations=3,
+    )
+    loop.tools = tools
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="steer-interrupt")
+
+    run_task = asyncio.create_task(loop.run())
+    try:
+        await bus.publish_inbound(
+            InboundMessage(session_key=session_key, sender_id="user-1", content="first request")
+        )
+        await asyncio.wait_for(tools.started.wait(), timeout=2)
+        await bus.publish_inbound(
+            InboundMessage(session_key=session_key, sender_id="user-1", content="steer update")
+        )
+        await asyncio.sleep(0)
+        tools.release.set()
+        await asyncio.wait_for(provider.second_call_started.wait(), timeout=2)
+
+        assert await loop.interrupt(session_key) is True
+
+        interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
+
+        assert interrupted.content == ""
+        session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
+        assert [message["role"] for message in session.messages] == ["user", "user"]
+        assert [message["content"] for message in session.messages] == [
+            "first request",
+            "steer update",
+        ]
+        assert bus.inbound_size == 0
+    finally:
+        tools.release.set()
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_interrupt_preserves_unconsumed_steer_input(
+    make_loop, temp_dir: Path
+):
+    bus = MessageBus()
+    provider = _SteerProvider()
+    tools = _BlockingSteerRegistry()
+    loop = make_loop(
+        bus=bus,
+        provider=provider,
+        config=Config(storage_workspace=str(temp_dir)),
+        max_iterations=3,
+    )
+    loop.tools = tools
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="steer-interrupt-early")
+
+    run_task = asyncio.create_task(loop.run())
+    try:
+        await bus.publish_inbound(
+            InboundMessage(session_key=session_key, sender_id="user-1", content="first request")
+        )
+        await asyncio.wait_for(tools.started.wait(), timeout=2)
+        await bus.publish_inbound(
+            InboundMessage(session_key=session_key, sender_id="user-1", content="steer update")
+        )
+        await asyncio.sleep(0)
+
+        assert await loop.interrupt(session_key) is True
+
+        interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
+
+        assert interrupted.content == ""
+        session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
+        assert [message["role"] for message in session.messages] == ["user", "user"]
+        assert [message["content"] for message in session.messages] == [
+            "first request",
+            "steer update",
+        ]
+        assert bus.inbound_size == 0
+    finally:
+        tools.release.set()
         run_task.cancel()
         await asyncio.gather(run_task, return_exceptions=True)
 
