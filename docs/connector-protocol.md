@@ -252,8 +252,12 @@ own chat however many mails arrive. Any decision, the mail itself included, may
 propose one; the Core sends the owner a card on the primary IM with the
 recipients and subject (from the mail event's `data.reply`) and the draft in an
 editable input (read-only beyond 1000 characters), registered as a question
-only the owner can answer, once, within three days. On send the Core delivers
-the text the owner left there, with a key per card so it goes out at most once,
+only the owner can answer, once, within three days. The card lists every
+recipient: a mail that would be answered to more than 20 addresses reports only
+their number in `data.reply` and cannot be answered. On send the Core delivers
+the text the owner left there to the recipients the card showed, passed as
+`to`; the Connector sends only if they are exactly the mail's reply recipients.
+The key is per card, so the reply goes out at most once,
 and updates the card to sent, cancelled, not sent or uncertain. The model has no
 part in that; afterwards the Core tells it, as a line in the owner's chat, what
 actually went out (with the owner's edits) or that nothing did. A reply is recorded where its target is: one to

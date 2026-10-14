@@ -18,6 +18,8 @@ const FETCH_BATCH = 10;
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 const MAX_LISTED = 10;
 const MAX_ATTACHMENTS = 20;
+// An approval card shows every reply recipient; a mail that would be answered
+// to more addresses than fit there in full cannot be answered at all.
 const MAX_REPLY_RECIPIENTS = 20;
 
 // The account file: { address, password, imap: { host, port }, smtp: { host,
@@ -72,6 +74,12 @@ export function replyRecipients(mail, own) {
   const others = mail.to.filter((recipient) => recipient.address !== own);
   if (to.every((recipient) => recipient.address === own) && others.length > 0) to = others;
   return to;
+}
+
+function sameAddresses(approved, recipients) {
+  const sorted = (list) => [...list].sort().join('\n');
+  return Array.isArray(approved) && approved.length === recipients.length
+    && sorted(approved) === sorted(recipients.map((recipient) => recipient.address));
 }
 
 export function replySubject(subject) {
@@ -225,6 +233,7 @@ export class EmailClient {
     }
     if (item.truncated) mail.text = `[mail body not fetched: ${Math.round(item.size / 1_048_576)} MiB]`;
     const messageId = `mail:${uidValidity}:${item.uid}`;
+    const recipients = replyRecipients(mail, this.account.address);
     const line = JSON.stringify(eventMessage('email', {
       id: `imap:${uidValidity}:${item.uid}`,
       kind: mail.bulk ? 'email.list' : 'email.received',
@@ -239,8 +248,10 @@ export class EmailClient {
         })),
       },
       message: { id: messageId, type: 'email' },
-      // What a reply would look like, for the owner to check before it is sent.
-      data: { reply: { to: replyRecipients(mail, this.account.address).slice(0, MAX_REPLY_RECIPIENTS), subject: replySubject(mail.subject) } },
+      // Who a reply goes to, in full, for the owner to check on the approval
+      // card; past the limit only how many.
+      data: { reply: { subject: replySubject(mail.subject),
+        ...(recipients.length <= MAX_REPLY_RECIPIENTS ? { to: recipients } : { recipients: recipients.length }) } },
     }));
     // The event is built and checked before the reply headers are kept, so a
     // mail that fails leaves nothing behind.
@@ -253,13 +264,16 @@ export class EmailClient {
   }
 
   // A plain-text reply to a mail this Connector reported, threaded under it.
-  async replyMessage({ message_id: messageId, content, idempotency_key: idempotencyKey }) {
+  // `to` is the recipient list the owner approved on the card; it goes out only
+  // if it is still exactly this mail's reply recipients.
+  async replyMessage({ message_id: messageId, content, to: approved, idempotency_key: idempotencyKey }) {
     if (content?.type !== 'markdown') throw new Error('email replies are plain text only');
     const original = this.state.mail(messageId);
     if (!original) throw new Error('That mail is no longer available to reply to');
     const own = this.account.address;
     const to = replyRecipients(original, own);
     if (to.length === 0) throw new Error('That mail has no address to reply to');
+    if (!sameAddresses(approved, to)) throw new Error('The reply recipients do not match the ones the owner approved');
     const raw = buildReply({
       from: { name: this.account.name, address: own }, to, original, text: content.text,
       messageId: replyMessageId(idempotencyKey, own),

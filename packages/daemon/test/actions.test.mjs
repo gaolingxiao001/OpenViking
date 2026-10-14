@@ -752,6 +752,16 @@ describe('owner notices and owner-only actions', () => {
 
     await assert.rejects(call('reply_message', { source: 'email', message_id: 'mail:9:9', markdown: 'x', decision_id: 'evt-hello' }),
       (error) => error.code === 'invalid_target');
+
+    // A card shows every recipient or none: past the limit, or with nobody to
+    // answer, there is no card.
+    store.ingest(mailEvent({ uid: 8, thread: 'gmail:108', reply: { subject: 'Re: x', recipients: 21 } }));
+    store.ingest(mailEvent({ uid: 9, thread: 'gmail:109', reply: { subject: 'Re: x', to: [] } }));
+    await assert.rejects(call('reply_message', { message_id: 'mail:1:8', markdown: 'x', decision_id: 'imap:1:8' }),
+      (error) => error.code === 'unsupported' && /replies to go to 21 addresses/.test(error.message));
+    await assert.rejects(call('reply_message', { message_id: 'mail:1:9', markdown: 'x', decision_id: 'imap:1:9' }),
+      (error) => error.code === 'invalid_target' && /no address to reply to/.test(error.message));
+    assert.equal(connectors.calls.length, 3);
   });
 
   it('sends the approved draft as the owner left it, once, and shows the outcome on the card', async (t) => {
@@ -769,8 +779,9 @@ describe('owner notices and owner-only actions', () => {
     const settled = await new ActionService({ config: { maxReplyChars: 1_000 }, store, connectors, logger }).settleApproval(pressed);
     assert.deepEqual([settled.state, settled.edited], ['sent', true]);
     const sent = connectors.calls.filter(({ connector }) => connector === 'email');
-    assert.deepEqual(sent.map(({ action, input }) => [action, input.message_id, input.content.text]),
-      [['message.reply', 'mail:1:7', '周五下午三点可以，回头见']]);
+    // Sent to exactly the recipients the card showed.
+    assert.deepEqual(sent.map(({ action, input }) => [action, input.message_id, input.content.text, input.to]),
+      [['message.reply', 'mail:1:7', '周五下午三点可以，回头见', ['alice@example.com']]]);
     assert.deepEqual(connectors.updates.map(({ messageId, card }) => [messageId, card.header.title.content]), [[CARD, '已发送']]);
     // Recorded against the mail, with no chat.
     const row = store.db.prepare("SELECT chat_id, conv_key, inbound_seq FROM outbox WHERE connector = 'email'").get();

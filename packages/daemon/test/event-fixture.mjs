@@ -44,6 +44,6 @@ export function mailEvent(fields = {}) {
     actor: { type: 'email', id: fields.from ?? 'alice@example.com' },
     content: { title: fields.title ?? '周四开会？', text: fields.text ?? 'From: alice@example.com\n\n周四下午能开会吗？' },
     message: { id: `mail:1:${uid}`, type: 'email' },
-    data: { reply: { to: [{ name: '', address: fields.from ?? 'alice@example.com' }], subject: `Re: ${fields.title ?? '周四开会？'}` } },
+    data: { reply: fields.reply ?? { to: [{ name: '', address: fields.from ?? 'alice@example.com' }], subject: `Re: ${fields.title ?? '周四开会？'}` } },
   }));
 }

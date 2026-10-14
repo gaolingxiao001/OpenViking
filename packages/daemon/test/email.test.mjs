@@ -231,8 +231,13 @@ describe('email connector', () => {
     // The event says where a reply would go, for the owner's approval card.
     assert.deepEqual(events[0].data.reply, { to: [{ name: 'Bob', address: 'bob@example.com' }], subject: 'Re: Thursday?' });
 
-    assert.deepEqual(await client.replyMessage({ message_id: 'mail:1:1', content: { type: 'markdown', text: '周四可以\n三点见' },
-      idempotency_key: 'ld_reply1' }), { sent: true });
+    // Only the recipients the owner approved, and all of them.
+    const answer = (to) => client.replyMessage({ message_id: 'mail:1:1', content: { type: 'markdown', text: '周四可以\n三点见' },
+      to, idempotency_key: 'ld_reply1' });
+    for (const to of [undefined, [], ['bob@example.com', 'eve@example.com'], ['eve@example.com']]) {
+      await assert.rejects(answer(to), /do not match the ones the owner approved/);
+    }
+    assert.deepEqual(await answer(['bob@example.com']), { sent: true });
     const [sent] = smtp.messages;
     assert.equal(sent.from, `<${ME}>`);
     assert.deepEqual(sent.to, ['<bob@example.com>']);
@@ -248,6 +253,17 @@ describe('email connector', () => {
     await assert.rejects(client.replyMessage({ message_id: 'mail:1:1', content: { type: 'file', path: '/x' }, idempotency_key: 'k' }),
       /plain text only/);
     assert.equal(smtp.messages.length, 1);
+  });
+
+  it('reports every reply recipient for the approval card, or only how many when they are too many to show', async (t) => {
+    const { imap, start } = await setup(t);
+    const { events } = await start();
+    const replyTo = (count) => `Reply-To: ${Array.from({ length: count }, (_, index) => `r${index + 1}@example.com`).join(', ')}`;
+    imap.deliver(mail({ id: 'twenty@example.com', headers: [replyTo(20)] }));
+    imap.deliver(mail({ id: 'many@example.com', headers: [replyTo(21)] }));
+    await until(() => events.length === 2);
+    assert.equal(events[0].data.reply.to.length, 20);
+    assert.deepEqual(events[1].data.reply, { subject: 'Re: Thursday?', recipients: 21 });
   });
 
   it('picks up after a restart where it stopped, without reporting a mail twice', async (t) => {

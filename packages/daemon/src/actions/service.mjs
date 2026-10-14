@@ -494,11 +494,15 @@ export class ActionService {
     } catch (error) {
       throw blocked('invalid_content', error.message);
     }
-    const mail = JSON.parse(target.event_json);
+    // The card shows every recipient, and exactly those are sent to.
+    const reply = JSON.parse(target.event_json).data?.reply ?? {};
+    if (!Array.isArray(reply.to)) {
+      throw blocked('unsupported', `This mail asks for replies to go to ${reply.recipients ?? 'more'} addresses, more than an approval card shows in full, so it cannot be answered here. Tell the owner instead. ${NO_ACTION}`);
+    }
+    if (reply.to.length === 0) throw blocked('invalid_target', `This mail has no address to reply to. ${NO_ACTION}`);
     const draft = {
       connector, action: 'message.reply', message_id: input.message_id, text: draftText,
-      to: mail.data?.reply?.to ?? [], subject: mail.data?.reply?.subject ?? mail.content?.title ?? '',
-      responseSeq: responseTo.seq,
+      to: reply.to, subject: reply.subject, responseSeq: responseTo.seq,
     };
     const question = approvalQuestion(draft, owner.id);
     const result = await this.deliver({
@@ -541,7 +545,8 @@ export class ActionService {
         try {
           const result = await this.deliver({
             caller: { trace }, connector: draft.connector, action: draft.action,
-            input: { message_id: draft.message_id, content: { type: 'markdown', text } },
+            input: { message_id: draft.message_id, content: { type: 'markdown', text },
+              to: draft.to.map((recipient) => recipient.address) },
             // One approval sends at most once, whatever was edited.
             key: actionKey('approved', draft.connector, cardId),
             summary: text,
