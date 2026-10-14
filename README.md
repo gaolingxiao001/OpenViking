@@ -23,7 +23,7 @@
 
 Core 根据 manifest 启动 Connector 子进程。飞书 Connector 通过 `lark-cli` 长连接收消息；微信 Connector 通过腾讯 `openclaw-weixin` 的 iLink HTTP 协议长轮询。两者输出统一的 `EVENT` 信封，并进入同一个 `AgentRuntime`。每个 Connector 单独失败、单独重连：微信登录过期这类问题只让微信停下，飞书和 runtime 照常运行。出站方向，所有 runtime 都调用同一套 Agent 工具（`send_message`、`reply_message` 等）：Codex/TraeX/Claude 经 MCP 适配器，Pi 经 CLI，两者都只是把调用转发给 Core 的本机 socket。Core 统一校验运行权、新鲜度、路由与内容，写入唯一的 `outbox` 表后再由对应 Connector 执行；daemon 自己的失败通知和 slash 命令回复走同一条路径。协议和生命周期见 [Connector protocol 0.2](docs/connector-protocol.md)。
 
-Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `connector_events`，按来源实例和事件 ID 去重；聊天、消息和回复路由字段可选。GitHub issue、Calendar 提醒等可以使用 `kind`、`subject`、标题与正文进入 runtime，无须包装成飞书消息。实际内置 Connector 仍为飞书和微信；新增来源需实现 Connector。协议已更新为 0.2，本次为未上线产品的直接 schema 变更，使用新的数据目录，不迁移旧 `inbound` 表。
+Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `connector_events`，按来源实例和事件 ID 去重；聊天、消息和回复路由字段可选。GitHub issue、Calendar 提醒等可以使用 `kind`、`subject`、标题与正文进入 runtime，无须包装成飞书消息。内置 Connector 为飞书、微信和邮箱（IMAP/SMTP）；新增来源需实现 Connector。非聊天事件只能经 `notify_owner` 通知 owner（你本人）：Agent 不选目的地，Core 发到主 IM（`channel`）上你的私聊。owner 身份由 Connector 自检时给出：飞书是该 profile 用 lark-cli 做 user 登录的账号，微信是扫码登录的账号。协议已更新为 0.2，本次为未上线产品的直接 schema 变更，使用新的数据目录，不迁移旧 `inbound` 表。
 
 ## 安装
 
@@ -71,6 +71,32 @@ LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
 终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。带有微信语音转写的消息会以转写文本进入 Agent。默认只接受完成扫码的微信用户，避免其他联系人触发本机 Agent。需要显式增加发送者时，可在 manifest 的共享 `env` 中设置 `LARK_DAEMON_WEIXIN_ALLOW_FROM`，值为逗号分隔的完整微信 iLink 用户 ID。
 
 这个 MVP 使用一个微信账号，支持单聊文本、入站图片和文件、微信提供的语音转写，以及出站图片和文件。入站媒体经腾讯 CDN 下载和 AES 解密后保存在该实例的 `dataDir/weixin/media`，单个文件和出站 workspace 文件上限均为 20 MiB，并随 daemon 的保留周期清理。原始语音解码/ASR、视频、群聊、引用和 reaction 尚未接入。协议实现固定对齐 `Tencent/openclaw-weixin` 2.4.9，来源与许可证见 [微信协议说明](packages/daemon/src/weixin/NOTICE.md) 和 [MIT 许可证](packages/daemon/src/weixin/LICENSE.openclaw-weixin)。
+
+### 邮箱
+
+邮箱 Connector 用 IMAP 只读监听一个邮箱的收件箱（不会把邮件标成已读，也不移动、不删除），用 SMTP 回信。新邮件到达后，Agent 判断要不要告诉你，要的话发到你在主 IM 上的私聊。Agent 从不直接发邮件：无论是你让它回，还是它觉得该回，它都只能起草，Core 把草稿放在一张卡片上发给你（收件人、主题和可编辑的正文），你点"发送"才会以卡片上的内容发出，点"不发了"就作废。卡片只有你能操作，三天后过期，目前需要主 IM 是飞书。首次启动只从之后到达的邮件开始；订阅和群发邮件标为 `kind=email.list`，自动回复（含多数退信）和它自己的回信直接跳过；程序自动发出的通知（安全告警、任务失败等）照常交给 Agent 判断。
+
+在实例上加 `email` 并指向账号文件（文件权限必须是 0600，不要写进 `env`）：
+
+```json
+{
+  "id": "primary",
+  "channel": "lark",
+  "connectors": ["lark", "email"],
+  "emailConfig": "/Users/you/.lark-daemon/email-primary.json"
+}
+```
+
+```json
+{
+  "address": "you@gmail.com",
+  "password": "<客户端专用密码>",
+  "imap": { "host": "imap.gmail.com", "port": 993 },
+  "smtp": { "host": "smtp.gmail.com", "port": 465 }
+}
+```
+
+`password` 是邮箱给第三方客户端用的专用密码，按邮箱账号生成一次，IMAP 和 SMTP 共用：Gmail 叫应用密码（需先开两步验证，填写时去掉空格），QQ/163 叫授权码（需先在设置里开启 IMAP/SMTP）。SMTP 在 465 端口用直连 TLS，其他端口用 STARTTLS，可用 `smtp.secure` 覆盖；可选 `username`（默认同 `address`）和 `name`（回信的发件人名）。只用 OAuth 的邮箱（如 Outlook）暂不支持。方舟 Self-hosted Ark 用不了 Agent 工具，因此不支持邮箱。
 
 ### 方舟 MA 配置
 

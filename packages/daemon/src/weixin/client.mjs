@@ -66,6 +66,8 @@ export class WeixinClient {
     return {
       profile: this.profile,
       version: `openclaw-weixin-protocol/${WEIXIN_CHANNEL_VERSION}`,
+      // The account that scanned the login QR code; its chat is its user id.
+      owner: this.account.userId ? { id: this.account.userId, target: { chat_id: this.account.userId } } : null,
     };
   }
 

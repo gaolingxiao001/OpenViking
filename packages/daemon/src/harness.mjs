@@ -169,6 +169,18 @@ export class Harness {
     });
   }
 
+  // A line the Core composed about an accepted chat event (what an approval
+  // card actually did), for the runtime in that event's chat. It reports on an
+  // inbound rather than being one, so it carries no seq.
+  deliverNote(event, content) {
+    return this.enqueueIngress(async () => {
+      await this.runtime.prepareInputContext?.();
+      this.groupBurst.route(eventDeliveryItem(event, null, {
+        text: formatInboundLine({ ...event, content }, null, { replyTo: { kind: 'me' } }),
+      }));
+    });
+  }
+
   // A slash command and every later accepted message share one global order.
   // Slow model discovery and two-phase runtime catch-up therefore cannot let a
   // following message slip into the old runtime.

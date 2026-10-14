@@ -65,6 +65,7 @@ const AGENT_FIELDS = Object.freeze([
   'volcSessionId',
   'volcEnvironmentId',
   'meetingAudio',
+  'emailConfig',
 ]);
 
 const MEETING_AUDIO_FIELDS = Object.freeze(['targetChatId', 'asrConfigFile', 'pythonCommand']);
@@ -205,12 +206,13 @@ function parseAgent(value, index) {
       manifestString(connector, `${label}.connectors[${connectorIndex}]`, { maxLength: 64 })
     )))];
     if (connectors.length !== value.connectors.length
-      || connectors.some((connector) => !['lark', 'weixin'].includes(connector))) {
-      throw new Error(`${label}.connectors must contain unique lark or weixin values`);
+      || connectors.some((connector) => !['lark', 'weixin', 'email'].includes(connector))) {
+      throw new Error(`${label}.connectors must contain unique lark, weixin or email values`);
     }
   }
+  // The primary IM: where notices to the owner go. A mailbox is never one.
   const channel = value.channel === undefined
-    ? (connectors?.[0] ?? 'lark')
+    ? (connectors?.find((connector) => connector !== 'email') ?? 'lark')
     : manifestString(value.channel, `${label}.channel`);
   if (!['lark', 'weixin'].includes(channel)) {
     throw new Error(`${label}.channel must be lark or weixin`);
@@ -236,6 +238,15 @@ function parseAgent(value, index) {
   if (meetingAudio && !connectors.includes('lark')) {
     throw new Error(`${label}.meetingAudio requires the lark connector`);
   }
+  const emailConfig = value.emailConfig === undefined || value.emailConfig === null
+    ? null
+    : manifestAbsolutePath(value.emailConfig, `${label}.emailConfig`);
+  if (connectors.includes('email') !== Boolean(emailConfig)) {
+    throw new Error(`${label}.emailConfig and the email connector must be configured together`);
+  }
+  if (connectors.includes('email') && model === 'ark') {
+    throw new Error(`${label} using the email connector cannot use the ark runtime`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -250,6 +261,7 @@ function parseAgent(value, index) {
     volcSessionId,
     volcEnvironmentId,
     meetingAudio,
+    emailConfig,
   });
 }
 
@@ -387,6 +399,8 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
   });
   env.LARK_DAEMON_CHANNEL = agent.channel;
   env.LARK_DAEMON_CONNECTORS_JSON = JSON.stringify(agent.connectors);
+  if (agent.emailConfig) env.LARK_DAEMON_EMAIL_CONFIG_FILE = agent.emailConfig;
+  else delete env.LARK_DAEMON_EMAIL_CONFIG_FILE;
   if (agent.volcSessionId) {
     env.LARK_DAEMON_VOLC_SESSION_ID = agent.volcSessionId;
     env.LARK_DAEMON_VOLC_ENVIRONMENT_ID = agent.volcEnvironmentId;

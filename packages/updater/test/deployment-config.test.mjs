@@ -292,6 +292,34 @@ test('requires a complete per-agent self-hosted binding for Ark', () => {
   }
 });
 
+test('connects a mailbox only together with its private account file', () => {
+  const manifest = validManifest();
+  manifest.agents[1].connectors = ['email', 'lark'];
+  manifest.agents[1].emailConfig = '/srv/lark-daemon/secrets/beta-email.json';
+  withManifest(manifest, (manifestPath) => {
+    const env = { LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath, LARK_DAEMON_EMAIL_CONFIG_FILE: '/stale.json' };
+    const deployment = loadDeploymentManifest(env);
+    // A mailbox is never the primary IM, wherever it is listed.
+    assert.equal(selectDeploymentAgent(deployment).channel, 'lark');
+    applyDeploymentAgentEnv(env, deployment, 'beta');
+    assert.equal(env.LARK_DAEMON_CONNECTORS_JSON, '["email","lark"]');
+    assert.equal(env.LARK_DAEMON_EMAIL_CONFIG_FILE, '/srv/lark-daemon/secrets/beta-email.json');
+    applyDeploymentAgentEnv(env, deployment, 'gamma');
+    assert.equal(env.LARK_DAEMON_EMAIL_CONFIG_FILE, undefined);
+  });
+  for (const mutate of [
+    (agent) => { agent.connectors = ['lark', 'email']; },
+    (agent) => { agent.emailConfig = '/srv/lark-daemon/secrets/beta-email.json'; },
+  ]) {
+    const broken = validManifest();
+    mutate(broken.agents[1]);
+    withManifest(broken, (manifestPath) => {
+      assert.throws(() => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
+        /emailConfig and the email connector must be configured together/);
+    });
+  }
+});
+
 test('rejects unknown and missing manifest fields instead of guessing', () => {
   const cases = [
     {

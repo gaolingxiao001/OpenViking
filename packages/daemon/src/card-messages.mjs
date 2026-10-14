@@ -108,6 +108,7 @@ export function acceptCardAnswer(db, event, now) {
   return Number(result.changes) > 0;
 }
 
+// An approval card is settled by ActionService.settleApproval instead.
 export function settledChoiceCard(event) {
-  return event.question && event.answer ? choiceCard(event.question, event.answer) : null;
+  return event.question && event.answer && event.question.kind !== 'approval' ? choiceCard(event.question, event.answer) : null;
 }

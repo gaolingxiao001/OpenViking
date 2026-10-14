@@ -21,7 +21,13 @@ contains:
 The Core starts a Connector and calls these operations in order:
 
 1. `spec`: return the versioned manifest.
-2. `check`: validate credentials, configuration, and provider availability.
+2. `check`: validate credentials, configuration, and provider availability. The
+   result may name the owner, the person this agent works for, as seen on this
+   Connector: `owner: { id, target }`, where `id` is how the owner appears as an
+   event actor and `target` is the `message.send` input that reaches them in a
+   direct chat (Lark: the profile's logged-in user, `{ user_id: "ou_..." }`;
+   Weixin: the account that scanned the login code, `{ chat_id }`). A mailbox
+   reports none.
 3. `start`: begin receiving events.
 4. `action`: execute a typed external action.
 5. `pause`: stop event intake while keeping actions available for Core shutdown draining.
@@ -66,7 +72,10 @@ Capabilities are optional modules:
 Connector. `content` lists the message bodies an action accepts (`markdown`,
 `file`, `file_key`, `card`); `mentions` and `thread` opt into those Lark
 features; `idempotent: true` means the provider honours the idempotency key, so
-the Core may retry an `UNCERTAIN` attempt with the same key. `queries` lists the
+the Core may retry an `UNCERTAIN` attempt with the same key; `approval: true`
+means the action speaks for the owner (an email reply), so the Core never runs it
+for the agent: it puts the draft on a card in the owner's direct chat and runs
+it only when the owner presses send there. `queries` lists the
 read-only operations. The Core offers an agent tool only when some configured
 Connector declares the operation behind it, and checks every call against the
 target Connector's declaration.
@@ -162,7 +171,13 @@ Generic runtime inputs retain the event semantics:
 ```
 
 Chat input keeps `chat=`, `msg=`, thread, mentions and reply context, and also
-carries `event=`. An optional `instance=` is included when it differs from
+carries `event=`. A non-chat event that can itself be answered (a mail) carries
+its reply target as `msg=` as well:
+
+```text
+[source=email kind=email.received msg=mail:1:18475 event=imap:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ body
+```
+ An optional `instance=` is included when it differs from
 `source=`. Tag values percent-encode whitespace, brackets and `%`, so an id
 copied from a tag decodes back to the exact id. Untrusted content is
 collapsed onto one physical line. Journal-to-OpenViking synchronization uses the
@@ -222,6 +237,32 @@ subject is, for example whether the occurrences of a recurring calendar event
 share a subject (so a new occurrence makes the previous reminder stale) or each
 have their own.
 
+Who a decision may reach is decided in one Core function, so routing rules
+(a source that may also post to a group, say) can be added there later. Today
+a non-chat event may only notify the owner, through `notify_owner`: the agent
+passes no chat id, and the Core sends to the owner's `target` on the primary
+IM (`LARK_DAEMON_CHANNEL`). A chat message may name another IM (`source`) when
+the owner asked to be told there. A chat decision keeps every other delivery
+tool, across Connectors too.
+
+An action declared `approval` (an email reply) is authorized by the owner, not
+by a decision: who asked does not matter, since a decision only proves which
+input the agent acted on, and an old message from the owner stays fresh in its
+own chat however many mails arrive. Any decision, the mail itself included, may
+propose one; the Core sends the owner a card on the primary IM with the
+recipients and subject (from the mail event's `data.reply`) and the draft in an
+editable input (read-only beyond 1000 characters), registered as a question
+only the owner can answer, once, within three days. The card lists every
+recipient: a mail that would be answered to more than 20 addresses reports only
+their number in `data.reply` and cannot be answered. On send the Core delivers
+the text the owner left there to the recipients the card showed, passed as
+`to`; the Connector sends only if they are exactly the mail's reply recipients.
+The key is per card, so the reply goes out at most once,
+and updates the card to sent, cancelled, not sent or uncertain. The model has no
+part in that; afterwards the Core tells it, as a line in the owner's chat, what
+actually went out (with the owner's edits) or that nothing did. A reply is recorded where its target is: one to
+a mail has no chat, and its history line is rendered from the mail's event.
+
 The Core derives the idempotency key from the decision and response events'
 `(instance, event_id)`, the target and the canonical payload, so two events with
 the same text are two deliveries (a caller-supplied key is bound to that payload), reserves it in
@@ -260,12 +301,22 @@ Results report the delivered `message_id` and, where known, `chat_id`,
 
 ## Current actions
 
-| Operation | Lark | Weixin |
-| --- | --- | --- |
-| `message.send`, `message.reply` | markdown, file, file key, card; mentions; threads; idempotent | markdown (plain text), file |
-| `message.react`, `message.retract` | yes | — |
-| `message.media` (query) | download by image/file key | downloaded inbound media |
-| `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — |
+| Operation | Lark | Weixin | Email |
+| --- | --- | --- | --- |
+| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | — |
+| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | markdown (plain text); owner approval on a Lark card |
+| `message.react`, `message.retract` | yes | — | — |
+| `message.media` (query) | download by image/file key | downloaded inbound media | — |
+| `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — | — |
+
+The Email Connector watches one mailbox's `INBOX` over IMAP, opened read-only
+(`EXAMINE`, `BODY.PEEK[]`): it never marks, moves or deletes mail. It starts
+from the mail that arrives after its first start, keeps a UID cursor, and after
+a stop reports at most the newest 50 mails it missed. Auto-replies, bounces and
+its own replies are skipped; mailing-list and bulk mail arrive as `email.list`.
+Replies go over SMTP to Reply-To (else From) with `Re:`, `In-Reply-To` and
+`References`, as plain text. SMTP has no idempotency key, so an uncertain reply
+is never resent.
 
 The Lark Connector also serves Core-internal operations that are not agent
 tools: `message.reaction.delete` (temporary working reactions), `card.update`,

@@ -82,6 +82,10 @@ function fakeLarkSource(dir) {
       process.exit(0);
     }
     if (args.includes('doctor')) { console.log(JSON.stringify({ ok: true })); process.exit(0); }
+    if (args.includes('auth') && args.includes('status')) {
+      console.log(JSON.stringify({ identities: { user: { openId: 'ou_mockOwner12345' } } }));
+      process.exit(0);
+    }
     if (args.includes('+messages-reply') || args.includes('+messages-send')) {
       fs.appendFileSync(REPLIES, JSON.stringify(args) + '\\n');
       console.log(JSON.stringify({ ok: true, data: { message_id: 'om-mock-out' } }));

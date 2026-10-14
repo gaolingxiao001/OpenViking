@@ -22,6 +22,10 @@ export function formatCognitionJournalLine(item) {
     // PENDING means the external action may already have happened. Render it
     // conservatively until it settles or startup recovery marks it UNCERTAIN.
     const status = item.status === 'COMMITTED' ? '' : ' outcome=uncertain';
+    if (item.metadata?.notify === 'owner') {
+      return `[source=${metadataTag(item.metadata.source)} to=owner in_reply_to_event=${metadataTag(item.metadata.decisionEvent)}`
+        + ` time=${isoMinute(item.atMs)} from=me${status}] ${oneLine(item.text)}`;
+    }
     if (!item.chatId && item.metadata?.event) {
       const event = normalizeEvent(item.metadata.event);
       return `[source=${metadataTag(event.source)}`

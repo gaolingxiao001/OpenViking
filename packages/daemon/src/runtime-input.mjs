@@ -40,7 +40,10 @@ export function formatEventLine(event) {
   const fields = [
     `source=${metadataTag(event.source)}`,
     ...(event.connectorInstance !== event.source ? [`instance=${metadataTag(event.connectorInstance)}`] : []),
-    `kind=${metadataTag(event.kind)}`, `event=${metadataTag(event.eventId)}`,
+    `kind=${metadataTag(event.kind)}`,
+    // A non-chat event that can be answered (a mail) carries its reply target.
+    ...(event.messageId ? [`msg=${metadataTag(event.messageId)}`] : []),
+    `event=${metadataTag(event.eventId)}`,
     `subject=${metadataTag(event.subject.type)}:${metadataTag(event.subject.id)}`,
     `time=${isoMinute(event.createTimeMs)}`,
     ...(event.actor ? [`actor=${metadataTag(event.actor.type)}:${metadataTag(event.actor.id)}`] : []),

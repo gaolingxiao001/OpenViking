@@ -14,6 +14,7 @@ import { FailurePolicy } from './notices.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
+import { approvalNote } from './actions/approval.mjs';
 import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
@@ -216,8 +217,18 @@ export class PersonalAgentDaemon {
         liveness: this.liveness,
         prepareEvent: (event) => event.source === 'lark' && event.kind === 'message.action'
           ? resolveCardAction(this.store.db, event, this.config.profile) : event,
-        eventHandler: (event) => event.source === 'lark' && event.kind.startsWith('meeting.') && event.data.meeting
-          ? (accepted) => this.meeting.handleEvent(accepted.data.meeting) : null,
+        eventHandler: (event) => {
+          // The owner answered an approval card: the Core sends or drops the
+          // draft itself, off the ingress queue (an SMTP send may be slow).
+          // The model then hears what actually went out.
+          if (event.question?.kind === 'approval') {
+            return (accepted) => { void this.actions.settleApproval(accepted)
+              .then((settled) => this.harness.deliverNote(accepted, approvalNote(accepted.question.draft, settled)))
+              .catch((error) => this.logger.error('approval_settle_failed', { error: safeError(error) })); };
+          }
+          return event.source === 'lark' && event.kind.startsWith('meeting.') && event.data.meeting
+            ? (accepted) => this.meeting.handleEvent(accepted.data.meeting) : null;
+        },
         onSlashCommand: (command, event, inbound) => this.handleSlashCommand(command, event, inbound),
         onInboundChat: (chatId) => this.chatNames.schedule(chatId),
         afterEvent: (event) => {
