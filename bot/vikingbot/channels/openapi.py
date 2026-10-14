@@ -1639,6 +1639,11 @@ class OpenAPIChannel(BaseChannel):
             channel_id=self.config.channel_id(),
             chat_id=storage_key,
         )
+        if self._agent_loop is not None and not self._agent_loop.can_steer(session_key):
+            raise HTTPException(
+                status_code=409,
+                detail="Session has no active turn to steer",
+            )
         msg = InboundMessage(
             session_key=session_key,
             sender_id=user_id,

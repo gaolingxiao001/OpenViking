@@ -121,6 +121,40 @@ describe('MessageList reasoning', () => {
   })
 })
 
+describe('MessageList pending steers', () => {
+  it('renders optimistic steer messages after the streaming assistant', () => {
+    const { container } = render(
+      <MessageList
+        messages={[
+          {
+            id: 'message-1',
+            role: 'user',
+            parts: [{ type: 'text', text: 'first question' }],
+            created_at: '2026-09-13T00:00:00Z',
+          },
+        ]}
+        streaming={{
+          iteration: 1,
+          parts: [{ type: 'text', text: 'answer still streaming' }],
+          pendingMessages: [
+            {
+              id: 'pending-steer',
+              role: 'user',
+              parts: [{ type: 'text', text: 'follow up' }],
+              created_at: '2026-09-13T00:00:01Z',
+            },
+          ],
+        }}
+      />,
+    )
+
+    const text = container.textContent ?? ''
+    expect(text.indexOf('answer still streaming')).toBeLessThan(
+      text.indexOf('follow up'),
+    )
+  })
+})
+
 describe('MessageList images', () => {
   it('renders an image using the server message format', () => {
     const { container } = render(

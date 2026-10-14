@@ -110,7 +110,11 @@ function SessionThread({ sessionId, draft = false, onPersisted }: ThreadProps) {
     scrollRafRef.current = requestAnimationFrame(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
     })
-  }, [chat.messages.length, chat.streamingParts])
+  }, [
+    chat.messages.length,
+    chat.pendingSteerMessages.length,
+    chat.streamingParts,
+  ])
 
   const [showBackground, setShowBackground] = useState(false)
 
@@ -176,6 +180,7 @@ function SessionThread({ sessionId, draft = false, onPersisted }: ThreadProps) {
               isStreaming
                 ? {
                     parts: chat.streamingParts,
+                    pendingMessages: chat.pendingSteerMessages,
                     iteration: chat.iteration,
                   }
                 : undefined

@@ -278,7 +278,21 @@ class TestOpenAPIAuth:
     async def test_steer_publishes_inbound_message_for_pending_session(
         self, message_bus, temp_workspace
     ):
-        channel = OpenAPIChannel(OpenAPIChannelConfig(), message_bus, temp_workspace)
+        class FakeAgentLoop:
+            def __init__(self):
+                self.session_key = None
+
+            def can_steer(self, session_key):
+                self.session_key = session_key
+                return True
+
+        agent_loop = FakeAgentLoop()
+        channel = OpenAPIChannel(
+            OpenAPIChannelConfig(),
+            message_bus,
+            temp_workspace,
+            agent_loop=agent_loop,
+        )
         scope = channel._principal_scope("standalone")
         storage_key = channel._scoped_session_id(scope, "same-session")
         channel._pending[storage_key] = PendingResponse()
@@ -290,12 +304,40 @@ class TestOpenAPIAuth:
 
         assert response.status_code == 200
         assert response.json() == {"accepted": True}
+        assert agent_loop.session_key == SessionKey(
+            type="cli", channel_id="default", chat_id=storage_key
+        )
         msg = await asyncio.wait_for(message_bus.consume_inbound(), timeout=1)
         assert msg.session_key == SessionKey(
             type="cli", channel_id="default", chat_id=storage_key
         )
         assert msg.content == "follow up"
         assert msg.sender_id == "user-1"
+
+    def test_steer_rejects_pending_session_without_active_turn(
+        self, message_bus, temp_workspace
+    ):
+        class FakeAgentLoop:
+            def can_steer(self, session_key):
+                return False
+
+        channel = OpenAPIChannel(
+            OpenAPIChannelConfig(),
+            message_bus,
+            temp_workspace,
+            agent_loop=FakeAgentLoop(),
+        )
+        scope = channel._principal_scope("standalone")
+        storage_key = channel._scoped_session_id(scope, "same-session")
+        channel._pending[storage_key] = PendingResponse()
+
+        response = _make_client(channel).post(
+            "/bot/v1/sessions/same-session/steer",
+            json={"message": "follow up", "user_id": "user-1"},
+        )
+
+        assert response.status_code == 409
+        assert message_bus.inbound_size == 0
 
     def test_scoped_session_id_stays_logical_while_storage_path_is_portable(
         self, message_bus, temp_workspace

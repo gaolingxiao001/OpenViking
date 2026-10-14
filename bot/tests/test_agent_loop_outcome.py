@@ -202,33 +202,6 @@ class _BlockingSteerRegistry:
         return "tool result"
 
 
-class _InterruptAfterSteerProvider(LLMProvider):
-    def __init__(self):
-        super().__init__()
-        self.calls = []
-        self.second_call_started = asyncio.Event()
-
-    async def chat(self, messages, tools=None, **kwargs):
-        self.calls.append(copy.deepcopy(messages))
-        if len(self.calls) == 1:
-            return LLMResponse(
-                content="checking",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call-1",
-                        name="wait_for_steer",
-                        arguments={},
-                        tokens=1,
-                    )
-                ],
-            )
-        self.second_call_started.set()
-        await asyncio.Future()
-
-    def get_default_model(self) -> str:
-        return "fake-model"
-
-
 async def _consume_outbound_event(
     bus: MessageBus, event_type: OutboundEventType, timeout: float = 2
 ) -> object:
@@ -240,6 +213,21 @@ async def _consume_outbound_event(
         outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=remaining)
         if outbound.event_type == event_type:
             return outbound
+
+
+async def _consume_outbound_until_response(
+    bus: MessageBus, timeout: float = 2
+) -> list[object]:
+    events = []
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for response event")
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=remaining)
+        events.append(outbound)
+        if outbound.event_type == OutboundEventType.RESPONSE:
+            return events
 
 
 def test_context_keeps_multimodal_tool_result_on_tool_message(temp_dir: Path):
@@ -265,6 +253,26 @@ def test_context_keeps_multimodal_tool_result_on_tool_message(temp_dir: Path):
             "name": "openviking_multi_read",
             "content": content,
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_build_messages_can_skip_system_prompt(temp_dir: Path):
+    context = ContextBuilder(workspace=temp_dir / "workspace", eval=True)
+
+    messages = await context.build_messages(
+        history=[],
+        current_message="steer with image",
+        media=[{"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}],
+        session_key=SessionKey(type="cli", channel_id="default", chat_id="steer-context"),
+        ov_tools_enable=False,
+        include_system=False,
+    )
+
+    assert [message["role"] for message in messages] == ["user", "user"]
+    assert messages[-1]["content"] == [
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+        {"type": "text", "text": "steer with image"},
     ]
 
 
@@ -400,60 +408,6 @@ async def test_agent_loop_passes_configured_temperature_to_provider(make_loop, t
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_appends_current_user_after_model_without_prompt_duplication(
-    make_loop, temp_dir: Path, monkeypatch
-):
-    seen = {}
-
-    async def fake_run_agent_loop(self, **kwargs):
-        persisted = SessionManager(self.config.bot_data_path).get_or_create(
-            session_key, skip_heartbeat=True
-        )
-        seen["persisted_before_model"] = [
-            message["content"] for message in persisted.messages
-        ]
-        seen["prompt_user_messages"] = [
-            message.get("content")
-            for message in kwargs["messages"]
-            if message.get("role") == "user"
-        ]
-        return "final answer", None, [], {"prompt_tokens": 1, "completion_tokens": 1}, 1
-
-    fake_langfuse = _FakeLangfuseClient()
-    monkeypatch.setattr(AgentLoop, "_run_agent_loop", fake_run_agent_loop)
-    monkeypatch.setattr(
-        "vikingbot.agent.loop.LangfuseClient.get_instance",
-        staticmethod(lambda: fake_langfuse),
-    )
-
-    bus = MessageBus()
-    config = Config(storage_workspace=str(temp_dir))
-    loop = make_loop(bus=bus, config=config)
-    session_key = SessionKey(type="cli", channel_id="default", chat_id="early-user-commit")
-    session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
-    session.add_message("user", "old user", sender_id="user-1")
-    session.add_message("assistant", "old assistant", sender_id="user-1")
-    await loop.sessions.save(session)
-
-    response = await loop._process_message(
-        InboundMessage(session_key=session_key, sender_id="user-1", content="new question")
-    )
-
-    assert response is not None
-    assert seen["persisted_before_model"] == ["old user", "old assistant"]
-    assert seen["prompt_user_messages"].count("new question") == 1
-    persisted = SessionManager(config.bot_data_path).get_or_create(
-        session_key, skip_heartbeat=True
-    )
-    assert [message["content"] for message in persisted.messages] == [
-        "old user",
-        "old assistant",
-        "new question",
-        "final answer",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_agent_loop_interrupt_does_not_cancel_final_session_save(
     make_loop, temp_dir: Path, monkeypatch
 ):
@@ -506,37 +460,6 @@ async def test_agent_loop_interrupt_does_not_cancel_final_session_save(
         assert save_calls == 1
     finally:
         release_save.set()
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_agent_loop_interrupt_active_turn_without_append_phase(make_loop, monkeypatch):
-    loop = make_loop()
-    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-early")
-    msg = InboundMessage(session_key=session_key, sender_id="user-1", content="stop early")
-    started = asyncio.Event()
-
-    async def slow_process_message(_msg):
-        started.set()
-        await asyncio.Future()
-
-    monkeypatch.setattr(loop, "_process_message", slow_process_message)
-
-    task = asyncio.create_task(loop._process_message_as_active_turn(msg))
-    try:
-        await asyncio.wait_for(started.wait(), timeout=2)
-
-        assert await loop.interrupt(session_key) is True
-
-        outbound = await asyncio.wait_for(task, timeout=2)
-        assert outbound.event_type == OutboundEventType.INTERRUPT
-
-        session = loop.sessions.get_or_create(session_key)
-        assert [message["role"] for message in session.messages] == ["user"]
-        assert session.messages[0]["content"] == "stop early"
-    finally:
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -666,7 +589,14 @@ async def test_agent_loop_steers_same_session_input_into_next_tool_turn(
         await asyncio.sleep(0)
         tools.release.set()
 
-        response = await _consume_outbound_event(bus, OutboundEventType.RESPONSE)
+        events = await _consume_outbound_until_response(bus)
+        assert [event.event_type for event in events[:4]] == [
+            OutboundEventType.ITERATION,
+            OutboundEventType.TOOL_CALL,
+            OutboundEventType.TOOL_RESULT,
+            OutboundEventType.ITERATION,
+        ]
+        response = events[-1]
 
         assert response.content == "steered final"
         assert len(provider.calls) == 2
@@ -697,54 +627,72 @@ async def test_agent_loop_steers_same_session_input_into_next_tool_turn(
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_interrupt_after_steer_preserves_all_consumed_user_inputs(
+async def test_agent_loop_steers_same_session_input_before_final_response(
     make_loop, temp_dir: Path
 ):
     bus = MessageBus()
-    provider = _InterruptAfterSteerProvider()
-    tools = _BlockingSteerRegistry()
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="steer-final-boundary")
+    provider_calls = []
+
+    class _LateSteerProvider(_FakeProvider):
+        async def chat(self, messages, tools=None, **kwargs):
+            provider_calls.append(copy.deepcopy(messages))
+            if len(provider_calls) == 1:
+                await bus.publish_inbound(
+                    InboundMessage(
+                        session_key=session_key,
+                        sender_id="user-1",
+                        content="late steer",
+                    )
+                )
+                await asyncio.sleep(0)
+                return LLMResponse(content="first final")
+            return LLMResponse(content="steered final")
+
     loop = make_loop(
         bus=bus,
-        provider=provider,
+        provider=_LateSteerProvider(),
         config=Config(storage_workspace=str(temp_dir)),
         max_iterations=3,
     )
-    loop.tools = tools
-    session_key = SessionKey(type="cli", channel_id="default", chat_id="steer-interrupt")
 
     run_task = asyncio.create_task(loop.run())
     try:
         await bus.publish_inbound(
             InboundMessage(session_key=session_key, sender_id="user-1", content="first request")
         )
-        await asyncio.wait_for(tools.started.wait(), timeout=2)
-        await bus.publish_inbound(
-            InboundMessage(session_key=session_key, sender_id="user-1", content="steer update")
+
+        events = await _consume_outbound_until_response(bus)
+        assert [event.event_type for event in events[:2]] == [
+            OutboundEventType.ITERATION,
+            OutboundEventType.ITERATION,
+        ]
+        response = events[-1]
+
+        assert response.content == "steered final"
+        assert len(provider_calls) == 2
+        second_call_user_text = "\n".join(
+            str(message.get("content"))
+            for message in provider_calls[1]
+            if message.get("role") == "user"
         )
-        await asyncio.sleep(0)
-        tools.release.set()
-        await asyncio.wait_for(provider.second_call_started.wait(), timeout=2)
+        assert "first request" in second_call_user_text
+        assert "late steer" in second_call_user_text
 
-        assert await loop.interrupt(session_key) is True
-
-        interrupted = await _consume_outbound_event(bus, OutboundEventType.INTERRUPT)
-
-        assert interrupted.content == ""
         session = loop.sessions.get_or_create(session_key, skip_heartbeat=True)
-        assert [message["role"] for message in session.messages] == ["user", "user"]
         assert [message["content"] for message in session.messages] == [
             "first request",
-            "steer update",
+            "late steer",
+            "steered final",
         ]
         assert bus.inbound_size == 0
     finally:
-        tools.release.set()
         run_task.cancel()
         await asyncio.gather(run_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_interrupt_preserves_unconsumed_steer_input(
+async def test_agent_loop_interrupt_preserves_active_steer_input(
     make_loop, temp_dir: Path
 ):
     bus = MessageBus()
@@ -789,22 +737,42 @@ async def test_agent_loop_interrupt_preserves_unconsumed_steer_input(
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_interrupt_repeated_text_keeps_prior_completed_turn(make_loop):
+async def test_agent_loop_closes_steer_before_final_response(make_loop, monkeypatch):
     bus = MessageBus()
-    loop = make_loop(bus=bus, provider=_RecordingProvider())
-    session_key = SessionKey(type="cli", channel_id="default", chat_id="interrupt-repeat")
-    session = loop.sessions.get_or_create(session_key)
-    session.add_message("user", "repeat", sender_id="user-1")
-    session.add_message("assistant", "old answer", response_id="old-response")
+    loop = make_loop(bus=bus)
+    session_key = SessionKey(type="cli", channel_id="default", chat_id="steer-finalized")
+    can_steer_when_final_content_is_read: list[bool] = []
 
-    interrupted = await loop._complete_interrupted_message(
-        InboundMessage(session_key=session_key, sender_id="user-1", content="repeat")
+    class _ObservedFinalResponse:
+        usage = {}
+        tool_calls = []
+        reasoning_content = None
+
+        @property
+        def has_tool_calls(self):
+            return False
+
+        @property
+        def content(self):
+            if can_steer_when_final_content_is_read:
+                can_steer_when_final_content_is_read.append(loop.can_steer(session_key))
+            else:
+                can_steer_when_final_content_is_read.append(True)
+            return "final answer"
+
+    async def fake_chat_with_stream_events(self, **kwargs):
+        return _ObservedFinalResponse(), False, False
+
+    monkeypatch.setattr(AgentLoop, "_chat_with_stream_events", fake_chat_with_stream_events)
+
+    response = await loop._process_message_as_active_turn(
+        InboundMessage(session_key=session_key, sender_id="user-1", content="first request")
     )
 
-    assert interrupted.event_type == OutboundEventType.INTERRUPT
-    assert [message["role"] for message in session.messages] == ["user", "assistant", "user"]
-    assert session.messages[1]["content"] == "old answer"
-    assert session.messages[2]["content"] == "repeat"
+    assert response is not None
+    assert response.content == "final answer"
+    assert can_steer_when_final_content_is_read[1:]
+    assert all(can_steer is False for can_steer in can_steer_when_final_content_is_read[1:])
 
 
 @pytest.mark.asyncio

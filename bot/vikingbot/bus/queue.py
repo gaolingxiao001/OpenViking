@@ -58,13 +58,6 @@ class MessageBus:
         self.inbound._queue = kept
         return drained
 
-    def prepend_inbound(self, messages: list[InboundMessage]) -> None:
-        """Put messages back at the front of the inbound queue in the same order."""
-        if not messages:
-            return
-        for msg in reversed(messages):
-            self.inbound._queue.appendleft(msg)
-
     async def wait_for_inbound_change(self) -> None:
         """Wait until a channel publishes an inbound message."""
         async with self._inbound_changed:

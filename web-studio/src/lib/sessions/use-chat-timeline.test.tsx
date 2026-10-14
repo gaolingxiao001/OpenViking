@@ -11,13 +11,12 @@ const {
   interruptChatSessionMock,
   sendChatStreamMock,
   steerChatSessionMock,
-} =
-  vi.hoisted(() => ({
-    addMessageMock: vi.fn(),
-    interruptChatSessionMock: vi.fn(),
-    sendChatStreamMock: vi.fn(),
-    steerChatSessionMock: vi.fn(),
-  }))
+} = vi.hoisted(() => ({
+  addMessageMock: vi.fn(),
+  interruptChatSessionMock: vi.fn(),
+  sendChatStreamMock: vi.fn(),
+  steerChatSessionMock: vi.fn(),
+}))
 
 vi.mock('./api', () => ({
   addMessage: addMessageMock,
@@ -269,13 +268,11 @@ describe('useChat event timeline', () => {
     sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
       fetchSse('/stream', {
         signal,
-        fetch: vi
-          .fn()
-          .mockResolvedValue(
-            new Response(new ReadableStream<Uint8Array>(), {
-              headers: { 'Content-Type': 'text/event-stream' },
-            }),
-          ),
+        fetch: vi.fn().mockResolvedValue(
+          new Response(new ReadableStream<Uint8Array>(), {
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+        ),
       }),
     )
 
@@ -339,93 +336,6 @@ describe('useChat event timeline', () => {
     expect(streamReleased).toBe(true)
   })
 
-  it('requests backend interrupt but discards partial output on reset', async () => {
-    let controller!: ReadableStreamDefaultController<Uint8Array>
-    const encoder = new TextEncoder()
-    sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
-      fetchSse('/stream', {
-        signal,
-        fetch: vi.fn().mockResolvedValue(
-          new Response(
-            new ReadableStream<Uint8Array>({
-              start(streamController) {
-                controller = streamController
-              },
-            }),
-            { headers: { 'Content-Type': 'text/event-stream' } },
-          ),
-        ),
-      }),
-    )
-
-    const { result } = renderHook(() =>
-      useChat({
-        identityScopeKey: 'identity',
-        persistMessages: false,
-        sessionId: 'session-1',
-      }),
-    )
-
-    let sendPromise!: Promise<void>
-    await act(async () => {
-      sendPromise = result.current.send('hello')
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({
-            event: 'content_delta',
-            data: 'partial',
-          })}\n\n`,
-        ),
-      )
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      result.current.reset()
-      await sendPromise
-    })
-
-    expect(interruptChatSessionMock).toHaveBeenCalledWith('session-1')
-    expect(result.current.status).toBe('idle')
-    expect(result.current.streamingParts).toEqual([])
-    expect(result.current.messages).toEqual([])
-  })
-
-  it('requests backend interrupt when unmounted during a stream', async () => {
-    let controller!: ReadableStreamDefaultController<Uint8Array>
-    sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
-      fetchSse('/stream', {
-        signal,
-        fetch: vi.fn().mockResolvedValue(
-          new Response(
-            new ReadableStream<Uint8Array>({
-              start(streamController) {
-                controller = streamController
-              },
-            }),
-            { headers: { 'Content-Type': 'text/event-stream' } },
-          ),
-        ),
-      }),
-    )
-
-    const { result, unmount } = renderHook(() =>
-      useChat({
-        identityScopeKey: 'identity',
-        persistMessages: false,
-        sessionId: 'session-1',
-      }),
-    )
-
-    let sendPromise!: Promise<void>
-    await act(async () => {
-      sendPromise = result.current.send('hello')
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      unmount()
-      controller.close()
-      await sendPromise
-    })
-
-    expect(interruptChatSessionMock).toHaveBeenCalledWith('session-1')
-  })
-
   it('steers new user input into an active stream without opening another stream', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>
     const encoder = new TextEncoder()
@@ -470,30 +380,41 @@ describe('useChat event timeline', () => {
     })
     expect(result.current.messages.map((message) => message.role)).toEqual([
       'user',
-      'user',
     ])
-    expect(result.current.messages[1]?.parts).toEqual([
-      { type: 'text', text: 'follow up' },
-    ])
+    expect(
+      result.current.pendingSteerMessages.map((message) => message.parts),
+    ).toEqual([[{ type: 'text', text: 'follow up' }]])
 
     await act(async () => {
       controller.enqueue(
         encoder.encode(
-          `data: ${JSON.stringify({ event: 'response', data: 'answer' })}\n\n`,
+          [
+            { event: 'content_delta', data: 'before steer' },
+            { event: 'iteration', data: 'Iteration 2/10' },
+            { event: 'response', data: 'answer' },
+          ]
+            .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+            .join(''),
         ),
       )
       controller.close()
       await sendPromise
     })
+    expect(result.current.pendingSteerMessages).toEqual([])
     expect(result.current.messages.map((message) => message.role)).toEqual([
       'user',
+      'assistant',
       'user',
       'assistant',
     ])
     expect(result.current.messages[1]?.parts).toEqual([
-      { type: 'text', text: 'follow up' },
+      { type: 'text', text: 'before steer' },
     ])
     expect(result.current.messages[2]?.parts).toEqual([
+      { type: 'text', text: 'follow up' },
+    ])
+    expect(result.current.messages[3]?.parts).toEqual([
+      { type: 'iteration', iteration: 2 },
       { type: 'text', text: 'answer' },
     ])
   })

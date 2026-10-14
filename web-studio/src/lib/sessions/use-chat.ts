@@ -166,6 +166,7 @@ export interface UseChatReturn {
   streamingToolCalls: StreamToolCall[]
   streamingReasoning: string
   streamingParts: MessagePart[]
+  pendingSteerMessages: Message[]
   iteration: number
   send: (message: string, options?: SendOptions) => Promise<void>
   abort: (options?: AbortOptions) => void
@@ -190,15 +191,25 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   >([])
   const [streamingReasoning, setStreamingReasoning] = useState('')
   const [streamingParts, setStreamingParts] = useState<MessagePart[]>([])
+  const [pendingSteerMessages, setPendingSteerMessages] = useState<Message[]>(
+    [],
+  )
   const [iteration, setIteration] = useState(0)
 
   const abortRef = useRef<AbortController | null>(null)
   const activeSessionRef = useRef<string | null>(null)
   const discardPartialControllersRef = useRef(new WeakSet<AbortController>())
   const messagesRef = useRef<Message[]>(messages)
+  const pendingSteerMessagesRef = useRef<Message[]>(pendingSteerMessages)
   const lastSyncedInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   const pendingInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   messagesRef.current = messages
+  pendingSteerMessagesRef.current = pendingSteerMessages
+
+  const setPendingSteers = useCallback((next: Message[]) => {
+    pendingSteerMessagesRef.current = next
+    setPendingSteerMessages(next)
+  }, [])
 
   const abort = useCallback((abortOptions?: AbortOptions) => {
     const controller = abortRef.current
@@ -246,8 +257,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     setStreamingToolCalls([])
     setStreamingReasoning('')
     setStreamingParts([])
+    setPendingSteers([])
     setIteration(0)
-  }, [abort, sessionId])
+  }, [abort, sessionId, setPendingSteers])
 
   // Sync initialMessages into state when they load or when switching sessions.
   useEffect(() => {
@@ -278,8 +290,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     setStreamingToolCalls([])
     setStreamingReasoning('')
     setStreamingParts([])
+    setPendingSteers([])
     setIteration(0)
-  }, [abort, initialMessages])
+  }, [abort, initialMessages, setPendingSteers])
 
   useEffect(
     () => () => {
@@ -296,11 +309,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const userMsg = createUserMessage(displayMessage)
 
       if (status === 'streaming') {
-        setMessages((prev) => [...prev, userMsg])
         setError(undefined)
+        setPendingSteers([...pendingSteerMessagesRef.current, userMsg])
         try {
           await steerChatSession(sessionId, { message })
         } catch (err) {
+          setPendingSteers(
+            pendingSteerMessagesRef.current.filter(
+              (candidate) => candidate.id !== userMsg.id,
+            ),
+          )
           setError(err instanceof Error ? err.message : String(err))
           throw err
         }
@@ -325,6 +343,8 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       let accReasoning = ''
       const accToolCalls: StreamToolCall[] = []
       const accParts: MessagePart[] = []
+      const completedStreamMessages: Message[] = []
+      let flushedStreamMessageCount = 0
       let lastToolCall: StreamToolCall | null = null
       let currentReasoningPart: ReasoningPart | null = null
       let currentReasoningHasDelta = false
@@ -418,6 +438,42 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         publishStreamingPartsNow()
       }
 
+      const resetAccumulators = () => {
+        accContent = ''
+        accReasoning = ''
+        accToolCalls.length = 0
+        accParts.length = 0
+        lastToolCall = null
+        currentReasoningPart = null
+        currentReasoningHasDelta = false
+        currentTextPart = null
+      }
+
+      const hasAssistantSegment = () =>
+        accContent.length > 0 || accParts.length > 0 || accToolCalls.length > 0
+
+      const finalizeAssistantSegment = () => {
+        finishCurrentReasoning()
+        if (!hasAssistantSegment()) return
+        completedStreamMessages.push(
+          buildAssistantMessage(
+            accContent,
+            dedupeToolCalls(accToolCalls),
+            accParts,
+          ),
+        )
+        resetAccumulators()
+      }
+
+      const flushCompletedStreamMessages = () => {
+        const pendingMessages = completedStreamMessages.slice(
+          flushedStreamMessageCount,
+        )
+        if (pendingMessages.length === 0) return
+        flushedStreamMessageCount = completedStreamMessages.length
+        setMessages((prev) => [...prev, ...pendingMessages])
+      }
+
       const persistUserMessage = async () => {
         if (!persistMessages) return
         await addMessage(sessionId, 'user', displayMessage)
@@ -437,6 +493,14 @@ export function useChat(options: UseChatOptions): UseChatReturn {
               const data = streamEventDataToText(event.data)
               const match = data.match(/(\d+)/)
               if (match) {
+                const pendingSteers = pendingSteerMessagesRef.current
+                if (pendingSteers.length > 0) {
+                  setPendingSteers([])
+                  finalizeAssistantSegment()
+                  completedStreamMessages.push(...pendingSteers)
+                  flushCompletedStreamMessages()
+                  clearStreamingState()
+                }
                 currentIteration = Number(match[1])
                 setIteration(currentIteration)
                 finishCurrentReasoning()
@@ -608,19 +672,35 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         )
         clearStreamingState()
         setStatus('idle')
-        setMessages((prev) => [...prev, assistantMsg])
+        const streamedMessages = [...completedStreamMessages, assistantMsg]
+        setMessages((prev) => [
+          ...prev,
+          ...streamedMessages.slice(flushedStreamMessageCount),
+        ])
 
         // Persist to openviking session (bot doesn't do this automatically)
         if (persistMessages) {
           try {
-            // Sequential: user message must precede assistant message
             await persistUserMessage()
-            await addMessage(
-              sessionId,
-              'assistant',
-              undefined,
-              serializeParts(assistantMsg.parts),
-            )
+            for (const streamedMessage of streamedMessages) {
+              if (streamedMessage.role === 'user') {
+                await addMessage(
+                  sessionId,
+                  'user',
+                  streamedMessage.parts
+                    .filter((part): part is TextPart => part.type === 'text')
+                    .map((part) => part.text)
+                    .join('\n'),
+                )
+              } else {
+                await addMessage(
+                  sessionId,
+                  'assistant',
+                  undefined,
+                  serializeParts(streamedMessage.parts),
+                )
+              }
+            }
           } catch {
             // Persistence failure is non-blocking
           }
@@ -666,7 +746,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         }
       }
     },
-    [identityScopeKey, persistMessages, sessionId, status],
+    [identityScopeKey, persistMessages, sessionId, setPendingSteers, status],
   )
 
   return {
@@ -677,6 +757,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     streamingToolCalls,
     streamingReasoning,
     streamingParts,
+    pendingSteerMessages,
     iteration,
     send,
     abort,

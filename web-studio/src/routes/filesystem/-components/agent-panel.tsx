@@ -144,6 +144,7 @@ export function AgentPanel({
   }, [
     chat.messages.length,
     chat.streamingContent,
+    chat.pendingSteerMessages.length,
     chat.streamingReasoning,
     chat.streamingToolCalls,
   ])
@@ -244,6 +245,7 @@ export function AgentPanel({
                   ? {
                       iteration: chat.iteration,
                       parts: chat.streamingParts,
+                      pendingMessages: chat.pendingSteerMessages,
                     }
                   : undefined
               }
