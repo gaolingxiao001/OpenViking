@@ -428,6 +428,7 @@ describe('useChat event timeline', () => {
 
   it('steers new user input into an active stream without opening another stream', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
     sendChatStreamMock.mockResolvedValue(
       fetchSse('/stream', {
         fetch: vi.fn().mockResolvedValue(
@@ -474,11 +475,31 @@ describe('useChat event timeline', () => {
     expect(result.current.messages[1]?.parts).toEqual([
       { type: 'text', text: 'follow up' },
     ])
+    expect(result.current.messages[1]).toMatchObject({
+      client_status: 'queued',
+    })
 
     await act(async () => {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({ event: 'response', data: 'answer' })}\n\n`,
+        ),
+      )
       controller.close()
       await sendPromise
     })
+    expect(result.current.messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+    ])
+    expect(result.current.messages[1]?.parts).toEqual([
+      { type: 'text', text: 'answer' },
+    ])
+    expect(result.current.messages[2]?.parts).toEqual([
+      { type: 'text', text: 'follow up' },
+    ])
+    expect(result.current.messages[2]?.client_status).toBeUndefined()
   })
 
   it('keeps reasoning and tool timeline when aborted before content arrives', async () => {

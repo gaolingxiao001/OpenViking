@@ -137,8 +137,17 @@ export function MessageList({
   streaming,
 }: MessageListProps) {
   const isExpanded = layout === 'expanded'
+  const visibleMessages = Array.isArray(messages) ? [...messages] : []
+  const queuedMessages: Message[] = []
+  if (streaming) {
+    while (visibleMessages.at(-1)?.client_status === 'queued') {
+      const queued = visibleMessages.pop()
+      if (!queued) break
+      queuedMessages.unshift(queued)
+    }
+  }
   const safeMessages = groupMessages([
-    ...(Array.isArray(messages) ? messages : []),
+    ...visibleMessages,
     ...(streaming
       ? [
           {
@@ -186,6 +195,20 @@ export function MessageList({
           onResourceClick={onResourceClick}
         />
       )}
+      {queuedMessages.map((msg, idx) => {
+        const prev = idx > 0 ? queuedMessages[idx - 1] : null
+        const sameRole =
+          prev?.role === msg.role &&
+          (!prev.turn_id || !msg.turn_id || prev.turn_id === msg.turn_id)
+        return (
+          <UserMessage
+            key={msg.id}
+            message={msg}
+            compact={sameRole}
+            expanded={isExpanded}
+          />
+        )
+      })}
     </>
   )
 }
@@ -205,6 +228,7 @@ const UserMessage = memo(function UserMessage({
 }) {
   const { t } = useTranslation('sessions')
   const text = stripLegacyContextSuffix(getTextFromParts(message))
+  const isQueued = message.client_status === 'queued'
 
   return (
     <div
@@ -225,6 +249,13 @@ const UserMessage = memo(function UserMessage({
         {text && (
           <div className="whitespace-pre-wrap rounded-2xl rounded-tr-sm border border-border/70 bg-muted/70 px-4 py-2.5 text-sm leading-6 text-foreground shadow-sm">
             {text}
+          </div>
+        )}
+        {isQueued && (
+          <div className="flex justify-end">
+            <span className="inline-flex items-center rounded-full border border-border/70 bg-background/80 px-2 py-0.5 text-[10px] font-medium text-muted-foreground shadow-sm">
+              {t('chat.queued')}
+            </span>
           </div>
         )}
       </div>

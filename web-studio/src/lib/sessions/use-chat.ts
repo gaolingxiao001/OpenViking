@@ -31,6 +31,32 @@ function createUserMessage(content: string): Message {
   }
 }
 
+function clearQueuedMessages(messages: Message[]): Message[] {
+  return messages.map((message) => {
+    if (message.client_status !== 'queued') return message
+    const { client_status, ...rest } = message
+    return rest
+  })
+}
+
+function appendBeforeQueuedMessages(
+  messages: Message[],
+  message: Message,
+): Message[] {
+  let firstQueuedIndex = messages.length
+  while (
+    firstQueuedIndex > 0 &&
+    messages[firstQueuedIndex - 1]?.client_status === 'queued'
+  ) {
+    firstQueuedIndex -= 1
+  }
+  return [
+    ...messages.slice(0, firstQueuedIndex),
+    message,
+    ...clearQueuedMessages(messages.slice(firstQueuedIndex)),
+  ]
+}
+
 function toolCallKey(toolCall: StreamToolCall): string {
   return `${toolCall.iteration ?? 0}\u0000${toolCall.name}\u0000${toolCall.arguments}`
 }
@@ -296,7 +322,10 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const userMsg = createUserMessage(displayMessage)
 
       if (status === 'streaming') {
-        setMessages((prev) => [...prev, userMsg])
+        setMessages((prev) => [
+          ...prev,
+          { ...userMsg, client_status: 'queued' },
+        ])
         setError(undefined)
         try {
           await steerChatSession(sessionId, { message })
@@ -599,6 +628,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           } catch {
             // Persistence failure is non-blocking
           }
+          setMessages(clearQueuedMessages)
           return
         }
         const assistantMsg = buildAssistantMessage(
@@ -608,7 +638,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         )
         clearStreamingState()
         setStatus('idle')
-        setMessages((prev) => [...prev, assistantMsg])
+        setMessages((prev) => appendBeforeQueuedMessages(prev, assistantMsg))
 
         // Persist to openviking session (bot doesn't do this automatically)
         if (persistMessages) {
@@ -648,9 +678,10 @@ export function useChat(options: UseChatOptions): UseChatReturn {
               accParts,
             )
             clearStreamingState()
-            setMessages((prev) => [...prev, partialMsg])
+            setMessages((prev) => appendBeforeQueuedMessages(prev, partialMsg))
           } else {
             clearStreamingState()
+            setMessages(clearQueuedMessages)
           }
           setStatus('idle')
         } else {

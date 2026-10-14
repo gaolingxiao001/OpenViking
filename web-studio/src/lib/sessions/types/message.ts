@@ -70,6 +70,8 @@ export type MessagePart =
 export interface Message {
   id: string
   turn_id?: string
+  /** Client-only presentation state; not part of the backend session record. */
+  client_status?: 'queued'
   message_kind?:
     'user_query' | 'assistant_step' | 'tool_transport' | 'checkpoint'
   role: 'user' | 'assistant'

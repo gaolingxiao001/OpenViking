@@ -145,3 +145,23 @@ describe('MessageList images', () => {
     )
   })
 })
+
+describe('MessageList queued user messages', () => {
+  it('shows a queued marker for locally steered messages', () => {
+    render(
+      <MessageList
+        messages={[
+          {
+            id: 'queued-message',
+            role: 'user',
+            client_status: 'queued',
+            created_at: '2026-09-13T00:00:00Z',
+            parts: [{ type: 'text', text: 'follow up' }],
+          },
+        ]}
+      />,
+    )
+
+    expect(screen.getByText('chat.queued')).toBeTruthy()
+  })
+})
