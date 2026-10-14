@@ -290,7 +290,7 @@ export function parseMail(raw, { maxTextChars = MAX_TEXT_CHARS } = {}) {
   }));
   const date = Date.parse(header(headers, 'date'));
   const precedence = header(headers, 'precedence').toLowerCase();
-  const autoSubmitted = header(headers, 'auto-submitted').toLowerCase();
+  const autoSubmitted = header(headers, 'auto-submitted').split(';')[0].trim().toLowerCase();
   return {
     messageId: messageIds(header(headers, 'message-id'))[0] ?? null,
     inReplyTo: messageIds(header(headers, 'in-reply-to'))[0] ?? null,
@@ -303,8 +303,10 @@ export function parseMail(raw, { maxTextChars = MAX_TEXT_CHARS } = {}) {
     date: Number.isFinite(date) ? date : null,
     text,
     attachments,
-    // Auto-replies and bounces (RFC 3834) are never conversation.
-    automatic: Boolean(autoSubmitted && autoSubmitted !== 'no'),
+    // An automatic answer to a mail (out of office, most bounces; RFC 3834). A
+    // notice a program sends on its own (`auto-generated`, a security alert)
+    // is still mail the owner may need to hear about.
+    autoReplied: autoSubmitted === 'auto-replied',
     // Mailing lists, newsletters and bulk senders.
     bulk: headers.has('list-id') || headers.has('list-unsubscribe') || ['bulk', 'list', 'junk'].includes(precedence),
   };

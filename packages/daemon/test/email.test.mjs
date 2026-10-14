@@ -204,14 +204,19 @@ describe('email connector', () => {
     const { imap, start } = await setup(t, { mails: [mail({ id: 'old-1@example.com' }), mail({ id: 'old-2@example.com' })] });
     const { events, exits } = await start();
 
-    imap.deliver(mail({ id: 'auto@example.com', headers: ['Auto-Submitted: auto-replied'] }));
+    imap.deliver(mail({ id: 'auto@example.com', headers: ['Auto-Submitted: auto-replied; owner-email="x@example.com"'] }));
     imap.deliver(mail({ from: ME, id: replyMessageId('ld_earlier', ME), subject: 'Re: Thursday?' }));
     imap.deliver(mail({ from: '"Alice, A." <Alice@Example.com>', headers: ['Cc: Carol <carol@example.com>'],
       subject: '=?UTF-8?B?5ZGo5Zub5byA5Lya77yf?=', body: 'Can we meet?\r\n\r\nThanks' }));
     imap.deliver(mail({ from: 'news@example.com', id: 'news@example.com', headers: ['List-Id: <news.example.com>'] }));
-    await until(() => events.length === 2);
+    // A notice a program sent on its own (a security alert) is not a reply:
+    // the model decides whether the owner hears of it.
+    imap.deliver(mail({ from: 'no-reply@accounts.example.com', id: 'alert@example.com', subject: 'Security alert',
+      headers: ['Auto-Submitted: auto-generated'] }));
+    await until(() => events.length === 3);
 
-    const [event, news] = events;
+    const [event, news, alert] = events;
+    assert.deepEqual([alert.eventId, alert.kind, alert.title], ['imap:1:7', 'email.received', 'Security alert']);
     assert.deepEqual([event.eventId, event.kind, event.messageId, event.subject, event.senderId, event.title],
       ['imap:1:5', 'email.received', 'mail:1:5', { type: 'thread', id: 'gmail:9001' }, 'alice@example.com', '周四开会？']);
     assert.equal(event.content, 'From: Alice, A. <alice@example.com>\nTo: me@example.com\nCc: Carol <carol@example.com>\n\nCan we meet?\n\nThanks');

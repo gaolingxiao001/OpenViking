@@ -227,8 +227,8 @@ export class EmailClient {
   report(item, uidValidity, onLine) {
     if (!item.body) return;
     const mail = parseMail(item.body);
-    if (mail.automatic || isOwnMessageId(mail.messageId)) {
-      this.logger.info('email_skipped', { uid: item.uid, reason: mail.automatic ? 'automatic' : 'own_reply' });
+    if (mail.autoReplied || isOwnMessageId(mail.messageId)) {
+      this.logger.info('email_skipped', { uid: item.uid, reason: mail.autoReplied ? 'auto_replied' : 'own_reply' });
       return;
     }
     if (item.truncated) mail.text = `[mail body not fetched: ${Math.round(item.size / 1_048_576)} MiB]`;
