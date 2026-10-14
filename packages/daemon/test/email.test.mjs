@@ -83,6 +83,8 @@ async function fakeImap(t, { mails = [], uidValidity = 1, gmail = true } = {}) {
               socket.write(')\r\n');
             }
           }
+          // What else the server says during a fetch: flag changes made elsewhere.
+          state.onFetch?.(socket);
           ok();
         } else if (command === 'IDLE') {
           idleTag = tag;
@@ -221,6 +223,27 @@ describe('email connector', () => {
     assert.ok(imap.state.commands.some((command) => command.includes('BODY.PEEK[]')));
     assert.doesNotMatch(imap.state.commands.join('\n'), /^(SELECT|STORE|UID STORE|EXPUNGE|COPY|MOVE|UID MOVE)\b/m);
     assert.deepEqual(exits, []);
+  });
+
+  it('counts only the mails it fetched when the server adds flag changes for others', async (t) => {
+    const { imap, start } = await setup(t);
+    const { events } = await start();
+    imap.deliver(mail({ id: 'one@example.com' }));
+    await until(() => events.length === 1);
+
+    // While mail 2 is fetched, mails 3 and 4 arrive unannounced, and the owner
+    // reads 4 and the old mail 1 elsewhere: the server adds their new flags.
+    imap.state.onFetch = (socket) => {
+      imap.state.onFetch = null;
+      imap.state.mails.push({ uid: 3, raw: mail({ id: 'three@example.com' }) }, { uid: 4, raw: mail({ id: 'four@example.com' }) });
+      socket.write('* 4 FETCH (UID 4 FLAGS (\\Seen))\r\n* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n');
+    };
+    imap.deliver(mail({ id: 'two@example.com' }));
+    await until(() => events.some((event) => event.eventId === 'imap:1:2'));
+    imap.deliver(mail({ id: 'five@example.com' }));
+    await until(() => events.some((event) => event.eventId === 'imap:1:5'));
+
+    assert.deepEqual(events.map((event) => event.eventId), ['imap:1:1', 'imap:1:2', 'imap:1:3', 'imap:1:4', 'imap:1:5']);
   });
 
   it('replies over SMTP to Reply-To, threaded under the mail', async (t) => {

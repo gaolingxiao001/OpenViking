@@ -237,7 +237,7 @@ export class ImapConnection {
     if (!box.uidNext) {
       // No UIDNEXT: the newest message's UID, plus one.
       const last = box.exists > 0 ? await this.fetch('*', ['UID'], { byUid: false }) : [];
-      box.uidNext = (last[0]?.uid ?? 0) + 1;
+      box.uidNext = Math.max(0, ...last.map((item) => item.uid)) + 1;
     }
     return box;
   }
@@ -253,14 +253,22 @@ export class ImapConnection {
     return uids.filter((uid) => uid >= fromUid).sort((left, right) => left - right);
   }
 
+  // The server may add FETCH responses of its own, such as flags changed from
+  // another client (RFC 3501 7.4.2), for any message. Only the UIDs asked for
+  // are returned, one entry each, with all their responses merged.
   async fetch(set, items, { byUid = true } = {}) {
     const name = byUid ? 'UID FETCH' : 'FETCH';
     const list = Array.isArray(set) ? set.join(',') : set;
+    const wanted = Array.isArray(set) ? new Set(set) : null;
     const { untagged } = await this.command(name, `${list} (${items.join(' ')})`, { timeoutMs: FETCH_TIMEOUT_MS });
-    return untagged
-      .filter((parts) => /^\* \d+ FETCH\b/i.test(parts[0]))
-      .map((parts) => fetchAttributes(parseResponse(parts).find(Array.isArray) ?? []))
-      .filter((attributes) => Number.isSafeInteger(attributes.uid));
+    const found = new Map();
+    for (const parts of untagged) {
+      if (!/^\* \d+ FETCH\b/i.test(parts[0])) continue;
+      const attributes = fetchAttributes(parseResponse(parts).find(Array.isArray) ?? []);
+      if (!Number.isSafeInteger(attributes.uid) || (wanted && !wanted.has(attributes.uid))) continue;
+      found.set(attributes.uid, { ...found.get(attributes.uid), ...attributes });
+    }
+    return [...found.values()];
   }
 
   // Waits in IDLE until the mailbox reports a new message count, `maxMs`
