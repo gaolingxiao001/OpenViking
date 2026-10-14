@@ -475,9 +475,6 @@ describe('useChat event timeline', () => {
     expect(result.current.messages[1]?.parts).toEqual([
       { type: 'text', text: 'follow up' },
     ])
-    expect(result.current.messages[1]).toMatchObject({
-      client_status: 'queued',
-    })
 
     await act(async () => {
       controller.enqueue(
@@ -496,7 +493,6 @@ describe('useChat event timeline', () => {
     expect(result.current.messages[1]?.parts).toEqual([
       { type: 'text', text: 'follow up' },
     ])
-    expect(result.current.messages[1]?.client_status).toBeUndefined()
     expect(result.current.messages[2]?.parts).toEqual([
       { type: 'text', text: 'answer' },
     ])

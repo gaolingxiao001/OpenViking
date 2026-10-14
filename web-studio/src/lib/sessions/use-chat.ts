@@ -31,14 +31,6 @@ function createUserMessage(content: string): Message {
   }
 }
 
-function clearQueuedMessages(messages: Message[]): Message[] {
-  return messages.map((message) => {
-    if (message.client_status !== 'queued') return message
-    const { client_status, ...rest } = message
-    return rest
-  })
-}
-
 function toolCallKey(toolCall: StreamToolCall): string {
   return `${toolCall.iteration ?? 0}\u0000${toolCall.name}\u0000${toolCall.arguments}`
 }
@@ -304,10 +296,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const userMsg = createUserMessage(displayMessage)
 
       if (status === 'streaming') {
-        setMessages((prev) => [
-          ...prev,
-          { ...userMsg, client_status: 'queued' },
-        ])
+        setMessages((prev) => [...prev, userMsg])
         setError(undefined)
         try {
           await steerChatSession(sessionId, { message })
@@ -610,7 +599,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           } catch {
             // Persistence failure is non-blocking
           }
-          setMessages(clearQueuedMessages)
           return
         }
         const assistantMsg = buildAssistantMessage(
@@ -620,7 +608,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         )
         clearStreamingState()
         setStatus('idle')
-        setMessages((prev) => [...clearQueuedMessages(prev), assistantMsg])
+        setMessages((prev) => [...prev, assistantMsg])
 
         // Persist to openviking session (bot doesn't do this automatically)
         if (persistMessages) {
@@ -660,10 +648,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
               accParts,
             )
             clearStreamingState()
-            setMessages((prev) => [...clearQueuedMessages(prev), partialMsg])
+            setMessages((prev) => [...prev, partialMsg])
           } else {
             clearStreamingState()
-            setMessages(clearQueuedMessages)
           }
           setStatus('idle')
         } else {

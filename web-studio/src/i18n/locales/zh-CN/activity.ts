@@ -31,7 +31,6 @@ const activity = {
       emptyState: '选择或创建一个会话开始聊天。',
       thinking: '思考中...',
       reasoning: '思考过程',
-      queued: '排队中',
       iteration: '第 {{count}} 轮',
       toolCall: '工具调用',
       toolInput: '输入',

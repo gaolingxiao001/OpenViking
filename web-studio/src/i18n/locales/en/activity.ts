@@ -31,7 +31,6 @@ const activity = {
       emptyState: 'Select or create a session to start chatting.',
       thinking: 'Thinking...',
       reasoning: 'Reasoning',
-      queued: 'Queued',
       iteration: 'Round {{count}}',
       toolCall: 'Tool call',
       toolInput: 'Input',
