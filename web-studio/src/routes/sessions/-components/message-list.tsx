@@ -137,17 +137,8 @@ export function MessageList({
   streaming,
 }: MessageListProps) {
   const isExpanded = layout === 'expanded'
-  const visibleMessages = Array.isArray(messages) ? [...messages] : []
-  const queuedMessages: Message[] = []
-  if (streaming) {
-    while (visibleMessages.at(-1)?.client_status === 'queued') {
-      const queued = visibleMessages.pop()
-      if (!queued) break
-      queuedMessages.unshift(queued)
-    }
-  }
   const safeMessages = groupMessages([
-    ...visibleMessages,
+    ...(Array.isArray(messages) ? messages : []),
     ...(streaming
       ? [
           {
@@ -195,20 +186,6 @@ export function MessageList({
           onResourceClick={onResourceClick}
         />
       )}
-      {queuedMessages.map((msg, idx) => {
-        const prev = idx > 0 ? queuedMessages[idx - 1] : null
-        const sameRole =
-          prev?.role === msg.role &&
-          (!prev.turn_id || !msg.turn_id || prev.turn_id === msg.turn_id)
-        return (
-          <UserMessage
-            key={msg.id}
-            message={msg}
-            compact={sameRole}
-            expanded={isExpanded}
-          />
-        )
-      })}
     </>
   )
 }

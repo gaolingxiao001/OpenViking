@@ -490,16 +490,16 @@ describe('useChat event timeline', () => {
     })
     expect(result.current.messages.map((message) => message.role)).toEqual([
       'user',
-      'assistant',
       'user',
+      'assistant',
     ])
     expect(result.current.messages[1]?.parts).toEqual([
-      { type: 'text', text: 'answer' },
-    ])
-    expect(result.current.messages[2]?.parts).toEqual([
       { type: 'text', text: 'follow up' },
     ])
-    expect(result.current.messages[2]?.client_status).toBeUndefined()
+    expect(result.current.messages[1]?.client_status).toBeUndefined()
+    expect(result.current.messages[2]?.parts).toEqual([
+      { type: 'text', text: 'answer' },
+    ])
   })
 
   it('keeps reasoning and tool timeline when aborted before content arrives', async () => {

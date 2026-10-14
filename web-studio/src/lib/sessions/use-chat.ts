@@ -39,24 +39,6 @@ function clearQueuedMessages(messages: Message[]): Message[] {
   })
 }
 
-function appendBeforeQueuedMessages(
-  messages: Message[],
-  message: Message,
-): Message[] {
-  let firstQueuedIndex = messages.length
-  while (
-    firstQueuedIndex > 0 &&
-    messages[firstQueuedIndex - 1]?.client_status === 'queued'
-  ) {
-    firstQueuedIndex -= 1
-  }
-  return [
-    ...messages.slice(0, firstQueuedIndex),
-    message,
-    ...clearQueuedMessages(messages.slice(firstQueuedIndex)),
-  ]
-}
-
 function toolCallKey(toolCall: StreamToolCall): string {
   return `${toolCall.iteration ?? 0}\u0000${toolCall.name}\u0000${toolCall.arguments}`
 }
@@ -638,7 +620,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         )
         clearStreamingState()
         setStatus('idle')
-        setMessages((prev) => appendBeforeQueuedMessages(prev, assistantMsg))
+        setMessages((prev) => [...clearQueuedMessages(prev), assistantMsg])
 
         // Persist to openviking session (bot doesn't do this automatically)
         if (persistMessages) {
@@ -678,7 +660,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
               accParts,
             )
             clearStreamingState()
-            setMessages((prev) => appendBeforeQueuedMessages(prev, partialMsg))
+            setMessages((prev) => [...clearQueuedMessages(prev), partialMsg])
           } else {
             clearStreamingState()
             setMessages(clearQueuedMessages)
