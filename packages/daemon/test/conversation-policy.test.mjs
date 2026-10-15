@@ -6,7 +6,6 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   assembleConversationPolicy,
-  assemblePiConversationPolicy,
   assembleVolcConversationPolicy,
 } from '../src/conversation-policy.mjs';
 
@@ -34,24 +33,19 @@ describe('conversation policy assemble', () => {
     assert.doesNotMatch(text, /do nothing and end the turn/);
   });
 
-  it('gives every runtime the same delivery tools; Pi reaches them through the CLI', () => {
-    const base = { systemPromptPath: defaultSystemPromptPath, actionCliPath: '/daemon/actions/cli.mjs' };
+  it('shares the MCP delivery policy across local runtimes and connector combinations', () => {
+    const base = { systemPromptPath: defaultSystemPromptPath };
     const codex = assembleConversationPolicy({ ...base, connectors: ['lark', 'weixin'] });
     assert.match(codex, /`send_message`/);
     assert.match(codex, /never through `lark-cli`/);
     assert.match(codex, /source=weixin/);
     assert.doesNotMatch(codex, /send_lark_message|weixin-cli|Agent tools from bash/);
 
-    const pi = assemblePiConversationPolicy({ ...base, connectors: ['lark'] });
-    assert.match(pi, /## Agent tools from bash/);
-    assert.match(pi, /"\/daemon\/actions\/cli\.mjs" <tool> <<'JSON'/);
-    assert.doesNotMatch(pi, /im \+messages-reply/);
-
-    const weixin = assemblePiConversationPolicy({ ...base, connectors: ['weixin'] });
+    const weixin = assembleConversationPolicy({ ...base, connectors: ['weixin'] });
     assert.match(weixin, /# Weixin conversation policy/);
     assert.match(weixin, /`reply_message` with the inbound msg=/);
     assert.match(weixin, /call `get_message_media`/);
-    assert.match(weixin, /## Agent tools from bash/);
+    assert.doesNotMatch(weixin, /Agent tools from bash|actions\/cli\.mjs/);
   });
 
   it('stitches base, OpenViking, optional meeting audio, and harness', () => {

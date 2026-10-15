@@ -1,7 +1,7 @@
 import { CONTENT_PROPERTIES } from './content.mjs';
 
-// One tool surface for every runtime. The MCP adapter and the CLI both relay
-// these definitions and calls to the Core; neither validates or executes.
+// One tool surface for every runtime. The MCP adapter relays these definitions
+// and calls to the Core; it neither validates nor executes.
 // `action` / `query` name the Connector operation a tool needs, so a tool is
 // offered only when some configured Connector declares it.
 
@@ -223,7 +223,7 @@ function typeOf(value) {
 }
 
 // The subset of JSON Schema the tool definitions use. Runtimes do not reliably
-// enforce schemas, and the CLI never does, so the Core checks every call.
+// enforce schemas, so the Core checks every call.
 export function validateInput(definition, value, label = 'input') {
   const actual = typeOf(value);
   if (definition.type && actual !== definition.type

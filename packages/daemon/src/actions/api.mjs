@@ -28,8 +28,8 @@ async function readJson(request) {
   return parsed;
 }
 
-// The agent tool endpoint on a mode-0600 Unix socket. The MCP adapter and the
-// CLI only relay to it; the ActionService decides and executes.
+// The agent tool endpoint on a mode-0600 Unix socket. The MCP adapter only
+// relays to it; the ActionService decides and executes.
 //   GET  /v1/tools -> { tools }
 //   POST /v1/call  { tool, input } -> { ok, result: { text, data, media? } } | { ok: false, error }
 export async function startActionApi({ socketPath, service, logger }) {
@@ -52,7 +52,7 @@ export async function startActionApi({ socketPath, service, logger }) {
     try {
       const result = await service.call(body.tool, body.input ?? {}, {
         authority: request.headers[AUTHORITY_HEADER],
-        via: ['mcp', 'cli'].includes(request.headers[CLIENT_HEADER]) ? request.headers[CLIENT_HEADER] : 'unknown',
+        via: request.headers[CLIENT_HEADER] === 'mcp' ? 'mcp' : 'unknown',
       });
       send(response, 200, { ok: true, result });
     } catch (error) {

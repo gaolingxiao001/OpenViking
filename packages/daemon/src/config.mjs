@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { managedPiBin } from './pi-runtime.mjs';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 export const moduleDir = path.resolve(sourceDir, '..');
@@ -174,7 +175,6 @@ export function getConfig() {
     connectorWorkerPath: path.join(sourceDir, 'connectors', 'worker.mjs'),
     actionSocketPath: path.join(dataDir, 'actions.sock'),
     actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
-    actionCliPath: path.join(sourceDir, 'actions', 'cli.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
     weixinAllowFrom: csvEnv('LARK_DAEMON_WEIXIN_ALLOW_FROM'),
     emailConfigFile,
@@ -185,7 +185,7 @@ export function getConfig() {
     codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
     traexBin: process.env.TRAEX_BIN || process.env.TRAECLI_BIN || 'traecli',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
-    piBin: process.env.PI_BIN || 'pi',
+    piBin: process.env.PI_BIN || managedPiBin(),
     initialModel: process.env.LARK_DAEMON_MODEL || '',
     codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
     traexEffort: enumEnv('LARK_DAEMON_TRAEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),

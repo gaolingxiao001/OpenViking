@@ -162,7 +162,7 @@ export class PersonalAgentDaemon {
       });
       // Every outbound action, from any runtime or the daemon itself, goes
       // through this one service and its outbox. Runtimes reach it over the
-      // local socket via the MCP adapter or the CLI.
+      // local socket via the MCP adapter.
       this.actions = new ActionService({
         config: this.config,
         store: this.store,

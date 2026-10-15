@@ -4,13 +4,22 @@
 
 ## 准备
 
-- Node.js 22.5 或以上；clone 后运行一次 `npm install`。
+- Node.js 22.19.0 或以上；clone 后运行 `npm run setup`，自动安装 lockfile 锁定的依赖和项目专用 Pi，并检查 Pi 版本。
 - 飞书实例需要已配置 bot profile 的 `lark-cli`；微信单聊 MVP 不需要 `lark-cli`。
 - 一个 coding agent：默认支持 Codex，也可以使用 TraeX、Claude、Pi 或火山方舟 Managed Agent。
 - 正式常驻运行需要 `pm2`：`npm i -g pm2`。
 - OpenViking，用来保存跨会话上下文。每个 agent 在 deployment manifest 中配置自己的 `ovConfig`。
+- 全量测试需要 `python3` 为 Python 3.10 或以上，并安装 PyYAML（会议 ASR 用例使用）；实际会议功能的依赖见 `meeting-asr/requirements.txt`。
 
 Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [deployment.example.json](./deployment.example.json)。
+
+Claude Code 需要 2.1.259 或以上，支持 `--permission-prompts none`；启动预检会检查该参数。daemon 是无人值守会话：Pi 扩展对话框、Codex/TraeX 的审批和用户输入请求会被明确取消或拒绝；Claude 使用官方无人值守设置，并拒绝意外的控制请求。需要向人提问时，模型应通过消息工具发文字或支持的选项卡，结束当前轮次，再等待用户消息或卡片答案。用户的扩展、provider 和其他会话配置不因此被关闭。
+
+Pi 1.2.0 在启动扩展完成后才开始读取 RPC 回复，因此扩展在 `session_start` 中要求人工输入时，daemon 会立即拒绝启动并提示关闭该启动交互；运行期间的对话框则正常返回取消。
+
+Pi 随项目依赖自动安装，确切版本由 `packages/daemon/package.json` 和 lockfile 固定。用 `npm run pi` 打开项目专用 Pi，再执行 `/login`；已有 Pi 的模型登录信息仍可复用。安装不会升级全局 `pi`。`PI_BIN` 留空时使用项目/release 内的版本；显式指定其他路径时，该程序必须是本 release 验证的同一版本，否则启动会给出修复指引。
+
+daemon 启动 Pi 时只为该会话注册 `personal_agent` MCP server，使用 `direct` exposure，让模型直接看到各个工具和参数。它不会修改 `~/.pi/agent/mcp.json` 或工作区 `.pi/mcp.json`，也不会给用户其他 Pi 会话添加该 server。若这些文件已有同名 server、内置 MCP 被禁用，或工具没有成功加载，daemon 会拒绝启动 Pi；不回退到 Bash/CLI。普通用户的其他 MCP server 配置仍由 Pi 自己加载。
 
 ## 配飞书
 
@@ -31,7 +40,7 @@ cd lark-daemon
 mkdir -p ~/.lark-daemon
 cp deployment.example.json ~/.lark-daemon/deployment.json
 # 编辑 deployment.json：至少填 profile、dataDir、workspace、ovConfig、model
-npm install
+npm run setup
 npm test && npm run check
 npm run start:daemon
 ```
@@ -47,7 +56,7 @@ npm run weixin:login -- weixin
 LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
 ```
 
-登录命令按实例读取 manifest，在终端输出二维码。手机确认后，token、机器人账号、扫码用户和长轮询游标保存在该实例的私有 SQLite 中。Core 随后启动独立微信 Connector；它调用 `notifyStart`，持续请求 `getupdates`，把入站文本、图片、文件和微信已有语音转写封装成 `EVENT` 交给 Agent。媒体保存在 `dataDir/weixin/media`。Agent 通过统一的 Agent 工具（Pi 用 `actions/cli.mjs`，Codex/TraeX/Claude 用 MCP 适配器）把查询和发送请求经 `dataDir/actions.sock` 交给 Core；Core 先写 outbox，再由 Connector 携带 `context_token` 和由幂等键派生的 `client_id` 调用 `sendmessage`。
+登录命令按实例读取 manifest，在终端输出二维码。手机确认后，token、机器人账号、扫码用户和长轮询游标保存在该实例的私有 SQLite 中。Core 随后启动独立微信 Connector；它调用 `notifyStart`，持续请求 `getupdates`，把入站文本、图片、文件和微信已有语音转写封装成 `EVENT` 交给 Agent。媒体保存在 `dataDir/weixin/media`。Agent 通过统一的 Agent 工具（Codex/TraeX/Claude/Pi 共用 MCP 适配器）把查询和发送请求经 `dataDir/actions.sock` 交给 Core；Core 先写 outbox，再由 Connector 携带 `context_token` 和由幂等键派生的 `client_id` 调用 `sendmessage`。
 
 默认 allowlist 是扫码用户。`LARK_DAEMON_WEIXIN_ALLOW_FROM` 可配置逗号分隔的完整 iLink 用户 ID；不要填昵称。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
 
@@ -76,6 +85,10 @@ lark-daemon upgrade <instance-id>
 # 共享 Web 有改动时
 lark-daemon upgrade all
 ```
+
+首次发布和自动升级都会先在新 release 内执行 `npm ci`、验证托管 Pi，再运行测试；全部成功后才切换 release 和进程。升级 Pi 也是更新版本锁定后随 release 发布，回滚则使用旧 release 自己的 Pi。安装或验证失败不会覆盖当前 release 的依赖，也不会修改用户全局 Pi。
+
+从尚未安装 release 依赖的旧 updater 迁移时，首次需使用新代码执行上面的 `deploy.sh HEAD` 和 `bootstrap-updater.sh`，再调用 upgrade。旧 updater 的验证逻辑不会自动执行新代码中的依赖安装；控制面更新后，后续升级自动安装目标 release 锁定的 Pi。
 
 `deploy.sh` 只用于首次安装或 updater 协议变更。查看运行状态：
 

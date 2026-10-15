@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig, projectDir } from '../src/config.mjs';
+import { managedPiBin } from '../src/pi-runtime.mjs';
 import { assembleConversationPolicy as loadSystemPrompt } from '../src/conversation-policy.mjs';
 
 const saved = new Map();
@@ -133,6 +134,8 @@ describe('configuration safety', { concurrency: false }, () => {
   });
 
   it('accepts Pi CLI path and thinking-level effort', () => {
+    setEnv('PI_BIN', undefined);
+    assert.equal(getConfig().piBin, managedPiBin());
     setEnv('PI_BIN', '/opt/homebrew/bin/pi');
     setEnv('LARK_DAEMON_PI_MODEL', 'openai/gpt-4o');
     setEnv('LARK_DAEMON_PI_EFFORT', 'xhigh');

@@ -7,7 +7,7 @@
     "CODEX_BIN": "/opt/homebrew/bin/codex",
     "TRAEX_BIN": "traecli",
     "CLAUDE_BIN": "claude",
-    "PI_BIN": "pi",
+    "PI_BIN": "",
     "LARK_DAEMON_WEIXIN_ALLOW_FROM": "",
     "LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS": "35000",
     "LARK_DAEMON_LOG_LEVEL": "info",

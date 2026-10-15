@@ -13,9 +13,12 @@
     "packages/updater"
   ],
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.19.0"
   },
   "scripts": {
+    "setup": "npm ci --no-audit --no-fund && npm run check:pi",
+    "pi": "pi",
+    "check:pi": "node packages/daemon/scripts/check-pi.mjs",
     "start": "node packages/daemon/src/main.mjs",
     "start:daemon": "node packages/daemon/src/main.mjs",
     "start:web": "node packages/web/src/main.mjs",

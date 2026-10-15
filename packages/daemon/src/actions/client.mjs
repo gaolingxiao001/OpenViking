@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { AUTHORITY_HEADER, CLIENT_HEADER } from './api.mjs';
 
-// Shared by the MCP adapter and the CLI. The socket path and runtime authority
+// Used by the MCP adapter. The socket path and runtime authority
 // come from the agent process environment the daemon set up.
 export function actionEndpoint(client, environment = process.env) {
   const socketPath = environment.PERSONAL_AGENT_SOCKET;
@@ -9,11 +9,11 @@ export function actionEndpoint(client, environment = process.env) {
   return { socketPath, authority: environment.PERSONAL_AGENT_AUTHORITY ?? '', client };
 }
 
-export function requestAction({ socketPath, authority, client }, method, route, body = null) {
+export function requestAction({ socketPath, authority, client }, method, route, body = null, { signal } = {}) {
   const payload = body === null ? '' : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request({
-      socketPath, path: route, method,
+      socketPath, path: route, method, signal,
       headers: {
         [AUTHORITY_HEADER]: authority,
         [CLIENT_HEADER]: client,
@@ -22,6 +22,7 @@ export function requestAction({ socketPath, authority, client }, method, route, 
     }, (response) => {
       let output = '';
       response.setEncoding('utf8');
+      response.once('error', reject);
       response.on('data', (chunk) => { output += chunk; });
       response.on('end', () => {
         try { resolve(JSON.parse(output)); } catch {
@@ -34,12 +35,12 @@ export function requestAction({ socketPath, authority, client }, method, route, 
   });
 }
 
-export async function listTools(endpoint) {
-  return (await requestAction(endpoint, 'GET', '/v1/tools')).tools;
+export async function listTools(endpoint, options) {
+  return (await requestAction(endpoint, 'GET', '/v1/tools', null, options)).tools;
 }
 
-export async function callTool(endpoint, tool, input) {
-  const response = await requestAction(endpoint, 'POST', '/v1/call', { tool, input });
+export async function callTool(endpoint, tool, input, options) {
+  const response = await requestAction(endpoint, 'POST', '/v1/call', { tool, input }, options);
   if (!response.ok) throw new Error(response.error || 'agent tool failed');
   return response.result;
 }

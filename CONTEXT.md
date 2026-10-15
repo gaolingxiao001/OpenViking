@@ -34,6 +34,6 @@ _Avoid_: meeting stack, audio runtime, media supervisor (those are internals)
 **Agent tools**:
 The one tool surface every runtime uses for messaging and chat reads, served by
 the Core's ActionService over `<dataDir>/actions.sock`. The MCP adapter (Codex,
-Claude) and the CLI (Pi) only relay; every outbound action is checked there and
+TraeX, Claude, Pi) only relays; every outbound action is checked there and
 recorded in the single `outbox` table before a Connector executes it.
 _Avoid_: Lark tools, sidecar, delivery CLI per connector

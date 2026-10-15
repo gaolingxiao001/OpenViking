@@ -702,11 +702,16 @@ export class CodexAgent {
     } catch { /* connection lost; handled by exit */ }
   }
 
-  // Pure dispatch of one server line: resolves a pending response or routes a
-  // notification. Unit-tested directly.
+  // Server requests have both id and method. They must get a response even in
+  // unattended mode; treating them as notifications strands the server's turn.
   _handleLine(line) {
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.id !== undefined && typeof msg.method === 'string') {
+      this._handleServerRequest(msg);
+      return;
+    }
     if (msg.id !== undefined && msg.method === undefined) {
       const pending = this.pending.get(msg.id);
       if (!pending) return;
@@ -716,6 +721,45 @@ export class CodexAgent {
       return;
     }
     if (typeof msg.method === 'string') this._handleNotification(msg.method, msg.params || {});
+  }
+
+  // approvalPolicy 'never' already makes Codex reject approvals, permission
+  // requests and MCP elicitations itself; this covers anything that still
+  // arrives. Each denial lets the turn continue, so the model can still reply.
+  _handleServerRequest({ id, method }) {
+    let result;
+    switch (method) {
+      case 'item/commandExecution/requestApproval':
+      case 'item/fileChange/requestApproval':
+        result = { decision: 'decline' };
+        break;
+      case 'execCommandApproval':
+      case 'applyPatchApproval':
+        result = { decision: 'denied' };
+        break;
+      case 'item/permissions/requestApproval':
+        result = { permissions: {}, scope: 'turn' };
+        break;
+      case 'item/tool/requestUserInput':
+        // An empty answer map means no answer, never an invented user choice.
+        result = { answers: {} };
+        break;
+      case 'mcpServer/elicitation/request':
+        result = { action: 'cancel', content: null };
+        break;
+      default:
+        break;
+    }
+    const response = result === undefined
+      ? { id, error: { code: -32601, message: 'This unattended daemon does not support this server request.' } }
+      : { id, result };
+    this.logger.warn(`${this.logPrefix}_server_request_declined`, { method: safe(method), reason: 'unattended' });
+    this._recordActivity('agent.interaction_declined', {
+      summary: safe(method), metadata: { runtime: this.runtime, method: safe(method) },
+    });
+    try { this.child?.stdin.write(`${JSON.stringify(response)}\n`); } catch (error) {
+      this.logger.warn(`${this.logPrefix}_server_response_failed`, { error: safe(error) });
+    }
   }
 
   _handleNotification(method, params) {

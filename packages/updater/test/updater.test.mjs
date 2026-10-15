@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { publishLatestRelease } from '../src/publisher.mjs';
+import { defaultValidateRelease, publishLatestRelease } from '../src/publisher.mjs';
 
 process.env.LARK_UPDATER_TARGETS_JSON = JSON.stringify({
   zayn: {
@@ -741,6 +741,26 @@ test('upgradeTarget publishes upstream before rolling the target', async () => {
   assert.equal(result.published, true);
 });
 
+test('release preparation installs locked dependencies and verifies managed Pi before testing', async () => {
+  const calls = [];
+  const buildEnv = { PATH: '/fixture/bin', HOME: '/fixture/home' };
+  await defaultValidateRelease('/releases/pending', {
+    npmBin: 'npm', buildEnv,
+    execFileImpl: async (bin, args, options) => { calls.push({ bin, args, options }); },
+  });
+  assert.deepEqual(calls.map(({ args }) => args), [
+    ['ci', '--no-audit', '--no-fund'], ['run', 'check:pi'], ['test'], ['run', 'check'],
+  ]);
+  assert.ok(calls.every(({ bin, options }) => bin === 'npm'
+    && options.cwd === '/releases/pending' && options.env === buildEnv));
+  const failed = [];
+  await assert.rejects(defaultValidateRelease('/releases/pending', {
+    npmBin: 'npm', buildEnv,
+    execFileImpl: async (_bin, args) => { failed.push(args); throw new Error('install failed'); },
+  }), /install failed/);
+  assert.deepEqual(failed, [['ci', '--no-audit', '--no-fund']]);
+});
+
 test('publisher fetches trusted main, validates once, and reuses the same commit', async () => {
   const root = await fixtureTempRoot('lark-publisher-test-');
   const source = path.join(root, 'source');
@@ -761,7 +781,8 @@ test('publisher fetches trusted main, validates once, and reuses the same commit
       else reject(new Error(Buffer.concat(stderr).toString('utf8')));
     });
   });
-  await git('init', '-b', 'main');
+  await git('init');
+  await git('checkout', '-b', 'main');
   await git('config', 'user.email', 'test@example.com');
   await git('config', 'user.name', 'Test');
   await git('add', '.');
@@ -819,7 +840,8 @@ test('publisher advances current and keeps the prior release as rollback', async
     child.once('error', reject);
     child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(Buffer.concat(stderr).toString('utf8')))));
   });
-  await runGit(source, ['init', '-b', 'main']);
+  await runGit(source, ['init']);
+  await runGit(source, ['checkout', '-b', 'main']);
   await runGit(source, ['config', 'user.email', 'test@example.com']);
   await runGit(source, ['config', 'user.name', 'Test']);
   await runGit(source, ['add', '.']);

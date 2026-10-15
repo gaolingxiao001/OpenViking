@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,7 +22,7 @@ import { fakeConnectors } from './action-fixture.mjs';
 const TOKEN = 'runtime-token';
 const OWNER = { id: 'ou_owner12345678', target: { user_id: 'ou_owner12345678' } };
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const cliPath = fileURLToPath(new URL('../src/actions/cli.mjs', import.meta.url));
+const mcpPath = fileURLToPath(new URL('../src/actions/mcp.mjs', import.meta.url));
 
 function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, meetingEnabled = false, ovClient = null,
   owners = { lark: OWNER }, channel = 'lark', profile = undefined } = {}) {
@@ -444,41 +444,42 @@ describe('agent tool front-ends', () => {
     assert.match(fenced.result.content[0].text, /no longer owns/);
   });
 
-  it('serves the same tools to the CLI with the runtime environment', async (t) => {
+  it('serves tools over real MCP stdio with the runtime environment', async (t) => {
     const { socketPath, inbound, connectors, logs } = await serve(t);
     inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
     const env = { ...process.env, PERSONAL_AGENT_SOCKET: socketPath, PERSONAL_AGENT_AUTHORITY: TOKEN };
-    const run = (args, input) => new Promise((resolve) => {
-      // spawnSync would block the event loop the in-process socket server needs.
-      import('node:child_process').then(({ spawn }) => {
-        const child = spawn(process.execPath, [cliPath, ...args], { env });
-        let stdout = '';
-        let stderr = '';
-        child.stdout.on('data', (chunk) => { stdout += chunk; });
-        child.stderr.on('data', (chunk) => { stderr += chunk; });
-        child.on('close', (code) => resolve({ code, stdout, stderr }));
-        child.stdin.end(input ?? '');
-      });
+    const run = (requests) => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [mcpPath], { env });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, responses: stdout.trim().split('\n').map(JSON.parse).sort((a, b) => a.id - b.id), stderr }));
+      child.stdin.end(requests.map((request, index) => JSON.stringify({ jsonrpc: '2.0', id: index, ...request })).join('\n') + '\n');
     });
 
-    const sent = await run(['reply_message'], JSON.stringify({
-      message_id: 'om_decision123456', markdown: 'it\'s "quoted"\nand multi-line', decision_id: 'message:om_decision123456',
-    }));
+    const sent = await run([
+      { method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+      { method: 'tools/list' },
+      { method: 'tools/call', params: { name: 'reply_message', arguments: {
+        message_id: 'om_decision123456', markdown: 'it\'s "quoted"\nand multi-line\u2028分行\u2029分段', decision_id: 'message:om_decision123456',
+      } } },
+      { method: 'tools/call', params: { name: 'send_message', arguments: {
+        chat_id: 'oc_chat12345678', markdown: 'x', decision_id: 'message:om_missing12345',
+      } } },
+    ]);
     assert.equal(sent.code, 0, sent.stderr);
-    assert.match(sent.stdout, /^Delivered reply to message_id=om_decision123456/);
-    assert.equal(connectors.calls[0].input.content.text, 'it\'s "quoted"\nand multi-line');
-    assert.equal(logs.find((line) => line.message === 'agent_tool').via, 'cli');
-
-    const failed = await run(['send_message', '{"chat_id":"oc_chat12345678","markdown":"x","decision_id":"message:om_missing12345"}']);
-    assert.equal(failed.code, 1);
-    assert.match(failed.stderr, /not the event= of an accepted daemon-authenticated input/);
-
-    const listed = await run(['--list']);
-    assert.match(listed.stdout, /^send_message: /m);
+    assert.ok(sent.responses[1].result.tools.some(({ name }) => name === 'send_message'));
+    assert.match(sent.responses[2].result.content[0].text, /^Delivered reply to message_id=om_decision123456/);
+    assert.equal(connectors.calls[0].input.content.text, 'it\'s "quoted"\nand multi-line\u2028分行\u2029分段');
+    assert.equal(logs.find((line) => line.message === 'agent_tool').via, 'mcp');
+    assert.equal(sent.responses[3].result.isError, true);
+    assert.match(sent.responses[3].result.content[0].text, /not the event= of an accepted daemon-authenticated input/);
   });
 
   it('refuses to run outside a daemon runtime', () => {
-    const result = spawnSync(process.execPath, [cliPath, 'list_chats', '{}'], {
+    const result = spawnSync(process.execPath, [mcpPath], {
       env: { PATH: process.env.PATH }, encoding: 'utf8',
     });
     assert.equal(result.status, 1);
