@@ -724,7 +724,7 @@ async def test_agent_loop_interrupt_preserves_steers_during_batched_prepare(make
 
     monkeypatch.setattr(loop, "_prepare_steer_message", prepare)
 
-    async def process(_msg):
+    async def process(_msg, active_turn=None):
         assert loop.steer(
             InboundMessage(session_key=session_key, sender_id="user-1", content="first steer")
         )
@@ -737,7 +737,7 @@ async def test_agent_loop_interrupt_preserves_steers_during_batched_prepare(make
             release_first.set()
 
         asyncio.create_task(add_second_steer())
-        await loop._take_accepted_steers(session_key)
+        await loop._take_accepted_steers(active_turn)
 
     monkeypatch.setattr(loop, "_process_message", process)
     task = asyncio.create_task(
@@ -835,7 +835,7 @@ async def test_agent_loop_error_preserves_accepted_steer_input(make_loop, monkey
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def fail_message(_msg):
+    async def fail_message(_msg, active_turn=None):
         started.set()
         await release.wait()
         raise RuntimeError("processing failed")

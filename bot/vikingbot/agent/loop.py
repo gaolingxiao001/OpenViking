@@ -1301,7 +1301,12 @@ class AgentLoop:
         return True
 
     async def _process_message_as_active_turn(self, msg: InboundMessage) -> OutboundMessage | None:
-        task = asyncio.create_task(self._process_message(msg))
+        active: _ActiveTurn
+
+        async def run_active_message() -> OutboundMessage | None:
+            return await self._process_message(msg, active_turn=active)
+
+        task = asyncio.create_task(run_active_message())
         is_agent_turn = bool(
             msg.need_reply
             and msg.session_key.type != "system"
@@ -1421,14 +1426,9 @@ class AgentLoop:
 
     async def _take_accepted_steers(
         self,
-        session_key: SessionKey,
+        active: _ActiveTurn | None,
     ) -> list[_PreparedSteer]:
-        active = self._active_turn
-        if (
-            active is None
-            or active.session_key != session_key
-            or active.task is not asyncio.current_task()
-        ):
+        if active is None:
             return []
         prepared: list[_PreparedSteer] = []
         prepared_count = 0
@@ -1753,6 +1753,7 @@ class AgentLoop:
         status_note_provider: Any | None = None,
         should_stop: Callable[[], bool] | None = None,
         skill_runtime: Any | None = None,
+        active_turn: _ActiveTurn | None = None,
         agent_id: str = "main",
         max_iterations: int | None = None,
     ) -> tuple[str | None, str | None, list[dict], dict[str, int], int]:
@@ -1847,18 +1848,13 @@ class AgentLoop:
                 break
             iteration += 1
 
-            active = self._active_turn
-            if active is not None and (
-                active.task is not asyncio.current_task() or active.session_key != session_key
-            ):
-                active = None
-            if active is not None and iteration >= iteration_limit:
-                active.accepting_steer = False
-            accepted_steers = await self._take_accepted_steers(session_key)
+            if active_turn is not None and iteration >= iteration_limit:
+                active_turn.accepting_steer = False
+            accepted_steers = await self._take_accepted_steers(active_turn)
             for steer in accepted_steers:
                 messages.extend(steer.prompt_messages)
             if accepted_steers:
-                active.history_items.extend(accepted_steers)
+                active_turn.history_items.extend(accepted_steers)
             steer_memory_events.extend(accepted_steers)
 
             if context_compact_budget is not None:
@@ -2299,7 +2295,7 @@ class AgentLoop:
                         }
                     )
                     continue
-                final_steers = await self._take_accepted_steers(session_key)
+                final_steers = await self._take_accepted_steers(active_turn)
                 if final_steers:
                     messages = self.context.add_assistant_message(
                         messages,
@@ -2307,21 +2303,21 @@ class AgentLoop:
                         [],
                         reasoning_content=response.reasoning_content,
                     )
-                    active.history_items.append(
+                    active_turn.history_items.append(
                         _AssistantBoundary(
                             content=response.content or "",
                             reasoning_content=response.reasoning_content,
                         )
                     )
-                    active.history_items.extend(final_steers)
+                    active_turn.history_items.extend(final_steers)
                     for steer in final_steers:
                         messages.extend(steer.prompt_messages)
                     steer_memory_events.extend(final_steers)
                     continue
-                if active is not None:
+                if active_turn is not None:
                     # No await separates this close from the empty queue check,
                     # so a successful steer cannot slip past the final checkpoint.
-                    active.accepting_steer = False
+                    active_turn.accepting_steer = False
                 final_content = response.content
                 final_reasoning_content = response.reasoning_content
                 if routed:
@@ -2457,7 +2453,11 @@ class AgentLoop:
         extract_session_id=lambda msg: msg.session_key.safe_name(),
         extract_user_id=lambda msg: msg.sender_id,
     )
-    async def _process_message(self, msg: InboundMessage) -> OutboundMessage | None:
+    async def _process_message(
+        self,
+        msg: InboundMessage,
+        active_turn: _ActiveTurn | None = None,
+    ) -> OutboundMessage | None:
         """
         Process a single inbound message.
 
@@ -2779,14 +2779,12 @@ class AgentLoop:
                     channel_metadata=msg.metadata,
                     captured_turns=agent_turns,
                     skill_runtime=skill_runtime,
+                    active_turn=active_turn,
                 )
 
             if auto_memory_tool:
                 tools_used = [auto_memory_tool, *(tools_used or [])]
-            active = self._active_turn
-            if active is not None and active.task is not asyncio.current_task():
-                active = None
-            active_turn_history = list(active.history_items) if active is not None else []
+            active_turn_history = list(active_turn.history_items) if active_turn is not None else []
             for item in active_turn_history:
                 if isinstance(item, _PreparedSteer) and item.auto_memory_tool:
                     tools_used.append(item.auto_memory_tool)
@@ -2806,7 +2804,7 @@ class AgentLoop:
                 tools_used=tools_used,
             )
 
-            if active is not None:
+            if active_turn is not None:
                 # Detach before persistence so a later interrupt cannot cancel final session writes.
                 self._active_turn = None
 
