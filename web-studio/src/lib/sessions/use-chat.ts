@@ -387,6 +387,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const accToolCalls: StreamToolCall[] = []
       const accParts: MessagePart[] = []
       const completedStreamMessages: Message[] = []
+      const activeAssistantMessages = new Set<Message>()
       let pendingUserMessages: Message[] = []
       let flushedStreamMessageCount = 0
       let currentReasoningPart: ReasoningPart | null = null
@@ -540,6 +541,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           setStreamingInsertIndex(streamingInsertIndexValue)
           return
         }
+        for (const message of pendingAssistantMessages) {
+          activeAssistantMessages.add(message)
+        }
         setMessages((prev) => {
           const insertAt = Math.min(streamingInsertIndexValue, prev.length)
           const next = [
@@ -570,11 +574,18 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         appendPendingUserMessagesToTimeline()
         resetAccumulators()
         clearStreamingState()
+        if (activeAssistantMessages.size > 0) {
+          setMessages((prev) =>
+            prev.filter((message) => !activeAssistantMessages.has(message)),
+          )
+        }
       }
 
       const persistTimeline = (userOnly: boolean) => {
         if (!persistMessages) return Promise.resolve()
-        const timeline = [...completedStreamMessages]
+        const timeline = userOnly
+          ? completedStreamMessages.filter((message) => message.role === 'user')
+          : [...completedStreamMessages]
         return queuePersistence(async () => {
           for (const completedMessage of timeline) {
             if (completedMessage.role === 'user') {
@@ -803,7 +814,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         }
         finishCurrentReasoning()
         if (interrupted) {
-          const persistence = persistTimeline(false)
+          const persistence = persistTimeline(true)
           finishActiveRequest()
           setStatus('idle')
           await persistence
@@ -842,7 +853,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         dropStreamingSegment()
         if (controller.signal.aborted) {
           setStatus('idle')
-          await persistTimeline(false)
+          await persistTimeline(true)
         } else {
           const msg = err instanceof Error ? err.message : String(err)
           setError(msg)

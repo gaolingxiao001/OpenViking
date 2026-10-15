@@ -464,6 +464,94 @@ describe('useChat event timeline', () => {
     ).toEqual(['A', 'B', 'D'])
   })
 
+  it('removes committed assistant segments when an acknowledged interrupt closes the stream', async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
+    interruptChatSessionMock.mockResolvedValueOnce({ interrupted: true })
+    sendChatStreamMock.mockResolvedValue(
+      fetchSse('/stream', {
+        fetch: vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+              },
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+        ),
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: true,
+        sessionId: 'session-1',
+      }),
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('A')
+    })
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    await act(async () => {
+      streamController.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            event: 'content_delta',
+            data: 'partial',
+          })}\n\n`,
+        ),
+      )
+      await result.current.send('B')
+      await result.current.send('D')
+    })
+
+    await act(async () => {
+      streamController.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            event: 'iteration',
+            data: 'Iteration 2/10',
+          })}\n\n`,
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['A', 'partial', 'B', 'D'])
+
+    await act(async () => {
+      result.current.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      streamController.close()
+      await sendPromise
+    })
+
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['A', 'B', 'D'])
+    expect(addMessageMock.mock.calls.map((call) => call[1])).toEqual([
+      'user',
+      'user',
+      'user',
+    ])
+    expect(addMessageMock.mock.calls.map((call) => call[2])).toEqual([
+      'A',
+      'B',
+      'D',
+    ])
+  })
+
   it('does not hide local steer inputs when a stale history snapshot arrives after interrupt', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     interruptChatSessionMock.mockResolvedValueOnce({ interrupted: true })
