@@ -289,6 +289,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     if (lastSyncedInitialMessagesRef.current === nextInitialMessages) return
 
     lastSyncedInitialMessagesRef.current = nextInitialMessages
+    if (nextInitialMessages.length < messagesRef.current.length) return
     setMessages(nextInitialMessages)
   }, [initialMessages, sessionId, status])
 

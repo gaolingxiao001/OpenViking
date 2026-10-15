@@ -51,6 +51,15 @@ function streamMessages(events: Array<{ event: string; data: unknown }>) {
   })
 }
 
+function textMessage(id: string, role: 'user' | 'assistant', text: string) {
+  return {
+    id,
+    role,
+    parts: [{ type: 'text' as const, text }],
+    created_at: '2026-01-01T00:00:00.000Z',
+  }
+}
+
 describe('useChat event timeline', () => {
   beforeEach(() => {
     addMessageMock.mockReset()
@@ -448,6 +457,70 @@ describe('useChat event timeline', () => {
 
     expect(result.current.status).toBe('idle')
     expect(result.current.streamingUserMessages).toEqual([])
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['A', 'B', 'D'])
+  })
+
+  it('does not hide local steer inputs when a stale history snapshot arrives after interrupt', async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    interruptChatSessionMock.mockResolvedValueOnce({ interrupted: true })
+    sendChatStreamMock.mockResolvedValue(
+      fetchSse('/stream', {
+        fetch: vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+              },
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+        ),
+      }),
+    )
+
+    const { result, rerender } = renderHook(
+      ({ initialMessages }) =>
+        useChat({
+          identityScopeKey: 'identity',
+          initialMessages,
+          persistMessages: false,
+          sessionId: 'session-1',
+        }),
+      { initialProps: { initialMessages: [] } },
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('A')
+    })
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    await act(async () => {
+      await result.current.send('B')
+      await result.current.send('D')
+      result.current.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      streamController.close()
+      await sendPromise
+    })
+
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['A', 'B', 'D'])
+
+    rerender({
+      initialMessages: [
+        textMessage('history-a', 'user', 'A'),
+        textMessage('history-b', 'user', 'B'),
+      ],
+    })
+
     expect(
       result.current.messages.map(
         (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
