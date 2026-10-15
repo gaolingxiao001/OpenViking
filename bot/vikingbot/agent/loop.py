@@ -1330,7 +1330,7 @@ class AgentLoop:
                 await self._complete_interrupted_message(msg)
             raise
         finally:
-            if self._active_turn and self._active_turn.task is task:
+            if self._active_turn is active:
                 # Clear the active pointer before cleanup so later interrupt calls
                 # cannot cancel this turn while its local teardown is finishing.
                 self._active_turn = None
@@ -1485,11 +1485,13 @@ class AgentLoop:
         session = self.sessions.get_or_create(session_key, skip_heartbeat=skip_heartbeat)
         session.add_message("user", msg.content, sender_id=msg.sender_id)
         active = self._active_turn
-        if active and active.session_key == session_key:
+        accepted_steers: list[_AcceptedSteer] = []
+        if active is not None and active.session_key == session_key:
+            accepted_steers = active.accepted_steers
             consumed = (
                 item.msg for item in active.history_items if isinstance(item, _PreparedSteer)
             )
-            pending = (steer.msg for steer in active.accepted_steers)
+            pending = (steer.msg for steer in accepted_steers)
             for steer_msg in (*consumed, *pending):
                 session.add_message(
                     "user",
@@ -1497,16 +1499,13 @@ class AgentLoop:
                     sender_id=steer_msg.sender_id,
                 )
         await self.sessions.save(session)
-        if active and active.session_key == session_key:
-            for steer in active.accepted_steers:
-                if not steer.task.done():
-                    steer.task.cancel()
-            if active.accepted_steers:
-                await asyncio.gather(
-                    *(steer.task for steer in active.accepted_steers),
-                    return_exceptions=True,
-                )
-                active.accepted_steers.clear()
+        for steer in accepted_steers:
+            steer.task.cancel()
+        await asyncio.gather(
+            *(steer.task for steer in accepted_steers),
+            return_exceptions=True,
+        )
+        accepted_steers.clear()
         return OutboundMessage(
             session_key=msg.session_key,
             content="",
@@ -1849,18 +1848,16 @@ class AgentLoop:
             iteration += 1
 
             active = self._active_turn
-            if active is not None and active.task is not asyncio.current_task():
-                active = None
-            if (
-                active is not None
-                and active.session_key == session_key
-                and iteration >= iteration_limit
+            if active is not None and (
+                active.task is not asyncio.current_task() or active.session_key != session_key
             ):
+                active = None
+            if active is not None and iteration >= iteration_limit:
                 active.accepting_steer = False
             accepted_steers = await self._take_accepted_steers(session_key)
             for steer in accepted_steers:
                 messages.extend(steer.prompt_messages)
-            if active is not None and active.session_key == session_key:
+            if accepted_steers:
                 active.history_items.extend(accepted_steers)
             steer_memory_events.extend(accepted_steers)
 
@@ -2310,24 +2307,18 @@ class AgentLoop:
                         [],
                         reasoning_content=response.reasoning_content,
                     )
-                    if active is not None:
-                        active.history_items.append(
-                            _AssistantBoundary(
-                                content=response.content or "",
-                                reasoning_content=response.reasoning_content,
-                            )
+                    active.history_items.append(
+                        _AssistantBoundary(
+                            content=response.content or "",
+                            reasoning_content=response.reasoning_content,
                         )
-                        active.history_items.extend(final_steers)
+                    )
+                    active.history_items.extend(final_steers)
                     for steer in final_steers:
                         messages.extend(steer.prompt_messages)
                     steer_memory_events.extend(final_steers)
                     continue
-                active = self._active_turn
-                if (
-                    active is not None
-                    and active.task is asyncio.current_task()
-                    and active.session_key == session_key
-                ):
+                if active is not None:
                     # No await separates this close from the empty queue check,
                     # so a successful steer cannot slip past the final checkpoint.
                     active.accepting_steer = False
@@ -2795,11 +2786,7 @@ class AgentLoop:
             active = self._active_turn
             if active is not None and active.task is not asyncio.current_task():
                 active = None
-            active_turn_history = (
-                list(active.history_items)
-                if active is not None and active.session_key == session_key
-                else []
-            )
+            active_turn_history = list(active.history_items) if active is not None else []
             for item in active_turn_history:
                 if isinstance(item, _PreparedSteer) and item.auto_memory_tool:
                     tools_used.append(item.auto_memory_tool)
@@ -2819,7 +2806,7 @@ class AgentLoop:
                 tools_used=tools_used,
             )
 
-            if active and active.session_key == session_key:
+            if active is not None:
                 # Detach before persistence so a later interrupt cannot cancel final session writes.
                 self._active_turn = None
 
