@@ -25,6 +25,8 @@ import {
   safeStringify,
 } from "./utils.mjs"
 
+const STALE_SESSION_STATE_MS = 7 * 24 * 60 * 60 * 1000
+
 export function createMemorySessionManager({ config, pluginRoot }) {
   const sessions = new Map()
   const statePath = path.join(pluginRoot, "openviking-session-state.json")
@@ -77,10 +79,17 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         log("ERROR", "persistence", "Unsupported session map version", { version: data.version })
         return
       }
+      const staleBefore = Date.now() - STALE_SESSION_STATE_MS
+      let pruned = 0
       for (const [opencodeSessionId, persisted] of Object.entries(data.sessions ?? {})) {
+        if (isPrunable(persisted, staleBefore)) {
+          pruned += 1
+          continue
+        }
         sessions.set(opencodeSessionId, deserializeSessionState(persisted))
       }
-      log("INFO", "persistence", "Session state loaded", { count: sessions.size })
+      log("INFO", "persistence", "Session state loaded", { count: sessions.size, pruned })
+      if (pruned > 0) await enqueueSave()
     } catch (error) {
       log("ERROR", "persistence", "Failed to load session state", { error: error?.message })
       if (fs.existsSync(statePath)) {
@@ -131,6 +140,12 @@ export function createMemorySessionManager({ config, pluginRoot }) {
         },
       ])),
     }
+  }
+
+  // A stale session whose messages are all captured holds nothing left to send.
+  function isPrunable(persisted, staleBefore) {
+    if ((persisted.lastActivityAt ?? 0) >= staleBefore) return false
+    return (persisted.messages ?? []).every(([, message]) => message.captured)
   }
 
   function deserializeSessionState(persisted) {

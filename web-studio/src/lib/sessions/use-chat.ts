@@ -21,6 +21,7 @@ import {
 import { parseSseStream, streamEventDataToText } from './sse'
 import { setSessionTitle } from './use-session-titles'
 import { createBrowserId } from '../browser-crypto'
+import { ovClient } from '#/lib/ov-client'
 
 function createUserMessage(content: string): Message {
   return {
@@ -257,6 +258,17 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     }
   }, [])
 
+  const ownerRef = useRef(0)
+
+  // Cancel work when its session/identity owner changes or unmounts.
+  useEffect(() => {
+    ownerRef.current += 1
+    return () => {
+      ownerRef.current += 1
+      abortRef.current?.abort()
+    }
+  }, [identityScopeKey, sessionId])
+
   // Reset state when sessionId changes
   useEffect(() => {
     abort({ closeLocalStream: true, discardPartial: true })
@@ -272,7 +284,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     setStreamingParts([])
     setStreamingInsertIndex(undefined)
     setIteration(0)
-  }, [abort, sessionId])
+  }, [abort, identityScopeKey, sessionId])
 
   // Sync initialMessages into state when they load or when switching sessions.
   useEffect(() => {
@@ -380,6 +392,18 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       abortRef.current = controller
       activeSessionRef.current = sessionId
       let streamingInsertIndexValue = messagesRef.current.length + 1
+      const owner = ownerRef.current
+      const connectionSnapshot = JSON.stringify([
+        ovClient.getOptions(),
+        ovClient.getConnection(),
+      ])
+      const isCurrent = () =>
+        owner === ownerRef.current &&
+        connectionSnapshot ===
+          JSON.stringify([ovClient.getOptions(), ovClient.getConnection()])
+      const isSameConnection = () =>
+        connectionSnapshot ===
+        JSON.stringify([ovClient.getOptions(), ovClient.getConnection()])
 
       // Accumulators (mutable for performance during streaming)
       let accContent = ''
@@ -399,10 +423,24 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       let publishFrameId: number | null = null
       let interrupted = false
       let timelineTail: Promise<void> = Promise.resolve()
-      if (persistMessages) {
-        void queuePersistence(() =>
-          addMessage(sessionId, 'user', displayMessage),
-        )
+      let streamStarted = false
+      let initialUserPersistenceQueued = false
+      let persistedInitialUserMessage = false
+      const queueInitialUserPersistence = () => {
+        if (
+          !persistMessages ||
+          !streamStarted ||
+          initialUserPersistenceQueued ||
+          persistedInitialUserMessage
+        ) {
+          return
+        }
+        initialUserPersistenceQueued = true
+        void queuePersistence(async () => {
+          if (!isCurrent() || controller.signal.aborted) return
+          await addMessage(sessionId, 'user', displayMessage)
+          persistedInitialUserMessage = true
+        })
       }
 
       const publishStreamingPartsNow = () => {
@@ -587,6 +625,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           ? completedStreamMessages.filter((message) => message.role === 'user')
           : [...completedStreamMessages]
         return queuePersistence(async () => {
+          if (
+            !persistedInitialUserMessage &&
+            !initialUserPersistenceQueued &&
+            streamStarted
+          ) {
+            if (!isCurrent() || controller.signal.aborted) return
+            await addMessage(sessionId, 'user', displayMessage)
+            persistedInitialUserMessage = true
+          }
+          if (!isSameConnection()) return
           for (const completedMessage of timeline) {
             if (completedMessage.role === 'user') {
               await addMessage(
@@ -598,6 +646,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
                   .join('\n'),
               )
             } else if (!userOnly) {
+              if (!isCurrent() || controller.signal.aborted) return
               await addMessage(
                 sessionId,
                 'assistant',
@@ -631,6 +680,8 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
         stream: for await (const event of parseSseStream(response)) {
           if (controller.signal.aborted) break
+          streamStarted = true
+          queueInitialUserPersistence()
 
           switch (event.event) {
             case 'iteration': {
@@ -807,6 +858,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           await persistTimeline(true)
           return
         }
+        if (!isCurrent()) return
+        if (controller.signal.aborted)
+          throw new DOMException('Aborted', 'AbortError')
         appendInputRef.current = null
         if (interruptedControllersRef.current.has(controller)) {
           dropStreamingSegment()
@@ -829,7 +883,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         await persistence
 
         // Generate session title on first exchange
-        if (sessionId && isFirstExchange) {
+        if (isCurrent() && sessionId && isFirstExchange) {
           // Immediate: use first user message as temp title
           setSessionTitle(
             identityScopeKey,
@@ -848,6 +902,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           await persistTimeline(true)
           return
         }
+        if (!isCurrent()) return
         appendInputRef.current = null
         await timelineTail
         dropStreamingSegment()

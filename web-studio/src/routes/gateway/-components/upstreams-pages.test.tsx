@@ -51,6 +51,10 @@ vi.mock('react-i18next', () => ({
   }),
 }))
 vi.mock('sonner', () => ({ toast }))
+vi.mock('#/hooks/use-studio-service', () => ({
+  useStudioService: () => ({ ready: true, provider: 'opensource' }),
+}))
+
 vi.mock('#/hooks/use-app-connection', () => ({
   useAppConnection: () => ({
     connection: {
@@ -418,6 +422,23 @@ describe('UpstreamEditor', () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe('/gateway/upstreams'),
     )
+  })
+
+  it('can send requests to the exact base URL without a protocol path', async () => {
+    renderAt('/gateway/upstreams/u1')
+    await screen.findByLabelText('upstreams.form.name.label')
+    const toggle = screen.getByRole('switch', {
+      name: 'upstreams.form.appendEndpointPath.label',
+    })
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText('https://api.openai.com/v1')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'actions.save' }))
+    await waitFor(() => expect(api.saveUpstream).toHaveBeenCalledTimes(1))
+    expect(lastSavedBody().append_endpoint_path).toBe(false)
   })
 
   it('asks for the API key and header values again after the address changes', async () => {

@@ -455,6 +455,42 @@ test("captured message parts are not retained in the session state file", async 
   })
 })
 
+test("startup prunes stale sessions with nothing pending and keeps the rest", async () => {
+  await withTempDir("ov-oc-state-prune-", async (dir) => {
+    const statePath = join(dir, "openviking-session-state.json")
+    const stale = Date.now() - 30 * 24 * 60 * 60 * 1000
+    const recent = Date.now() - 60 * 1000
+    const session = (lastActivityAt, messages) => ({
+      ovSessionId: "oc-x",
+      createdAt: lastActivityAt,
+      lastActivityAt,
+      messages,
+    })
+    const captured = ["msg-done", { role: "user", captured: true, parts: [] }]
+    const pending = ["msg-pending", { role: "user", captured: false, parts: [["part-1", { type: "text", text: "unsent" }]] }]
+    fs.writeFileSync(statePath, JSON.stringify({
+      version: 2,
+      sessions: {
+        "stale-done": session(stale, [captured]),
+        "stale-empty": session(stale, []),
+        "stale-pending": session(stale, [captured, pending]),
+        "recent-done": session(recent, [captured]),
+      },
+    }))
+
+    const manager = createMemorySessionManager({
+      config: { ...baseConfig("http://127.0.0.1:1"), autoCapture: false },
+      pluginRoot: dir,
+    })
+    await manager.init({ deferNetwork: true })
+
+    const data = JSON.parse(await fs.promises.readFile(statePath, "utf8"))
+    await manager.waitForBackground()
+    assert.deepEqual(Object.keys(data.sessions).sort(), ["recent-done", "stale-pending"])
+    assert.equal(new Map(data.sessions["stale-pending"].messages).get("msg-pending").parts.length, 1)
+  })
+})
+
 test("OpenCode capture filters sanitized text before sending", async () => {
   await withCaptureServer(async ({ endpoint, requests }) => {
     await withTempDir("ov-oc-filters-", async (dir) => {
