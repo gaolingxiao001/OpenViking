@@ -146,7 +146,7 @@ export function AgentPanel({
     chat.streamingContent,
     chat.streamingReasoning,
     chat.streamingToolCalls,
-    chat.streamingUserMessages.length,
+    chat.streamingInsertIndex,
   ])
 
   const send = useCallback(
@@ -248,7 +248,7 @@ export function AgentPanel({
                   ? {
                       iteration: chat.iteration,
                       parts: chat.streamingParts,
-                      userMessages: chat.streamingUserMessages,
+                      insertIndex: chat.streamingInsertIndex,
                     }
                   : undefined
               }

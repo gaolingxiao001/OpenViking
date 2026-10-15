@@ -456,7 +456,7 @@ describe('useChat event timeline', () => {
     })
 
     expect(result.current.status).toBe('idle')
-    expect(result.current.streamingUserMessages).toEqual([])
+    expect(result.current.streamingInsertIndex).toBeUndefined()
     expect(
       result.current.messages.map(
         (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
@@ -825,7 +825,11 @@ describe('useChat event timeline', () => {
     await act(async () => {
       await result.current.send('follow up')
     })
-    expect(result.current.streamingUserMessages).toHaveLength(1)
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['first request', 'follow up'])
 
     await act(async () => {
       result.current.reset()
@@ -835,10 +839,10 @@ describe('useChat event timeline', () => {
 
     expect(result.current.status).toBe('idle')
     expect(result.current.messages).toEqual([])
-    expect(result.current.streamingUserMessages).toEqual([])
+    expect(result.current.streamingInsertIndex).toBeUndefined()
   })
 
-  it('keeps reasoning and tool timeline when aborted before content arrives', async () => {
+  it('drops the unfinished assistant segment when aborted before content arrives', async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>
     const encoder = new TextEncoder()
     sendChatStreamMock.mockImplementation((_request, signal: AbortSignal) =>
@@ -885,17 +889,9 @@ describe('useChat event timeline', () => {
 
     expect(result.current.status).toBe('idle')
     expect(result.current.streamingParts).toEqual([])
-    expect(result.current.messages[1]?.parts).toMatchObject([
-      {
-        is_running: false,
-        reasoning: 'checking',
-        type: 'reasoning',
-      },
-      {
-        tool_name: 'search',
-        tool_status: 'running',
-        type: 'tool',
-      },
+    expect(result.current.messages).toHaveLength(1)
+    expect(result.current.messages[0]?.parts).toEqual([
+      { type: 'text', text: 'hello' },
     ])
   })
 })

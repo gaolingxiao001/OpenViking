@@ -173,7 +173,7 @@ export interface UseChatReturn {
   streamingToolCalls: StreamToolCall[]
   streamingReasoning: string
   streamingParts: MessagePart[]
-  streamingUserMessages: Message[]
+  streamingInsertIndex: number | undefined
   iteration: number
   send: (message: string, options?: SendOptions) => Promise<void>
   abort: (options?: AbortOptions) => void
@@ -198,9 +198,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   >([])
   const [streamingReasoning, setStreamingReasoning] = useState('')
   const [streamingParts, setStreamingParts] = useState<MessagePart[]>([])
-  const [streamingUserMessages, setStreamingUserMessages] = useState<Message[]>(
-    [],
-  )
+  const [streamingInsertIndex, setStreamingInsertIndex] = useState<
+    number | undefined
+  >(undefined)
   const [iteration, setIteration] = useState(0)
 
   const abortRef = useRef<AbortController | null>(null)
@@ -213,6 +213,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   const discardPartialControllersRef = useRef(new WeakSet<AbortController>())
   const interruptedControllersRef = useRef(new WeakSet<AbortController>())
   const messagesRef = useRef<Message[]>(messages)
+  const hasLocalTimelineRef = useRef(false)
   const lastSyncedInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   const pendingInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   messagesRef.current = messages
@@ -259,6 +260,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // Reset state when sessionId changes
   useEffect(() => {
     abort({ closeLocalStream: true, discardPartial: true })
+    hasLocalTimelineRef.current = false
     lastSyncedInitialMessagesRef.current = undefined
     pendingInitialMessagesRef.current = undefined
     setMessages([])
@@ -268,7 +270,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     setStreamingToolCalls([])
     setStreamingReasoning('')
     setStreamingParts([])
-    setStreamingUserMessages([])
+    setStreamingInsertIndex(undefined)
     setIteration(0)
   }, [abort, sessionId])
 
@@ -287,14 +289,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     // permanently shadow later initialMessages updates.
     pendingInitialMessagesRef.current = undefined
     if (lastSyncedInitialMessagesRef.current === nextInitialMessages) return
+    if (hasLocalTimelineRef.current) return
 
     lastSyncedInitialMessagesRef.current = nextInitialMessages
-    if (nextInitialMessages.length < messagesRef.current.length) return
     setMessages(nextInitialMessages)
   }, [initialMessages, sessionId, status])
 
   const reset = useCallback(() => {
     abort({ closeLocalStream: true, discardPartial: true })
+    hasLocalTimelineRef.current = false
     setMessages(initialMessages ?? [])
     setStatus('idle')
     setError(undefined)
@@ -302,7 +305,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     setStreamingToolCalls([])
     setStreamingReasoning('')
     setStreamingParts([])
-    setStreamingUserMessages([])
+    setStreamingInsertIndex(undefined)
     setIteration(0)
   }, [abort, initialMessages])
 
@@ -362,6 +365,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         return
       }
 
+      hasLocalTimelineRef.current = true
       setMessages((prev) => [...prev, userMsg])
       setStatus('streaming')
       setError(undefined)
@@ -369,11 +373,13 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       setStreamingToolCalls([])
       setStreamingReasoning('')
       setStreamingParts([])
+      setStreamingInsertIndex(messagesRef.current.length + 1)
       setIteration(0)
 
       const controller = new AbortController()
       abortRef.current = controller
       activeSessionRef.current = sessionId
+      let streamingInsertIndexValue = messagesRef.current.length + 1
 
       // Accumulators (mutable for performance during streaming)
       let accContent = ''
@@ -381,7 +387,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const accToolCalls: StreamToolCall[] = []
       const accParts: MessagePart[] = []
       const completedStreamMessages: Message[] = []
-      let acceptedUserMessages: Message[] = []
+      let pendingUserMessages: Message[] = []
       let flushedStreamMessageCount = 0
       let currentReasoningPart: ReasoningPart | null = null
       let currentReasoningHasDelta = false
@@ -417,7 +423,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         publishFrameId = window.requestAnimationFrame(publishStreamingPartsNow)
       }
 
-      const clearStreamingState = () => {
+      const clearStreamingSegmentView = () => {
         if (publishFrameId !== null && typeof window !== 'undefined') {
           window.cancelAnimationFrame(publishFrameId)
         }
@@ -427,6 +433,11 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         setStreamingToolCalls([])
         setStreamingReasoning('')
         setStreamingParts([])
+      }
+
+      const clearStreamingState = () => {
+        clearStreamingSegmentView()
+        setStreamingInsertIndex(undefined)
       }
 
       const finishActiveRequest = () => {
@@ -521,16 +532,43 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         )
         if (pendingMessages.length === 0) return
         flushedStreamMessageCount = completedStreamMessages.length
-        setMessages((prev) => [...prev, ...pendingMessages])
+        const pendingAssistantMessages = pendingMessages.filter(
+          (message) => message.role === 'assistant',
+        )
+        if (pendingAssistantMessages.length === 0) {
+          streamingInsertIndexValue += pendingMessages.length
+          setStreamingInsertIndex(streamingInsertIndexValue)
+          return
+        }
+        setMessages((prev) => {
+          const insertAt = Math.min(streamingInsertIndexValue, prev.length)
+          const next = [
+            ...prev.slice(0, insertAt),
+            ...pendingAssistantMessages,
+            ...prev.slice(insertAt),
+          ]
+          streamingInsertIndexValue = insertAt + pendingMessages.length
+          setStreamingInsertIndex(streamingInsertIndexValue)
+          return next
+        })
       }
 
-      const finalizeAcceptedInputs = (keepAssistant: boolean) => {
-        if (acceptedUserMessages.length === 0) return
-        if (keepAssistant) finalizeAssistantSegment()
-        completedStreamMessages.push(...acceptedUserMessages)
-        acceptedUserMessages = []
-        setStreamingUserMessages([])
+      const appendPendingUserMessagesToTimeline = () => {
+        if (pendingUserMessages.length === 0) return
+        completedStreamMessages.push(...pendingUserMessages)
+        pendingUserMessages = []
+      }
+
+      const commitAssistantSegment = () => {
+        finalizeAssistantSegment()
+        appendPendingUserMessagesToTimeline()
         flushCompletedStreamMessages()
+        clearStreamingSegmentView()
+      }
+
+      const dropStreamingSegment = () => {
+        appendPendingUserMessagesToTimeline()
+        resetAccumulators()
         clearStreamingState()
       }
 
@@ -564,9 +602,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         const decision = timelineTail.then(async () => {
           const wasAccepted = await accepted
           if (!wasAccepted) return false
-          acceptedUserMessages.push(inputMessage)
+          pendingUserMessages.push(inputMessage)
           if (abortRef.current === controller) {
-            setStreamingUserMessages([...acceptedUserMessages])
+            setMessages((prev) => [...prev, inputMessage])
           }
           return true
         })
@@ -586,7 +624,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           switch (event.event) {
             case 'iteration': {
               await timelineTail
-              finalizeAcceptedInputs(true)
+              if (pendingUserMessages.length > 0) {
+                commitAssistantSegment()
+              }
               const data = streamEventDataToText(event.data)
               const match = data.match(/(\d+)/)
               if (match) {
@@ -728,17 +768,14 @@ export function useChat(options: UseChatOptions): UseChatReturn {
             case 'interrupt': {
               appendInputRef.current = null
               await timelineTail
-              finalizeAcceptedInputs(false)
+              dropStreamingSegment()
               interrupted = true
-              finishCurrentReasoning()
-              clearStreamingState()
               break stream
             }
 
             case 'response': {
               appendInputRef.current = null
               await timelineTail
-              finalizeAcceptedInputs(true)
               // Final complete response — overrides accumulated deltas
               accContent = streamEventDataToText(event.data)
               setStreamingContent(accContent)
@@ -755,39 +792,28 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           sessionIdRef.current !== sessionId ||
           isSupersededRequest(abortRef.current, controller)
         ) {
-          completedStreamMessages.push(...acceptedUserMessages)
-          acceptedUserMessages = []
+          appendPendingUserMessagesToTimeline()
           await persistTimeline(true)
           return
         }
         appendInputRef.current = null
         if (interruptedControllersRef.current.has(controller)) {
-          finalizeAcceptedInputs(false)
+          dropStreamingSegment()
           interrupted = true
-          clearStreamingState()
         }
         finishCurrentReasoning()
         if (interrupted) {
-          const persistence = persistTimeline(true)
+          const persistence = persistTimeline(false)
           finishActiveRequest()
           setStatus('idle')
           await persistence
           return
         }
-        const assistantMsg = buildAssistantMessage(
-          accContent,
-          dedupeToolCalls(accToolCalls),
-          accParts,
-        )
-        completedStreamMessages.push(assistantMsg)
+        commitAssistantSegment()
         const persistence = persistTimeline(false)
-        clearStreamingState()
         finishActiveRequest()
         setStatus('idle')
-        setMessages((prev) => [
-          ...prev,
-          ...completedStreamMessages.slice(flushedStreamMessageCount),
-        ])
+        clearStreamingState()
 
         await persistence
 
@@ -807,32 +833,16 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           isSupersededRequest(abortRef.current, controller)
         ) {
           await timelineTail
-          completedStreamMessages.push(...acceptedUserMessages)
-          acceptedUserMessages = []
+          appendPendingUserMessagesToTimeline()
           await persistTimeline(true)
           return
         }
         appendInputRef.current = null
         await timelineTail
-        finalizeAcceptedInputs(false)
+        dropStreamingSegment()
         if (controller.signal.aborted) {
-          // Aborted intentionally — still finalize any partial content
-          const discardPartial =
-            discardPartialControllersRef.current.has(controller)
-          if (!discardPartial && (accContent || accParts.length > 0)) {
-            finishCurrentReasoning()
-            const partialMsg = buildAssistantMessage(
-              accContent,
-              dedupeToolCalls(accToolCalls),
-              accParts,
-            )
-            clearStreamingState()
-            setMessages((prev) => [...prev, partialMsg])
-          } else {
-            clearStreamingState()
-          }
           setStatus('idle')
-          await persistTimeline(true)
+          await persistTimeline(false)
         } else {
           const msg = err instanceof Error ? err.message : String(err)
           setError(msg)
@@ -860,7 +870,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     streamingToolCalls,
     streamingReasoning,
     streamingParts,
-    streamingUserMessages,
+    streamingInsertIndex,
     iteration,
     send,
     abort,

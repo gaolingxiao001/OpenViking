@@ -29,7 +29,7 @@ vi.mock('#/lib/sessions/use-chat', () => ({
     messages: [],
     status: 'idle',
     streamingParts: [],
-    streamingUserMessages: [],
+    streamingInsertIndex: undefined,
     send: m.send,
   }),
 }))
