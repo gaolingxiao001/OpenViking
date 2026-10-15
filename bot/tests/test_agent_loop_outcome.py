@@ -803,6 +803,9 @@ async def test_agent_loop_interrupt_preserves_active_steer_input(
             )
             is True
         )
+        active = loop._active_turn
+        assert active is not None
+        steer_task = active.accepted_steers[0].task
 
         assert await loop.interrupt(session_key) is True
 
@@ -817,6 +820,8 @@ async def test_agent_loop_interrupt_preserves_active_steer_input(
         ]
         assert "recalled_exp_uris" not in session.metadata
         assert bus.inbound_size == 0
+        assert active.accepted_steers == []
+        assert steer_task.done()
     finally:
         tools.release.set()
         run_task.cancel()
@@ -846,6 +851,9 @@ async def test_agent_loop_error_preserves_accepted_steer_input(make_loop, monkey
         assert loop.steer(
             InboundMessage(session_key=session_key, sender_id="user-1", content="steer update")
         )
+        active = loop._active_turn
+        assert active is not None
+        steer_task = active.accepted_steers[0].task
 
         release.set()
         with pytest.raises(RuntimeError, match="processing failed"):
@@ -856,6 +864,8 @@ async def test_agent_loop_error_preserves_accepted_steer_input(make_loop, monkey
             "first request",
             "steer update",
         ]
+        assert active.accepted_steers == []
+        assert steer_task.done()
     finally:
         release.set()
         if not task.done():

@@ -1316,7 +1316,10 @@ class AgentLoop:
         )
         self._active_turn = active
         try:
-            return await task
+            response = await task
+            if active.accepted_steers:
+                raise RuntimeError("Active turn completed with unconsumed steer input")
+            return response
         except asyncio.CancelledError:
             if active.interrupted:
                 logger.info(f"Interrupted message from {msg.session_key}")
@@ -1331,14 +1334,6 @@ class AgentLoop:
                 # Clear the active pointer before cleanup so later interrupt calls
                 # cannot cancel this turn while its local teardown is finishing.
                 self._active_turn = None
-            for steer in active.accepted_steers:
-                if not steer.task.done():
-                    steer.task.cancel()
-            if active.accepted_steers:
-                await asyncio.gather(
-                    *(steer.task for steer in active.accepted_steers),
-                    return_exceptions=True,
-                )
 
     async def _prepare_steer_message(self, msg: InboundMessage) -> _PreparedSteer:
         try:
@@ -1502,6 +1497,16 @@ class AgentLoop:
                     sender_id=steer_msg.sender_id,
                 )
         await self.sessions.save(session)
+        if active and active.session_key == session_key:
+            for steer in active.accepted_steers:
+                if not steer.task.done():
+                    steer.task.cancel()
+            if active.accepted_steers:
+                await asyncio.gather(
+                    *(steer.task for steer in active.accepted_steers),
+                    return_exceptions=True,
+                )
+                active.accepted_steers.clear()
         return OutboundMessage(
             session_key=msg.session_key,
             content="",
