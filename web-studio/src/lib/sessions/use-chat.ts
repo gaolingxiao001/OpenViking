@@ -211,6 +211,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   >(null)
   const persistenceTailRef = useRef<Promise<void>>(Promise.resolve())
   const discardPartialControllersRef = useRef(new WeakSet<AbortController>())
+  const interruptedControllersRef = useRef(new WeakSet<AbortController>())
   const messagesRef = useRef<Message[]>(messages)
   const lastSyncedInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   const pendingInitialMessagesRef = useRef<Message[] | undefined>(undefined)
@@ -237,6 +238,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
     void interruptChatSession(activeSessionId)
       .then((result) => {
+        if (result.interrupted && abortRef.current === controller) {
+          interruptedControllersRef.current.add(controller)
+        }
         if (!result.interrupted && abortRef.current === controller) {
           closeLocalStream()
         }
@@ -756,6 +760,11 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           return
         }
         appendInputRef.current = null
+        if (interruptedControllersRef.current.has(controller)) {
+          finalizeAcceptedInputs(false)
+          interrupted = true
+          clearStreamingState()
+        }
         finishCurrentReasoning()
         if (interrupted) {
           const persistence = persistTimeline(true)
@@ -831,6 +840,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         }
       } finally {
         discardPartialControllersRef.current.delete(controller)
+        interruptedControllersRef.current.delete(controller)
         if (abortRef.current === controller) {
           abortRef.current = null
           activeSessionRef.current = null

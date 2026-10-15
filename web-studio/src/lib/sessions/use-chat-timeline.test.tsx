@@ -393,6 +393,68 @@ describe('useChat event timeline', () => {
     expect(streamReleased).toBe(true)
   })
 
+  it('keeps accepted steer inputs visible when an acknowledged interrupt closes the stream', async () => {
+    let streamController!: ReadableStreamDefaultController<Uint8Array>
+    const encoder = new TextEncoder()
+    interruptChatSessionMock.mockResolvedValueOnce({ interrupted: true })
+    sendChatStreamMock.mockResolvedValue(
+      fetchSse('/stream', {
+        fetch: vi.fn().mockResolvedValue(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller
+              },
+            }),
+            { headers: { 'Content-Type': 'text/event-stream' } },
+          ),
+        ),
+      }),
+    )
+
+    const { result } = renderHook(() =>
+      useChat({
+        identityScopeKey: 'identity',
+        persistMessages: false,
+        sessionId: 'session-1',
+      }),
+    )
+
+    let sendPromise!: Promise<void>
+    await act(async () => {
+      sendPromise = result.current.send('A')
+    })
+    await waitFor(() => expect(result.current.status).toBe('streaming'))
+
+    await act(async () => {
+      streamController.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            event: 'content_delta',
+            data: 'partial',
+          })}\n\n`,
+        ),
+      )
+      await result.current.send('B')
+      await result.current.send('D')
+    })
+
+    await act(async () => {
+      result.current.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      streamController.close()
+      await sendPromise
+    })
+
+    expect(result.current.status).toBe('idle')
+    expect(result.current.streamingUserMessages).toEqual([])
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['A', 'B', 'D'])
+  })
+
   it('keeps the steer boundary when the next iteration arrives before its ACK', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     let acceptSteer!: (result: { accepted: boolean }) => void
