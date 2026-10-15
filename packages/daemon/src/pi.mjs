@@ -7,14 +7,14 @@ import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { safeError as safe } from './logger.mjs';
 import { activityPayload } from './activity.mjs';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
-import { agentToolEnv } from './actions/api.mjs';
-import { assemblePiConversationPolicy } from './conversation-policy.mjs';
+import { agentToolEnv, agentToolServer } from './actions/api.mjs';
+import { assembleConversationPolicy } from './conversation-policy.mjs';
+import { assertPiVersion, piCommand, PI_MCP_EXTENSION, PI_MCP_STATUS } from './pi-runtime.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
-const START_TIMEOUT_MS = 5_000;
-const START_STABILITY_MS = 250;
+const START_TIMEOUT_MS = 15_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 const RPC_TIMEOUT_MS = 8_000;
@@ -24,7 +24,7 @@ export const PI_EFFORTS = PI_RUNTIME.efforts;
 
 const PREFLIGHT_FLAGS = [
   '--mode', '--append-system-prompt', '--thinking',
-  '--session-id', '--model',
+  '--session-id', '--session-dir', '--model', '--extension', '--approve',
 ];
 
 function delay(ms) {
@@ -68,8 +68,8 @@ export function formatPiModelId(model) {
   return String(model.id ?? '');
 }
 
-// Persistent `pi --mode rpc` adapter. Pi has no MCP client configuration
-// surface, so its bash tool reaches the daemon's agent tools through the CLI.
+// Persistent RPC adapter; Pi's built-in MCP client calls the same server as
+// Codex, TraeX, and Claude. The session extension only configures that client.
 export class PiAgent {
   constructor(config, store, logger, options = {}) {
     this.config = config;
@@ -81,7 +81,6 @@ export class PiAgent {
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
-    this.startStabilityMs = options.startStabilityMs ?? START_STABILITY_MS;
     this.reconnectBaseMs = options.reconnectBaseMs ?? RECONNECT_BASE_MS;
     this.reconnectCapMs = options.reconnectCapMs ?? RECONNECT_CAP_MS;
     this.rpcTimeoutMs = options.rpcTimeoutMs ?? RPC_TIMEOUT_MS;
@@ -98,7 +97,7 @@ export class PiAgent {
     this.syncedThroughSeq = options.syncedThroughSeq ?? 0;
     this.deliveredThroughSeq = this.syncedThroughSeq;
 
-    this.systemPrompt = assemblePiConversationPolicy(config);
+    this.systemPrompt = assembleConversationPolicy(config);
     this.developerInstructionsText = this.systemPrompt;
     this.model = options.model
       ?? store.getSetting?.('pi_model')
@@ -144,7 +143,7 @@ export class PiAgent {
     return createHash('sha256')
       .update(this.developerInstructionsText).update('\0')
       .update(this.config.workspace).update('\0')
-      .update('pi-rpc-v1').digest('hex');
+      .update('pi-rpc-mcp-v2').digest('hex');
   }
 
   get state() {
@@ -200,9 +199,7 @@ export class PiAgent {
 
   async _preflight() {
     const version = await this._probe(['--version']);
-    if (!/\d+\.\d+/.test(version.stdout)) {
-      throw new Error('pi preflight returned an unrecognised version');
-    }
+    assertPiVersion(version.stdout);
     const help = await this._probe(['--help']);
     for (const flag of PREFLIGHT_FLAGS) {
       if (!help.stdout.includes(flag)) {
@@ -214,11 +211,16 @@ export class PiAgent {
     }
   }
 
+  _spawnPi(args, options) {
+    const command = piCommand(this.config.piBin, args);
+    return this._spawn(command.command, command.args, options);
+  }
+
   _probe(args) {
     return new Promise((resolve, reject) => {
       let child;
       try {
-        child = this._spawn(this.config.piBin, args, {
+        child = this._spawnPi(args, {
           cwd: this.config.workspace,
           env: sanitizePiEnv(process.env, this.larkProfile(), agentToolEnv(this.config, this.authorityToken)),
           shell: false,
@@ -293,14 +295,19 @@ export class PiAgent {
         '--session-id', this.sessionId,
         '--session-dir', this._sessionDir(),
         '--approve',
+        '--extension', PI_MCP_EXTENSION,
       ];
       if (this.model) args.push('--model', this.model);
 
       const env = sanitizePiEnv(process.env, this.larkProfile(), agentToolEnv(this.config, this.authorityToken));
+      env.PERSONAL_AGENT_MCP_CONFIG = JSON.stringify({
+        ...agentToolServer(this.config, this.authorityToken),
+        timeout: Math.max(10, Math.ceil(this.config.sendTimeoutMs / 1_000) + 5),
+      });
 
       let child;
       try {
-        child = this._spawn(this.config.piBin, args, {
+        child = this._spawnPi(args, {
           cwd: this.config.workspace,
           env,
           shell: false,
@@ -317,50 +324,64 @@ export class PiAgent {
       this.stderrBuffer = '';
       let ready = false;
       let settled = false;
-      let stabilityTimer = null;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        this.child = null;
-        terminateProcessTree(child, 'SIGKILL');
-        reject(new Error('pi rpc process start timed out'));
-      }, this.startTimeoutMs);
-      timer.unref?.();
-
       const failStart = (error) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        if (stabilityTimer) clearTimeout(stabilityTimer);
-        this.child = null;
-        this.connected = false;
+        // A later spawn may already own the agent; leave its state alone.
+        if (this.child === child) {
+          this.child = null;
+          this.connected = false;
+          this.onMcpStartup = null;
+        }
         terminateProcessTree(child, 'SIGKILL');
         reject(error);
       };
+      const timer = setTimeout(() => failStart(new Error('Pi startup timed out; check that built-in MCP is enabled, personal_agent is not overridden in mcp.json, and no extension blocks session start')), this.startTimeoutMs);
+      timer.unref?.();
 
       child.stdin?.on('error', (error) => {
         if (this.child === child) this.logger.warn('pi_stdin_error', { error: safe(error) });
       });
       child.stdout?.setEncoding('utf8');
       child.stderr?.setEncoding('utf8');
+      let mcpReady = false;
+      this.onMcpStartup = (ok, error = null) => {
+        if (settled || child.exitCode !== null) return;
+        if (!ok) {
+          failStart(error ?? new Error('Pi could not load the Core MCP tools with direct exposure; check built-in MCP and conflicting personal_agent settings'));
+          return;
+        }
+        if (mcpReady) return;
+        mcpReady = true;
+        // Pi reads stdin only after every session_start handler returns, so the
+        // MCP notice alone does not mean it can take prompts or dialog answers.
+        // Its first command response does; until then a dialog fails the start.
+        const id = this._nextRpcId();
+        this.pendingRpc.set(id, {
+          command: 'set_steering_mode',
+          resolve: () => {
+            if (settled) return;
+            this.connected = true;
+            ready = true;
+            settled = true;
+            clearTimeout(timer);
+            this.onMcpStartup = null;
+            this.sessionInitialized = true;
+            resolve();
+          },
+          reject: failStart,
+        });
+        try { this._writeCommand({ id, type: 'set_steering_mode', mode: 'all' }); } catch (error) {
+          this.pendingRpc.delete(id);
+          failStart(error);
+        }
+      };
       child.stdout?.on('data', (chunk) => {
         if (this.child === child) this._onStdout(chunk, child);
       });
       child.stderr?.on('data', (chunk) => {
         if (this.child === child) this._onStderr(chunk);
-      });
-      child.once('spawn', () => {
-        if (settled) return;
-        stabilityTimer = setTimeout(() => {
-          if (settled || child.exitCode !== null) return;
-          ready = true;
-          settled = true;
-          clearTimeout(timer);
-          this.connected = true;
-          this.sessionInitialized = true;
-          this._writeCommand({ type: 'set_steering_mode', mode: 'all' });
-          resolve();
-        }, this.startStabilityMs);
       });
       child.once('error', (error) => {
         if (!ready) failStart(error);
@@ -568,6 +589,28 @@ export class PiAgent {
     let message;
     try { message = JSON.parse(line.replace(/\r$/, '')); } catch { return; }
     if (!message || typeof message !== 'object') return;
+
+    if (message.type === 'extension_ui_request') {
+      if (message.method === 'notify') {
+        if (message.message === `${PI_MCP_STATUS}:ready`) this.onMcpStartup?.(true);
+        if (message.message === `${PI_MCP_STATUS}:failed`) this.onMcpStartup?.(false);
+      } else if (['confirm', 'select', 'input', 'editor'].includes(message.method) && message.id != null) {
+        this.logger.warn('pi_interaction_cancelled', { method: message.method, reason: 'unattended' });
+        this._recordActivity('agent.interaction_declined', {
+          summary: `extension ${message.method}`, metadata: { runtime: 'pi', method: message.method },
+        });
+        if (this.onMcpStartup) {
+          // Pi 1.2.0 installs its stdin reader only after session_start handlers
+          // finish. A startup dialog cannot consume our cancellation response.
+          this.onMcpStartup(false, new Error('Pi extension requested an interactive dialog during startup; disable its startup prompt for this unattended daemon'));
+          return;
+        }
+        // Dialog responses are fire-and-forget, not commands expecting an RPC
+        // acknowledgement. Preserve the extension's id.
+        this._writeCommand({ type: 'extension_ui_response', id: message.id, cancelled: true });
+      }
+      return;
+    }
 
     if (message.type === 'response') {
       const pending = message.id != null ? this.pendingRpc.get(message.id) : null;

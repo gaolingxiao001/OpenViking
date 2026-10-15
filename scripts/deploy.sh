@@ -61,8 +61,8 @@ FINAL="$BASE/releases/$VERSION-$(date +%Y%m%d-%H%M%S)-$COMMIT"
 mv "$REL" "$FINAL"
 REL="$FINAL"
 
-echo "running tests in $REL ..."
-(cd "$REL" && npm test >/dev/null && npm run check >/dev/null) || { echo "tests failed — aborting deploy"; exit 1; }
+echo "installing locked dependencies and testing $REL ..."
+(cd "$REL" && npm run setup && npm test >/dev/null && npm run check >/dev/null) || { echo "release preparation failed — aborting deploy"; exit 1; }
 
 # Keep the previously published release addressable. Runtime processes are not
 # changed here, so publishing can be retried without interrupting either bot.

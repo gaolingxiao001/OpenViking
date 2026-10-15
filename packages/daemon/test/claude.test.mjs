@@ -55,7 +55,7 @@ class FakeChild extends EventEmitter {
 const helpFlags = [
   '--input-format', '--output-format', '--resume', '--session-id', '--mcp-config',
   '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
-  '--append-system-prompt', '--no-chrome', '--model', '--print',
+  '--append-system-prompt', '--no-chrome', '--model', '--print', '--permission-prompts',
 ].join('\n');
 
 function makeStore({ globalOverride = {} } = {}) {
@@ -149,7 +149,7 @@ async function waitFor(predicate, timeoutMs = 500) {
   throw new Error('timed out waiting for condition');
 }
 
-function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {}) {
+function harness({ loggedIn = true, store = makeStore(), agentOptions = {}, help = helpFlags } = {}) {
   const calls = [];
   const persistent = [];
   const spawn = (_bin, args, options) => {
@@ -157,10 +157,10 @@ function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {
     calls.push({ args, child, options });
     queueMicrotask(() => {
       if (args.includes('--version')) {
-        child.stdout.emit('data', '2.1.220 (Claude Code)\n');
+        child.stdout.emit('data', '2.1.300 (Claude Code)\n');
         child.finish();
       } else if (args.includes('--help')) {
-        child.stdout.emit('data', helpFlags);
+        child.stdout.emit('data', help);
         child.finish();
       } else if (args[0] === 'auth') {
         child.stdout.emit('data', JSON.stringify({ loggedIn }));
@@ -184,12 +184,19 @@ function harness({ loggedIn = true, store = makeStore(), agentOptions = {} } = {
 }
 
 describe('ClaudeAgent persistent stream-json runtime', () => {
+  it('refuses a CLI without unattended permission handling before starting a session', async () => {
+    const { agent, persistent } = harness({ help: helpFlags.replace('--permission-prompts', '') });
+    await assert.rejects(agent.start(), /missing required flag --permission-prompts/);
+    assert.equal(persistent.length, 0);
+  });
+
   it('preflights, starts persistent stream-json, and prefixes the first real turn', async () => {
     const { agent, calls, persistent, store } = harness();
     await agent.start();
 
     assert.equal(calls.length, 4);
     const args = calls.at(-1).args;
+    assert.equal(args[args.indexOf('--permission-prompts') + 1], 'none');
     for (const value of ['--print', '--input-format', 'stream-json', '--output-format', '--mcp-config']) {
       assert.ok(args.includes(value));
     }

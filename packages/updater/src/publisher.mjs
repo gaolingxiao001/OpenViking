@@ -136,7 +136,19 @@ async function atomicSymlink(target, linkPath) {
   }
 }
 
-async function defaultValidateRelease(release, { npmBin, execFileImpl, buildEnv }) {
+export async function defaultValidateRelease(release, { npmBin, execFileImpl, buildEnv }) {
+  // Install into this unpublished release. A failed install must leave the
+  // current release (including its Pi executable) intact and rollbackable.
+  await run(execFileImpl, npmBin, ['ci', '--no-audit', '--no-fund'], {
+    cwd: release,
+    env: buildEnv,
+    timeout: 300_000,
+  });
+  await run(execFileImpl, npmBin, ['run', 'check:pi'], {
+    cwd: release,
+    env: buildEnv,
+    timeout: 30_000,
+  });
   await run(execFileImpl, npmBin, ['test'], {
     cwd: release,
     env: buildEnv,

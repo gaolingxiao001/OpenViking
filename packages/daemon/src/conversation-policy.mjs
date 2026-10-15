@@ -170,26 +170,13 @@ function mixedConnectorPolicy(config = {}) {
   ].join('\n');
 }
 
-// Pi has no MCP client configuration surface; its bash tool reaches the same
-// tools through the CLI.
-function agentToolCliPolicy(config = {}) {
-  const cli = `${JSON.stringify(process.execPath)} ${JSON.stringify(config.actionCliPath)}`;
-  return [
-    '## Agent tools from bash',
-    '',
-    'This runtime has no MCP client. Every tool this policy names (send_message, notify_owner, reply_message, react_to_message, retract_message, list_chats, list_chat_messages, search_messages, list_thread_messages, get_message_media, read_openviking_session_context, read_meeting_inbox) runs through your bash tool, with the tool input as one JSON object:',
-    '',
-    `${cli} <tool> <<'JSON'`,
-    '{"message_id": "<msg id>", "decision_id": "<event id>", "markdown": "<reply text>"}',
-    'JSON',
-    '',
-    `\`${cli} --list\` prints every tool and its input fields. The command prints the result, or an error on stderr with a nonzero exit status. Only a successful delivery command reaches a user; never send messages through lark-cli.`,
-  ].join('\n');
-}
-
 const CONTEXT_WORKDIR_PROMPT = `<context-workdir>
 treat ov and it's viking:// as your only working directory to save and retrive long-term, cross-session context. Use OpenViking MCPs to navigate cloud filesystem. Use OV viking:// as your only context workspace. When things need to be saved for long-term retrival, MUST save in viking:// with MCP tools. Anything not saved will be lost after session restart. Check workspace content before write with OV MCP. Use short sentence to notify things retrived from and added to OV.
 </context-workdir>`;
+
+// The adapters cancel or deny every request that needs a person's answer:
+// one global runtime cannot wait on a person without stalling every chat.
+const UNATTENDED_INTERACTION_POLICY = 'This is an unattended daemon session. Native runtime dialogs, permission prompts, and MCP requests for user input are cancelled or denied; never depend on them. If you need clarification, use the messaging tools to send a question (or choices when the connector supports them), end the turn, and wait for a later authenticated user message or card answer. A cancelled dialog is not user approval.';
 
 // Native runtimes get the release markdown plus harness/OV/meeting plugins.
 export function assembleConversationPolicy(config = {}, options = {}) {
@@ -203,6 +190,7 @@ export function assembleConversationPolicy(config = {}, options = {}) {
       openVikingIdentityPromptSection(config, options),
       CONTEXT_WORKDIR_PROMPT,
       personaSection(config),
+      UNATTENDED_INTERACTION_POLICY,
     ]);
   }
   return joinSections([
@@ -215,11 +203,8 @@ export function assembleConversationPolicy(config = {}, options = {}) {
     harnessPromptSection(config),
     mixedConnectorPolicy(config),
     emailConnectorPolicy(config),
+    UNATTENDED_INTERACTION_POLICY,
   ]);
-}
-
-export function assemblePiConversationPolicy(config = {}, options = {}) {
-  return joinSections([assembleConversationPolicy(config, options), agentToolCliPolicy(config)]);
 }
 
 // Volc's remote Environment Worker cannot reach the daemon's agent tools, so it

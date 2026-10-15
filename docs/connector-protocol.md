@@ -201,8 +201,7 @@ Every outbound action, whichever runtime asked, goes through one Core service
 and one SQLite `outbox` table:
 
 ```
-agent runtime ── MCP adapter (Codex, Claude) ─┐
-              └─ CLI (Pi) ───────────────────┴─> <dataDir>/actions.sock
+agent runtime ── MCP adapter (Codex, TraeX, Claude, Pi) ──> <dataDir>/actions.sock
                                                    │ Core ActionService
                                                    │  runtime authority
                                                    │  route to a Connector
@@ -217,6 +216,13 @@ The adapters only relay `tools/list` / `tools/call` (`GET /v1/tools`,
 `POST /v1/call`) with the runtime's authority token; neither validates nor
 executes. The socket is mode `0600`. Agent runtimes never open a Connector
 state database or call a provider API to send messages.
+
+The MCP stdio transport splits only on LF, preserving Unicode line/paragraph
+separators inside JSON strings. Independent requests run concurrently and responses
+are correlated by id, so a slow media read cannot queue unrelated deliveries.
+Cancellation prevents undispatched work and aborts the adapter's HTTP wait; it
+cannot retract a delivery already submitted by Core. Outbox remains authoritative
+for those outcomes, and a timeout must not be interpreted as proof of non-delivery.
 
 Every delivery names the input it acts on as `decision_id`: that input's
 `event=`, copied as the tag shows it; a `msg=` is never a reference, since one

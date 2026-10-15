@@ -5,9 +5,10 @@
   "description": "Personal Agent connectors, runtime execution, SQLite state, and private activity API.",
   "type": "module",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.19.0"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
     "qrcode-terminal": "0.12.0"
   },
   "scripts": {

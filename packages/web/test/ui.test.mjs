@@ -66,7 +66,7 @@ test('渲染层只用安全 DOM API', () => {
   assert.doesNotMatch(js, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
 });
 
-test('Core 已结算投递进入输出区，MCP/CLI 调用和未确认投递不会重复计作成功', () => {
+test('Core 已结算投递进入输出区，MCP 调用和未确认投递不会重复计作成功', () => {
   const { buildModel, deliveryOf } = runInNewContext(
     js.slice(0, js.indexOf('// ---------- 渲染：上下文流')) + '\n({ buildModel, deliveryOf });',
     { document: { getElementById: () => ({}) } },
@@ -83,7 +83,7 @@ test('Core 已结算投递进入输出区，MCP/CLI 调用和未确认投递不�
         metadata: { connector, action: 'message.reply' } },
       { kind: 'agent.tool', status: 'COMPLETED', metadata: { toolId: 'reply', output: 'ok' } },
       { kind: 'agent.tool', status: 'COMPLETED', metadata: { toolName: 'bash',
-        input: 'node /daemon/actions/cli.mjs reply_message', output: 'ok' } },
+        input: 'mcp__personal_agent__reply_message', output: 'ok' } },
       { kind: 'delivery.uncertain', outboxId: 2, status: 'UNCERTAIN', summary: 'timeout' },
       { kind: 'agent.turn_completed', status: 'completed' },
     ].map((row, i) => ({ id: i + 1, createdAtMs: i * 100, ...row }));

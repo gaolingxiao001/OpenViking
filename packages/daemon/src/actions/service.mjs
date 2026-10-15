@@ -50,8 +50,8 @@ function messageLines(messages, { withChat = false } = {}) {
   }).join('\n');
 }
 
-// The single outbound path. Agent tool calls (MCP adapter or CLI, both through
-// the local socket) and daemon notices all end in deliver(): reserve in the
+// The single outbound path. Agent tool calls (through the MCP adapter and the
+// local socket) and daemon notices all end in deliver(): reserve in the
 // outbox, invoke the Connector, settle. Authority, freshness, routing and
 // content checks happen here once, whichever runtime asked.
 export class ActionService {

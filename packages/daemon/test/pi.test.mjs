@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
+import { managedPiBin, PI_VERSION, PI_MCP_EXTENSION, PI_MCP_STATUS } from '../src/pi-runtime.mjs';
+import { assembleConversationPolicy } from '../src/conversation-policy.mjs';
 import {
   PI_EFFORTS,
   PiAgent,
@@ -26,7 +28,7 @@ const baseConfig = {
   connectors: ['lark'],
   larkCliBin: '/fake/lark-cli',
   actionSocketPath: '/tmp/lark-daemon-pi-data/actions.sock',
-  actionCliPath: '/release/packages/daemon/src/actions/cli.mjs',
+  actionMcpPath: '/release/packages/daemon/src/actions/mcp.mjs',
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
   cognitionMaxChars: 120_000,
@@ -59,7 +61,8 @@ class FakeChild extends EventEmitter {
 }
 
 const helpFlags = [
-  '--mode', '--append-system-prompt', '--thinking', '--session-id', '--model', 'rpc',
+  '--mode', '--append-system-prompt', '--thinking', '--session-id', '--session-dir',
+  '--model', '--extension', '--approve', 'rpc',
 ].join('\n');
 
 function parsedWrites(child) {
@@ -157,31 +160,41 @@ async function waitFor(predicate, timeoutMs = 500) {
   throw new Error('timed out waiting for condition');
 }
 
-function harness({ store = makeStore(), agentOptions = {} } = {}) {
+// Pi answers its first command only after every session_start handler returns.
+const answerSteering = (child, { id }) => child.feed({ type: 'response', id, command: 'set_steering_mode', success: true });
+
+function harness({ config = baseConfig, store = makeStore(), agentOptions = {}, version = PI_VERSION, mcpStatus = 'ready',
+  onSteering = answerSteering } = {}) {
   const calls = [];
   const persistent = [];
-  const spawn = (_bin, args, options) => {
+  const spawn = (bin, args, options) => {
     const child = new FakeChild();
-    calls.push({ args, child, options });
+    calls.push({ bin, args, child, options });
     queueMicrotask(() => {
       if (args.includes('--version')) {
-        child.stdout.emit('data', '0.81.1\n');
+        child.stdout.emit('data', `${version}\n`);
         child.finish();
       } else if (args.includes('--help')) {
         child.stdout.emit('data', helpFlags);
         child.finish();
       } else {
         persistent.push(child);
+        const write = child.stdin.write;
+        child.stdin.write = (value) => {
+          const payload = JSON.parse(value);
+          if (payload.type === 'set_steering_mode') queueMicrotask(() => onSteering(child, payload));
+          return write(value);
+        };
         child.emit('spawn');
+        if (mcpStatus) child.feed({ type: 'extension_ui_request', method: 'notify', message: `${PI_MCP_STATUS}:${mcpStatus}` });
       }
     });
     return child;
   };
   const failures = [];
-  const agent = new PiAgent(baseConfig, store, quietLogger, {
+  const agent = new PiAgent(config, store, quietLogger, {
     spawn,
     startTimeoutMs: 100,
-    startStabilityMs: 1,
     onTurnFailed: (failure) => failures.push(failure),
     ...agentOptions,
   });
@@ -208,9 +221,15 @@ describe('PiAgent persistent rpc runtime', () => {
     assert.equal(env.PI_LARK_TOOLS_CONFIG, undefined);
     const promptPath = args[args.indexOf('--append-system-prompt') + 1];
     const runtimePrompt = fs.readFileSync(promptPath, 'utf8');
-    assert.match(runtimePrompt, /## Agent tools from bash/);
-    assert.match(runtimePrompt, /actions\/cli\.mjs" <tool> <<'JSON'/);
+    assert.equal(runtimePrompt, assembleConversationPolicy(baseConfig));
+    assert.doesNotMatch(runtimePrompt, /Agent tools from bash|actions\/cli\.mjs/);
     assert.doesNotMatch(runtimePrompt, /lark-cli im \+messages-reply/);
+    assert.equal(args[args.indexOf('--extension') + 1], PI_MCP_EXTENSION);
+    assert.deepEqual(JSON.parse(env.PERSONAL_AGENT_MCP_CONFIG), {
+      command: process.execPath,
+      args: [baseConfig.actionMcpPath, '--socket', baseConfig.actionSocketPath, '--authority', agent.authorityToken],
+      timeout: 10,
+    });
 
     agent.deliver('[chat=oc_now12345678 msg=om_now12345678] current request', 7);
     const prompt = parsedWrites(persistent[0]).find((message) => message.type === 'prompt');
@@ -222,6 +241,66 @@ describe('PiAgent persistent rpc runtime', () => {
     assert.match(prompt.message, /current request$/);
     assert.equal(store.global().runtime, 'pi');
     await agent.stop();
+  });
+
+  it('runs the managed Pi with the daemon Node, and an explicit PI_BIN as given', async () => {
+    const managed = harness({ config: { ...baseConfig, piBin: managedPiBin() } });
+    await managed.agent.start();
+    assert.equal(managed.calls.length, 3);
+    for (const { bin, args } of managed.calls) {
+      assert.equal(bin, process.execPath);
+      assert.equal(args[0], managedPiBin());
+    }
+    assert.deepEqual(managed.calls.at(-1).args.slice(1, 3), ['--mode', 'rpc']);
+    await managed.agent.stop();
+
+    const explicit = harness();
+    await explicit.agent.start();
+    for (const { bin, args } of explicit.calls) {
+      assert.equal(bin, 'pi');
+      assert.notEqual(args[0], managedPiBin());
+    }
+    await explicit.agent.stop();
+  });
+
+  it('rejects unsupported Pi versions before starting a session', async () => {
+    const { agent, persistent } = harness({ version: '0.87.1' });
+    await assert.rejects(agent.start(), /Pi .* is required.*npm ci/);
+    assert.equal(persistent.length, 0);
+    assert.equal(agent.connected, false);
+  });
+
+  it('does not report ready when the Pi process starts without MCP tools', async () => {
+    const { agent, persistent, store } = harness({ mcpStatus: null, agentOptions: { startTimeoutMs: 25 } });
+    await assert.rejects(agent.start(), /Pi startup timed out/);
+    assert.equal(agent.connected, false);
+    assert.equal(store.global().sessionReady, false);
+    assert.notEqual(persistent[0].exitCode, null);
+  });
+
+  it('fails the start when an extension opens a dialog before Pi reads commands', async () => {
+    const { agent, persistent, store } = harness({
+      onSteering: (child) => child.feed({ type: 'extension_ui_request', id: 'startup-dialog', method: 'confirm', title: 'Trust?' }),
+    });
+    await assert.rejects(agent.start(), /interactive dialog during startup/);
+    assert.equal(agent.connected, false);
+    assert.equal(store.global().sessionReady, false);
+    assert.notEqual(persistent[0].exitCode, null);
+    assert.ok(!parsedWrites(persistent[0]).some(({ type }) => type === 'extension_ui_response'),
+      'Pi cannot read a dialog answer before session_start returns');
+  });
+
+  it('is not ready until Pi answers its first command', async () => {
+    const { agent, store } = harness({ onSteering: () => {}, agentOptions: { startTimeoutMs: 25 } });
+    await assert.rejects(agent.start(), /Pi startup timed out/);
+    assert.equal(agent.connected, false);
+    assert.equal(store.global().sessionReady, false);
+  });
+
+  it('rejects failed MCP initialization without publishing the session', async () => {
+    const { agent, store } = harness({ mcpStatus: 'failed' });
+    await assert.rejects(agent.start(), /could not load the Core MCP tools/);
+    assert.equal(store.global().sessionReady, false);
   });
 
   it('writes steer for a second deliver during an active turn, not a second unadorned prompt', async () => {

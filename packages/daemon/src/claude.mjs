@@ -175,10 +175,11 @@ export class ClaudeAgent {
     for (const flag of [
       '--input-format', '--output-format', '--resume', '--session-id', '--mcp-config',
       '--dangerously-skip-permissions', '--disallowed-tools', '--effort',
-      '--append-system-prompt', '--no-chrome', '--model', '--print',
+      '--append-system-prompt', '--no-chrome', '--model', '--print', '--permission-prompts',
     ]) {
       if (!help.stdout.includes(flag)) {
-        throw new Error(`claude preflight is missing required flag ${flag}`);
+        const hint = flag === '--permission-prompts' ? '; upgrade Claude Code to 2.1.259 or newer for unattended operation' : '';
+        throw new Error(`claude preflight is missing required flag ${flag}${hint}`);
       }
     }
     const auth = await this._probe(['auth', 'status', '--json']);
@@ -266,6 +267,9 @@ export class ClaudeAgent {
       const args = [
         '--print',
         '--dangerously-skip-permissions',
+        // Supported since Claude Code 2.1.259. Unanswered user-input and MCP
+        // elicitation requests are denied/cancelled by the runtime itself.
+        '--permission-prompts', 'none',
         '--verbose',
         '--output-format', 'stream-json',
         '--input-format', 'stream-json',
@@ -509,6 +513,34 @@ export class ClaudeAgent {
     let message;
     try { message = JSON.parse(line); } catch { return; }
     if (!message || typeof message !== 'object') return;
+
+    if (message.type === 'control_request' && message.request_id != null) {
+      const subtype = message.request?.subtype;
+      const reason = 'This unattended daemon cannot answer interactive requests. Ask the user through the messaging tools instead.';
+      // No permission host is configured, but answer unexpected control
+      // requests explicitly instead of silently leaving the CLI waiting.
+      const response = subtype === 'can_use_tool'
+        ? { subtype: 'success', request_id: message.request_id, response: { behavior: 'deny', message: reason } }
+        : { subtype: 'error', request_id: message.request_id, error: reason };
+      this.logger.warn('claude_control_request_declined', { subtype: safe(subtype ?? 'unknown'), reason: 'unattended' });
+      this._recordActivity('agent.interaction_declined', {
+        summary: safe(subtype ?? 'unknown'), metadata: { runtime: 'claude', method: safe(subtype ?? 'unknown') },
+      });
+      try { this.child?.stdin.write(`${JSON.stringify({ type: 'control_response', response })}\n`); } catch (error) {
+        this.logger.warn('claude_control_response_failed', { error: safe(error) });
+      }
+      return;
+    }
+
+    // --permission-prompts none: the CLI denied a prompt itself and told the
+    // model nobody can approve it.
+    if (message.type === 'system' && message.subtype === 'permission_denied') {
+      this.logger.warn('claude_interaction_denied', { reason: 'unattended' });
+      this._recordActivity('agent.interaction_declined', {
+        summary: 'permission_denied', metadata: { runtime: 'claude', method: 'permission_denied' },
+      });
+      return;
+    }
 
     if (message.type === 'system' && message.subtype === 'init') {
       const sessionId = message.session_id ?? message.sessionId;
