@@ -18,6 +18,7 @@ import { approvalNote } from './actions/approval.mjs';
 import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
+import { loadOpenVikingIdentity } from './openviking.mjs';
 import {
   MeetingPlugin,
 } from './meeting/index.mjs';
@@ -96,14 +97,27 @@ export class PersonalAgentDaemon {
     }
   }
 
+  // Opt-in (LARK_DAEMON_OV_IDENTITY). Every runtime assembles its policy from
+  // this.config, so the read happens once, before the first runtime exists. A
+  // failed read only leaves the identity section out.
+  async loadOpenVikingIdentity(client) {
+    if (!this.config.openVikingIdentityEnabled) return;
+    try {
+      this.config.openVikingIdentity = await loadOpenVikingIdentity(this.config, { client });
+      this.logger.info('ov_identity_loaded', { found: Boolean(this.config.openVikingIdentity.text) });
+    } catch (error) {
+      this.logger.warn('ov_identity_unavailable', { error: safeError(error) });
+    }
+  }
+
   async start() {
     fs.mkdirSync(this.config.dataDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(this.config.workspace, { recursive: true, mode: 0o700 });
     this.lock.acquire();
     try {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
-      this.ovContext = new OVSessionContext(this.store,
-        this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath), this.logger,
+      const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
+      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
         { canCommit: () => !this.connectors?.subscribed });
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
@@ -178,6 +192,7 @@ export class PersonalAgentDaemon {
         logger: this.logger.child({ component: 'action-api' }),
       });
 
+      await this.loadOpenVikingIdentity(ovClient);
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           this.meeting?.onTurnFailed(info);

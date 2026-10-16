@@ -1,8 +1,8 @@
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
-// OpenViking stays outside the daemon process except for one start-time
-// identity read. Agents still reach the rest through skill and MCP tools.
+// OpenViking stays outside the daemon process except for an opt-in start-time
+// identity read over OV HTTP. Agents still reach the rest through skill and
+// MCP tools.
 
 export function isOpenVikingEnvKey(name) {
   return typeof name === 'string' && name.startsWith('OPENVIKING_');
@@ -46,35 +46,21 @@ export function openVikingIdentityUris(user) {
   ];
 }
 
-export function readOpenVikingResource(uri, {
-  ovBin = 'ov',
-  env = process.env,
-  timeoutMs = 5_000,
-} = {}) {
-  if (!uri) return '';
-  let result;
-  try {
-    result = spawnSync(ovBin, ['read', uri], {
-      encoding: 'utf8',
-      env,
-      timeout: timeoutMs,
-    });
-  } catch {
-    return '';
-  }
-  if (result.status !== 0) return '';
-  return String(result.stdout || '').trim();
-}
-
-export function loadOpenVikingIdentity(config = {}, options = {}) {
-  const env = options.env || process.env;
+// identity.md first. A missing file falls through to the next URI; any other
+// failure is the caller's to report.
+export async function loadOpenVikingIdentity(config = {}, { client, env = process.env } = {}) {
   const user = openVikingUserId(config, env);
   const uris = openVikingIdentityUris(user);
-  if (!uris.length) return { user: '', uri: '', text: '' };
-  const read = options.readResource || readOpenVikingResource;
   for (const uri of uris) {
-    const text = String(read(uri, { ...options, env }) || '').trim();
+    let content;
+    try {
+      content = await client.read(uri, 0, -1);
+    } catch (error) {
+      if (error.httpStatus === 404) continue;
+      throw error;
+    }
+    const text = typeof content === 'string' ? content.trim() : '';
     if (text) return { user, uri, text };
   }
-  return { user, uri: uris[0], text: '' };
+  return { user, uri: uris[0] ?? '', text: '' };
 }

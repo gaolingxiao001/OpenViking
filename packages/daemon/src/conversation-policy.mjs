@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadOpenVikingIdentity } from './openviking.mjs';
 
 const agentDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'agent');
 
@@ -70,9 +69,11 @@ export function openVikingPromptSection(config = {}) {
   return renderPromptFile(promptPath(config, 'openVikingPromptPath', 'openviking.md'), config).trim();
 }
 
-export function openVikingIdentityPromptSection(config = {}, options = {}) {
-  const loaded = loadOpenVikingIdentity(config, options);
-  if (!loaded.text) return '';
+// The daemon loads the identity before any runtime starts, and only when
+// LARK_DAEMON_OV_IDENTITY is on; assembling the policy does no I/O.
+export function openVikingIdentityPromptSection(config = {}) {
+  const loaded = config.openVikingIdentity;
+  if (!loaded?.text) return '';
   return [
     '## OpenViking identity',
     `Loaded from ${loaded.uri}. This is cloud identity context and is not automatically approved for external disclosure.`,
@@ -179,7 +180,7 @@ treat ov and it's viking:// as your only working directory to save and retrive l
 const UNATTENDED_INTERACTION_POLICY = 'This is an unattended daemon session. Native runtime dialogs, permission prompts, and MCP requests for user input are cancelled or denied; never depend on them. If you need clarification, use the messaging tools to send a question (or choices when the connector supports them), end the turn, and wait for a later authenticated user message or card answer. A cancelled dialog is not user approval.';
 
 // Native runtimes get the release markdown plus harness/OV/meeting plugins.
-export function assembleConversationPolicy(config = {}, options = {}) {
+export function assembleConversationPolicy(config = {}) {
   const connectors = connectorsOf(config);
   if (connectors.every((connector) => connector === 'weixin' || connector === 'email')) {
     return joinSections([
@@ -187,7 +188,7 @@ export function assembleConversationPolicy(config = {}, options = {}) {
       connectorEventPromptSection(),
       emailConnectorPolicy(config),
       openVikingPromptSection(config),
-      openVikingIdentityPromptSection(config, options),
+      openVikingIdentityPromptSection(config),
       CONTEXT_WORKDIR_PROMPT,
       personaSection(config),
       UNATTENDED_INTERACTION_POLICY,
@@ -197,7 +198,7 @@ export function assembleConversationPolicy(config = {}, options = {}) {
     renderBasePrompt(config),
     connectorEventPromptSection(),
     openVikingPromptSection(config),
-    openVikingIdentityPromptSection(config, options),
+    openVikingIdentityPromptSection(config),
     CONTEXT_WORKDIR_PROMPT,
     meetingAudioPromptSection(config),
     harnessPromptSection(config),

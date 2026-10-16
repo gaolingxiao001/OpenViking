@@ -163,6 +163,7 @@ export function getConfig() {
     workspace,
     systemPromptPath: path.join(promptDir, 'system-prompt.md'),
     openVikingConfigPath: (process.env.OPENVIKING_CLI_CONFIG_FILE || '').trim(),
+    openVikingIdentityEnabled: boolEnv('LARK_DAEMON_OV_IDENTITY', false),
     harnessPromptPath: path.join(promptDir, 'harness.md'),
     openVikingPromptPath: path.join(promptDir, 'openviking.md'),
     meetingAudioPromptPath: path.join(promptDir, 'meeting-audio.md'),

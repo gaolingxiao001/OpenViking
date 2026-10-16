@@ -176,6 +176,18 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
       await env.stop();
     }
   });
+
+  it('leaves the OpenViking identity out unless it is turned on', async () => {
+    const env = await startMockEnv();
+    try {
+      const instructions = env.codexSpawnArgs()[0].find((argument) => argument.startsWith('developer_instructions='));
+      assert.ok(instructions, 'codex is spawned with developer_instructions');
+      assert.doesNotMatch(instructions, /OpenViking identity/);
+      assert.deepEqual(env.ovReads(), []);
+    } finally {
+      await env.stop();
+    }
+  });
 });
 
 describe('ingress barrier', () => {
