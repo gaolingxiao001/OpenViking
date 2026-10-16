@@ -216,7 +216,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   const interruptedControllersRef = useRef(new WeakSet<AbortController>())
   const messagesRef = useRef<Message[]>(messages)
   const historyLoadedRef = useRef(Boolean(initialMessages))
-  const localBeforeHistoryRef = useRef<Message[]>([])
   const lastSyncedInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   const pendingInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   messagesRef.current = messages
@@ -285,7 +284,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   useEffect(() => {
     abort({ closeLocalStream: true, discardPartial: true })
     historyLoadedRef.current = false
-    localBeforeHistoryRef.current = []
     lastSyncedInitialMessagesRef.current = undefined
     pendingInitialMessagesRef.current = undefined
     setMessages([])
@@ -317,8 +315,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
     lastSyncedInitialMessagesRef.current = nextInitialMessages
     if (!historyLoadedRef.current) {
-      setMessages([...nextInitialMessages, ...localBeforeHistoryRef.current])
-      localBeforeHistoryRef.current = []
+      setMessages((current) => [...nextInitialMessages, ...current])
       historyLoadedRef.current = true
     }
   }, [initialMessages, sessionId, status])
@@ -326,7 +323,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   const reset = useCallback(() => {
     abort({ closeLocalStream: true, discardPartial: true })
     historyLoadedRef.current = Boolean(initialMessages)
-    localBeforeHistoryRef.current = []
     setMessages(initialMessages ?? [])
     setStatus('idle')
     setError(undefined)
@@ -394,9 +390,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         return
       }
 
-      if (!historyLoadedRef.current) {
-        localBeforeHistoryRef.current.push(userMsg)
-      }
       setMessages((prev) => [...prev, userMsg])
       setStatus('streaming')
       setError(undefined)
@@ -685,9 +678,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           const wasAccepted = await accepted
           if (!wasAccepted) return false
           pendingUserMessages.push(inputMessage)
-          if (!historyLoadedRef.current) {
-            localBeforeHistoryRef.current.push(inputMessage)
-          }
           if (abortRef.current === controller) {
             setMessages((prev) => [...prev, inputMessage])
           }

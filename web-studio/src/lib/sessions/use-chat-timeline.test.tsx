@@ -652,7 +652,7 @@ describe('useChat event timeline', () => {
       result.current.messages.map(
         (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
       ),
-    ).toEqual(['old question', 'old answer', 'new question'])
+    ).toEqual(['old question', 'old answer', 'new question', 'new answer'])
   })
 
   it('keeps the steer boundary when the next iteration arrives before its ACK', async () => {
