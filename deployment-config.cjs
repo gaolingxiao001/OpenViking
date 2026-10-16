@@ -50,6 +50,8 @@ const DAEMON_ENV_FIELDS = Object.freeze([
 // processes, but are deliberately excluded from the deployment manifest.
 const DAEMON_SECRET_ENV_FIELDS = Object.freeze([
   'ARK_API_KEY',
+  // Read key of the private test release bucket; drop with downloadHeaders.
+  'VIKA_TOS_ACCESS_KEY',
 ]);
 const DAEMON_PROCESS_ENV_FIELDS = Object.freeze([
   ...DAEMON_ENV_FIELDS,

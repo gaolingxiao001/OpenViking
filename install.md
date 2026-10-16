@@ -13,7 +13,8 @@ curl -fsSL <下载地址>/install.sh | sh
 安装脚本识别系统（Linux、macOS，x64 / arm64；Windows 用 WSL2），下载这台机器对应的安装包，核对 SHA-256，解到 `~/.vika/releases/<版本>`，把 `~/.vika/bin` 加进 shell 的 PATH，然后进入 `vika setup`。机器上只需要 sh、curl、tar 和 sha256sum（或 shasum）：安装包自带固定版本的 Node、pm2、lark-cli 和 Pi，不用、也不改机器上已有的 Node、npm、pm2 或 git。新版本先试跑自带的 Node 才切换，跑不起来（系统库太旧、CPU 不匹配）就保留原有安装。不支持 musl（Alpine 等）。
 
 > 内测用的存储桶还不是公开读，下载要带上它的访问密钥：
-> `curl -fsSL -H "x-tos-access: $KEY" <下载地址>/install.sh | VIKA_TOS_ACCESS_KEY=$KEY sh`。换成公开桶后去掉。
+> `curl -fsSL -H "x-tos-access: $KEY" <下载地址>/install.sh | VIKA_TOS_ACCESS_KEY=$KEY sh`。
+> 之后 `vika upgrade` 也要用到它：写一行 `VIKA_TOS_ACCESS_KEY=...` 到 `~/.vika/secrets.env`（权限 600），再 `vika restart updater`。换成公开桶后这些都去掉。
 
 已经在跑 lark-daemon 的部署，先按 [迁移说明](./docs/migrating-from-lark-daemon.md) 手工迁移一次。
 

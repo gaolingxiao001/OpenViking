@@ -8,6 +8,7 @@ import test from 'node:test';
 const require = createRequire(import.meta.url);
 const {
   applyDeploymentAgentEnv,
+  deploymentDaemonEnvOverrides,
   applyDeploymentDaemonEnv,
   loadDeploymentManifest,
   resolveDeploymentManifestPath,
@@ -141,7 +142,7 @@ test('falls back to a secrets file for daemon-wide secrets missing from the envi
   withManifest(validManifest(), (manifestPath) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-secrets-'));
     const secretsPath = path.join(directory, 'secrets.env');
-    fs.writeFileSync(secretsPath, '# comment\nARK_API_KEY=from-file-secret\n');
+    fs.writeFileSync(secretsPath, '# comment\nARK_API_KEY=from-file-secret\nVIKA_TOS_ACCESS_KEY=bucket-read-key\nOTHER=ignored\n');
     try {
       const env = {
         HOME: '/Users/test',
@@ -151,6 +152,9 @@ test('falls back to a secrets file for daemon-wide secrets missing from the envi
       const deployment = loadDeploymentManifest(env);
       applyDeploymentDaemonEnv(env, deployment);
       assert.equal(env.ARK_API_KEY, 'from-file-secret');
+      // The updater downloads releases from the private test bucket with it.
+      assert.equal(deploymentDaemonEnvOverrides(env).VIKA_TOS_ACCESS_KEY, 'bucket-read-key');
+      assert.equal(env.OTHER, undefined);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
