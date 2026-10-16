@@ -206,6 +206,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
   const abortRef = useRef<AbortController | null>(null)
   const activeSessionRef = useRef<string | null>(null)
+  const activeConnectionRef = useRef<string | null>(null)
   const sessionIdRef = useRef(sessionId)
   const appendInputRef = useRef<
     ((message: Message, accepted: Promise<boolean>) => Promise<boolean>) | null
@@ -214,7 +215,8 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   const discardPartialControllersRef = useRef(new WeakSet<AbortController>())
   const interruptedControllersRef = useRef(new WeakSet<AbortController>())
   const messagesRef = useRef<Message[]>(messages)
-  const hasLocalTimelineRef = useRef(false)
+  const historyLoadedRef = useRef(Boolean(initialMessages))
+  const localBeforeHistoryRef = useRef<Message[]>([])
   const lastSyncedInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   const pendingInitialMessagesRef = useRef<Message[] | undefined>(undefined)
   messagesRef.current = messages
@@ -234,8 +236,18 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       if (abortRef.current === controller) {
         abortRef.current = null
         activeSessionRef.current = null
+        activeConnectionRef.current = null
         appendInputRef.current = null
       }
+    }
+
+    const currentConnection = JSON.stringify([
+      ovClient.getOptions(),
+      ovClient.getConnection(),
+    ])
+    if (activeConnectionRef.current !== currentConnection) {
+      closeLocalStream()
+      return
     }
 
     void interruptChatSession(activeSessionId)
@@ -272,7 +284,8 @@ export function useChat(options: UseChatOptions): UseChatReturn {
   // Reset state when sessionId changes
   useEffect(() => {
     abort({ closeLocalStream: true, discardPartial: true })
-    hasLocalTimelineRef.current = false
+    historyLoadedRef.current = false
+    localBeforeHistoryRef.current = []
     lastSyncedInitialMessagesRef.current = undefined
     pendingInitialMessagesRef.current = undefined
     setMessages([])
@@ -301,15 +314,19 @@ export function useChat(options: UseChatOptions): UseChatReturn {
     // permanently shadow later initialMessages updates.
     pendingInitialMessagesRef.current = undefined
     if (lastSyncedInitialMessagesRef.current === nextInitialMessages) return
-    if (hasLocalTimelineRef.current) return
 
     lastSyncedInitialMessagesRef.current = nextInitialMessages
-    setMessages(nextInitialMessages)
+    if (!historyLoadedRef.current) {
+      setMessages([...nextInitialMessages, ...localBeforeHistoryRef.current])
+      localBeforeHistoryRef.current = []
+      historyLoadedRef.current = true
+    }
   }, [initialMessages, sessionId, status])
 
   const reset = useCallback(() => {
     abort({ closeLocalStream: true, discardPartial: true })
-    hasLocalTimelineRef.current = false
+    historyLoadedRef.current = Boolean(initialMessages)
+    localBeforeHistoryRef.current = []
     setMessages(initialMessages ?? [])
     setStatus('idle')
     setError(undefined)
@@ -377,7 +394,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         return
       }
 
-      hasLocalTimelineRef.current = true
+      if (!historyLoadedRef.current) {
+        localBeforeHistoryRef.current.push(userMsg)
+      }
       setMessages((prev) => [...prev, userMsg])
       setStatus('streaming')
       setError(undefined)
@@ -389,14 +408,15 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       setIteration(0)
 
       const controller = new AbortController()
-      abortRef.current = controller
-      activeSessionRef.current = sessionId
-      let streamingInsertIndexValue = messagesRef.current.length + 1
       const owner = ownerRef.current
       const connectionSnapshot = JSON.stringify([
         ovClient.getOptions(),
         ovClient.getConnection(),
       ])
+      abortRef.current = controller
+      activeSessionRef.current = sessionId
+      activeConnectionRef.current = connectionSnapshot
+      let streamingInsertIndexValue = messagesRef.current.length + 1
       const isCurrent = () =>
         owner === ownerRef.current &&
         connectionSnapshot ===
@@ -484,6 +504,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         if (abortRef.current === controller) {
           abortRef.current = null
           activeSessionRef.current = null
+          activeConnectionRef.current = null
         }
       }
 
@@ -636,6 +657,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           }
           if (!isSameConnection()) return
           for (const completedMessage of timeline) {
+            if (!isSameConnection()) return
             if (completedMessage.role === 'user') {
               await addMessage(
                 sessionId,
@@ -663,6 +685,9 @@ export function useChat(options: UseChatOptions): UseChatReturn {
           const wasAccepted = await accepted
           if (!wasAccepted) return false
           pendingUserMessages.push(inputMessage)
+          if (!historyLoadedRef.current) {
+            localBeforeHistoryRef.current.push(inputMessage)
+          }
           if (abortRef.current === controller) {
             setMessages((prev) => [...prev, inputMessage])
           }
@@ -921,6 +946,7 @@ export function useChat(options: UseChatOptions): UseChatReturn {
         if (abortRef.current === controller) {
           abortRef.current = null
           activeSessionRef.current = null
+          activeConnectionRef.current = null
           appendInputRef.current = null
         }
       }

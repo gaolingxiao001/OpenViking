@@ -616,6 +616,45 @@ describe('useChat event timeline', () => {
     ).toEqual(['A', 'B', 'D'])
   })
 
+  it('merges late initial history with local messages sent before history loads', async () => {
+    sendChatStreamMock.mockResolvedValue(
+      streamMessages([{ event: 'response', data: 'new answer' }]),
+    )
+
+    const { result, rerender } = renderHook(
+      ({ initialMessages }) =>
+        useChat({
+          identityScopeKey: 'identity',
+          initialMessages,
+          persistMessages: false,
+          sessionId: 'session-1',
+        }),
+      { initialProps: { initialMessages: undefined as Message[] | undefined } },
+    )
+
+    await act(async () => {
+      await result.current.send('new question')
+    })
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['new question', 'new answer'])
+
+    rerender({
+      initialMessages: [
+        textMessage('history-a', 'user', 'old question'),
+        textMessage('history-b', 'assistant', 'old answer'),
+      ],
+    })
+
+    expect(
+      result.current.messages.map(
+        (message) => message.parts[0]?.type === 'text' && message.parts[0].text,
+      ),
+    ).toEqual(['old question', 'old answer', 'new question'])
+  })
+
   it('keeps the steer boundary when the next iteration arrives before its ACK', async () => {
     let streamController!: ReadableStreamDefaultController<Uint8Array>
     let acceptSteer!: (result: { accepted: boolean }) => void
