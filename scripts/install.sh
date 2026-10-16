@@ -12,6 +12,8 @@
 # Options: --version <v> (default: latest), --file <archive>, --no-setup.
 # Environment: VIKA_DOWNLOAD_BASE overrides where releases are downloaded from.
 set -eu
+# Always ${NAME} before non-ASCII text: macOS /bin/sh (bash 3.2) counts
+# UTF-8 lead bytes as name characters, so "$VERSION（" names another variable.
 
 BASE="${VIKA_DOWNLOAD_BASE:-__VIKA_DOWNLOAD_BASE__}"
 VIKA_HOME="$HOME/.vika"
@@ -83,7 +85,7 @@ else
   fi
   case "$VERSION" in ''|*[!0-9A-Za-z._-]*) die "版本号无效：$VERSION" ;; esac
   NAME="vika-$VERSION-$PLATFORM.tar.gz"
-  say "下载 Vika $VERSION（$PLATFORM）..."
+  say "下载 Vika ${VERSION}（${PLATFORM}）..."
   fetch "$BASE/releases/$VERSION/$NAME.sha256" "$TMP/sha256" || die "这个版本没有 $PLATFORM 的安装包"
   EXPECTED=$(cut -d' ' -f1 < "$TMP/sha256")
   fetch "$BASE/releases/$VERSION/$NAME" "$TMP/$NAME" || die "下载失败：$NAME"
@@ -152,7 +154,7 @@ case ":$PATH:" in
     esac
     if ! grep -q '/.vika/bin' "$RC" 2>/dev/null; then
       printf '\n# vika\nexport PATH="$HOME/.vika/bin:$PATH"\n' >> "$RC"
-      say "已把 ~/.vika/bin 加进 $RC；新开的终端里可以直接用 vika"
+      say "已把 ~/.vika/bin 加进 ${RC}；新开的终端里可以直接用 vika"
     fi
     ;;
 esac

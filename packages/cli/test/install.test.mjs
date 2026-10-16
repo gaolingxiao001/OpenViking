@@ -91,3 +91,10 @@ test('waits for a running upgrade instead of racing it', (t) => {
   assert.match(blocked.stderr, /另一个安装或升级正在进行/);
   assert.ok(fs.existsSync(path.join(m.vika, 'deploy.lock')), 'someone else\'s lock is left alone');
 });
+
+test('no variable runs into non-ASCII text, which macOS /bin/sh would read as part of its name', () => {
+  const offending = fs.readFileSync(INSTALLER, 'utf8').split('\n')
+    .map((line, index) => [index + 1, line])
+    .filter(([, line]) => !line.trimStart().startsWith('#') && /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/.test(line));
+  assert.deepEqual(offending, []);
+});
