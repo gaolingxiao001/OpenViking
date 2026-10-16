@@ -1227,7 +1227,7 @@ class AgentLoop:
         while self._running:
             try:
                 # Wait for next message
-                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+                msg = await self.bus.consume_inbound()
 
                 # Process it
                 try:
