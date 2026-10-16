@@ -74,17 +74,23 @@ export function isInside(parent, child) {
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
+// The first pm2 command on a machine spawns its daemon and prints a banner
+// ahead of the JSON; the list is the last line.
+export function parseJlist(stdout) {
+  const line = String(stdout || '').trim().split('\n').reverse().find((text) => text.trim().startsWith('['));
+  try {
+    return JSON.parse(line ?? '[]');
+  } catch {
+    throw new Error('pm2 jlist returned invalid JSON');
+  }
+}
+
 export async function verifyPm2App({ app, release, pm2Bin, execFileImpl, pm2Env }) {
   const result = await execFileImpl(pm2Bin, ['jlist'], {
     timeout: 30_000,
     env: pm2Env || cleanPm2ControlEnv(),
   });
-  let processes;
-  try {
-    processes = JSON.parse(result?.stdout || '[]');
-  } catch {
-    throw new Error('pm2 jlist returned invalid JSON');
-  }
+  const processes = parseJlist(result?.stdout);
   const matches = processes.filter((processInfo) => processInfo?.name === app);
   if (matches.length !== 1) throw new Error(`expected exactly one PM2 app named ${app}`);
   const [processInfo] = matches;
@@ -101,11 +107,7 @@ export async function pm2Processes({ pm2Bin, execFileImpl, pm2Env }) {
     timeout: 30_000,
     env: pm2Env,
   });
-  try {
-    return JSON.parse(result?.stdout || '[]');
-  } catch {
-    throw new Error('pm2 jlist returned invalid JSON');
-  }
+  return parseJlist(result?.stdout);
 }
 
 

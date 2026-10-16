@@ -51,19 +51,23 @@ Lark 原始事件解析在 `connectors/lark-events.mjs`；微信直接输出标�
 npm test            # node --test,全部测试(daemon + web)
 npm run check       # node --check 全部源文件
 npm run start:daemon / start:web
-./scripts/deploy.sh [git-ref]   # 只部署已提交的 HEAD,先跑测试再切 pm2
-pm2 logs vika-<instance-id> --lines 100
+node scripts/build-release.mjs [--all] [--download-base URL]   # 打安装包(只含已提交代码)到 dist/
+sh scripts/install.sh --file dist/vika-<版本>-<平台>.tar.gz     # 装到 ~/.vika,和用户同一条路径
+node scripts/publish-release.mjs   # 传到发布桶(VIKA_TOS_BUCKET/ENDPOINT/ACCESS_KEY),latest 最后写
+vika status / vika logs <id> / vika restart [id]
 ```
+
+安装包 = git archive 的代码 + `npm ci --omit=dev` 的依赖 + 官方 Node(版本在根 package.json `vika.node`) + 目标平台的 lark-cli 二进制(按 npm 包自带 checksums.txt 校验) + `release.json`(版本、平台、downloadBase)。Vika 用安装包里的 pm2(`bin/pm2`,由包内 Node 运行),`PM2_HOME=~/.vika/pm2`,不碰用户的 pm2。ecosystem 的 `interpreter` 是包内 Node;PATH 以调用者的为先,系统目录只作兜底。updater(`publisher.mjs`)只下载已发布版本:读 `<downloadBase>/latest` → 清单 → 核对 SHA-256/大小 → 解包 → 用包内 Node 冒烟 → 切 `current`;升级完从新版本重启自己(`scheduleUpdaterRestart`:分离的 shell 在 pm2 杀进程树前就已脱离)。测试桶是私有的:`VIKA_TOS_ACCESS_KEY` 会作为 `x-tos-access` 带上,换公开桶后删掉 `downloadHeaders` 和 install.sh 里那段。
 
 `vika` 命令在 `packages/cli`(bin 按子命令懒加载，`setup`/`help` 不需要 manifest):`setup` 问完全部问题、先用 daemon 的 loader 校验将写入的 manifest，再扫码(飞书设备码建应用 `lark-app.mjs`，lark-cli 写 `vika-<id>` profile 并授权 owner;微信 `loginWeixin`),最后写 `~/.vika/config.json` 并启动。`start/stop/restart/status` 只操作 `~/.vika/current` 这份已安装 release,不拉代码;`upgrade` 才走 updater。pm2 的启动与就绪检查在 `packages/updater/src/pm2.mjs`,updater 与 CLI 共用;updater 每次请求都重读 manifest(`loadTargets`),新加的实例不用重启 updater。
 
 ## 运行时事实(排查问题先看这里)
 
-- **工作区改动不会生效**:线上跑的是 `~/.vika/releases/<version>-<ts>-<commit>` 下的 release(pm2)，配置默认来自 `~/.vika/config.json`。必须 commit 后发布 release 才能让代码上线。
+- **工作区改动不会生效**:线上跑的是 `~/.vika/releases/<version>` 下的安装包(Vika 自己的 pm2)，配置默认来自 `~/.vika/config.json`。代码要 commit、打包、发布后再 `vika upgrade` 才会上线。
 - **运行数据**:`<dataDir>/vika.sqlite3`(activities / connector_events / outbox / cognition_journal 表)。查一次交互到底发生了什么,先 `sqlite3` 查 activities;某次出站的状态和重试看 outbox。每次 Agent 工具调用打一行 `agent_tool` 日志(tool/via/runtime/connector/outcome/code/decisionSeq/newerSeq/responseSeq/outboxId/attempt,不含正文和原始 id),被拦下的投递另记 `delivery.blocked` activity;入站 `event_delivered` 带 seq,可与之对齐。
 - **模型侧真相**:codex rollout 在 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,记录模型实际看到的输入和工具调用顺序,是 daemon activity 之外的第二证据源。
 - **effort 校验与失败通知**:`/effort` 按 `model/list` 里当前模型的 `supportedReasoningEfforts` 校验(不支持的档位如 minimal 会让每个 turn 都 400);turn failed 时 daemon 解包 API 错误(`turnErrorText`)记入 activity,并经 `notifyTurnFailure` 引用回复发信人。
-- **禁止自部署**:system-prompt 明确禁止 Lark 里的 codex 对 Vika 自身执行 deploy.sh/pm2 操作——`pm2 delete` 会连带杀掉它自己所在的进程树,部署会死在 `pm2 start` 之前(2026-07-17 发生过)。
+- **禁止自部署**:system-prompt 明确禁止 Lark 里的 codex 对 Vika 自身执行打包/安装/pm2 操作,自升级只能 `vika upgrade <自己>`——`pm2 delete` 会连带杀掉它自己所在的进程树,部署会死在 `pm2 start` 之前(2026-07-17 发生过)。
 - **关机排水与 mid-turn 会话降级**:shutdown 先有界等待活跃 turn 完成(≤12s,预算含在 shutdownTimeoutMs 内)再杀 backend;若仍在 turn 中被杀,runtime 会 `store.markOwnedSessionUnresumable` 把已存 session durably 降级,下次启动开 fresh session + OV context,而不是 resume。原因:resume 被 mid-turn 打断的 transcript 时 Claude CLI 会给悬空 tool call 补拒绝标记,消息历史被改写,整个 prompt cache 前缀按 cache-write 价全量重写(2026-08 实测单实例一天烧掉 ~9M write tokens);codex 同理还有重复输入风险。
 - **OV context**:fresh native session 只接 OV archive overview + live messages；同一 native session 不再注入 journal delta。SQLite journal 仅为投递账本和同步 outbox；不得恢复为模型历史来源。
 - **steer 语义(已知且接受)**:`turn/steer` RPC 成功只代表 codex 收下了消息,实际注入要等当前推理步(reasoning + tool call)结束,还有约 6s 每轮的注入开销。所以 turn 进行中来的消息,竞态窗口约一个模型步(10-15s),模型正在发的回复拦不住。除非明确要求改成 turn/interrupt + 合并重发,否则不要"修"这个。

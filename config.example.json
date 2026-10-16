@@ -3,8 +3,8 @@
   "defaultInstance": "primary",
   "env": {
     "TEAM_TASK_BOARD_URL": "",
-    "LARK_CLI_BIN": "/opt/homebrew/bin/lark-cli",
-    "CODEX_BIN": "/opt/homebrew/bin/codex",
+    "LARK_CLI_BIN": "",
+    "CODEX_BIN": "",
     "TRAEX_BIN": "traecli",
     "CLAUDE_BIN": "claude",
     "PI_BIN": "",

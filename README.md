@@ -27,7 +27,7 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 
 ## 安装
 
-看 [install.md](./install.md)。里面有依赖、飞书权限、`config.json`、首次部署、多 agent 和日常升级。
+一条命令：`curl -fsSL <下载地址>/install.sh | sh`，装好后 `vika setup` 扫码接飞书/微信。机器上不需要 Node。细节看 [install.md](./install.md)：依赖、setup、升级回滚、开机自启、多 agent 和发布新版本。
 
 ### 微信单聊 MVP
 
@@ -177,21 +177,19 @@ npm run start:daemon   # 127.0.0.1:3738
 npm run start:web      # 127.0.0.1:3737
 ```
 
-源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.vika/releases/`；每个实例的工作区由 release 之外的持久 manifest 独立配置。
+源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式安装在 `~/.vika/releases/`，由 Vika 自己的 pm2 托管；每个实例的工作区由 release 之外的持久 manifest 独立配置。
 
 ## 日常运维
 
 ```bash
-pm2 status vika-<instance-id> vika-web vika-updater
-pm2 logs vika-<instance-id> --lines 100
+vika status
+vika logs <instance-id>
 curl http://127.0.0.1:3737/ready
 vika upgrade <instance-id>
 vika upgrade all
 ```
 
-`deploy.sh` 是首次安装或 updater 控制面协议变更时的 bootstrap 工具，不是日常升级步骤。
-
-`vika-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 manifest 中的 agent id 和 `all`，从固定的 upstream `main` 发布 release；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 滚动目标 daemon；`all` 还会滚动共享 Web。相同 commit 的第二次请求直接复用已验证 release。整个过程持有同一把 deploy lock。
+`vika-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 manifest 中的 agent id 和 `all`，每次请求都重读 manifest；请求不能传版本、路径、下载地址或 shell。它只装下载地址上 `latest` 指向的已发布版本：核对 SHA-256、用安装包自带的 Node 冒烟检查后才原子切换 `current`，随后从同一份 ecosystem config 滚动目标 daemon，`all` 还会滚动共享 Web，最后从新版本重启自己。相同版本的第二次请求直接复用。整个过程和安装脚本共用同一把 deploy lock。
 
 ### 可横向扩展的多 Agent 部署
 
@@ -201,9 +199,9 @@ vika upgrade all
 
 启动 preflight 严格拒绝未知字段、相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `vika-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
 
-`npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `VIKA_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `vika upgrade all`。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `vika upgrade <id>`。
+`npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `VIKA_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `vika upgrade all`（或 `vika start <新实例>` 加 `vika restart web`）。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `vika upgrade <id>`。
 
-首次安装，或 release 修改了 updater 自身协议时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `vika upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
+代码升级先由维护者发布新版本（见 install.md），再调用 `vika upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
 
 ## Activity 页面
 

@@ -9,7 +9,7 @@
 | `~/.local/lib/lark-daemon/`（releases、current、updater 的 git 镜像） | `~/.vika/` |
 | `~/.local/share/lark-daemon/updater.sock` | `~/.vika/updater.sock` |
 | `<dataDir>/lark-daemon.sqlite3` | `<dataDir>/vika.sqlite3` |
-| 命令 `lark-daemon upgrade` | `vika upgrade` |
+| 命令 `lark-daemon upgrade` | `vika upgrade`（只装已发布的版本，不再从 git 拉代码） |
 | pm2 进程 `lark-daemon-<id>`、`lark-web`、`lark-updater` | `vika-<id>`、`vika-web`、`vika-updater` |
 | 环境变量 `LARK_DAEMON_*`、`LARK_WEB_*`、`LARK_UPDATER_*` | `VIKA_*`、`VIKA_WEB_*`、`VIKA_UPDATER_*` |
 | `LARK_DAEMON_DEPLOYMENT_MANIFEST` | `VIKA_CONFIG` |
@@ -51,15 +51,16 @@
 
 5. 自己 shell 里 export 过的 `LARK_DAEMON_*` 等变量，按上表改名。
 
-6. 从源码目录发布并启动：
+6. 安装并启动（不再需要全局 pm2、Node 或 git）：
 
    ```bash
-   ./scripts/deploy.sh <git-ref>
-   ./scripts/bootstrap-updater.sh
-   vika upgrade all
+   curl -fsSL <下载地址>/install.sh | sh -s -- --no-setup
+   ~/.vika/bin/vika start
    ```
 
-7. 确认 `pm2 status vika-<id> vika-web vika-updater` 都是 online，并在飞书里收发一条消息后，再删掉旧目录：`~/.local/lib/lark-daemon`、`~/.local/bin/lark-daemon`。`~/.lark-daemon` 里还有 `emailConfig` 等被引用的文件时先保留。
+   Vika 现在用自己的 pm2，状态在 `~/.vika/pm2`；第 1 步旧进程所在的全局 pm2 不再需要。
+
+7. 确认 `vika status` 里各进程都是 online/ready，并在飞书里收发一条消息后，再删掉旧目录：`~/.local/lib/lark-daemon`、`~/.local/bin/lark-daemon`。`~/.lark-daemon` 里还有 `emailConfig` 等被引用的文件时先保留。
 
 ## 已知影响
 

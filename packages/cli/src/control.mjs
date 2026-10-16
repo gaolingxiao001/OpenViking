@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   appControlEnv,
@@ -20,18 +21,30 @@ import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '
 
 const execFile = promisify(execFileCallback);
 const UPDATER_APP = 'vika-updater';
+// This command's own release (or source checkout); bin/pm2 runs its pinned pm2.
+const RELEASE_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+
+export function pm2Defaults(env = process.env) {
+  const releasePm2 = path.join(RELEASE_ROOT, 'bin', 'pm2');
+  return {
+    pm2Bin: env.PM2_BIN || (fs.existsSync(releasePm2) ? releasePm2 : 'pm2'),
+    // Vika's own pm2 daemon, apart from any pm2 the user runs.
+    pm2Env: cleanPm2ControlEnv({ ...env, PM2_HOME: env.PM2_HOME || path.join(env.HOME || '', '.vika', 'pm2') }),
+  };
+}
 
 function defaults(options = {}) {
   const env = options.env ?? process.env;
+  const pm2 = pm2Defaults(env);
   return {
     env,
-    pm2Bin: options.pm2Bin ?? env.PM2_BIN ?? 'pm2',
+    pm2Bin: options.pm2Bin ?? pm2.pm2Bin,
     execFileImpl: options.execFileImpl ?? execFile,
     fetchImpl: options.fetchImpl ?? globalThis.fetch,
     readyOptions: options.readyOptions,
     releaseLink: options.releaseLink ?? env.VIKA_UPDATER_RELEASE_LINK ?? defaultReleaseLink(),
     socketPath: options.socketPath ?? env.VIKA_UPDATER_SOCKET ?? defaultSocketPath(),
-    pm2Env: options.pm2Env ?? cleanPm2ControlEnv(env),
+    pm2Env: options.pm2Env ?? pm2.pm2Env,
     stdout: options.stdout ?? process.stdout,
   };
 }
@@ -54,7 +67,7 @@ export function appsFor(target, targets = loadTargets()) {
 
 async function installedRelease(releaseLink) {
   if (!fs.existsSync(releaseLink)) {
-    throw new Error(`no Vika release is installed at ${releaseLink}; publish one first (./scripts/deploy.sh)`);
+    throw new Error(`no Vika release is installed at ${releaseLink}; run the installer first (install.sh)`);
   }
   const release = await resolveRelease(releaseLink);
   const configPath = await realpath(path.join(release, 'ecosystem.config.cjs'));

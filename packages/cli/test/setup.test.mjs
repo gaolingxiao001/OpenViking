@@ -54,7 +54,8 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
 
   const manifest = h.manifest();
   assert.equal(manifest.defaultInstance, 'primary');
-  assert.deepEqual(manifest.env, { LARK_CLI_BIN: '/opt/lark/bin/lark-cli', CODEX_BIN: '/opt/codex/bin/codex' });
+  // lark-cli comes with the release; only the runtime the user installed is pinned.
+  assert.deepEqual(manifest.env, { CODEX_BIN: '/opt/codex/bin/codex' });
   assert.deepEqual(manifest.agents, [{
     id: 'primary',
     displayName: '小V',
@@ -85,12 +86,11 @@ test('a second instance keeps the shared env and the default instance', async (t
   const second = harness(t, ['', 'Second', '', '3', '1', 'y']);
   fs.mkdirSync(path.join(second.home, '.vika'), { recursive: true });
   fs.copyFileSync(path.join(h.home, '.vika', 'config.json'), path.join(second.home, '.vika', 'config.json'));
-  second.options.env.LARK_CLI_BIN = '/somewhere/else/lark-cli';
   second.options.allocate = async () => 3739;
   assert.equal(await setupCommand(second.options), 0);
   const manifest = second.manifest();
   assert.deepEqual(manifest.agents.map(({ id, model, port }) => [id, model, port]), [['primary', 'pi', 3738], ['agent2', 'pi', 3739]]);
-  assert.equal(manifest.env.LARK_CLI_BIN, '/opt/lark/bin/lark-cli');
+  assert.deepEqual(manifest.env, {});
   assert.equal(manifest.defaultInstance, 'primary');
 });
 
@@ -114,6 +114,12 @@ test('setup stops early when no runtime can run, and reports a start failure aft
   const none = harness(t, [], { runtimes: RUNTIMES.map((runtime) => ({ ...runtime, available: false })) });
   assert.equal(await setupCommand(none.options), 1);
   assert.match(none.written(), /没有可用的 agent 运行时/);
+
+  const webDown = harness(t, ['', '', '', '1', '1', 'y']);
+  webDown.options.control.restart = async () => { throw new Error('port 3737 is in use'); };
+  assert.equal(await setupCommand(webDown.options), 0);
+  assert.match(webDown.written(), /vika-web 没有起来：port 3737 is in use/);
+  assert.deepEqual(webDown.calls.map(([kind]) => kind), ['lark', 'start', 'start', 'greet']);
 
   const failing = harness(t, ['', '', '', '1', '1', 'y'], { failStart: true });
   assert.equal(await setupCommand(failing.options), 1);

@@ -5,6 +5,7 @@ import { LarkCli } from './lark-cli.mjs';
 import { larkScopes } from './setup.mjs';
 import { showQr } from './qr.mjs';
 import { which } from './runtimes.mjs';
+import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 
 // `vika login lark|weixin <instance>`: redo one IM's authorization for an
 // instance that already exists, e.g. after a login expired. Only the
@@ -30,7 +31,8 @@ export async function loginCommand([connector, id, ...extra], { env = process.en
     }
     return 0;
   }
-  const bin = env.LARK_CLI_BIN || deployment.env?.LARK_CLI_BIN || which('lark-cli', env);
+  const bundled = bundledLarkCli();
+  const bin = env.LARK_CLI_BIN || deployment.env?.LARK_CLI_BIN || (bundled === 'lark-cli' ? which('lark-cli', env) : bundled);
   if (!bin) throw new Error('lark-cli is not installed');
   const larkCli = new LarkCli(bin);
   const login = await larkCli.beginUserLogin({ profile: agent.profile, scopes: larkScopes().user });

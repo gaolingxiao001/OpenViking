@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { bundledLarkCli } from './lark-cli-bin.mjs';
 import { managedPiBin } from './pi-runtime.mjs';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
@@ -176,14 +177,14 @@ export function getConfig() {
     connectorWorkerPath: path.join(sourceDir, 'connectors', 'worker.mjs'),
     actionSocketPath: path.join(dataDir, 'actions.sock'),
     actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
-    larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
+    larkCliBin: process.env.LARK_CLI_BIN || bundledLarkCli(),
     weixinAllowFrom: csvEnv('VIKA_WEIXIN_ALLOW_FROM'),
     emailConfigFile,
     weixinLongPollTimeoutMs: intEnv('VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
       min: 5_000,
       max: 120_000,
     }),
-    codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
+    codexBin: process.env.CODEX_BIN || 'codex',
     traexBin: process.env.TRAEX_BIN || process.env.TRAECLI_BIN || 'traecli',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
     piBin: process.env.PI_BIN || managedPiBin(),

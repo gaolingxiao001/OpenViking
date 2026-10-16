@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { loginWeixin } from '../../daemon/src/weixin/auth.mjs';
 import { WeixinState } from '../../daemon/src/weixin/state.mjs';
+import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { LarkCli } from './lark-cli.mjs';
 import { createApp, inspectApp, missingScopes } from './lark-app.mjs';
 import {
@@ -18,6 +19,11 @@ import { restartCommand, startCommand } from './control.mjs';
 // saved until all scans succeed, so an aborted setup leaves the manifest as it was.
 
 const PERMISSIONS = new URL('../../../permission.json', import.meta.url);
+
+function resolveLarkCli(env) {
+  const bundled = bundledLarkCli();
+  return bundled === 'lark-cli' ? which('lark-cli', env) : bundled;
+}
 
 export function expandHome(value, homeDir = os.homedir()) {
   return value === '~' ? homeDir : value.replace(/^~(?=\/)/, homeDir);
@@ -153,11 +159,12 @@ export async function setupCommand({
   }
   const plan = await askPlan({ prompter, manifest, env, homeDir, runtimes, ov });
 
+  // The release's own lark-cli, unless the manifest or environment pins another.
   const larkCliBin = plan.connectors.includes('lark')
-    ? (env.LARK_CLI_BIN || manifest?.env?.LARK_CLI_BIN || which('lark-cli', env))
+    ? (env.LARK_CLI_BIN || manifest?.env?.LARK_CLI_BIN || resolveLarkCli(env))
     : null;
   if (plan.connectors.includes('lark') && !larkCliBin) {
-    out('\n接飞书需要 lark-cli：npm i -g @larksuite/cli 后重新运行 vika setup。\n');
+    out('\n找不到 lark-cli：这个安装不完整，重新运行安装脚本。\n');
     return 1;
   }
 
@@ -176,10 +183,8 @@ export async function setupCommand({
     ...(ovConfig ? { ovConfig } : {}),
     model: plan.runtime.model,
   };
-  const next = withInstance(manifest, agent, {
-    ...(larkCliBin ? { LARK_CLI_BIN: larkCliBin } : {}),
-    ...(plan.runtime.binEnv && plan.runtime.bin ? { [plan.runtime.binEnv]: plan.runtime.bin } : {}),
-  });
+  const next = withInstance(manifest, agent,
+    plan.runtime.binEnv && plan.runtime.bin ? { [plan.runtime.binEnv]: plan.runtime.bin } : {});
   validateManifest(configPath, next);
 
   out(`\n将添加实例 ${plan.id}：${plan.runtime.label}，${plan.connectors.map((c) => (c === 'lark' ? '飞书' : '微信')).join(' + ')}`
@@ -198,12 +203,16 @@ export async function setupCommand({
 
   try {
     await control.start(plan.id, { env });
-    // The shared Web routes to every instance; it picks up a new one on restart.
-    await control.restart('web', { env });
-    await control.start('updater', { env });
   } catch (error) {
     out(`\n配置已保存，但启动没有完成：${error.message}\n修好后运行 vika start ${plan.id}\n`);
     return 1;
+  }
+  // The instance is up. The shared Web (it routes to every instance, so it
+  // restarts to pick this one up) and the updater are helpers: report, go on.
+  for (const [action, target] of [['restart', 'web'], ['start', 'updater']]) {
+    await control[action](target, { env }).catch((error) => {
+      out(`  ⚠ vika-${target} 没有起来：${error.message}；之后运行 vika ${action} ${target}\n`);
+    });
   }
   if (lark) {
     await connect.greet({

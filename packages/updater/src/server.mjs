@@ -1,8 +1,10 @@
-import { execFile as execFileCallback } from 'node:child_process';
+import { execFile as execFileCallback, spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { chmod, lstat, mkdir, realpath, rm, rmdir } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   SHARED_WEB,
@@ -151,6 +153,27 @@ async function upgradeApp(spec, {
   }
 }
 
+// After an upgrade the updater still runs the old release. It cannot
+// replace itself from inside its own pm2 process (pm2 kills the process tree
+// on delete), so a detached shell outlives it: the inner subshell is orphaned
+// before the delete, then starts vika-updater from the new release.
+export function scheduleUpdaterRestart({ release, pm2Bin, pm2Env, spawnImpl = spawn }) {
+  const releasePm2 = path.join(release, 'bin', 'pm2');
+  const script = '(sleep 2; "$PM2" delete vika-updater >/dev/null 2>&1; '
+    + '"$PM2" start "$CONFIG" --only vika-updater --update-env >/dev/null 2>&1; '
+    + '"$PM2" save >/dev/null 2>&1) </dev/null >/dev/null 2>&1 &';
+  const child = spawnImpl('/bin/sh', ['-c', script], {
+    detached: true,
+    stdio: 'ignore',
+    env: {
+      ...pm2Env,
+      PM2: fs.existsSync(releasePm2) ? releasePm2 : pm2Bin,
+      CONFIG: path.join(release, 'ecosystem.config.cjs'),
+    },
+  });
+  child.unref();
+}
+
 export async function upgradeTarget(target, {
   releaseLink = process.env.VIKA_UPDATER_RELEASE_LINK || defaultReleaseLink(),
   pm2Bin = process.env.PM2_BIN || 'pm2',
@@ -160,6 +183,10 @@ export async function upgradeTarget(target, {
   pm2Env = cleanPm2ControlEnv(),
   publishReleaseImpl = publishLatestRelease,
   publishOptions = {},
+  // Only the running updater replaces itself (createUpdaterServer turns this
+  // on); a direct call, as in tests, never touches pm2's vika-updater.
+  restartSelfImpl = null,
+  selfEntry = fileURLToPath(import.meta.url),
 } = {}) {
   // The manifest is read on every request, so an instance added since the
   // updater started is already a valid target.
@@ -215,6 +242,9 @@ export async function upgradeTarget(target, {
       ? await removeStaleManagedDaemonApps({ targets, release, pm2Bin, execFileImpl, pm2Env })
       : [];
     await execFileImpl(pm2Bin, ['save'], { timeout: 30_000, env: pm2Env });
+    const realSelf = await realpath(selfEntry).catch(() => selfEntry);
+    const restartsUpdater = Boolean(restartSelfImpl) && !isInside(release, realSelf);
+    if (restartsUpdater) restartSelfImpl({ release, pm2Bin, pm2Env });
 
     return {
       target,
@@ -223,7 +253,9 @@ export async function upgradeTarget(target, {
       removedApps,
       release,
       commit: publication.commit,
+      version: publication.version,
       published: publication.published === true,
+      restartsUpdater,
       status: 'ready',
     };
   } finally {
@@ -275,7 +307,7 @@ async function removeStaleSocket(socketPath) {
 
 export async function createUpdaterServer({
   socketPath = process.env.VIKA_UPDATER_SOCKET || defaultSocketPath(),
-  upgrade = upgradeTarget,
+  upgrade = (target) => upgradeTarget(target, { restartSelfImpl: scheduleUpdaterRestart }),
   requestBodyTimeoutMs = 5000,
 } = {}) {
   let activeTarget = null;

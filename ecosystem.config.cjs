@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('node:fs');
 const path = require('node:path');
 const {
   CONTROL_ENV_MAX_BYTES,
@@ -13,10 +14,15 @@ const releaseDir = __dirname;
 const daemonDir = path.join(releaseDir, 'packages', 'daemon');
 const webDir = path.join(releaseDir, 'packages', 'web');
 const updaterDir = path.join(releaseDir, 'packages', 'updater');
-const executablePath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+// The caller's PATH first; the usual system directories only as a fallback.
+// Put first, they once handed the managed Pi a system Node v10.
+const fallbackPath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+// An installed release runs on the Node it ships; a source checkout on the
+// Node running pm2.
+const releaseNode = path.join(releaseDir, 'node', 'bin', 'node');
 
 const common = Object.freeze({
-  interpreter: process.execPath,
+  interpreter: fs.existsSync(releaseNode) ? releaseNode : process.execPath,
   exec_mode: 'fork',
   instances: 1,
   autorestart: true,
@@ -88,7 +94,7 @@ function buildEcosystem(sourceEnv = process.env) {
         VIKA_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
       } : {}),
       ...openVikingAgentEnv(agent),
-      PATH: `${executablePath}:${inheritedPath}`,
+      PATH: `${inheritedPath}:${fallbackPath}`,
     }),
   }));
 
@@ -133,7 +139,7 @@ function buildEcosystem(sourceEnv = process.env) {
           VIKA_WEB_PORT: '3737',
           VIKA_WEB_DEFAULT_INSTANCE: deployment.defaultInstance,
           VIKA_WEB_INSTANCES: webTargetsJson,
-          PATH: `${executablePath}:${inheritedPath}`,
+          PATH: `${inheritedPath}:${fallbackPath}`,
         },
       },
       {
@@ -155,7 +161,10 @@ function buildEcosystem(sourceEnv = process.env) {
           VIKA_UPDATER_REMOTE_URL: 'git@code.byted.org:data-arch/lark-daemon.git',
           VIKA_UPDATER_REMOTE_BRANCH: 'main',
           VIKA_UPDATER_SOCKET: path.join(baseDir, 'updater.sock'),
-          PATH: `${executablePath}:${inheritedPath}`,
+          // The updater drives the same pm2 daemon the vika command uses.
+          PM2_HOME: sourceEnv.PM2_HOME || path.join(baseDir, 'pm2'),
+          PM2_BIN: path.join(releaseDir, 'bin', 'pm2'),
+          PATH: `${inheritedPath}:${fallbackPath}`,
         },
       },
     ],

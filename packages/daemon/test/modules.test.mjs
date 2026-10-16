@@ -183,39 +183,7 @@ describe('module boundaries', () => {
     assert.match(manifest.scripts.test, /packages\/daemon\/test\/\*\.test\.mjs/);
     assert.match(manifest.scripts.test, /packages\/web\/test\/\*\.test\.mjs/);
     assert.match(manifest.scripts.test, /packages\/updater\/test\/\*\.test\.mjs/);
-  });
-
-  it('publishes a tested release without mutating runtime processes', () => {
-    const deploy = fs.readFileSync(path.join(root, 'scripts', 'deploy.sh'), 'utf8');
-    assert.match(deploy, /DEPLOY_LOCK=.*deploy\.lock/);
-    assert.match(deploy, /if ! mkdir "\$DEPLOY_LOCK"/);
-    assert.match(deploy, /npm test[^\n]*npm run check/);
-    assert.match(deploy, /loadDeploymentManifest\(process\.env\)/);
-    assert.doesNotMatch(deploy, /ENV_FILE|REL\/\.env|REPO\/\.env|BASE\/env/);
-    assert.match(deploy, /ln -sfn "\$REL" "\$BASE\/current"/);
-    assert.match(deploy, /ln -sfn "\$PREV" "\$BASE\/rollback"/);
-    assert.match(deploy, /vika upgrade <target\|all>/);
-    assert.match(deploy, /refusing to replace foreign CLI symlink/);
-    assert.match(deploy, /refusing to replace existing CLI path/);
-    assert.doesNotMatch(deploy, /pm2_control\(\)/);
-    assert.doesNotMatch(deploy, /^\s*pm2 (?:delete|start|save)/m);
-  });
-
-  it('bootstraps only the updater with a clean environment and a bounded rollback', () => {
-    const bootstrap = fs.readFileSync(path.join(root, 'scripts', 'bootstrap-updater.sh'), 'utf8');
-    assert.match(bootstrap, /pm2_control\(\)/);
-    assert.match(bootstrap, /env -i/);
-    assert.match(bootstrap, /VIKA_CONFIG/);
-    assert.match(bootstrap, /VIKA_LOG_LEVEL/);
-    assert.match(bootstrap, /ARK_API_KEY/);
-    assert.match(bootstrap, /VIKA_VOLC_SESSION_ID/);
-    assert.match(bootstrap, /delete vika-updater/);
-    assert.match(bootstrap, /start "\$CONFIG" --only vika-updater --update-env/);
-    assert.doesNotMatch(bootstrap, /startOrReload/);
-    assert.match(bootstrap, /--unix-socket "\$SOCKET" http:\/\/localhost\/ready/);
-    assert.match(bootstrap, /"\$BASE"\/releases\/\*\/packages\/updater\/src\/main\.mjs/);
-    assert.match(bootstrap, /restoring \$PREVIOUS_RELEASE/);
-    assert.doesNotMatch(bootstrap, /--only (?:all\b|vika-(?!updater\b))/);
+    assert.match(manifest.scripts.test, /packages\/cli\/test\/\*\.test\.mjs/);
   });
 
   it('allows exact sibling operations without permitting self or broad PM2 control', () => {
@@ -226,7 +194,7 @@ describe('module boundaries', () => {
     assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);
     assert.match(prompt, /Self-updates must go through an allowlisted external updater\/supervisor/);
     assert.match(prompt, /vika upgrade \{\{VIKA_UPGRADE_TARGET\}\}/);
-    assert.match(prompt, /without running `deploy\.sh`/);
+    assert.match(prompt, /installs the latest published release/);
     assert.match(prompt, /may manage an explicitly named sibling daemon\/web pair only after verifying/);
     assert.match(prompt, /Never use broad PM2 selectors or touch unrelated applications/);
     assert.doesNotMatch(prompt, /Never deploy, restart, stop, or reconfigure vika or vika-web yourself/);
