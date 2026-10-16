@@ -116,9 +116,13 @@ export class PersonalAgentDaemon {
     this.lock.acquire();
     try {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
-      const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
-      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
-        { canCommit: () => !this.connectors?.subscribed });
+      // Without OpenViking a fresh native session starts with no history.
+      const ovClient = this.ovClient
+        ?? (this.config.openVikingConfigPath ? new OVSessionClient(this.config.openVikingConfigPath) : null);
+      if (ovClient) {
+        this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
+          { canCommit: () => !this.connectors?.subscribed });
+      }
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
         status: 'STARTING',
@@ -184,6 +188,7 @@ export class PersonalAgentDaemon {
         roster: this.roster,
         liveness: this.liveness,
         meetingEnabled: this.connectorIds.includes('lark'),
+        ovClient,
         logger: this.logger.child({ component: 'actions' }),
       });
       this.actionApi = await startActionApi({
@@ -192,7 +197,7 @@ export class PersonalAgentDaemon {
         logger: this.logger.child({ component: 'action-api' }),
       });
 
-      await this.loadOpenVikingIdentity(ovClient);
+      if (ovClient) await this.loadOpenVikingIdentity(ovClient);
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           this.meeting?.onTurnFailed(info);
@@ -296,15 +301,17 @@ export class PersonalAgentDaemon {
       this.ready = true;
       this.chatNames.refresh();
       this.maintenanceTimer = setInterval(() => this.runMaintenance(), 86_400_000);
-      this.ovSyncTimer = setInterval(() => {
-        if (this.shuttingDown || this.ovSyncBusy || this.harness.pendingIngress > 0 || this.agentRuntime.turnInProgress
-          || this.agentRuntime.state.queued > 0 || this.harness.groupBurst.pendingConversations > 0) return;
-        this.ovSyncBusy = true;
-        void this.ovContext.checkpoint(this.store.getCognitionState().epoch)
-          .catch(() => this.logger.warn('ov_session_sync_failed', { error: 'OV sync will retry; local transport cursor retained' }))
-          .finally(() => { this.ovSyncBusy = false; });
-      }, 5_000);
-      this.ovSyncTimer.unref();
+      if (this.ovContext) {
+        this.ovSyncTimer = setInterval(() => {
+          if (this.shuttingDown || this.ovSyncBusy || this.harness.pendingIngress > 0 || this.agentRuntime.turnInProgress
+            || this.agentRuntime.state.queued > 0 || this.harness.groupBurst.pendingConversations > 0) return;
+          this.ovSyncBusy = true;
+          void this.ovContext.checkpoint(this.store.getCognitionState().epoch)
+            .catch(() => this.logger.warn('ov_session_sync_failed', { error: 'OV sync will retry; local transport cursor retained' }))
+            .finally(() => { this.ovSyncBusy = false; });
+        }, 5_000);
+        this.ovSyncTimer.unref();
+      }
       this.maintenanceTimer.unref();
       this.logger.info('daemon_ready', {
         address: this.config.httpEnabled ? `http://${this.config.host}:${this.config.port}` : 'disabled',

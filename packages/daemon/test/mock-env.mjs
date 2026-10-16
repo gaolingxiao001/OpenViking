@@ -1,8 +1,9 @@
 // Shared mock environment for harness e2e tests: a real PersonalAgentDaemon wired to a
 // fake lark-cli (events fed dynamically through an NDJSON file) and a fake
 // codex app-server (scriptable turn outcome, records everything it is told).
-// OpenViking is quiet by default; pass { identity } to turn identity injection
-// on and serve that text from the fake OV client. No process.env mutation:
+// OpenViking is a quiet fake client by default; pass { identity } to turn
+// identity injection on and serve that text from it, or { openViking: false }
+// to run an instance with no OV at all. No process.env mutation:
 // every path the fake binaries need is embedded into the generated scripts.
 //
 // Operations, not plumbing:
@@ -185,6 +186,7 @@ function readLines(file) {
 export async function startMockEnv({
   codex = {},
   identity = null,
+  openViking = true,
   config: configOverrides = {},
   prepare = null,
 } = {}) {
@@ -222,7 +224,7 @@ export async function startMockEnv({
     profile: 'test-profile',
     initialModel: '',
     claudeModel: '',
-    openVikingConfigPath,
+    openVikingConfigPath: openViking ? openVikingConfigPath : '',
     openVikingIdentityEnabled: identity !== null,
     ignoredSenderIds: new Set(),
     port: 0,
@@ -235,7 +237,7 @@ export async function startMockEnv({
     meetingAudio: null,
     ...configOverrides,
   };
-  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), {
+  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), openViking ? {
     ovClient: {
       messages: new Map(),
       async create(sessionId) { return { session_id: sessionId, uri: `viking://session/${sessionId}` }; },
@@ -248,7 +250,7 @@ export async function startMockEnv({
         throw Object.assign(new Error('missing'), { httpStatus: 404 });
       },
     },
-  });
+  } : {});
 
   const env = {
     dir,

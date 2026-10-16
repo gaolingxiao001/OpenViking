@@ -320,6 +320,37 @@ test('connects a mailbox only together with its private account file', () => {
   }
 });
 
+test('an instance runs without OpenViking, and without a profile when it has no lark connector', () => {
+  const manifest = validManifest();
+  delete manifest.agents[1].ovConfig;
+  delete manifest.agents[2].ovConfig;
+  manifest.agents[2].channel = 'weixin';
+  manifest.agents[2].connectors = ['weixin'];
+  delete manifest.agents[2].profile;
+  withManifest(manifest, (manifestPath) => {
+    const env = {
+      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+      OPENVIKING_CLI_CONFIG_FILE: '/stale/ovcli.conf',
+      LARK_DAEMON_PROFILE: 'stale',
+      LARKSUITE_CLI_PROFILE: 'stale',
+    };
+    const deployment = loadDeploymentManifest(env);
+    assert.equal(selectDeploymentAgent(deployment, 'beta').ovConfig, null);
+    applyDeploymentAgentEnv(env, deployment, 'alpha');
+    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/srv/lark-daemon/ov/alpha.json');
+    assert.equal(env.OPENVIKING_MEMORY_ENABLED, '1');
+    // Without OV the user's own memory plugins are switched off for this instance.
+    applyDeploymentAgentEnv(env, deployment, 'beta');
+    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, undefined);
+    assert.equal(env.OPENVIKING_MEMORY_ENABLED, '0');
+    assert.equal(env.LARKSUITE_CLI_PROFILE, 'cli_beta');
+    applyDeploymentAgentEnv(env, deployment, 'gamma');
+    assert.equal(selectDeploymentAgent(deployment, 'gamma').profile, null);
+    assert.equal(env.LARK_DAEMON_PROFILE, undefined);
+    assert.equal(env.LARKSUITE_CLI_PROFILE, undefined);
+  });
+});
+
 test('rejects unknown and missing manifest fields instead of guessing', () => {
   const cases = [
     {
@@ -339,8 +370,13 @@ test('rejects unknown and missing manifest fields instead of guessing', () => {
     },
     {
       name: 'missing agent field',
-      mutate: (manifest) => { delete manifest.agents[0].ovConfig; },
-      error: /agents\[0\]\.ovConfig is required/,
+      mutate: (manifest) => { delete manifest.agents[0].profile; },
+      error: /agents\[0\]\.profile is required/,
+    },
+    {
+      name: 'profile on an instance without the lark connector',
+      mutate: (manifest) => { manifest.agents[1].channel = 'weixin'; manifest.agents[1].connectors = ['weixin']; },
+      error: /agents\[1\]\.profile is only used by the lark connector/,
     },
     {
       name: 'display name too long for Web routing',

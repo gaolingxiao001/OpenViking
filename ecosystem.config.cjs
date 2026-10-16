@@ -5,6 +5,7 @@ const {
   CONTROL_ENV_MAX_BYTES,
   deploymentDaemonEnvOverrides,
   loadDeploymentManifest,
+  openVikingAgentEnv,
   resolvedDeploymentDaemonEnv,
   updaterTargetsFor,
 } = require('./deployment-config.cjs');
@@ -67,8 +68,10 @@ function buildEcosystem(sourceEnv = process.env) {
       LARK_DAEMON_CONNECTORS_JSON: JSON.stringify(agent.connectors),
       LARK_DAEMON_EMAIL_CONFIG_FILE: agent.emailConfig || undefined,
       LARK_DAEMON_PORT: String(agent.port),
-      LARK_DAEMON_PROFILE: agent.profile,
-      LARKSUITE_CLI_PROFILE: agent.profile,
+      // Empty for an instance without the lark connector, so a profile in
+      // pm2's own environment cannot leak into it.
+      LARK_DAEMON_PROFILE: agent.profile || '',
+      LARKSUITE_CLI_PROFILE: agent.profile || '',
       LARK_DAEMON_AGENT_NAME: agent.displayName,
       LARK_DAEMON_DATA_DIR: agent.dataDir,
       LARK_DAEMON_WORKSPACE: agent.workspace,
@@ -88,13 +91,7 @@ function buildEcosystem(sourceEnv = process.env) {
         LARK_DAEMON_MEETING_AUDIO_WORKER_CWD: releaseDir,
         LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
       } : {}),
-      OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
-      OPENVIKING_CREDENTIAL_SOURCE: 'cli',
-      OPENVIKING_MEMORY_ENABLED: '1',
-      OPENVIKING_AUTO_RECALL: '0',
-      OPENVIKING_AUTO_CAPTURE: '1',
-      OPENVIKING_AUTO_COMMIT_ON_COMPACT: '1',
-      OPENVIKING_RECALL_PEER_SCOPE: 'actor',
+      ...openVikingAgentEnv(agent),
       PATH: `${executablePath}:${inheritedPath}`,
     }),
   }));

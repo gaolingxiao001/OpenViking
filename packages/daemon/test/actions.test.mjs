@@ -54,8 +54,12 @@ describe('agent tools', () => {
     assert.ok(names(lark.service).includes('read_meeting_inbox'));
     const weixin = setup(t, { ids: ['weixin'] });
     assert.deepEqual(names(weixin.service), [
-      'send_message', 'notify_owner', 'reply_message', 'get_message_media', 'read_openviking_session_context',
+      'send_message', 'notify_owner', 'reply_message', 'get_message_media',
     ]);
+    // The OV session tool exists only for an instance configured with OpenViking.
+    assert.ok(!names(lark.service).includes('read_openviking_session_context'));
+    const withOV = setup(t, { ids: ['weixin'], ovClient: {} });
+    assert.ok(names(withOV.service).includes('read_openviking_session_context'));
   });
 
   it('validates input against the tool schema before any connector call', async (t) => {

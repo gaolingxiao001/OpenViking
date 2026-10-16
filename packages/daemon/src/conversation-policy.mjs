@@ -65,7 +65,9 @@ export function harnessPromptSection(config = {}) {
   return renderPromptFile(promptPath(config, 'harnessPromptPath', 'harness.md'), config).trim();
 }
 
+// OpenViking prompt sections exist only for an instance configured with OV.
 export function openVikingPromptSection(config = {}) {
+  if (!config.openVikingConfigPath) return '';
   return renderPromptFile(promptPath(config, 'openVikingPromptPath', 'openviking.md'), config).trim();
 }
 
@@ -175,6 +177,10 @@ const CONTEXT_WORKDIR_PROMPT = `<context-workdir>
 treat ov and it's viking:// as your only working directory to save and retrive long-term, cross-session context. Use OpenViking MCPs to navigate cloud filesystem. Use OV viking:// as your only context workspace. When things need to be saved for long-term retrival, MUST save in viking:// with MCP tools. Anything not saved will be lost after session restart. Check workspace content before write with OV MCP. Use short sentence to notify things retrived from and added to OV.
 </context-workdir>`;
 
+function contextWorkdirSection(config = {}) {
+  return config.openVikingConfigPath ? CONTEXT_WORKDIR_PROMPT : '';
+}
+
 // The adapters cancel or deny every request that needs a person's answer:
 // one global runtime cannot wait on a person without stalling every chat.
 const UNATTENDED_INTERACTION_POLICY = 'This is an unattended daemon session. Native runtime dialogs, permission prompts, and MCP requests for user input are cancelled or denied; never depend on them. If you need clarification, use the messaging tools to send a question (or choices when the connector supports them), end the turn, and wait for a later authenticated user message or card answer. A cancelled dialog is not user approval.';
@@ -189,7 +195,7 @@ export function assembleConversationPolicy(config = {}) {
       emailConnectorPolicy(config),
       openVikingPromptSection(config),
       openVikingIdentityPromptSection(config),
-      CONTEXT_WORKDIR_PROMPT,
+      contextWorkdirSection(config),
       personaSection(config),
       UNATTENDED_INTERACTION_POLICY,
     ]);
@@ -199,7 +205,7 @@ export function assembleConversationPolicy(config = {}) {
     connectorEventPromptSection(),
     openVikingPromptSection(config),
     openVikingIdentityPromptSection(config),
-    CONTEXT_WORKDIR_PROMPT,
+    contextWorkdirSection(config),
     meetingAudioPromptSection(config),
     harnessPromptSection(config),
     mixedConnectorPolicy(config),

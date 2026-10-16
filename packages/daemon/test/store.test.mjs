@@ -263,6 +263,10 @@ describe('Store', () => {
     });
     assert.equal(emptyDelta.text, '');
     assert.equal(emptyDelta.throughSeq, 2);
+    // Without OpenViking there is no history to hand over; with it, an
+    // unprepared context fails closed.
+    assert.deepEqual(cognitionHistoryPrefix(store, epoch, head), { throughSeq: head, text: '' });
+    store.getOVContext = () => undefined;
     assert.throws(() => cognitionHistoryPrefix(store, epoch, head), /OpenViking context is not prepared/);
     // Even with a complete local ledger, an OV handoff is never reconstructed from it.
   });

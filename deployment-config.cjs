@@ -248,16 +248,23 @@ function parseAgent(value, index) {
   if (connectors.includes('email') && model === 'ark') {
     throw new Error(`${label} using the email connector cannot use the ark runtime`);
   }
+  // The lark-cli profile belongs to the lark connector; other instances have none.
+  if (!connectors.includes('lark') && value.profile !== undefined) {
+    throw new Error(`${label}.profile is only used by the lark connector`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
     channel,
     connectors: Object.freeze(connectors),
-    profile: manifestString(value.profile, `${label}.profile`),
+    profile: connectors.includes('lark') ? manifestString(value.profile, `${label}.profile`) : null,
     port: value.port,
     dataDir: manifestAbsolutePath(value.dataDir, `${label}.dataDir`),
     workspace: manifestAbsolutePath(value.workspace, `${label}.workspace`),
-    ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
+    // OpenViking is optional; without it the instance keeps no cross-session memory.
+    ovConfig: value.ovConfig === undefined || value.ovConfig === null
+      ? null
+      : manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     model,
     volcSessionId,
     volcEnvironmentId,
@@ -381,6 +388,22 @@ function selectDeploymentAgent(deployment, id = deployment.defaultInstance) {
   return agent;
 }
 
+// The OPENVIKING_* env an instance hands its runtimes. Without OV the memory
+// plugins a user installed globally are switched off, so they do not write
+// into the user's default OV space.
+function openVikingAgentEnv(agent) {
+  if (!agent.ovConfig) return { OPENVIKING_MEMORY_ENABLED: '0' };
+  return {
+    OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
+    OPENVIKING_CREDENTIAL_SOURCE: 'cli',
+    OPENVIKING_MEMORY_ENABLED: '1',
+    OPENVIKING_AUTO_RECALL: '0',
+    OPENVIKING_AUTO_CAPTURE: '1',
+    OPENVIKING_AUTO_COMMIT_ON_COMPACT: '1',
+    OPENVIKING_RECALL_PEER_SCOPE: 'actor',
+  };
+}
+
 function applyDeploymentAgentEnv(env, deployment, requestedId) {
   const id = requestedId || (typeof env.LARK_DAEMON_INSTANCE_ID === 'string'
     ? env.LARK_DAEMON_INSTANCE_ID.trim()
@@ -390,14 +413,20 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     LARK_DAEMON_INSTANCE_ID: agent.id,
     LARK_DAEMON_UPGRADE_TARGET: agent.id,
     LARK_DAEMON_AGENT_NAME: agent.displayName,
-    LARK_DAEMON_PROFILE: agent.profile,
-    LARKSUITE_CLI_PROFILE: agent.profile,
     LARK_DAEMON_PORT: String(agent.port),
     LARK_DAEMON_DATA_DIR: agent.dataDir,
     LARK_DAEMON_WORKSPACE: agent.workspace,
-    OPENVIKING_CLI_CONFIG_FILE: agent.ovConfig,
     LARK_DAEMON_MODEL: agent.model,
   });
+  if (agent.profile) {
+    env.LARK_DAEMON_PROFILE = agent.profile;
+    env.LARKSUITE_CLI_PROFILE = agent.profile;
+  } else {
+    delete env.LARK_DAEMON_PROFILE;
+    delete env.LARKSUITE_CLI_PROFILE;
+  }
+  Object.assign(env, openVikingAgentEnv(agent));
+  if (!agent.ovConfig) delete env.OPENVIKING_CLI_CONFIG_FILE;
   env.LARK_DAEMON_CHANNEL = agent.channel;
   env.LARK_DAEMON_CONNECTORS_JSON = JSON.stringify(agent.connectors);
   if (agent.emailConfig) env.LARK_DAEMON_EMAIL_CONFIG_FILE = agent.emailConfig;
@@ -458,6 +487,7 @@ module.exports = {
   deploymentDaemonEnvOverrides,
   loadDeploymentManifest,
   loadSecretsFile,
+  openVikingAgentEnv,
   resolveDeploymentManifestPath,
   resolveSecretsFilePath,
   resolvedDeploymentDaemonEnv,

@@ -76,6 +76,7 @@ export class ActionService {
     if (tool.action) return this.supporting(tool.action, 'actions').length > 0;
     if (tool.query) return this.supporting(tool.query, 'queries').length > 0;
     if (tool.meeting) return this.meetingEnabled;
+    if (tool.openviking) return Boolean(this.ovClient || this.config.openVikingConfigPath);
     return true;
   }
 

@@ -31,7 +31,7 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 
 ### 微信单聊 MVP
 
-可以在 `deployment.json` 中增加一个微信实例。`channel` 是兼容字段；`connectors` 声明该 Core 启动的 Connector。`profile` 目前仍是必填字段，但纯微信实例不会用它访问飞书：
+可以在 `deployment.json` 中增加一个微信实例。`channel` 是兼容字段；`connectors` 声明该 Core 启动的 Connector。`profile` 是飞书 Connector 的 lark-cli profile，纯微信实例不填（填了会被拒绝）；`ovConfig` 可选：
 
 ```json
 {
@@ -39,7 +39,6 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
   "displayName": "Weixin Pi",
   "channel": "weixin",
   "connectors": ["weixin"],
-  "profile": "weixin_unused",
   "port": 3741,
   "dataDir": "/Users/you/.local/share/lark-daemon-weixin",
   "workspace": "/Users/you/Documents/work/weixin-workspace",

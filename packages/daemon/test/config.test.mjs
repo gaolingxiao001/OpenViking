@@ -178,6 +178,7 @@ describe('release-owned system prompt', () => {
       const text = loadSystemPrompt({
         systemPromptPath,
         openVikingPromptPath: empty,
+        openVikingConfigPath: path.join(directory, 'ovcli.conf'),
         harnessPromptPath: empty,
         teamTaskBoardUrl: 'https://board.example',
         agentName: '斯斯',
@@ -200,6 +201,7 @@ describe('release-owned system prompt', () => {
       const baseConfig = {
         systemPromptPath,
         openVikingPromptPath: empty,
+        openVikingConfigPath: path.join(directory, 'ovcli.conf'),
         harnessPromptPath: empty,
       };
       const withoutAudio = loadSystemPrompt({ ...baseConfig, meetingAudio: null });

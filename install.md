@@ -8,7 +8,7 @@
 - 飞书实例需要已配置 bot profile 的 `lark-cli`；微信单聊 MVP 不需要 `lark-cli`。
 - 一个 coding agent：默认支持 Codex，也可以使用 TraeX、Claude、Pi 或火山方舟 Managed Agent。
 - 正式常驻运行需要 `pm2`：`npm i -g pm2`。
-- OpenViking，用来保存跨会话上下文。每个 agent 在 deployment manifest 中配置自己的 `ovConfig`。
+- OpenViking（可选），用来保存跨会话上下文。要用时每个 agent 在 deployment manifest 中配置自己的 `ovConfig`；不配则该实例没有跨会话记忆，切换 runtime 时开空会话，并会关掉用户全局装的 OV 记忆插件（`OPENVIKING_MEMORY_ENABLED=0`）。
 - 全量测试需要 `python3` 为 Python 3.10 或以上，并安装 PyYAML（会议 ASR 用例使用）；实际会议功能的依赖见 `meeting-asr/requirements.txt`。
 
 Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [deployment.example.json](./deployment.example.json)。
@@ -39,7 +39,7 @@ git clone <repo-url> lark-daemon
 cd lark-daemon
 mkdir -p ~/.lark-daemon
 cp deployment.example.json ~/.lark-daemon/deployment.json
-# 编辑 deployment.json：至少填 profile、dataDir、workspace、ovConfig、model
+# 编辑 deployment.json：至少填 profile（飞书实例）、dataDir、workspace、model；要用 OV 再填 ovConfig
 npm run setup
 npm test && npm run check
 npm run start:daemon
@@ -49,7 +49,7 @@ npm run start:daemon
 
 ### 微信扫码与单聊链路
 
-给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`、`ovConfig`。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。manifest schema 暂时仍要求一个唯一的 `profile`；纯微信实例不会使用它访问飞书。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。
+给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`（用 OV 时再加独立的 `ovConfig`）。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。
 
 ```bash
 npm run weixin:login -- weixin
@@ -101,4 +101,4 @@ curl http://127.0.0.1:3737/ready
 
 ## 多个 agent
 
-在 `deployment.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、profile、端口、dataDir、workspace 和 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark` 和 `weixin`。省略两者时走飞书。改动拓扑后，重新执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `lark-daemon upgrade all`。
+在 `deployment.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，用 OV 时还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark` 和 `weixin`。省略两者时走飞书。改动拓扑后，重新执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `lark-daemon upgrade all`。
