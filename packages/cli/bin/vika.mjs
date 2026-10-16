@@ -8,16 +8,27 @@ import fs from 'node:fs';
 const USAGE = `用法：vika <命令>
 
   setup                       添加一个 agent 实例（扫码接飞书/微信）
+  login <lark|weixin> [实例]  给实例接入一个 IM，或登录过期后重新授权
   start [实例|web|updater]    启动本机已安装的版本；不写实例时启动全部
   stop [实例|web|updater]     停止
   restart [实例|web|updater]  重启
-  status                      查看各进程状态
-  logs <实例>                 查看日志
-  login <lark|weixin> <实例>  重新授权某个 IM
-  upgrade <实例|all>          升级到最新版本
+  status                      查看各进程状态和接入的 IM
+  logs [实例]                 查看日志
+  upgrade [实例|all]          升级到最新版本；不写时升级全部
   autostart <enable|disable>  开机自动启动（不需要 sudo）
   pi [参数...]                打开内置的 Pi（例如用 /login 登录模型）
 `;
+
+// The instances on this machine, so their names need not be remembered.
+async function listInstances() {
+  try {
+    const { describeInstances, loadInstances } = await import('../src/instances.mjs');
+    const deployment = loadInstances();
+    process.stdout.write(deployment
+      ? `\n本机的实例（实例名  机器人名字  接入的 IM）：\n${describeInstances(deployment)}\n`
+      : '\n还没有实例：运行 vika setup 添加一个。\n');
+  } catch {}
+}
 
 async function main([command, ...args]) {
   switch (command) {
@@ -43,9 +54,13 @@ async function main([command, ...args]) {
       return statusCommand();
     }
     case 'logs': {
-      if (args.length !== 1) break;
-      const { logsCommand } = await import('../src/control.mjs');
-      return logsCommand(args[0]);
+      if (args.length > 1) break;
+      const [{ logsCommand }, { chooseInstance, loadInstances }, { Prompter }] = await Promise.all([
+        import('../src/control.mjs'), import('../src/instances.mjs'), import('../src/prompt.mjs')]);
+      const prompter = new Prompter();
+      const agent = await chooseInstance({ deployment: loadInstances(), requested: args[0], prompter, question: '看哪个实例的日志' })
+        .finally(() => prompter.close());
+      return logsCommand(agent.id);
     }
     case 'login': {
       const [{ loginCommand }, { Prompter }] = await Promise.all([import('../src/login.mjs'), import('../src/prompt.mjs')]);
@@ -58,7 +73,7 @@ async function main([command, ...args]) {
     }
     case 'upgrade': {
       const { upgradeCommand } = await import('../src/upgrade.mjs');
-      return upgradeCommand(args);
+      return upgradeCommand(args.length ? args : ['all']);
     }
     case 'autostart': {
       const { autostartCommand } = await import('../src/autostart.mjs');
@@ -84,6 +99,7 @@ async function main([command, ...args]) {
     case '--help':
     case '-h':
       process.stdout.write(USAGE);
+      await listInstances();
       return 0;
     default:
       break;

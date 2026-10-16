@@ -141,7 +141,7 @@ test('the vika command prints usage, and upgrade lists the configured targets', 
   assert.match(help.stdout, /vika <命令>[\s\S]*setup[\s\S]*upgrade/);
   const unknown = spawnSync(process.execPath, [bin, 'nope'], { encoding: 'utf8' });
   assert.equal(unknown.status, 2);
-  const upgrade = spawnSync(process.execPath, [bin, 'upgrade'], {
+  const upgrade = spawnSync(process.execPath, [bin, 'upgrade', 'sally', 'extra'], {
     encoding: 'utf8',
     env: { ...process.env, VIKA_UPDATER_TARGETS_JSON: JSON.stringify({
       sally: { app: 'vika-sally', readyUrl: 'http://127.0.0.1:3740/ready', upgradeSharedWeb: false },

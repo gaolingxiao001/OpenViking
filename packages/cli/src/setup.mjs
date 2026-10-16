@@ -135,7 +135,7 @@ export async function registerApp({ plan, prompter, scopes, debug, register = nu
   }
 }
 
-async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug = false }) {
+export async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug = false }) {
   const out = (text) => prompter.write(text);
   const scopes = larkScopes();
   out('\n── 飞书 ──\n');
@@ -162,7 +162,7 @@ async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug 
   return { profile, ownerOpenId };
 }
 
-async function connectWeixin({ plan, prompter }) {
+export async function connectWeixin({ plan, prompter }) {
   prompter.write('\n── 微信 ──\n');
   fs.mkdirSync(plan.dataDir, { recursive: true, mode: 0o700 });
   const state = new WeixinState(plan.dataDir);
@@ -173,7 +173,7 @@ async function connectWeixin({ plan, prompter }) {
   }
 }
 
-function greet({ larkCliBin, profile, userId, text }) {
+export function greet({ larkCliBin, profile, userId, text }) {
   return new LarkCli(larkCliBin).sendText({ profile, userId, text });
 }
 

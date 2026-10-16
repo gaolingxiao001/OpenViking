@@ -57,7 +57,7 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 }
 ```
 
-随后对这个实例执行一次 `vika login weixin <instance-id>`。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
+随后执行一次 `vika login weixin`（有多个实例时会让你选，或写上实例名）。已有实例后补接入微信也是这条命令：它会扫码、把微信加进这个实例的 `connectors` 并重启实例。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
 
 安装依赖后扫码，再以前台方式启动这个实例：
 

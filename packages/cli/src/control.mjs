@@ -15,6 +15,7 @@ import {
   verifyPm2App,
 } from '../../updater/src/pm2.mjs';
 import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '../../updater/src/targets.mjs';
+import { imList, loadInstances } from './instances.mjs';
 
 // start / stop / restart / status / logs run the release already installed
 // under ~/.vika/current. Nothing here fetches code or publishes a release.
@@ -170,14 +171,18 @@ export async function statusCommand(options) {
   const context = defaults(options);
   const apps = appsFor(undefined, loadTargets(context.env));
   const processes = new Map((await pm2Processes(context)).map((processInfo) => [processInfo?.name, processInfo]));
+  let ims = new Map();
+  try {
+    ims = new Map((loadInstances(context.env)?.agents ?? []).map((agent) => [`vika-${agent.id}`, imList(agent.connectors)]));
+  } catch {}
   const rows = [];
   for (const spec of apps) {
     const status = processes.get(spec.app)?.pm2_env?.status ?? 'not started';
-    rows.push([spec.app, status, status === 'online' ? (await ready(spec, context) ? 'ready' : 'not ready') : '-']);
+    rows.push([spec.app, status, status === 'online' ? (await ready(spec, context) ? 'ready' : 'not ready') : '-', ims.get(spec.app) ?? '']);
   }
   const width = Math.max(...rows.map(([app]) => app.length));
-  for (const [app, status, readiness] of rows) {
-    context.stdout.write(`${app.padEnd(width)}  ${status.padEnd(11)}  ${readiness}\n`);
+  for (const [app, status, readiness, im] of rows) {
+    context.stdout.write(`${app.padEnd(width)}  ${status.padEnd(11)}  ${readiness.padEnd(9)}  ${im}`.trimEnd() + '\n');
   }
   return 0;
 }

@@ -102,3 +102,17 @@ export function writeManifest(filePath, value) {
   if (fs.existsSync(filePath)) fs.copyFileSync(filePath, `${filePath}.bak`);
   fs.renameSync(temporary, filePath);
 }
+
+// The manifest with one more IM on an existing instance. An instance written
+// before `connectors` existed has only its `channel`; that stays its primary IM.
+export function withConnector(manifest, id, connector, fields = {}) {
+  const next = structuredClone(manifest);
+  const agent = next.agents.find((candidate) => candidate.id === id);
+  if (!agent) throw new Error(`no instance ${id} in the manifest`);
+  const connectors = agent.connectors ?? [agent.channel ?? 'lark'];
+  if (connectors.includes(connector)) throw new Error(`instance ${id} already uses ${connector}`);
+  agent.channel ??= connectors[0];
+  agent.connectors = [...connectors, connector];
+  Object.assign(agent, fields);
+  return next;
+}

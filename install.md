@@ -105,12 +105,12 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```bash
 vika start|stop|restart [实例|web|updater]   # 用本机已安装的 release，不拉代码
 vika status
-vika logs <实例>
-vika login lark|weixin <实例>               # 登录过期后重新授权
+vika logs [实例]
+vika login lark|weixin [实例]               # 给实例接入飞书/微信，或登录过期后重新授权
 vika pi                                     # 打开内置 Pi，例如 /login 配模型
 ```
 
-邮箱暂时还要按 README 手动配置。
+setup 时没选的 IM，之后用 `vika login weixin` 或 `vika login lark` 补上：扫码后写进这个实例的配置并重启它；只有一个实例时不用写实例名，多个时会列出来让你选。`vika` 不带参数会列出本机所有实例和它们接入的 IM。邮箱暂时还要按 README 手动配置。
 
 ## 升级与回滚
 
