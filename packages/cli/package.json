@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.75.0",
     "qrcode-terminal": "0.12.0"
   }
 }

@@ -95,7 +95,7 @@ async function manualApp(prompter) {
   return { appId, appSecret, brand, ownerOpenId: null };
 }
 
-export async function registerApp({ plan, prompter, scopes, fetchImpl, debug }) {
+export async function registerApp({ plan, prompter, scopes, debug, register = null }) {
   const out = (text) => prompter.write(text);
   const controller = new AbortController();
   let waiting = null;
@@ -110,16 +110,16 @@ export async function registerApp({ plan, prompter, scopes, fetchImpl, debug }) 
     name: plan.displayName,
     description: 'Vika：把本机的 coding agent 接进飞书',
     scopes,
-    fetchImpl,
     signal: controller.signal,
+    ...(register ? { register } : {}),
     onQRCode: ({ url, expiresIn }) => {
       showQr(prompter.output, url, `第 1 次扫码：用飞书 App 扫码创建机器人应用（${Math.round(expiresIn / 60)} 分钟内有效）`);
       if (prompter.tty) waiting = setInterval(tick, 1000);
     },
-    onStatus: (status) => { if (status === 'domain_switched') out('\n  识别到国际版 Lark 租户\n'); },
-    onPoll: (poll) => {
-      if (debug) out(`\n  [poll] ${JSON.stringify(poll)}\n`);
-      last = poll.error === 'slow_down' ? '平台要求放慢轮询' : poll.error === 'authorization_pending' ? '等待扫码确认' : last;
+    onStatus: (status) => {
+      if (debug) out(`\n  [registration] ${status}\n`);
+      if (status === 'domain_switched') out('\n  识别到国际版 Lark 租户\n');
+      last = status === 'slow_down' ? '平台要求放慢轮询' : status === 'polling' ? '等待扫码确认' : last;
     },
   });
   try {
@@ -139,7 +139,7 @@ async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug 
   const out = (text) => prompter.write(text);
   const scopes = larkScopes();
   out('\n── 飞书 ──\n');
-  const app = await registerApp({ plan, prompter, scopes, fetchImpl, debug });
+  const app = await registerApp({ plan, prompter, scopes, debug });
   out(`  已创建应用 ${app.appId}\n`);
   const inspected = await inspectApp(app, { fetchImpl });
   const missing = missingScopes(scopes, inspected.granted);

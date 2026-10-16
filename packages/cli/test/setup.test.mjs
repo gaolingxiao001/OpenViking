@@ -161,14 +161,13 @@ test('when the scan confirmation never arrives, m switches to typing the App ID 
   output.resume();
   const prompter = new Prompter({ input, output });
   let polls = 0;
-  const fetchImpl = async (_url, init) => {
-    const action = new URLSearchParams(init.body).get('action');
-    if (action === 'poll') polls += 1;
-    const body = action === 'begin'
-      ? { device_code: 'd', verification_uri_complete: 'https://open.feishu.cn/page/launcher?user_code=A', interval: 0, expires_in: 600 }
-      : { error: 'authorization_pending' };
-    return { status: 400, text: async () => JSON.stringify(body) };
-  };
+  let aborted = false;
+  // A registration whose confirmation never arrives, until setup gives up on it.
+  const register = (options) => new Promise((_resolve, reject) => {
+    options.onQRCodeReady({ url: 'https://open.feishu.cn/page/launcher?user_code=A', expireIn: 600 });
+    const timer = setInterval(() => { polls += 1; options.onStatusChange({ status: 'polling' }); }, 2);
+    options.signal.addEventListener('abort', () => { clearInterval(timer); aborted = true; reject({ code: 'abort', description: 'aborted' }); });
+  });
   const typing = (async () => {
     while (polls < 2) await new Promise((resolve) => setTimeout(resolve, 5));
     for (const key of ['m']) input.write(key);
@@ -179,7 +178,8 @@ test('when the scan confirmation never arrives, m switches to typing the App ID 
     await new Promise((resolve) => setTimeout(resolve, 20));
     input.write('\r');
   })();
-  const app = await registerApp({ plan: { displayName: 'Vika' }, prompter, scopes: { tenant: [], user: [] }, fetchImpl });
+  const app = await registerApp({ plan: { displayName: 'Vika' }, prompter, scopes: { tenant: [], user: [] }, register });
   await typing;
+  assert.equal(aborted, true, 'the abandoned registration stops polling');
   assert.deepEqual(app, { appId: 'cli_abc123', appSecret: 'the-secret', brand: 'feishu', ownerOpenId: null });
 });

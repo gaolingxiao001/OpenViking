@@ -59,7 +59,7 @@ vika status / vika logs <id> / vika restart [id]
 
 安装包 = git archive 的代码 + `npm ci --omit=dev` 的依赖 + 官方 Node(版本在根 package.json `vika.node`) + 目标平台的 lark-cli 二进制(按 npm 包自带 checksums.txt 校验) + `release.json`(版本、平台、downloadBase)。Vika 用安装包里的 pm2(`bin/pm2`,由包内 Node 运行),`PM2_HOME=~/.vika/pm2`,不碰用户的 pm2。ecosystem 的 `interpreter` 是包内 Node;PATH 以调用者的为先,系统目录只作兜底。updater(`publisher.mjs`)只下载已发布版本:读 `<downloadBase>/latest` → 清单 → 核对 SHA-256/大小 → 解包 → 用包内 Node 冒烟 → 切 `current`;升级完从新版本重启自己(`scheduleUpdaterRestart`:分离的 shell 在 pm2 杀进程树前就已脱离)。测试桶是私有的:`VIKA_TOS_ACCESS_KEY` 会作为 `x-tos-access` 带上,换公开桶后删掉 `downloadHeaders` 和 install.sh 里那段。
 
-`vika` 命令在 `packages/cli`(bin 按子命令懒加载，`setup`/`help` 不需要 manifest):`setup` 问完全部问题、先用 daemon 的 loader 校验将写入的 manifest，再扫码(飞书设备码建应用 `lark-app.mjs`，lark-cli 写 `vika-<id>` profile 并授权 owner;微信 `loginWeixin`),最后写 `~/.vika/config.json` 并启动。`start/stop/restart/status` 只操作 `~/.vika/current` 这份已安装 release,不拉代码;`upgrade` 才走 updater。pm2 的启动与就绪检查在 `packages/updater/src/pm2.mjs`,updater 与 CLI 共用;updater 每次请求都重读 manifest(`loadTargets`),新加的实例不用重启 updater。
+`vika` 命令在 `packages/cli`(bin 按子命令懒加载，`setup`/`help` 不需要 manifest):`setup` 问完全部问题、先用 daemon 的 loader 校验将写入的 manifest，再扫码(飞书用官方 SDK 的 `registerApp` 建应用，`lark-app.mjs`；手写的同一接口客户端每次都卡在 pending，别换回去；lark-cli 写 `vika-<id>` profile 并授权 owner;微信 `loginWeixin`),最后写 `~/.vika/config.json` 并启动。`start/stop/restart/status` 只操作 `~/.vika/current` 这份已安装 release,不拉代码;`upgrade` 才走 updater。pm2 的启动与就绪检查在 `packages/updater/src/pm2.mjs`,updater 与 CLI 共用;updater 每次请求都重读 manifest(`loadTargets`),新加的实例不用重启 updater。
 
 ## 运行时事实(排查问题先看这里)
 

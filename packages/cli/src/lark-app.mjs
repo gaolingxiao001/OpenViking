@@ -1,16 +1,12 @@
-import zlib from 'node:zlib';
+import { registerApp } from '@larksuiteoapi/node-sdk';
 
 // Create a Feishu/Lark bot app by QR scan, then read back what it was
-// granted. This is the device flow of the official app registration endpoint
-// (the one @larksuiteoapi/node-sdk's registerApp wraps), written against
-// fetch so Vika needs no SDK. One scan creates, configures and publishes the
-// app; the platform drops unknown scope names silently, so the caller must
-// compare the granted scopes with the request.
-
-const FEISHU_ACCOUNTS = 'https://accounts.feishu.cn';
-const LARK_ACCOUNTS = 'https://accounts.larksuite.com';
-const REGISTRATION_PATH = '/oauth/v1/app/registration';
-const SOURCE = 'node-sdk/vika';
+// granted. Creation goes through the official SDK's registerApp (the device
+// flow of the app registration endpoint): a hand-written client of the same
+// endpoint saw every scan create the app while its poll stayed "pending", so
+// the SDK's own HTTP client is the one that is known to complete. One scan
+// creates, configures and publishes the app; the platform drops unknown scope
+// names silently, so the caller compares the granted scopes with the request.
 
 export const EVENTS = Object.freeze(['im.message.receive_v1']);
 export const CALLBACKS = Object.freeze(['card.action.trigger']);
@@ -23,104 +19,51 @@ export class LarkRegistrationError extends Error {
   }
 }
 
-// Fixed by the platform: JSON -> gzip -> base64url without padding.
-export function encodeAddons(addons) {
-  return zlib.gzipSync(Buffer.from(JSON.stringify(addons), 'utf8')).toString('base64')
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
 export function openApiBase(brand) {
   return brand === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
 }
 
-async function registration(fetchImpl, base, params) {
-  const response = await fetchImpl(`${base}${REGISTRATION_PATH}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(params).toString(),
-    signal: AbortSignal.timeout(15_000),
-  });
-  // RFC 8628: pending, slow_down and failures come back as HTTP 400 with a JSON body.
-  const text = await response.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new LarkRegistrationError('invalid_response', `app registration returned HTTP ${response.status} without JSON`);
-  }
-}
-
 // scopes: { tenant: [...], user: [...] }. onQRCode({ url, expiresIn }) shows
-// the code. Resolves with { appId, appSecret, brand, ownerOpenId }.
+// the code; onStatus gets polling / slow_down / domain_switched. Resolves with
+// { appId, appSecret, brand, ownerOpenId }.
 export async function createApp({
   name,
   description,
   scopes,
   onQRCode,
   onStatus = () => {},
-  // Every poll answer, for progress and VIKA_DEBUG; the secret is never in it.
-  onPoll = () => {},
-  signal = null,
-  fetchImpl = globalThis.fetch,
-  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now = () => Date.now(),
+  signal = undefined,
+  register = registerApp,
 }) {
-  let base = FEISHU_ACCOUNTS;
-  const begin = await registration(fetchImpl, base, {
-    action: 'begin',
-    archetype: 'PersonalAgent',
-    auth_method: 'client_secret',
-    request_user_info: 'open_id',
-  });
-  if (!begin.device_code || !begin.verification_uri_complete) {
-    throw new LarkRegistrationError(begin.error ?? 'begin_failed', begin.error_description ?? 'app registration did not start');
+  let result;
+  try {
+    result = await register({
+      source: 'vika',
+      createOnly: true,
+      appPreset: { ...(name ? { name } : {}), ...(description ? { desc: description } : {}) },
+      addons: {
+        scopes: { tenant: [...scopes.tenant], user: [...scopes.user] },
+        events: { items: { tenant: [...EVENTS] } },
+        callbacks: { items: [...CALLBACKS] },
+      },
+      signal,
+      onQRCodeReady: ({ url, expireIn }) => onQRCode({ url, expiresIn: expireIn }),
+      onStatusChange: ({ status }) => onStatus(status),
+    });
+  } catch (error) {
+    // The SDK rejects with a plain { code, description } for platform outcomes.
+    if (error instanceof Error) throw error;
+    throw new LarkRegistrationError(error?.code ?? 'unknown', error?.description ?? 'app registration failed');
   }
-  const url = new URL(begin.verification_uri_complete);
-  url.searchParams.set('from', 'sdk');
-  url.searchParams.set('source', SOURCE);
-  url.searchParams.set('tp', 'sdk');
-  if (name) url.searchParams.set('name', name);
-  if (description) url.searchParams.set('desc', description);
-  url.searchParams.set('addons', encodeAddons({
-    scopes: { tenant: [...scopes.tenant], user: [...scopes.user] },
-    events: { items: { tenant: [...EVENTS] } },
-    callbacks: { items: [...CALLBACKS] },
-  }));
-  url.searchParams.set('createOnly', 'true');
-  const expiresIn = begin.expires_in ?? 600;
-  onQRCode({ url: url.toString(), expiresIn });
-
-  const deadline = now() + expiresIn * 1000;
-  let interval = (begin.interval ?? 5) * 1000;
-  let switched = false;
-  while (now() < deadline) {
-    await sleep(interval);
-    if (signal?.aborted) throw new LarkRegistrationError('aborted', 'app registration was abandoned');
-    const poll = await registration(fetchImpl, base, { action: 'poll', device_code: begin.device_code });
-    onPoll({ ...poll, ...(poll.client_secret ? { client_secret: '***' } : {}) });
-    // A Lark (international) tenant finishes on the Lark accounts host.
-    if (poll.user_info?.tenant_brand === 'lark' && !switched) {
-      base = LARK_ACCOUNTS;
-      switched = true;
-      onStatus('domain_switched');
-      continue;
-    }
-    if (poll.client_id && poll.client_secret) {
-      return {
-        appId: poll.client_id,
-        appSecret: poll.client_secret,
-        brand: poll.user_info?.tenant_brand === 'lark' ? 'lark' : 'feishu',
-        ownerOpenId: poll.user_info?.open_id ?? null,
-      };
-    }
-    if (poll.error === 'authorization_pending') continue;
-    if (poll.error === 'slow_down') {
-      interval += 5_000;
-      onStatus('slow_down');
-      continue;
-    }
-    throw new LarkRegistrationError(poll.error ?? 'unknown', poll.error_description ?? 'app registration failed');
+  if (!result?.client_id || !result?.client_secret) {
+    throw new LarkRegistrationError('invalid_response', 'app registration returned no credentials');
   }
-  throw new LarkRegistrationError('expired_token', 'the QR code expired before it was confirmed');
+  return {
+    appId: result.client_id,
+    appSecret: result.client_secret,
+    brand: result.user_info?.tenant_brand === 'lark' ? 'lark' : 'feishu',
+    ownerOpenId: result.user_info?.open_id ?? null,
+  };
 }
 
 async function openApi(fetchImpl, brand, token, pathname) {
