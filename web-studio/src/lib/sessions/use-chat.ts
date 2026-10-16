@@ -359,14 +359,14 @@ export function useChat(options: UseChatOptions): UseChatReturn {
       const displayMessage = sendOptions?.displayMessage ?? message
 
       const userMsg = createUserMessage(displayMessage)
+      const connectionSnapshot = JSON.stringify([
+        ovClient.getOptions(),
+        ovClient.getConnection(),
+      ])
 
       if (abortRef.current) {
         const activeController = abortRef.current
-        const currentConnection = JSON.stringify([
-          ovClient.getOptions(),
-          ovClient.getConnection(),
-        ])
-        if (activeConnectionRef.current !== currentConnection) {
+        if (activeConnectionRef.current !== connectionSnapshot) {
           throw new Error('Active request belongs to a different connection')
         }
         setError(undefined)
@@ -409,10 +409,6 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
       const controller = new AbortController()
       const owner = ownerRef.current
-      const connectionSnapshot = JSON.stringify([
-        ovClient.getOptions(),
-        ovClient.getConnection(),
-      ])
       abortRef.current = controller
       activeSessionRef.current = sessionId
       activeConnectionRef.current = connectionSnapshot
