@@ -153,18 +153,9 @@ describe('module boundaries', () => {
     assert.equal(manifestOnlyAlpha.env.VIKA_DRY_RUN, 'false');
     assert.equal(manifestOnlyUpdater.env.VIKA_LOG_LEVEL, undefined);
     assert.equal(manifestOnlyUpdater.env.VIKA_DRY_RUN, undefined);
-    assert.deepEqual(JSON.parse(updater.env.VIKA_UPDATER_TARGETS_JSON), {
-      alpha: {
-        app: 'vika-alpha',
-        readyUrl: 'http://127.0.0.1:3738/ready',
-        upgradeSharedWeb: false,
-      },
-      beta: {
-        app: 'vika-beta',
-        readyUrl: 'http://127.0.0.1:3740/ready',
-        upgradeSharedWeb: false,
-      },
-    });
+    // The updater reads its targets from the manifest per request, not a list
+    // frozen into its environment at start.
+    assert.equal(updater.env.VIKA_UPDATER_TARGETS_JSON, undefined);
     assert.equal(alpha.wait_ready, true);
     assert.equal(beta.wait_ready, true);
     assert.equal(web.wait_ready, true);

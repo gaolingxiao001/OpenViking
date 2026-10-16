@@ -13,7 +13,7 @@ function clientIdFor(idempotencyKey, peerId) {
 
 export async function sendWeixinMessage({ state, to, content, idempotencyKey }) {
   const account = state.account();
-  if (!account?.token) throw new Error('Weixin is not logged in; run npm run weixin:login first');
+  if (!account?.token) throw new Error('Weixin is not logged in; run vika login weixin <instance> first');
   if (!state.knowsPeer(to)) throw new Error('Weixin recipient is not an authenticated inbound conversation');
   const clientId = clientIdFor(idempotencyKey, to);
   const common = { apiBaseUrl: account.baseUrl, token: account.token, to, contextToken: state.contextToken(to), clientId };

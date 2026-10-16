@@ -42,13 +42,13 @@ function parseUpdaterTargets(raw) {
   }));
 }
 
-const generatedTargets = process.env.VIKA_UPDATER_TARGETS_JSON
-  ? parseUpdaterTargets(process.env.VIKA_UPDATER_TARGETS_JSON)
-  : parseUpdaterTargets(JSON.stringify(
-    updaterTargetsFor(loadDeploymentManifest(process.env)),
-  ));
-
-export const TARGETS = Object.freeze(generatedTargets);
+// Read on every call: the manifest can gain an instance while the updater
+// runs. VIKA_UPDATER_TARGETS_JSON replaces the manifest, for tests.
+export function loadTargets(env = process.env) {
+  const raw = env.VIKA_UPDATER_TARGETS_JSON
+    || JSON.stringify(updaterTargetsFor(loadDeploymentManifest(env)));
+  return Object.freeze(parseUpdaterTargets(raw));
+}
 
 export const SHARED_WEB = Object.freeze({
   app: 'vika-web',
@@ -56,29 +56,31 @@ export const SHARED_WEB = Object.freeze({
   readyUrl: 'http://127.0.0.1:3737/ready',
 });
 
-export const UPGRADE_TARGETS = Object.freeze([...Object.keys(TARGETS), 'all']);
+export function upgradeTargetNames(targets = loadTargets()) {
+  return [...Object.keys(targets), 'all'];
+}
 
-export function getTarget(target) {
-  if (typeof target !== 'string' || !Object.hasOwn(TARGETS, target)) {
-    throw new Error(`target must be one of: ${UPGRADE_TARGETS.join(', ')}`);
+export function getTarget(target, targets = loadTargets()) {
+  if (typeof target !== 'string' || !Object.hasOwn(targets, target)) {
+    throw new Error(`target must be one of: ${upgradeTargetNames(targets).join(', ')}`);
   }
-  return TARGETS[target];
+  return targets[target];
 }
 
-export function getUpgradeTargets(target) {
-  if (target === 'all') return Object.entries(TARGETS);
-  return [[target, getTarget(target)]];
+export function getUpgradeTargets(target, targets = loadTargets()) {
+  if (target === 'all') return Object.entries(targets);
+  return [[target, getTarget(target, targets)]];
 }
 
-export function assertUpgradeTarget(target) {
-  if (typeof target !== 'string' || !UPGRADE_TARGETS.includes(target)) {
-    throw new Error(`target must be one of: ${UPGRADE_TARGETS.join(', ')}`);
+export function assertUpgradeTarget(target, targets = loadTargets()) {
+  if (typeof target !== 'string' || !upgradeTargetNames(targets).includes(target)) {
+    throw new Error(`target must be one of: ${upgradeTargetNames(targets).join(', ')}`);
   }
   return target;
 }
 
-export function shouldUpgradeSharedWeb(target) {
-  return target === 'all' || getTarget(target).upgradeSharedWeb === true;
+export function shouldUpgradeSharedWeb(target, targets = loadTargets()) {
+  return target === 'all' || getTarget(target, targets).upgradeSharedWeb === true;
 }
 
 export function defaultSocketPath(homeDir = os.homedir()) {

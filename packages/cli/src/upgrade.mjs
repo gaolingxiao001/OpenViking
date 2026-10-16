@@ -1,14 +1,8 @@
-#!/usr/bin/env node
 import http from 'node:http';
-const {
-  UPGRADE_TARGETS,
-  assertUpgradeTarget,
-  defaultSocketPath,
-} = await import('../src/targets.mjs');
+import { assertUpgradeTarget, defaultSocketPath, upgradeTargetNames } from '../../updater/src/targets.mjs';
 
-function usage() {
-  process.stderr.write(`usage: vika upgrade <${UPGRADE_TARGETS.join('|')}>\n`);
-}
+// `vika upgrade` only asks the updater process; the updater fetches, publishes
+// and rolls the apps, so the upgrade survives the caller disconnecting.
 
 function requestUpgrade(socketPath, target) {
   const body = JSON.stringify({ target });
@@ -45,25 +39,19 @@ function requestUpgrade(socketPath, target) {
   });
 }
 
-const [command, target, ...extra] = process.argv.slice(2);
-if (command !== 'upgrade' || !target || extra.length > 0) {
-  usage();
-  process.exitCode = 2;
-} else {
-  try {
-    assertUpgradeTarget(target);
-    const result = await requestUpgrade(
-      process.env.VIKA_UPDATER_SOCKET || defaultSocketPath(),
-      target,
-    );
-    const apps = Array.isArray(result.apps) && result.apps.length > 0
-      ? result.apps
-      : [result.app].filter(Boolean);
-    const commit = typeof result.commit === 'string' ? ` at ${result.commit.slice(0, 12)}` : '';
-    const publication = result.published ? 'published and ' : '';
-    process.stdout.write(`${publication}${apps.join(', ')} ${apps.length === 1 ? 'is' : 'are'} ready${commit} (${result.release})\n`);
-  } catch (error) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
+export async function upgradeCommand(args, { stdout = process.stdout, stderr = process.stderr, env = process.env } = {}) {
+  const [target, ...extra] = args;
+  if (!target || extra.length > 0) {
+    stderr.write(`usage: vika upgrade <${upgradeTargetNames().join('|')}>\n`);
+    return 2;
   }
+  assertUpgradeTarget(target);
+  const result = await requestUpgrade(env.VIKA_UPDATER_SOCKET || defaultSocketPath(), target);
+  const apps = Array.isArray(result.apps) && result.apps.length > 0
+    ? result.apps
+    : [result.app].filter(Boolean);
+  const commit = typeof result.commit === 'string' ? ` at ${result.commit.slice(0, 12)}` : '';
+  const publication = result.published ? 'published and ' : '';
+  stdout.write(`${publication}${apps.join(', ')} ${apps.length === 1 ? 'is' : 'are'} ready${commit} (${result.release})\n`);
+  return 0;
 }

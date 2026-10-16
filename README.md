@@ -57,13 +57,13 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 }
 ```
 
-随后对这个实例执行一次 `npm run weixin:login -- <instance-id>`。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
+随后对这个实例执行一次 `vika login weixin <instance-id>`。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
 
 安装依赖后扫码，再以前台方式启动这个实例：
 
 ```bash
 npm install
-npm run weixin:login -- weixin
+vika login weixin weixin
 VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```
 

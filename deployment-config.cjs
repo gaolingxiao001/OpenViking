@@ -480,6 +480,8 @@ function updaterTargetsFor(deployment) {
 
 module.exports = {
   AGENT_FIELDS,
+  INSTANCE_ID,
+  RESERVED_INSTANCE_IDS,
   CONTROL_ENV_MAX_BYTES,
   DAEMON_ENV_FIELDS,
   DAEMON_SECRET_ENV_FIELDS,

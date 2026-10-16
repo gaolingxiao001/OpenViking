@@ -54,7 +54,7 @@ npm run start:daemon
 给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`（用 OV 时再加独立的 `ovConfig`）。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。
 
 ```bash
-npm run weixin:login -- weixin
+vika login weixin weixin
 VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```
 
@@ -69,6 +69,26 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 在目标 agent 中设置 `model: "ark"`，用 `volcSessionId` 指向已绑定 Agent 与 Self-hosted Environment 的 seed session，并用 `volcEnvironmentId` 锁定同一个 Environment。部署层会分别注入 `VIKA_VOLC_SESSION_ID` 和 `VIKA_VOLC_ENVIRONMENT_ID`；其他 bot 不会继承这组 ID。daemon 启动时会校验 Environment ID 与 `config.type=self_hosted`，不匹配时 fail closed。每个 daemon 实例会从 seed 创建自己的 session，不会共同写 seed session；`ARK_API_KEY` 只放在进程环境中。参考已验证的 [Self-hosted Environment](https://console.volcengine.com/ark/region:cn-beijing/managed-agents/environments/env-20260831031839-rm2nj?searchField=Name)。
 
 此外要独立常驻官方 Go `EnvironmentWorker`，并给 Worker 设置 `ARK_API_KEY`、`ARK_BASE_URL`、`MA_ENVIRONMENT_ID` 和对应 bot 的 `LARKSUITE_CLI_PROFILE`。Managed Agent 通过 Worker 的 bash 调固定本机 `lark-cli` 完成回复；daemon 只负责 Sessions API/SSE，不执行工具、不回写 tool result，也不要求本轮必须返回 `agent.message`。因此仅通过 CLI 完成回复、随后直接 `end_turn` 也是成功路径。Worker 的部署、存活与升级暂不由 daemon/updater 托管。
+
+## 用 vika setup 添加实例
+
+发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置：
+
+1. 依次问实例名、机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）、接哪些 IM（飞书、微信多选，选两个时再问主渠道），以及要不要用本机检测到的 OpenViking。
+2. 飞书扫两次码：第一次创建机器人应用，按 `permission.json` 申请完整权限、订阅长连接事件和卡片回调，平台自动发版；第二次授权 owner 的用户身份。微信扫一次码。所有问题问完才开始扫码；扫码全部成功后才写配置。
+3. 写入 `~/.vika/config.json`，启动这个实例、重启共享 Web、确保 updater 在跑，然后机器人在飞书私聊里打个招呼。
+
+其他命令：
+
+```bash
+vika start|stop|restart [实例|web|updater]   # 用本机已安装的 release，不拉代码
+vika status
+vika logs <实例>
+vika login lark|weixin <实例>               # 登录过期后重新授权
+vika pi                                     # 打开内置 Pi，例如 /login 配模型
+```
+
+邮箱暂时还要按 README 手动配置。
 
 ## 正式部署与升级
 

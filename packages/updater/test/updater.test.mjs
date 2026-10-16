@@ -1021,7 +1021,7 @@ test('CLI upgrade command reaches the updater over the Unix socket', async (t) =
   });
   t.after(() => updater.close());
 
-  const bin = fileURLToPath(new URL('../bin/vika.mjs', import.meta.url));
+  const bin = fileURLToPath(new URL('../../cli/bin/vika.mjs', import.meta.url));
   const child = spawn(process.execPath, [bin, 'upgrade', 'sally'], {
     env: {
       ...process.env,

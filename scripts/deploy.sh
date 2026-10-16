@@ -15,7 +15,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BASE="$HOME/.vika"
 DEPLOY_LOCK="$BASE/deploy.lock"
 CLI_LINK="$HOME/.local/bin/vika"
-CLI_TARGET="$BASE/current/packages/updater/bin/vika.mjs"
+CLI_TARGET="$BASE/current/packages/cli/bin/vika.mjs"
 
 if [ -L "$CLI_LINK" ]; then
   EXISTING_TARGET="$(readlink "$CLI_LINK")"

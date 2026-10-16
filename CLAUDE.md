@@ -55,6 +55,8 @@ npm run start:daemon / start:web
 pm2 logs vika-<instance-id> --lines 100
 ```
 
+`vika` 命令在 `packages/cli`(bin 按子命令懒加载，`setup`/`help` 不需要 manifest):`setup` 问完全部问题、先用 daemon 的 loader 校验将写入的 manifest，再扫码(飞书设备码建应用 `lark-app.mjs`，lark-cli 写 `vika-<id>` profile 并授权 owner;微信 `loginWeixin`),最后写 `~/.vika/config.json` 并启动。`start/stop/restart/status` 只操作 `~/.vika/current` 这份已安装 release,不拉代码;`upgrade` 才走 updater。pm2 的启动与就绪检查在 `packages/updater/src/pm2.mjs`,updater 与 CLI 共用;updater 每次请求都重读 manifest(`loadTargets`),新加的实例不用重启 updater。
+
 ## 运行时事实(排查问题先看这里)
 
 - **工作区改动不会生效**:线上跑的是 `~/.vika/releases/<version>-<ts>-<commit>` 下的 release(pm2)，配置默认来自 `~/.vika/config.json`。必须 commit 后发布 release 才能让代码上线。

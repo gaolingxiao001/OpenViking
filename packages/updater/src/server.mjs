@@ -4,61 +4,32 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { createRequire } from 'node:module';
 import {
   SHARED_WEB,
   assertUpgradeTarget,
   defaultReleaseLink,
   defaultSocketPath,
   getUpgradeTargets,
+  loadTargets,
   shouldUpgradeSharedWeb,
 } from './targets.mjs';
 import { publishLatestRelease } from './publisher.mjs';
+import {
+  appControlEnv,
+  cleanPm2ControlEnv,
+  isInside,
+  pm2Processes,
+  resolveRelease,
+  startApp,
+  waitUntilReady,
+} from './pm2.mjs';
+
+export { cleanPm2ControlEnv, cleanWebPm2ControlEnv, resolveRelease, verifyPm2App } from './pm2.mjs';
 
 const execFile = promisify(execFileCallback);
-const require = createRequire(import.meta.url);
-const {
-  DAEMON_ENV_FIELDS,
-  DAEMON_SECRET_ENV_FIELDS,
-} = require('../../../deployment-config.cjs');
-const DAEMON_ENV_FIELD_SET = new Set(DAEMON_ENV_FIELDS);
 const MAX_BODY_BYTES = 4096;
 // vika-<instance>; vika-web and vika-updater share the prefix but are never pruned.
 const MANAGED_DAEMON_APP = /^vika-(?!(?:web|updater)$)[a-z][a-z0-9-]{0,31}$/;
-const WEB_FORBIDDEN_ENV_PREFIXES = Object.freeze([
-  'ARK_',
-  'VOLCENGINE_',
-  'VIKA_VOLC_',
-  'SESSION_ID',
-]);
-const PM2_CONTROL_ENV_KEYS = Object.freeze([
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'PATH',
-  'PM2_HOME',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TMPDIR',
-  'XDG_RUNTIME_DIR',
-  'VIKA_CONFIG',
-  ...DAEMON_ENV_FIELDS,
-  ...DAEMON_SECRET_ENV_FIELDS,
-]);
-
-export function cleanPm2ControlEnv(source = process.env) {
-  return Object.fromEntries(PM2_CONTROL_ENV_KEYS
-    .filter((key) => typeof source[key] === 'string'
-      && (source[key] !== '' || DAEMON_ENV_FIELD_SET.has(key)))
-    .map((key) => [key, source[key]]));
-}
-
-export function cleanWebPm2ControlEnv(source = {}) {
-  return Object.fromEntries(Object.entries(source).filter(([key]) => (
-    !WEB_FORBIDDEN_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
-  )));
-}
 
 function writeJson(response, statusCode, body) {
   const text = JSON.stringify(body);
@@ -84,67 +55,8 @@ async function readJsonBody(request) {
   }
 }
 
-async function waitUntilReady(url, fetchImpl, {
-  attempts = 30,
-  intervalMs = 1000,
-} = {}) {
-  let lastError;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const response = await fetchImpl(url, { signal: AbortSignal.timeout(1500) });
-      if (response.ok) return;
-      lastError = new Error(`ready endpoint returned ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    if (attempt + 1 < attempts) {
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-  }
-  throw new Error(`daemon did not become ready: ${lastError?.message || 'unknown error'}`);
-}
-
-function isInside(parent, child) {
-  const relative = path.relative(parent, child);
-  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
-}
-
-export async function verifyPm2App({ app, release, pm2Bin, execFileImpl, pm2Env }) {
-  const result = await execFileImpl(pm2Bin, ['jlist'], {
-    timeout: 30_000,
-    env: pm2Env || cleanPm2ControlEnv(),
-  });
-  let processes;
-  try {
-    processes = JSON.parse(result?.stdout || '[]');
-  } catch {
-    throw new Error('pm2 jlist returned invalid JSON');
-  }
-  const matches = processes.filter((processInfo) => processInfo?.name === app);
-  if (matches.length !== 1) throw new Error(`expected exactly one PM2 app named ${app}`);
-  const [processInfo] = matches;
-  if (processInfo.pm2_env?.status !== 'online') throw new Error(`${app} is not online`);
-  const execPath = await realpath(processInfo.pm2_env?.pm_exec_path || '');
-  if (!isInside(release, execPath)) {
-    throw new Error(`${app} is running outside the current release`);
-  }
-  return processInfo;
-}
-
-async function pm2Processes({ pm2Bin, execFileImpl, pm2Env }) {
-  const result = await execFileImpl(pm2Bin, ['jlist'], {
-    timeout: 30_000,
-    env: pm2Env,
-  });
-  try {
-    return JSON.parse(result?.stdout || '[]');
-  } catch {
-    throw new Error('pm2 jlist returned invalid JSON');
-  }
-}
-
-async function removeStaleManagedDaemonApps({ release, pm2Bin, execFileImpl, pm2Env }) {
-  const configuredApps = new Set(getUpgradeTargets('all').map(([, spec]) => spec.app));
+async function removeStaleManagedDaemonApps({ targets, release, pm2Bin, execFileImpl, pm2Env }) {
+  const configuredApps = new Set(getUpgradeTargets('all', targets).map(([, spec]) => spec.app));
   const releasesRoot = path.dirname(release);
   const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env });
   const removedApps = [];
@@ -208,9 +120,7 @@ async function upgradeApp(spec, {
   readyOptions,
   pm2Env,
 }) {
-  // The updater must protect Web even when rolling back to an older release
-  // whose ecosystem file predates Ark credential filtering.
-  const appPm2Env = spec.app === SHARED_WEB.app ? cleanWebPm2ControlEnv(pm2Env) : pm2Env;
+  const appPm2Env = appControlEnv(spec.app, pm2Env);
   const processes = await pm2Processes({ pm2Bin, execFileImpl, pm2Env: appPm2Env });
   const previous = processes.find((processInfo) => processInfo?.name === spec.app) || null;
   const previousWasOnline = previous?.pm2_env?.status === 'online';
@@ -220,21 +130,7 @@ async function upgradeApp(spec, {
   }
 
   try {
-    await execFileImpl(pm2Bin, [
-      'start',
-      configPath,
-      '--only',
-      spec.app,
-      '--update-env',
-    ], { timeout: 60_000, env: appPm2Env });
-    await verifyPm2App({
-      app: spec.app,
-      release,
-      pm2Bin,
-      execFileImpl,
-      pm2Env: appPm2Env,
-    });
-    await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
+    await startApp(spec, { release, configPath, pm2Bin, execFileImpl, fetchImpl, readyOptions, pm2Env });
   } catch (error) {
     await execFileImpl(pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appPm2Env }).catch(() => {});
     if (previousConfig) {
@@ -255,19 +151,6 @@ async function upgradeApp(spec, {
   }
 }
 
-export async function resolveRelease(releaseLink) {
-  const link = path.resolve(releaseLink);
-  const release = await realpath(link);
-  const releasesRoot = await realpath(path.join(path.dirname(link), 'releases')).catch((error) => {
-    if (error?.code === 'ENOENT') return path.join(path.dirname(link), 'releases');
-    throw error;
-  });
-  if (!isInside(releasesRoot, release)) {
-    throw new Error(`current release must resolve inside ${releasesRoot}`);
-  }
-  return release;
-}
-
 export async function upgradeTarget(target, {
   releaseLink = process.env.VIKA_UPDATER_RELEASE_LINK || defaultReleaseLink(),
   pm2Bin = process.env.PM2_BIN || 'pm2',
@@ -278,7 +161,10 @@ export async function upgradeTarget(target, {
   publishReleaseImpl = publishLatestRelease,
   publishOptions = {},
 } = {}) {
-  assertUpgradeTarget(target);
+  // The manifest is read on every request, so an instance added since the
+  // updater started is already a valid target.
+  const targets = loadTargets();
+  assertUpgradeTarget(target, targets);
   const deployLock = path.join(path.dirname(path.resolve(releaseLink)), 'deploy.lock');
   try {
     await mkdir(deployLock, { mode: 0o700 });
@@ -298,7 +184,7 @@ export async function upgradeTarget(target, {
     if (!isInside(release, configPath)) throw new Error('ecosystem config resolves outside the release');
 
     const upgradedApps = [];
-    for (const [, spec] of getUpgradeTargets(target)) {
+    for (const [, spec] of getUpgradeTargets(target, targets)) {
       await upgradeApp(spec, {
         release,
         configPath,
@@ -313,7 +199,7 @@ export async function upgradeTarget(target, {
 
     // Single-instance installations roll their shared Activity Web with their
     // only daemon. Multi-instance installs keep the explicit `all` boundary.
-    if (shouldUpgradeSharedWeb(target)) {
+    if (shouldUpgradeSharedWeb(target, targets)) {
       await upgradeApp(SHARED_WEB, {
         release,
         configPath,
@@ -326,7 +212,7 @@ export async function upgradeTarget(target, {
       upgradedApps.push(SHARED_WEB.app);
     }
     const removedApps = target === 'all'
-      ? await removeStaleManagedDaemonApps({ release, pm2Bin, execFileImpl, pm2Env })
+      ? await removeStaleManagedDaemonApps({ targets, release, pm2Bin, execFileImpl, pm2Env })
       : [];
     await execFileImpl(pm2Bin, ['save'], { timeout: 30_000, env: pm2Env });
 

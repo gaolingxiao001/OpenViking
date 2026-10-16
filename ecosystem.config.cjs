@@ -7,7 +7,6 @@ const {
   loadDeploymentManifest,
   openVikingAgentEnv,
   resolvedDeploymentDaemonEnv,
-  updaterTargetsFor,
 } = require('./deployment-config.cjs');
 
 const releaseDir = __dirname;
@@ -40,8 +39,6 @@ function buildEcosystem(sourceEnv = process.env) {
   if (deployment.agents.some((agent) => agent.port === 3737)) {
     throw new Error('agent port 3737 conflicts with the shared Web port');
   }
-  const updaterTargets = updaterTargetsFor(deployment);
-  const updaterTargetsJson = JSON.stringify(updaterTargets);
   const sharedDaemonEnv = resolvedDeploymentDaemonEnv(deployment, sourceEnv);
   const systemDaemonEnvOverrides = deploymentDaemonEnvOverrides(sourceEnv);
 
@@ -104,7 +101,6 @@ function buildEcosystem(sourceEnv = process.env) {
   const webTargetsJson = JSON.stringify(webTargets);
   for (const [name, value] of [
     ['VIKA_WEB_INSTANCES', webTargetsJson],
-    ['VIKA_UPDATER_TARGETS_JSON', updaterTargetsJson],
   ]) {
     if (Buffer.byteLength(value) > CONTROL_ENV_MAX_BYTES) {
       throw new Error(`${name} exceeds ${CONTROL_ENV_MAX_BYTES} bytes`);
@@ -154,7 +150,6 @@ function buildEcosystem(sourceEnv = process.env) {
           ...systemDaemonEnvOverrides,
           NODE_ENV: 'production',
           VIKA_CONFIG: deployment.manifestPath,
-          VIKA_UPDATER_TARGETS_JSON: updaterTargetsJson,
           VIKA_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
           VIKA_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),
           VIKA_UPDATER_REMOTE_URL: 'git@code.byted.org:data-arch/lark-daemon.git',
