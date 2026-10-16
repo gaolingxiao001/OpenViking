@@ -101,6 +101,7 @@ it('does not interrupt a changed connection', async () => {
   mocks.stream.mockResolvedValue(
     (async function* () {
       await pause
+      yield* []
     })(),
   )
   mocks.interrupt.mockResolvedValue({ interrupted: false })
@@ -123,6 +124,44 @@ it('does not interrupt a changed connection', async () => {
   })
 
   expect(mocks.interrupt).not.toHaveBeenCalled()
+  view.unmount()
+})
+
+it('rejects steer input after the active stream connection changes', async () => {
+  let finish!: () => void
+  const pause = new Promise<void>((resolve) => {
+    finish = resolve
+  })
+  mocks.stream.mockResolvedValue(
+    (async function* () {
+      await pause
+      yield* []
+    })(),
+  )
+  mocks.steer.mockResolvedValue({ accepted: true })
+  ovClient.setOptions({ baseUrl: 'http://source.example' })
+  const view = renderHook(() =>
+    useChat({ sessionId: 'same-session-id', identityScopeKey: 'source-scope' }),
+  )
+
+  let sending!: Promise<void>
+  await act(async () => {
+    sending = view.result.current.send('synthetic source message')
+  })
+  await waitFor(() => expect(view.result.current.status).toBe('streaming'))
+
+  ovClient.setOptions({ baseUrl: 'http://other.example' })
+  await expect(view.result.current.send('synthetic follow-up')).rejects.toThrow(
+    'Active request belongs to a different connection',
+  )
+
+  expect(mocks.steer).not.toHaveBeenCalled()
+  expect(view.result.current.messages).toHaveLength(1)
+
+  finish()
+  await act(async () => {
+    await sending
+  })
   view.unmount()
 })
 

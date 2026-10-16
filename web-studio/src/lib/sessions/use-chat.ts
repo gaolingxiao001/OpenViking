@@ -362,6 +362,13 @@ export function useChat(options: UseChatOptions): UseChatReturn {
 
       if (abortRef.current) {
         const activeController = abortRef.current
+        const currentConnection = JSON.stringify([
+          ovClient.getOptions(),
+          ovClient.getConnection(),
+        ])
+        if (activeConnectionRef.current !== currentConnection) {
+          throw new Error('Active request belongs to a different connection')
+        }
         setError(undefined)
         const appendInput = appendInputRef.current
         if (!appendInput) {
