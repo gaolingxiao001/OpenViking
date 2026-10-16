@@ -104,3 +104,22 @@ test('reads back what the app was granted and names what is missing', async () =
   assert.ok(calls.slice(1).every(({ auth }) => auth === 'Bearer t-1'));
   assert.deepEqual(missingScopes(SCOPES, inspected.granted), { tenant: ['im:message.group_msg'], user: [] });
 });
+
+test('every poll answer is reported without the secret, and an abandoned registration stops polling', async () => {
+  const { fetchImpl } = registrationServer([
+    { error: 'authorization_pending' },
+    { client_id: 'cli_new', client_secret: 'secret', user_info: { open_id: 'ou_owner' } },
+  ]);
+  const polls = [];
+  await createApp({ scopes: SCOPES, fetchImpl, ...instant, onQRCode() {}, onPoll: (poll) => polls.push(poll) });
+  assert.deepEqual(polls.map((poll) => poll.error ?? poll.client_secret), ['authorization_pending', '***']);
+
+  const controller = new AbortController();
+  const pending = registrationServer(Array.from({ length: 50 }, () => ({ error: 'authorization_pending' })));
+  let polled = 0;
+  await assert.rejects(createApp({
+    scopes: SCOPES, fetchImpl: pending.fetchImpl, signal: controller.signal, onQRCode() {},
+    sleep: async () => {}, onPoll: () => { polled += 1; if (polled === 2) controller.abort(); },
+  }), { code: 'aborted' });
+  assert.equal(polled, 2);
+});

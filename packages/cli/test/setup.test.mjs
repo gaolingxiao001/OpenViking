@@ -150,3 +150,36 @@ test('the vika command prints usage, and upgrade lists the configured targets', 
   assert.equal(upgrade.status, 2);
   assert.equal(upgrade.stderr, 'usage: vika upgrade <sally|all>\n');
 });
+
+test('when the scan confirmation never arrives, m switches to typing the App ID and Secret', async () => {
+  const { PassThrough } = await import('node:stream');
+  const { registerApp } = await import('../src/setup.mjs');
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => {};
+  const output = new PassThrough();
+  output.resume();
+  const prompter = new Prompter({ input, output });
+  let polls = 0;
+  const fetchImpl = async (_url, init) => {
+    const action = new URLSearchParams(init.body).get('action');
+    if (action === 'poll') polls += 1;
+    const body = action === 'begin'
+      ? { device_code: 'd', verification_uri_complete: 'https://open.feishu.cn/page/launcher?user_code=A', interval: 0, expires_in: 600 }
+      : { error: 'authorization_pending' };
+    return { status: 400, text: async () => JSON.stringify(body) };
+  };
+  const typing = (async () => {
+    while (polls < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (const key of ['m']) input.write(key);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    input.write('cli_abc123\r');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    input.write('the-secret\r');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    input.write('\r');
+  })();
+  const app = await registerApp({ plan: { displayName: 'Vika' }, prompter, scopes: { tenant: [], user: [] }, fetchImpl });
+  await typing;
+  assert.deepEqual(app, { appId: 'cli_abc123', appSecret: 'the-secret', brand: 'feishu', ownerOpenId: null });
+});

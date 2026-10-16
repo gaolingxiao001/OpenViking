@@ -57,6 +57,9 @@ export async function createApp({
   scopes,
   onQRCode,
   onStatus = () => {},
+  // Every poll answer, for progress and VIKA_DEBUG; the secret is never in it.
+  onPoll = () => {},
+  signal = null,
   fetchImpl = globalThis.fetch,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now(),
@@ -91,7 +94,9 @@ export async function createApp({
   let switched = false;
   while (now() < deadline) {
     await sleep(interval);
+    if (signal?.aborted) throw new LarkRegistrationError('aborted', 'app registration was abandoned');
     const poll = await registration(fetchImpl, base, { action: 'poll', device_code: begin.device_code });
+    onPoll({ ...poll, ...(poll.client_secret ? { client_secret: '***' } : {}) });
     // A Lark (international) tenant finishes on the Lark accounts host.
     if (poll.user_info?.tenant_brand === 'lark' && !switched) {
       base = LARK_ACCOUNTS;

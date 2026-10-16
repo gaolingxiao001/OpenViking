@@ -85,19 +85,61 @@ async function askPlan({ prompter, manifest, env, homeDir, runtimes, ov }) {
   return { id, displayName, dataDir, workspace, runtime, connectors, channel, useOv };
 }
 
-async function connectLark({ plan, prompter, larkCli, fetchImpl, profile }) {
+// If the confirmation never arrives, the app may still exist: its App ID and
+// App Secret (developer console → 凭证与基础信息) let setup carry on.
+async function manualApp(prompter) {
+  prompter.write('\n  在飞书开放平台打开刚创建的应用 →「凭证与基础信息」，复制下面两项：\n');
+  const appId = await prompter.text('App ID', { validate: (value) => (/^cli_[0-9a-z]+$/.test(value) ? null : 'App ID 以 cli_ 开头') });
+  const appSecret = await prompter.secret('App Secret');
+  const brand = await prompter.select('租户', [{ label: '飞书', value: 'feishu' }, { label: 'Lark（国际版）', value: 'lark' }]);
+  return { appId, appSecret, brand, ownerOpenId: null };
+}
+
+export async function registerApp({ plan, prompter, scopes, fetchImpl, debug }) {
   const out = (text) => prompter.write(text);
-  const scopes = larkScopes();
-  out('\n── 飞书 ──\n');
-  const app = await createApp({
+  const controller = new AbortController();
+  let waiting = null;
+  let last = '等待扫码';
+  const started = Date.now();
+  const manual = prompter.watchKey('m');
+  const tick = () => {
+    const seconds = Math.floor((Date.now() - started) / 1000);
+    out(`\r\x1b[2K  ${last} ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}（迟迟没有进展可以按 m 手动填写 App ID 和 Secret）`);
+  };
+  const created = createApp({
     name: plan.displayName,
     description: 'Vika：把本机的 coding agent 接进飞书',
     scopes,
     fetchImpl,
-    onQRCode: ({ url, expiresIn }) => showQr(prompter.output, url,
-      `第 1 次扫码：用飞书 App 扫码创建机器人应用（${Math.round(expiresIn / 60)} 分钟内有效）`),
-    onStatus: (status) => { if (status === 'domain_switched') out('  识别到国际版 Lark 租户\n'); },
+    signal: controller.signal,
+    onQRCode: ({ url, expiresIn }) => {
+      showQr(prompter.output, url, `第 1 次扫码：用飞书 App 扫码创建机器人应用（${Math.round(expiresIn / 60)} 分钟内有效）`);
+      if (prompter.tty) waiting = setInterval(tick, 1000);
+    },
+    onStatus: (status) => { if (status === 'domain_switched') out('\n  识别到国际版 Lark 租户\n'); },
+    onPoll: (poll) => {
+      if (debug) out(`\n  [poll] ${JSON.stringify(poll)}\n`);
+      last = poll.error === 'slow_down' ? '平台要求放慢轮询' : poll.error === 'authorization_pending' ? '等待扫码确认' : last;
+    },
   });
+  try {
+    const winner = await Promise.race([created.then((app) => ({ app })), manual.pressed.then((pressed) => ({ manual: pressed }))]);
+    if (winner?.app) return winner.app;
+    controller.abort();
+    created.catch(() => {});
+    if (waiting) { clearInterval(waiting); waiting = null; out('\n'); }
+    return await manualApp(prompter);
+  } finally {
+    if (waiting) { clearInterval(waiting); out('\n'); }
+    manual.stop();
+  }
+}
+
+async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug = false }) {
+  const out = (text) => prompter.write(text);
+  const scopes = larkScopes();
+  out('\n── 飞书 ──\n');
+  const app = await registerApp({ plan, prompter, scopes, fetchImpl, debug });
   out(`  已创建应用 ${app.appId}\n`);
   const inspected = await inspectApp(app, { fetchImpl });
   const missing = missingScopes(scopes, inspected.granted);
@@ -192,7 +234,7 @@ export async function setupCommand({
   if (!await prompter.confirm('开始扫码？')) return 1;
 
   const lark = plan.connectors.includes('lark')
-    ? await connect.lark({ plan, prompter, larkCli: new LarkCli(larkCliBin), fetchImpl, profile: agent.profile })
+    ? await connect.lark({ plan, prompter, larkCli: new LarkCli(larkCliBin), fetchImpl, profile: agent.profile, debug: Boolean(env.VIKA_DEBUG) })
     : null;
   if (plan.connectors.includes('weixin')) await connect.weixin({ plan, prompter });
   if (ovConfig) writeInstanceOvConfig({ detected: ov, instanceId: plan.id, target: ovConfig });

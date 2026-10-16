@@ -58,6 +58,40 @@ export class Prompter {
     });
   }
 
+  // While something else runs: resolves true once `key` is pressed, false
+  // when stop() is called first. Without a TTY it never fires.
+  watchKey(key) {
+    if (!this.tty) return { pressed: new Promise(() => {}), stop() {} };
+    let settle;
+    const pressed = new Promise((resolve) => { settle = resolve; });
+    const handler = (str, info = {}) => {
+      if (info.ctrl && info.name === 'c') { stop(); process.kill(process.pid, 'SIGINT'); return; }
+      if (str === key) { settle(true); stop(); }
+    };
+    const stop = () => {
+      this.input.off('keypress', handler);
+      this.input.setRawMode(false);
+      this.input.pause();
+      settle(false);
+    };
+    this.input.setRawMode(true);
+    this.input.resume();
+    this.input.on('keypress', handler);
+    return { pressed, stop };
+  }
+
+  async secret(question) {
+    if (!this.tty) return this.text(question);
+    this.write(`? ${question}: `);
+    let buffer = '';
+    return this.keys((str, key) => {
+      if (key.name === 'return' || key.name === 'enter') { this.write('\n'); return buffer.trim(); }
+      if (key.name === 'backspace') { buffer = buffer.slice(0, -1); return undefined; }
+      if (str && !key.ctrl && !key.meta && str >= ' ') buffer += str;
+      return undefined;
+    });
+  }
+
   async text(question, { initial = '', validate = () => null } = {}) {
     for (;;) {
       const hint = initial ? ` (${initial})` : '';

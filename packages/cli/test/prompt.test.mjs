@@ -77,3 +77,20 @@ test('terminal: typed text, backspace, and ctrl-c', async () => {
   type('\x03');
   await assert.rejects(prompter.text('名字'), PromptAborted);
 });
+
+test('terminal: a key can interrupt a wait, and a secret is not echoed', async () => {
+  const { prompter, input, type } = terminal();
+  const watch = prompter.watchKey('m');
+  type('x', 'm');
+  assert.equal(await watch.pressed, true);
+  assert.equal(input.raw, false);
+  const idle = prompter.watchKey('m');
+  idle.stop();
+  assert.equal(await idle.pressed, false);
+
+  let echoed = '';
+  prompter.output.on('data', (chunk) => { echoed += chunk; });
+  type('s', '3', 'c', '\r');
+  assert.equal(await prompter.secret('App Secret'), 's3c');
+  assert.doesNotMatch(echoed, /s3c/);
+});
