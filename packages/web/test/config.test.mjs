@@ -3,12 +3,12 @@ import { afterEach, beforeEach, test } from 'node:test';
 import { getConfig } from '../src/config.mjs';
 
 const KEYS = [
-  'LARK_WEB_HOST',
-  'LARK_WEB_PORT',
-  'LARK_WEB_DAEMON_HOST',
-  'LARK_WEB_DAEMON_PORT',
-  'LARK_WEB_INSTANCES',
-  'LARK_WEB_DEFAULT_INSTANCE',
+  'VIKA_WEB_HOST',
+  'VIKA_WEB_PORT',
+  'VIKA_WEB_DAEMON_HOST',
+  'VIKA_WEB_DAEMON_PORT',
+  'VIKA_WEB_INSTANCES',
+  'VIKA_WEB_DEFAULT_INSTANCE',
 ];
 let previous;
 
@@ -25,12 +25,12 @@ afterEach(() => {
 });
 
 test('web config accepts a fixed loopback allowlist of daemon instances', () => {
-  process.env.LARK_WEB_HOST = '0.0.0.0';
-  process.env.LARK_WEB_INSTANCES = JSON.stringify([
+  process.env.VIKA_WEB_HOST = '0.0.0.0';
+  process.env.VIKA_WEB_INSTANCES = JSON.stringify([
     { id: 'zayn', label: 'Zayn', host: '127.0.0.1', port: 3738 },
     { id: 'sally', label: '斯斯', host: 'localhost', port: 3740 },
   ]);
-  process.env.LARK_WEB_DEFAULT_INSTANCE = 'sally';
+  process.env.VIKA_WEB_DEFAULT_INSTANCE = 'sally';
   const config = getConfig();
   assert.deepEqual(config.instances.map(({ id, label, port }) => ({ id, label, port })), [
     { id: 'zayn', label: 'Zayn', port: 3738 },
@@ -42,40 +42,40 @@ test('web config accepts a fixed loopback allowlist of daemon instances', () => 
 });
 
 test('web routes are not capped to a fixed agent count', () => {
-  process.env.LARK_WEB_INSTANCES = JSON.stringify(Array.from({ length: 32 }, (_, index) => ({
+  process.env.VIKA_WEB_INSTANCES = JSON.stringify(Array.from({ length: 32 }, (_, index) => ({
     id: `agent-${index}`,
     label: `Agent ${index}`,
     host: '127.0.0.1',
     port: 4000 + index,
   })));
-  process.env.LARK_WEB_DEFAULT_INSTANCE = 'agent-17';
+  process.env.VIKA_WEB_DEFAULT_INSTANCE = 'agent-17';
   const config = getConfig();
   assert.equal(config.instances.length, 32);
   assert.equal(config.defaultInstance, 'agent-17');
 });
 
 test('web config rejects arbitrary upstreams, duplicate ids, and an unknown default', () => {
-  process.env.LARK_WEB_INSTANCES = JSON.stringify([
+  process.env.VIKA_WEB_INSTANCES = JSON.stringify([
     { id: 'zayn', label: 'Zayn', host: 'example.test', port: 3738 },
   ]);
   assert.throws(() => getConfig(), /loopback/);
 
-  process.env.LARK_WEB_INSTANCES = JSON.stringify([
+  process.env.VIKA_WEB_INSTANCES = JSON.stringify([
     { id: 'zayn', label: 'Zayn', host: '127.0.0.1', port: 3738 },
     { id: 'zayn', label: 'Other', host: '127.0.0.1', port: 3740 },
   ]);
   assert.throws(() => getConfig(), /duplicate.*id/);
 
-  process.env.LARK_WEB_INSTANCES = JSON.stringify([
+  process.env.VIKA_WEB_INSTANCES = JSON.stringify([
     { id: 'zayn', label: 'Zayn', host: '127.0.0.1', port: 3738 },
   ]);
-  process.env.LARK_WEB_DEFAULT_INSTANCE = 'sally';
+  process.env.VIKA_WEB_DEFAULT_INSTANCE = 'sally';
   assert.throws(() => getConfig(), /must name an entry/);
 });
 
 test('web config rejects arbitrary bind hosts while allowing wildcard listeners', () => {
-  process.env.LARK_WEB_HOST = 'example.test';
+  process.env.VIKA_WEB_HOST = 'example.test';
   assert.throws(() => getConfig(), /wildcard or loopback/);
-  process.env.LARK_WEB_HOST = '::';
+  process.env.VIKA_WEB_HOST = '::';
   assert.equal(getConfig().host, '::');
 });

@@ -190,7 +190,7 @@ export async function startMockEnv({
   config: configOverrides = {},
   prepare = null,
 } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-mock-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-mock-'));
   const binDir = path.join(dir, 'bin');
   fs.mkdirSync(binDir);
   const fakeLark = path.join(binDir, 'fake-lark-cli.mjs');
@@ -233,7 +233,7 @@ export async function startMockEnv({
     logLevel: 'error',
     // getConfig() freezes meetingAudio paths under the live dataDir. Overriding
     // dataDir does not rebuild that object, so a developer shell with
-    // LARK_DAEMON_MEETING_AUDIO_ENABLED would bind the production socket.
+    // VIKA_MEETING_AUDIO_ENABLED would bind the production socket.
     meetingAudio: null,
     ...configOverrides,
   };

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # One-time control-plane bootstrap after publishing a release that changes the
-# updater protocol. It replaces only lark-updater, verifies the exact exec path
+# updater protocol. It replaces only vika-updater, verifies the exact exec path
 # and private socket, and restores the prior updater release on failure.
 set -euo pipefail
 
-BASE="$HOME/.local/lib/lark-daemon"
+BASE="$HOME/.vika"
 CURRENT="$BASE/current"
-SOCKET="$HOME/.local/share/lark-daemon/updater.sock"
+SOCKET="$HOME/.vika/updater.sock"
 NODE_BIN="$(command -v node || true)"
 
 pm2_control() {
@@ -20,18 +20,18 @@ pm2_control() {
   )
   local key
   for key in \
-    LARK_DAEMON_DEPLOYMENT_MANIFEST \
+    VIKA_CONFIG \
     TEAM_TASK_BOARD_URL LARK_CLI_BIN CODEX_BIN CLAUDE_BIN \
-    LARK_DAEMON_LOG_LEVEL LARK_DAEMON_DRY_RUN LARK_DAEMON_IGNORED_SENDER_IDS \
-    LARK_DAEMON_SEND_TIMEOUT_MS LARK_DAEMON_SHUTDOWN_TIMEOUT_MS \
-    LARK_DAEMON_MAX_REPLY_CHARS LARK_DAEMON_MAX_EVENT_BYTES \
-    LARK_DAEMON_MAX_EVENT_AGE_MS LARK_DAEMON_IDLE_REACTION_AFTER_MS \
-    LARK_DAEMON_RETENTION_MS LARK_DAEMON_CODEX_EFFORT \
-    LARK_DAEMON_CLAUDE_EFFORT LARK_DAEMON_CLAUDE_MODEL \
-    ARK_API_KEY LARK_DAEMON_VOLC_SESSION_ID LARK_DAEMON_VOLC_ENVIRONMENT_ID LARK_DAEMON_VOLC_BASE_URL \
-    LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS \
+    VIKA_LOG_LEVEL VIKA_DRY_RUN VIKA_IGNORED_SENDER_IDS \
+    VIKA_SEND_TIMEOUT_MS VIKA_SHUTDOWN_TIMEOUT_MS \
+    VIKA_MAX_REPLY_CHARS VIKA_MAX_EVENT_BYTES \
+    VIKA_MAX_EVENT_AGE_MS VIKA_IDLE_REACTION_AFTER_MS \
+    VIKA_RETENTION_MS VIKA_CODEX_EFFORT \
+    VIKA_CLAUDE_EFFORT VIKA_CLAUDE_MODEL \
+    ARK_API_KEY VIKA_VOLC_SESSION_ID VIKA_VOLC_ENVIRONMENT_ID VIKA_VOLC_BASE_URL \
+    VIKA_VOLC_REQUEST_TIMEOUT_MS VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS \
     FALLBACK_MODEL \
-    LARK_DAEMON_COGNITION_MAX_CHARS LARK_DAEMON_HISTORY_LIMIT
+    VIKA_COGNITION_MAX_CHARS VIKA_HISTORY_LIMIT
   do
     if declare -p "$key" >/dev/null 2>&1; then
       clean_env+=("$key=${!key}")
@@ -56,7 +56,7 @@ PREVIOUS_EXEC="$({ pm2_control jlist || true; } | BASE="$BASE" "$NODE_BIN" -e '
   process.stdin.on("end", () => {
     let rows = [];
     try { rows = JSON.parse(input || "[]"); } catch {}
-    const row = rows.find((item) => item?.name === "lark-updater");
+    const row = rows.find((item) => item?.name === "vika-updater");
     if (row?.pm2_env?.pm_exec_path) {
       try {
         const raw = path.resolve(row.pm2_env.pm_exec_path);
@@ -71,7 +71,7 @@ PREVIOUS_EXEC="$({ pm2_control jlist || true; } | BASE="$BASE" "$NODE_BIN" -e '
 ')"
 
 rollback() {
-  pm2_control delete lark-updater >/dev/null 2>&1 || true
+  pm2_control delete vika-updater >/dev/null 2>&1 || true
   if [ -z "$PREVIOUS_EXEC" ]; then
     echo "updater bootstrap failed; no previous updater was available"
     return
@@ -81,7 +81,7 @@ rollback() {
       PREVIOUS_RELEASE="${PREVIOUS_EXEC%/packages/updater/src/main.mjs}"
       echo "updater bootstrap failed; restoring $PREVIOUS_RELEASE"
       if pm2_control start "$PREVIOUS_RELEASE/ecosystem.config.cjs" \
-        --only lark-updater --update-env >/dev/null 2>&1; then
+        --only vika-updater --update-env >/dev/null 2>&1; then
         pm2_control save >/dev/null 2>&1 || true
       fi
       ;;
@@ -93,9 +93,9 @@ rollback() {
 
 trap rollback ERR
 if [ -n "$PREVIOUS_EXEC" ]; then
-  pm2_control delete lark-updater >/dev/null
+  pm2_control delete vika-updater >/dev/null
 fi
-pm2_control start "$CONFIG" --only lark-updater --update-env >/dev/null
+pm2_control start "$CONFIG" --only vika-updater --update-env >/dev/null
 
 pm2_control jlist | CURRENT_RELEASE="$CURRENT_RELEASE" "$NODE_BIN" -e '
   const fs = require("node:fs");
@@ -103,7 +103,7 @@ pm2_control jlist | CURRENT_RELEASE="$CURRENT_RELEASE" "$NODE_BIN" -e '
   let input = "";
   process.stdin.on("data", (chunk) => { input += chunk; });
   process.stdin.on("end", () => {
-    const rows = JSON.parse(input || "[]").filter((item) => item?.name === "lark-updater");
+    const rows = JSON.parse(input || "[]").filter((item) => item?.name === "vika-updater");
     if (rows.length !== 1 || rows[0]?.pm2_env?.status !== "online") process.exit(1);
     let execPath = rows[0]?.pm2_env?.pm_exec_path || "";
     try { execPath = fs.realpathSync(execPath); } catch { process.exit(1); }
@@ -122,4 +122,4 @@ curl -sf --unix-socket "$SOCKET" http://localhost/ready >/dev/null
 
 pm2_control save >/dev/null
 trap - ERR
-echo "lark-updater is ready on $CURRENT_RELEASE"
+echo "vika-updater is ready on $CURRENT_RELEASE"

@@ -8,7 +8,7 @@ const WEIXIN_TEXT_LIMIT = 4_000;
 // from it keeps a retried attempt on the same Weixin message id.
 function clientIdFor(idempotencyKey, peerId) {
   const digest = createHash('sha256').update(idempotencyKey).update('\0').update(peerId).digest('hex');
-  return `lark-daemon-${digest.slice(0, 32)}`;
+  return `vika-${digest.slice(0, 32)}`;
 }
 
 export async function sendWeixinMessage({ state, to, content, idempotencyKey }) {

@@ -23,11 +23,12 @@ const {
 } = require('../../../deployment-config.cjs');
 const DAEMON_ENV_FIELD_SET = new Set(DAEMON_ENV_FIELDS);
 const MAX_BODY_BYTES = 4096;
-const MANAGED_DAEMON_APP = /^lark-daemon-[a-z][a-z0-9-]{0,31}$/;
+// vika-<instance>; vika-web and vika-updater share the prefix but are never pruned.
+const MANAGED_DAEMON_APP = /^vika-(?!(?:web|updater)$)[a-z][a-z0-9-]{0,31}$/;
 const WEB_FORBIDDEN_ENV_PREFIXES = Object.freeze([
   'ARK_',
   'VOLCENGINE_',
-  'LARK_DAEMON_VOLC_',
+  'VIKA_VOLC_',
   'SESSION_ID',
 ]);
 const PM2_CONTROL_ENV_KEYS = Object.freeze([
@@ -41,7 +42,7 @@ const PM2_CONTROL_ENV_KEYS = Object.freeze([
   'LC_CTYPE',
   'TMPDIR',
   'XDG_RUNTIME_DIR',
-  'LARK_DAEMON_DEPLOYMENT_MANIFEST',
+  'VIKA_CONFIG',
   ...DAEMON_ENV_FIELDS,
   ...DAEMON_SECRET_ENV_FIELDS,
 ]);
@@ -268,7 +269,7 @@ export async function resolveRelease(releaseLink) {
 }
 
 export async function upgradeTarget(target, {
-  releaseLink = process.env.LARK_UPDATER_RELEASE_LINK || defaultReleaseLink(),
+  releaseLink = process.env.VIKA_UPDATER_RELEASE_LINK || defaultReleaseLink(),
   pm2Bin = process.env.PM2_BIN || 'pm2',
   execFileImpl = execFile,
   fetchImpl = globalThis.fetch,
@@ -282,7 +283,7 @@ export async function upgradeTarget(target, {
   try {
     await mkdir(deployLock, { mode: 0o700 });
   } catch (error) {
-    if (error?.code === 'EEXIST') throw new Error('another lark-daemon deploy or upgrade is running');
+    if (error?.code === 'EEXIST') throw new Error('another vika deploy or upgrade is running');
     throw error;
   }
   try {
@@ -387,7 +388,7 @@ async function removeStaleSocket(socketPath) {
 }
 
 export async function createUpdaterServer({
-  socketPath = process.env.LARK_UPDATER_SOCKET || defaultSocketPath(),
+  socketPath = process.env.VIKA_UPDATER_SOCKET || defaultSocketPath(),
   upgrade = upgradeTarget,
   requestBodyTimeoutMs = 5000,
 } = {}) {

@@ -1,5 +1,5 @@
 {
-  "name": "@lark-local/daemon",
+  "name": "@vika/daemon",
   "version": "0.4.0",
   "private": true,
   "description": "Personal Agent connectors, runtime execution, SQLite state, and private activity API.",

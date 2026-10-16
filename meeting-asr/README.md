@@ -19,7 +19,7 @@ Feishu meeting
   -> local 24 kHz to 16 kHz resampling
   -> Doubao streaming ASR 2.0
   -> versioned stdio protocol
-  -> durable lark-daemon meeting spool
+  -> durable Vika meeting spool
 ```
 
 This folder contains only that path. It has no local Whisper model, backend

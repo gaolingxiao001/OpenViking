@@ -146,10 +146,10 @@ export class VolcAgent {
     if (typeof this.fetch !== 'function') throw new Error('Volc managed-agent runtime requires fetch');
     if (!this.apiKey) throw new Error('ARK_API_KEY is required for the Volc managed-agent runtime');
     if (!this.templateSessionId) {
-      throw new Error('LARK_DAEMON_VOLC_SESSION_ID (or SESSION_ID) is required for the Volc managed-agent runtime');
+      throw new Error('VIKA_VOLC_SESSION_ID (or SESSION_ID) is required for the Volc managed-agent runtime');
     }
     if (!this.environmentId) {
-      throw new Error('LARK_DAEMON_VOLC_ENVIRONMENT_ID is required for the self-hosted Volc runtime');
+      throw new Error('VIKA_VOLC_ENVIRONMENT_ID is required for the self-hosted Volc runtime');
     }
     this.stopping = false;
     this.template = await this._getSession(this.templateSessionId);
@@ -354,7 +354,7 @@ export class VolcAgent {
         ? { type: 'agent', id: this.template.agent.id, version: this.template.agent.version }
         : this.template.agent.id,
       environment_id: this.template.environment_id,
-      title: `lark-daemon ${new Date().toISOString()}`,
+      title: `vika ${new Date().toISOString()}`,
     };
     if (Array.isArray(this.template.vault_ids) && this.template.vault_ids.length > 0) {
       body.vault_ids = this.template.vault_ids;

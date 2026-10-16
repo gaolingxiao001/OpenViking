@@ -162,10 +162,10 @@ export async function defaultValidateRelease(release, { npmBin, execFileImpl, bu
 }
 
 export async function publishLatestRelease({
-  baseDir = path.join(os.homedir(), '.local', 'lib', 'lark-daemon'),
-  mirrorDir = process.env.LARK_UPDATER_GIT_DIR || path.join(baseDir, 'upstream.git'),
-  remoteUrl = process.env.LARK_UPDATER_REMOTE_URL || DEFAULT_REMOTE_URL,
-  remoteBranch = process.env.LARK_UPDATER_REMOTE_BRANCH || DEFAULT_REMOTE_BRANCH,
+  baseDir = path.join(os.homedir(), '.vika'),
+  mirrorDir = process.env.VIKA_UPDATER_GIT_DIR || path.join(baseDir, 'upstream.git'),
+  remoteUrl = process.env.VIKA_UPDATER_REMOTE_URL || DEFAULT_REMOTE_URL,
+  remoteBranch = process.env.VIKA_UPDATER_REMOTE_BRANCH || DEFAULT_REMOTE_BRANCH,
   gitBin = process.env.GIT_BIN || 'git',
   tarBin = process.env.TAR_BIN || 'tar',
   npmBin = process.env.NPM_BIN || 'npm',

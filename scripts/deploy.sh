@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # Bootstrap or repair the updater control plane by publishing a committed
 # local ref as a versioned release under
-# ~/.local/lib/lark-daemon/releases and move the current release pointer.
+# ~/.vika/releases and move the current release pointer.
 # The working tree is never deployed — commit first, then run this.
-# Runtime config lives in ~/.lark-daemon/deployment.json by default, outside
-# versioned releases. LARK_DAEMON_DEPLOYMENT_MANIFEST may select another path.
+# Runtime config lives in ~/.vika/config.json by default, outside
+# versioned releases. VIKA_CONFIG may select another path.
 #
 # This script deliberately does not touch PM2. After the initial bootstrap,
-# normal updates use only `lark-daemon upgrade <target|all>`; the updater
+# normal updates use only `vika upgrade <target|all>`; the updater
 # fetches trusted upstream main and publishes the release itself.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BASE="$HOME/.local/lib/lark-daemon"
+BASE="$HOME/.vika"
 DEPLOY_LOCK="$BASE/deploy.lock"
-CLI_LINK="$HOME/.local/bin/lark-daemon"
-CLI_TARGET="$BASE/current/packages/updater/bin/lark-daemon.mjs"
+CLI_LINK="$HOME/.local/bin/vika"
+CLI_TARGET="$BASE/current/packages/updater/bin/vika.mjs"
 
 if [ -L "$CLI_LINK" ]; then
   EXISTING_TARGET="$(readlink "$CLI_LINK")"
@@ -30,7 +30,7 @@ fi
 
 mkdir -p "$BASE/releases"
 if ! mkdir "$DEPLOY_LOCK" 2>/dev/null; then
-  echo "another lark-daemon deploy is already running: $DEPLOY_LOCK"
+  echo "another vika deploy is already running: $DEPLOY_LOCK"
   exit 1
 fi
 trap 'rmdir "$DEPLOY_LOCK" 2>/dev/null || true' EXIT
@@ -79,4 +79,4 @@ ln -sfn "$CLI_TARGET" "$CLI_LINK"
 # successful `upgrade all`.
 echo "published $REL"
 echo "bootstrap/refresh the updater with: ./scripts/bootstrap-updater.sh"
-echo "then roll out with: lark-daemon upgrade <target|all>"
+echo "then roll out with: vika upgrade <target|all>"

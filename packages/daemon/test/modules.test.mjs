@@ -24,13 +24,13 @@ describe('module boundaries', () => {
     const require = createRequire(import.meta.url);
     const ecosystemPath = path.join(root, 'ecosystem.config.cjs');
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-ecosystem-'));
-    const manifestPath = path.join(directory, 'deployment.json');
+    const manifestPath = path.join(directory, 'config.json');
     fs.writeFileSync(manifestPath, `${JSON.stringify({
       version: 1,
       defaultInstance: 'beta',
       env: {
-        LARK_DAEMON_LOG_LEVEL: 'info',
-        LARK_DAEMON_DRY_RUN: 'false',
+        VIKA_LOG_LEVEL: 'info',
+        VIKA_DRY_RUN: 'false',
       },
       agents: [
         {
@@ -38,14 +38,14 @@ describe('module boundaries', () => {
           displayName: 'Alpha',
           profile: 'cli_alpha',
           port: 3738,
-          dataDir: '/Users/test/.local/share/lark-daemon-alpha',
+          dataDir: '/Users/test/.vika/data/alpha',
           workspace: '/Users/test/Documents/work/alpha-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.alpha',
           model: 'gpt-5.6-sol',
           meetingAudio: {
             targetChatId: 'oc_target12345678',
             pythonCommand: '/usr/bin/python3',
-            asrConfigFile: '/Users/test/.config/lark-daemon/alpha-asr.yaml',
+            asrConfigFile: '/Users/test/.config/vika/alpha-asr.yaml',
           },
         },
         {
@@ -53,7 +53,7 @@ describe('module boundaries', () => {
           displayName: 'Beta',
           profile: 'cli_beta',
           port: 3740,
-          dataDir: '/Users/test/.local/share/lark-daemon-beta',
+          dataDir: '/Users/test/.vika/data/beta',
           workspace: '/Users/test/Documents/work/beta-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.beta',
           model: 'ark',
@@ -65,10 +65,10 @@ describe('module boundaries', () => {
     const env = {
       HOME: '/Users/test',
       PATH: '/safe/bin',
-      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
-      LARK_DAEMON_LOG_LEVEL: 'debug',
+      VIKA_CONFIG: manifestPath,
+      VIKA_LOG_LEVEL: 'debug',
       ARK_API_KEY: 'system-only-secret',
-      LARK_DAEMON_VOLC_SESSION_ID: 'seed-session-ref',
+      VIKA_VOLC_SESSION_ID: 'seed-session-ref',
       SESSION_ID: 'generic-session-ref',
     };
     const original = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
@@ -82,7 +82,7 @@ describe('module boundaries', () => {
       manifestOnlyEcosystem = buildEcosystem({
         HOME: '/Users/test',
         PATH: '/safe/bin',
-        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+        VIKA_CONFIG: manifestPath,
       });
     } finally {
       for (const [key, value] of Object.entries(original)) {
@@ -93,74 +93,74 @@ describe('module boundaries', () => {
     }
     assert.deepEqual(
       ecosystem.apps.map((app) => app.name),
-      ['lark-daemon-alpha', 'lark-daemon-beta', 'lark-web', 'lark-updater'],
+      ['vika-alpha', 'vika-beta', 'vika-web', 'vika-updater'],
     );
     const [alpha, beta, web, updater] = ecosystem.apps;
     assert.match(alpha.script, /packages\/daemon\/src\/main\.mjs$/);
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
-    assert.equal(alpha.env.LARK_DAEMON_PORT, '3738');
-    assert.equal(alpha.env.LARK_DAEMON_HTTP_ENABLED, 'true');
-    assert.equal(alpha.env.LARK_DAEMON_PROFILE, 'cli_alpha');
+    assert.equal(alpha.env.VIKA_PORT, '3738');
+    assert.equal(alpha.env.VIKA_HTTP_ENABLED, 'true');
+    assert.equal(alpha.env.VIKA_LARK_PROFILE, 'cli_alpha');
     assert.equal(alpha.env.LARKSUITE_CLI_PROFILE, 'cli_alpha');
-    assert.equal(alpha.env.LARK_DAEMON_AGENT_NAME, 'Alpha');
-    assert.equal(alpha.env.LARK_DAEMON_UPGRADE_TARGET, 'alpha');
+    assert.equal(alpha.env.VIKA_AGENT_NAME, 'Alpha');
+    assert.equal(alpha.env.VIKA_UPGRADE_TARGET, 'alpha');
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
-    assert.equal(alpha.env.LARK_DAEMON_CODEX_MODEL, undefined);
-    assert.equal(alpha.env.LARK_DAEMON_MODEL, 'gpt-5.6-sol');
-    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, 'true');
-    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND, '/usr/bin/python3');
-    assert.equal(alpha.env.LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE, '/Users/test/.config/lark-daemon/alpha-asr.yaml');
-    assert.deepEqual(JSON.parse(alpha.env.LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON).slice(1, 3), [
+    assert.equal(alpha.env.VIKA_CODEX_MODEL, undefined);
+    assert.equal(alpha.env.VIKA_MODEL, 'gpt-5.6-sol');
+    assert.equal(alpha.env.VIKA_MEETING_AUDIO_ENABLED, 'true');
+    assert.equal(alpha.env.VIKA_MEETING_AUDIO_WORKER_COMMAND, '/usr/bin/python3');
+    assert.equal(alpha.env.VIKA_MEETING_AUDIO_ASR_CONFIG_FILE, '/Users/test/.config/vika/alpha-asr.yaml');
+    assert.deepEqual(JSON.parse(alpha.env.VIKA_MEETING_AUDIO_WORKER_ARGS_JSON).slice(1, 3), [
       '--worker-dir',
       path.join(root, 'meeting-asr'),
     ]);
-    assert.equal(alpha.env.LARK_DAEMON_LOG_LEVEL, 'debug');
-    assert.equal(alpha.env.LARK_DAEMON_DRY_RUN, 'false');
+    assert.equal(alpha.env.VIKA_LOG_LEVEL, 'debug');
+    assert.equal(alpha.env.VIKA_DRY_RUN, 'false');
     assert.equal(alpha.env.ARK_API_KEY, 'system-only-secret');
-    assert.equal(alpha.env.LARK_DAEMON_VOLC_SESSION_ID, '');
-    assert.equal(alpha.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, '');
-    assert.equal(beta.env.LARK_DAEMON_PROFILE, 'cli_beta');
-    assert.equal(beta.env.LARK_DAEMON_MODEL, 'ark');
-    assert.equal(beta.env.LARK_DAEMON_CODEX_MODEL, undefined);
-    assert.equal(beta.env.LARK_DAEMON_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
-    assert.equal(beta.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
-    assert.equal(beta.env.LARK_DAEMON_MEETING_AUDIO_ENABLED, undefined);
-    assert.equal(web.env.LARK_WEB_PORT, '3737');
-    assert.equal(web.env.LARK_WEB_DEFAULT_INSTANCE, 'beta');
+    assert.equal(alpha.env.VIKA_VOLC_SESSION_ID, '');
+    assert.equal(alpha.env.VIKA_VOLC_ENVIRONMENT_ID, '');
+    assert.equal(beta.env.VIKA_LARK_PROFILE, 'cli_beta');
+    assert.equal(beta.env.VIKA_MODEL, 'ark');
+    assert.equal(beta.env.VIKA_CODEX_MODEL, undefined);
+    assert.equal(beta.env.VIKA_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
+    assert.equal(beta.env.VIKA_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
+    assert.equal(beta.env.VIKA_MEETING_AUDIO_ENABLED, undefined);
+    assert.equal(web.env.VIKA_WEB_PORT, '3737');
+    assert.equal(web.env.VIKA_WEB_DEFAULT_INSTANCE, 'beta');
     const effectiveWebEnv = Object.fromEntries(Object.entries({
       ...env,
       ...web.env,
     }).filter(([key]) => !web.filter_env.some((prefix) => key.startsWith(prefix))));
     assert.equal(effectiveWebEnv.ARK_API_KEY, undefined);
-    assert.equal(effectiveWebEnv.LARK_DAEMON_VOLC_SESSION_ID, undefined);
+    assert.equal(effectiveWebEnv.VIKA_VOLC_SESSION_ID, undefined);
     assert.equal(effectiveWebEnv.SESSION_ID, undefined);
     assert.deepEqual(
-      JSON.parse(web.env.LARK_WEB_INSTANCES),
+      JSON.parse(web.env.VIKA_WEB_INSTANCES),
       [
         { id: 'alpha', label: 'Alpha', host: '127.0.0.1', port: 3738 },
         { id: 'beta', label: 'Beta', host: '127.0.0.1', port: 3740 },
       ],
     );
     assert.match(updater.script, /packages\/updater\/src\/main\.mjs$/);
-    assert.match(updater.env.LARK_UPDATER_SOCKET, /updater\.sock$/);
-    assert.equal(updater.env.LARK_DAEMON_DEPLOYMENT_MANIFEST, manifestPath);
-    assert.equal(updater.env.LARK_DAEMON_LOG_LEVEL, 'debug');
+    assert.match(updater.env.VIKA_UPDATER_SOCKET, /updater\.sock$/);
+    assert.equal(updater.env.VIKA_CONFIG, manifestPath);
+    assert.equal(updater.env.VIKA_LOG_LEVEL, 'debug');
     assert.equal(updater.env.ARK_API_KEY, 'system-only-secret');
-    assert.equal(updater.env.LARK_DAEMON_DRY_RUN, undefined);
-    assert.equal(web.env.LARK_DAEMON_LOG_LEVEL, undefined);
+    assert.equal(updater.env.VIKA_DRY_RUN, undefined);
+    assert.equal(web.env.VIKA_LOG_LEVEL, undefined);
     const [manifestOnlyAlpha, , , manifestOnlyUpdater] = manifestOnlyEcosystem.apps;
-    assert.equal(manifestOnlyAlpha.env.LARK_DAEMON_LOG_LEVEL, 'info');
-    assert.equal(manifestOnlyAlpha.env.LARK_DAEMON_DRY_RUN, 'false');
-    assert.equal(manifestOnlyUpdater.env.LARK_DAEMON_LOG_LEVEL, undefined);
-    assert.equal(manifestOnlyUpdater.env.LARK_DAEMON_DRY_RUN, undefined);
-    assert.deepEqual(JSON.parse(updater.env.LARK_UPDATER_TARGETS_JSON), {
+    assert.equal(manifestOnlyAlpha.env.VIKA_LOG_LEVEL, 'info');
+    assert.equal(manifestOnlyAlpha.env.VIKA_DRY_RUN, 'false');
+    assert.equal(manifestOnlyUpdater.env.VIKA_LOG_LEVEL, undefined);
+    assert.equal(manifestOnlyUpdater.env.VIKA_DRY_RUN, undefined);
+    assert.deepEqual(JSON.parse(updater.env.VIKA_UPDATER_TARGETS_JSON), {
       alpha: {
-        app: 'lark-daemon-alpha',
+        app: 'vika-alpha',
         readyUrl: 'http://127.0.0.1:3738/ready',
         upgradeSharedWeb: false,
       },
       beta: {
-        app: 'lark-daemon-beta',
+        app: 'vika-beta',
         readyUrl: 'http://127.0.0.1:3740/ready',
         upgradeSharedWeb: false,
       },
@@ -203,7 +203,7 @@ describe('module boundaries', () => {
     assert.doesNotMatch(deploy, /ENV_FILE|REL\/\.env|REPO\/\.env|BASE\/env/);
     assert.match(deploy, /ln -sfn "\$REL" "\$BASE\/current"/);
     assert.match(deploy, /ln -sfn "\$PREV" "\$BASE\/rollback"/);
-    assert.match(deploy, /lark-daemon upgrade <target\|all>/);
+    assert.match(deploy, /vika upgrade <target\|all>/);
     assert.match(deploy, /refusing to replace foreign CLI symlink/);
     assert.match(deploy, /refusing to replace existing CLI path/);
     assert.doesNotMatch(deploy, /pm2_control\(\)/);
@@ -214,17 +214,17 @@ describe('module boundaries', () => {
     const bootstrap = fs.readFileSync(path.join(root, 'scripts', 'bootstrap-updater.sh'), 'utf8');
     assert.match(bootstrap, /pm2_control\(\)/);
     assert.match(bootstrap, /env -i/);
-    assert.match(bootstrap, /LARK_DAEMON_DEPLOYMENT_MANIFEST/);
-    assert.match(bootstrap, /LARK_DAEMON_LOG_LEVEL/);
+    assert.match(bootstrap, /VIKA_CONFIG/);
+    assert.match(bootstrap, /VIKA_LOG_LEVEL/);
     assert.match(bootstrap, /ARK_API_KEY/);
-    assert.match(bootstrap, /LARK_DAEMON_VOLC_SESSION_ID/);
-    assert.match(bootstrap, /delete lark-updater/);
-    assert.match(bootstrap, /start "\$CONFIG" --only lark-updater --update-env/);
+    assert.match(bootstrap, /VIKA_VOLC_SESSION_ID/);
+    assert.match(bootstrap, /delete vika-updater/);
+    assert.match(bootstrap, /start "\$CONFIG" --only vika-updater --update-env/);
     assert.doesNotMatch(bootstrap, /startOrReload/);
     assert.match(bootstrap, /--unix-socket "\$SOCKET" http:\/\/localhost\/ready/);
     assert.match(bootstrap, /"\$BASE"\/releases\/\*\/packages\/updater\/src\/main\.mjs/);
     assert.match(bootstrap, /restoring \$PREVIOUS_RELEASE/);
-    assert.doesNotMatch(bootstrap, /--only (?:all|lark-daemon)/);
+    assert.doesNotMatch(bootstrap, /--only (?:all\b|vika-(?!updater\b))/);
   });
 
   it('allows exact sibling operations without permitting self or broad PM2 control', () => {
@@ -234,10 +234,10 @@ describe('module boundaries', () => {
     );
     assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);
     assert.match(prompt, /Self-updates must go through an allowlisted external updater\/supervisor/);
-    assert.match(prompt, /lark-daemon upgrade \{\{LARK_DAEMON_UPGRADE_TARGET\}\}/);
+    assert.match(prompt, /vika upgrade \{\{VIKA_UPGRADE_TARGET\}\}/);
     assert.match(prompt, /without running `deploy\.sh`/);
     assert.match(prompt, /may manage an explicitly named sibling daemon\/web pair only after verifying/);
     assert.match(prompt, /Never use broad PM2 selectors or touch unrelated applications/);
-    assert.doesNotMatch(prompt, /Never deploy, restart, stop, or reconfigure lark-daemon or lark-web yourself/);
+    assert.doesNotMatch(prompt, /Never deploy, restart, stop, or reconfigure vika or vika-web yourself/);
   });
 });

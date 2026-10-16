@@ -26,7 +26,7 @@ describe('OpenViking env seam', () => {
       OPENVIKING_AUTO_RECALL: '0',
     });
     assert.equal(isOpenVikingEnvKey('OPENVIKING_CLI_CONFIG_FILE'), true);
-    assert.equal(isOpenVikingEnvKey('LARK_DAEMON_DATA_DIR'), false);
+    assert.equal(isOpenVikingEnvKey('VIKA_DATA_DIR'), false);
   });
 
   it('is the only writer of OPENVIKING_ keys on a child env', () => {
@@ -47,10 +47,13 @@ describe('OpenViking env seam', () => {
       PATH: '/bin',
       LARK_APP_SECRET: 'no',
       ARK_API_KEY: 'no',
+      VIKA_EMAIL_CONFIG_FILE: '/private/mailbox.json',
       OPENVIKING_CLI_CONFIG_FILE: '/tmp/ov.conf',
       OPENVIKING_MEMORY_ENABLED: '1',
     }, { profile: 'fixed' });
     assert.equal(env.LARK_APP_SECRET, undefined);
+    // The daemon's own settings never reach a runtime.
+    assert.equal(env.VIKA_EMAIL_CONFIG_FILE, undefined);
     assert.equal(env.ARK_API_KEY, undefined);
     assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/tmp/ov.conf');
     assert.equal(env.OPENVIKING_MEMORY_ENABLED, '1');

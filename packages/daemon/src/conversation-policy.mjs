@@ -21,13 +21,13 @@ export function substitutePromptPlaceholders(text, config = {}) {
   const boardUrl = (config.teamTaskBoardUrl ?? process.env.TEAM_TASK_BOARD_URL ?? '').trim();
   const agentName = (
     config.agentName
-    ?? process.env.LARK_DAEMON_AGENT_NAME
-    ?? process.env.LARK_DAEMON_INSTANCE_ID
+    ?? process.env.VIKA_AGENT_NAME
+    ?? process.env.VIKA_INSTANCE_ID
     ?? 'Agent'
   ).trim();
   const upgradeTarget = (
     config.upgradeTarget
-    ?? process.env.LARK_DAEMON_UPGRADE_TARGET
+    ?? process.env.VIKA_UPGRADE_TARGET
     ?? config.instanceId
     ?? '(configured target)'
   ).trim();
@@ -35,7 +35,7 @@ export function substitutePromptPlaceholders(text, config = {}) {
   return String(text ?? '')
     .replaceAll('{{TEAM_TASK_BOARD_URL}}', boardUrl || '(configured task board)')
     .replaceAll('{{AGENT_NAME}}', agentName || 'the bot')
-    .replaceAll('{{LARK_DAEMON_UPGRADE_TARGET}}', upgradeTarget || '(configured target)')
+    .replaceAll('{{VIKA_UPGRADE_TARGET}}', upgradeTarget || '(configured target)')
     .replaceAll('{{LARK_PROFILE}}', profile);
 }
 
@@ -72,7 +72,7 @@ export function openVikingPromptSection(config = {}) {
 }
 
 // The daemon loads the identity before any runtime starts, and only when
-// LARK_DAEMON_OV_IDENTITY is on; assembling the policy does no I/O.
+// VIKA_OV_IDENTITY is on; assembling the policy does no I/O.
 export function openVikingIdentityPromptSection(config = {}) {
   const loaded = config.openVikingIdentity;
   if (!loaded?.text) return '';
@@ -233,8 +233,8 @@ export function localLarkCliDeliveryPolicy(config = {}, runtimeName = 'Agent') {
 export function assembleVolcConversationPolicy(config = {}, extra = []) {
   const agentName = (
     config.agentName
-    ?? process.env.LARK_DAEMON_AGENT_NAME
-    ?? process.env.LARK_DAEMON_INSTANCE_ID
+    ?? process.env.VIKA_AGENT_NAME
+    ?? process.env.VIKA_INSTANCE_ID
     ?? 'the bot'
   ).trim() || 'the bot';
   return [volcInboundSection(agentName), connectorEventPromptSection(), ...extra, personaSection(config)]

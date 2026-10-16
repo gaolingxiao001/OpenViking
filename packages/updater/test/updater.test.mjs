@@ -15,14 +15,14 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { defaultValidateRelease, publishLatestRelease } from '../src/publisher.mjs';
 
-process.env.LARK_UPDATER_TARGETS_JSON = JSON.stringify({
+process.env.VIKA_UPDATER_TARGETS_JSON = JSON.stringify({
   zayn: {
-    app: 'lark-daemon-zayn',
+    app: 'vika-zayn',
     readyUrl: 'http://127.0.0.1:3738/ready',
     upgradeSharedWeb: false,
   },
   sally: {
-    app: 'lark-daemon-sally',
+    app: 'vika-sally',
     readyUrl: 'http://127.0.0.1:3740/ready',
     upgradeSharedWeb: false,
   },
@@ -39,8 +39,8 @@ async function fixtureTempRoot(prefix) {
 }
 
 async function fixtureRelease() {
-  const root = await fixtureTempRoot('lark-updater-test-');
-  const base = path.join(root, 'lark-daemon');
+  const root = await fixtureTempRoot('vika-updater-test-');
+  const base = path.join(root, 'vika');
   const release = path.join(base, 'releases', '0.4.0-test');
   await mkdir(release, { recursive: true });
   await writeFile(path.join(release, 'ecosystem.config.cjs'), 'module.exports = {};\n');
@@ -104,10 +104,10 @@ function replacePm2Harness({ app, initialEntry, entriesByConfig }) {
 }
 
 async function fixtureBootstrapUpdater({ failCurrentReady = false } = {}) {
-  const root = await fixtureTempRoot('lark-updater-bootstrap-test-');
+  const root = await fixtureTempRoot('vika-updater-bootstrap-test-');
   const home = path.join(root, 'home');
   const fakeBin = path.join(root, 'bin');
-  const base = path.join(home, '.local', 'lib', 'lark-daemon');
+  const base = path.join(home, '.vika');
   const oldRelease = path.join(base, 'releases', '0.4.0-old');
   const currentRelease = path.join(base, 'releases', '0.4.0-current');
   const updaterRelative = path.join('packages', 'updater', 'src', 'main.mjs');
@@ -121,7 +121,7 @@ async function fixtureBootstrapUpdater({ failCurrentReady = false } = {}) {
   await mkdir(fakeBin, { recursive: true });
   await symlink(currentRelease, path.join(base, 'current'));
   await writeFile(path.join(home, 'pm2-state.json'), JSON.stringify([{
-    name: 'lark-updater',
+    name: 'vika-updater',
     pm2_env: { status: 'online', pm_exec_path: oldEntry },
   }]));
   if (failCurrentReady) await writeFile(path.join(home, 'fail-current-ready'), '1\n');
@@ -136,12 +136,12 @@ const [operation, ...args] = process.argv.slice(2);
 const readState = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const writeState = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
 fs.writeFileSync(path.join(home, 'pm2-env.json'), JSON.stringify({
-  manifest: process.env.LARK_DAEMON_DEPLOYMENT_MANIFEST,
-  logLevel: process.env.LARK_DAEMON_LOG_LEVEL,
+  manifest: process.env.VIKA_CONFIG,
+  logLevel: process.env.VIKA_LOG_LEVEL,
   arkApiKey: process.env.ARK_API_KEY,
-  volcSessionId: process.env.LARK_DAEMON_VOLC_SESSION_ID,
-  volcStreamIdleTimeoutMs: process.env.LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS,
-  profile: process.env.LARK_DAEMON_PROFILE,
+  volcSessionId: process.env.VIKA_VOLC_SESSION_ID,
+  volcStreamIdleTimeoutMs: process.env.VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS,
+  profile: process.env.VIKA_LARK_PROFILE,
 }));
 fs.appendFileSync(eventsPath, JSON.stringify(['pm2', operation, ...args]) + '\\n');
 if (operation === 'jlist') {
@@ -171,11 +171,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const home = process.env.HOME;
 const state = JSON.parse(fs.readFileSync(path.join(home, 'pm2-state.json'), 'utf8'));
-const row = state.find((item) => item.name === 'lark-updater');
+const row = state.find((item) => item.name === 'vika-updater');
 const entry = row?.pm2_env?.pm_exec_path || '';
 fs.appendFileSync(path.join(home, 'events.jsonl'), JSON.stringify(['ready', entry]) + '\\n');
 if (!entry) process.exit(22);
-const current = fs.realpathSync(path.join(home, '.local', 'lib', 'lark-daemon', 'current'));
+const current = fs.realpathSync(path.join(home, '.vika', 'current'));
 const activeRelease = entry.slice(0, -${JSON.stringify(`/${updaterRelative}`)}.length);
 if (fs.existsSync(path.join(home, 'fail-current-ready')) && activeRelease === current) process.exit(22);
 `, { mode: 0o755 });
@@ -259,7 +259,7 @@ test('upgradeTarget cold-starts only the allowlisted Sally app from current rele
         jlistCalls += 1;
         return {
           stdout: JSON.stringify(jlistCalls === 1 ? [] : [{
-            name: 'lark-daemon-sally',
+            name: 'vika-sally',
             pm2_env: { status: 'online', pm_exec_path: daemonEntry },
           }]),
         };
@@ -271,7 +271,7 @@ test('upgradeTarget cold-starts only the allowlisted Sally app from current rele
     pm2Env: { HOME: '/safe-home', PATH: '/safe-bin' },
   });
 
-  assert.equal(result.app, 'lark-daemon-sally');
+  assert.equal(result.app, 'vika-sally');
   assert.equal(result.release, fixture.release);
   assert.deepEqual(calls, [
     {
@@ -288,7 +288,7 @@ test('upgradeTarget cold-starts only the allowlisted Sally app from current rele
         'start',
         path.join(fixture.release, 'ecosystem.config.cjs'),
         '--only',
-        'lark-daemon-sally',
+        'vika-sally',
         '--update-env',
       ],
       options: {
@@ -326,9 +326,9 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
   const calls = [];
   const fetches = [];
   const processes = [
-    { name: 'lark-daemon-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
-    { name: 'lark-daemon-sally', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
-    { name: 'lark-web', pm2_env: { status: 'online', pm_exec_path: webEntry } },
+    { name: 'vika-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'vika-sally', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'vika-web', pm2_env: { status: 'online', pm_exec_path: webEntry } },
   ];
   const result = await upgradeTarget('all', {
     releaseLink: fixture.releaseLink,
@@ -342,17 +342,17 @@ test('upgrade all rolls both daemons and the shared web from one ecosystem confi
     readyOptions: { attempts: 1, intervalMs: 0 },
   });
 
-  assert.deepEqual(result.apps, ['lark-daemon-zayn', 'lark-daemon-sally', 'lark-web']);
+  assert.deepEqual(result.apps, ['vika-zayn', 'vika-sally', 'vika-web']);
   assert.deepEqual(
     calls.filter((args) => args[0] === 'start').map((args) => [args[1], args[3]]),
     [
-      [path.join(fixture.release, 'ecosystem.config.cjs'), 'lark-daemon-zayn'],
-      [path.join(fixture.release, 'ecosystem.config.cjs'), 'lark-daemon-sally'],
-      [path.join(fixture.release, 'ecosystem.config.cjs'), 'lark-web'],
+      [path.join(fixture.release, 'ecosystem.config.cjs'), 'vika-zayn'],
+      [path.join(fixture.release, 'ecosystem.config.cjs'), 'vika-sally'],
+      [path.join(fixture.release, 'ecosystem.config.cjs'), 'vika-web'],
     ],
   );
   assert.ok(!calls.some((args) => args[0] === 'startOrReload'));
-  for (const app of ['lark-daemon-zayn', 'lark-daemon-sally', 'lark-web']) {
+  for (const app of ['vika-zayn', 'vika-sally', 'vika-web']) {
     assert.ok(calls.some((args) => args[0] === 'delete' && args[1] === app));
   }
   assert.deepEqual(fetches, [
@@ -373,11 +373,11 @@ test('upgrade all removes only stale daemon apps owned by the managed releases d
     await writeFile(entry, '');
   }
   let processes = [
-    { name: 'lark-daemon-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
-    { name: 'lark-daemon-sally', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
-    { name: 'lark-web', pm2_env: { status: 'online', pm_exec_path: webEntry } },
-    { name: 'lark-daemon-retired', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
-    { name: 'lark-daemon-foreign', pm2_env: { status: 'online', pm_exec_path: foreignEntry } },
+    { name: 'vika-zayn', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'vika-sally', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'vika-web', pm2_env: { status: 'online', pm_exec_path: webEntry } },
+    { name: 'vika-retired', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
+    { name: 'vika-foreign', pm2_env: { status: 'online', pm_exec_path: foreignEntry } },
     { name: 'unrelated-service', pm2_env: { status: 'online', pm_exec_path: daemonEntry } },
   ];
   const deleted = [];
@@ -400,7 +400,7 @@ test('upgrade all removes only stale daemon apps owned by the managed releases d
           name: app,
           pm2_env: {
             status: 'online',
-            pm_exec_path: app === 'lark-web' ? webEntry : daemonEntry,
+            pm_exec_path: app === 'vika-web' ? webEntry : daemonEntry,
           },
         });
         return { stdout: '' };
@@ -412,11 +412,11 @@ test('upgrade all removes only stale daemon apps owned by the managed releases d
     readyOptions: { attempts: 1, intervalMs: 0 },
   });
 
-  assert.deepEqual(result.removedApps, ['lark-daemon-retired']);
-  assert.ok(deleted.includes('lark-daemon-retired'));
-  assert.ok(!deleted.includes('lark-daemon-foreign'));
+  assert.deepEqual(result.removedApps, ['vika-retired']);
+  assert.ok(deleted.includes('vika-retired'));
+  assert.ok(!deleted.includes('vika-foreign'));
   assert.ok(!deleted.includes('unrelated-service'));
-  assert.ok(processes.some((row) => row.name === 'lark-daemon-foreign'));
+  assert.ok(processes.some((row) => row.name === 'vika-foreign'));
   assert.ok(processes.some((row) => row.name === 'unrelated-service'));
 });
 
@@ -426,13 +426,13 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     PATH: '/safe-bin',
     PM2_HOME: '/safe-pm2',
     LANG: 'C.UTF-8',
-    name: 'lark-daemon',
+    name: 'vika',
     pm_id: '28',
     pm_exec_path: '/old/release/main.mjs',
     cwd: '/old/release',
-    LARK_DAEMON_PROFILE: 'secret-profile',
-    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/safe-home/custom/deployment.json',
-    LARK_DAEMON_LOG_LEVEL: 'debug',
+    VIKA_LARK_PROFILE: 'secret-profile',
+    VIKA_CONFIG: '/safe-home/custom/config.json',
+    VIKA_LOG_LEVEL: 'debug',
     ARK_API_KEY: 'system-only-secret',
     TEAM_TASK_BOARD_URL: '',
   }), {
@@ -440,8 +440,8 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     PATH: '/safe-bin',
     PM2_HOME: '/safe-pm2',
     LANG: 'C.UTF-8',
-    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/safe-home/custom/deployment.json',
-    LARK_DAEMON_LOG_LEVEL: 'debug',
+    VIKA_CONFIG: '/safe-home/custom/config.json',
+    VIKA_LOG_LEVEL: 'debug',
     ARK_API_KEY: 'system-only-secret',
     TEAM_TASK_BOARD_URL: '',
   });
@@ -456,7 +456,7 @@ test('upgradeTarget replaces an app whose PM2 exec path belongs to an old releas
   await writeFile(currentEntry, '');
   const currentConfig = path.join(fixture.release, 'ecosystem.config.cjs');
   const pm2 = replacePm2Harness({
-    app: 'lark-daemon-sally',
+    app: 'vika-sally',
     initialEntry: previous.entry,
     entriesByConfig: new Map([
       [currentConfig, currentEntry],
@@ -479,8 +479,8 @@ test('upgradeTarget replaces an app whose PM2 exec path belongs to an old releas
   assert.equal(pm2.activeEntry, currentEntry);
   assert.deepEqual(pm2.events, [
     ['pm2', 'jlist'],
-    ['pm2', 'delete', 'lark-daemon-sally'],
-    ['pm2', 'start', currentConfig, '--only', 'lark-daemon-sally', '--update-env'],
+    ['pm2', 'delete', 'vika-sally'],
+    ['pm2', 'start', currentConfig, '--only', 'vika-sally', '--update-env'],
     ['pm2', 'jlist'],
     ['ready', 'http://127.0.0.1:3740/ready', currentEntry],
     ['pm2', 'save'],
@@ -496,7 +496,7 @@ test('failed replacement restores the app from the release that owned its old ex
   await writeFile(currentEntry, '');
   const currentConfig = path.join(fixture.release, 'ecosystem.config.cjs');
   const pm2 = replacePm2Harness({
-    app: 'lark-daemon-sally',
+    app: 'vika-sally',
     initialEntry: previous.entry,
     entriesByConfig: new Map([
       [currentConfig, currentEntry],
@@ -518,12 +518,12 @@ test('failed replacement restores the app from the release that owned its old ex
   assert.equal(pm2.activeEntry, previous.entry);
   assert.deepEqual(pm2.events.filter((event) => event[1] !== 'save'), [
     ['pm2', 'jlist'],
-    ['pm2', 'delete', 'lark-daemon-sally'],
-    ['pm2', 'start', currentConfig, '--only', 'lark-daemon-sally', '--update-env'],
+    ['pm2', 'delete', 'vika-sally'],
+    ['pm2', 'start', currentConfig, '--only', 'vika-sally', '--update-env'],
     ['pm2', 'jlist'],
     ['ready', 'http://127.0.0.1:3740/ready', currentEntry],
-    ['pm2', 'delete', 'lark-daemon-sally'],
-    ['pm2', 'start', previous.config, '--only', 'lark-daemon-sally', '--update-env'],
+    ['pm2', 'delete', 'vika-sally'],
+    ['pm2', 'start', previous.config, '--only', 'vika-sally', '--update-env'],
     ['ready', 'http://127.0.0.1:3740/ready', previous.entry],
   ]);
 });
@@ -542,7 +542,7 @@ test('web upgrade and old-release rollback never inherit Ark credentials from PM
   await writeFile(daemonEntry, '');
   await writeFile(webEntry, '');
 
-  const active = new Map([['lark-web', previous.entry]]);
+  const active = new Map([['vika-web', previous.entry]]);
   const starts = [];
   const pm2Env = {
     HOME: '/safe-home',
@@ -550,7 +550,7 @@ test('web upgrade and old-release rollback never inherit Ark credentials from PM
     ARK_API_KEY: 'sentinel-key',
     ARK_SESSION_ID: 'sentinel-ark-session',
     VOLCENGINE_API_KEY: 'sentinel-volc-key',
-    LARK_DAEMON_VOLC_SESSION_ID: 'sentinel-seed',
+    VIKA_VOLC_SESSION_ID: 'sentinel-seed',
     SESSION_ID: 'sentinel-generic-session',
   };
   const execFileImpl = async (_command, args, options) => {
@@ -569,7 +569,7 @@ test('web upgrade and old-release rollback never inherit Ark credentials from PM
     }
     if (operation === 'start') {
       const app = args[3];
-      const entry = app === 'lark-web'
+      const entry = app === 'vika-web'
         ? (args[1] === previous.config ? previous.entry : webEntry)
         : daemonEntry;
       active.set(app, entry);
@@ -586,13 +586,13 @@ test('web upgrade and old-release rollback never inherit Ark credentials from PM
     pm2Env,
     execFileImpl,
     fetchImpl: async (url) => ({
-      ok: !url.endsWith(':3737/ready') || active.get('lark-web') === previous.entry,
+      ok: !url.endsWith(':3737/ready') || active.get('vika-web') === previous.entry,
       status: 503,
     }),
     readyOptions: { attempts: 1, intervalMs: 0 },
   }), /did not become ready/);
 
-  const webStarts = starts.filter(({ app }) => app === 'lark-web');
+  const webStarts = starts.filter(({ app }) => app === 'vika-web');
   assert.deepEqual(webStarts.map(({ config }) => config), [
     path.join(fixture.release, 'ecosystem.config.cjs'),
     previous.config,
@@ -600,7 +600,7 @@ test('web upgrade and old-release rollback never inherit Ark credentials from PM
   for (const { env } of webStarts) {
     assert.deepEqual(env, { HOME: '/safe-home', PATH: '/safe-bin' });
   }
-  assert.ok(starts.some(({ app, env }) => app.startsWith('lark-daemon-')
+  assert.ok(starts.some(({ app, env }) => app.startsWith('vika-')
     && env.ARK_API_KEY === 'sentinel-key'));
   assert.deepEqual(cleanWebPm2ControlEnv(pm2Env), {
     HOME: '/safe-home',
@@ -611,20 +611,20 @@ test('web upgrade and old-release rollback never inherit Ark credentials from PM
 test('bootstrap replaces the updater from the exact current release config and verifies readiness', async () => {
   const fixture = await fixtureBootstrapUpdater();
   const result = await fixture.run({
-    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/custom/deployment.json',
-    LARK_DAEMON_LOG_LEVEL: 'debug',
+    VIKA_CONFIG: '/custom/config.json',
+    VIKA_LOG_LEVEL: 'debug',
     ARK_API_KEY: 'system-only-secret',
-    LARK_DAEMON_VOLC_SESSION_ID: 'seed-session-ref',
-    LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS: '120000',
-    LARK_DAEMON_PROFILE: 'must-not-pass',
+    VIKA_VOLC_SESSION_ID: 'seed-session-ref',
+    VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS: '120000',
+    VIKA_LARK_PROFILE: 'must-not-pass',
   });
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.deepEqual(result.state, [{
-    name: 'lark-updater',
+    name: 'vika-updater',
     pm2_env: { status: 'online', pm_exec_path: fixture.currentEntry },
   }]);
   assert.deepEqual(result.pm2Env, {
-    manifest: '/custom/deployment.json',
+    manifest: '/custom/config.json',
     logLevel: 'debug',
     arkApiKey: 'system-only-secret',
     volcSessionId: 'seed-session-ref',
@@ -635,13 +635,13 @@ test('bootstrap replaces the updater from the exact current release config and v
   assert.deepEqual(pm2Events.map((event) => event[1]), [
     'jlist', 'delete', 'start', 'jlist', 'save',
   ]);
-  assert.deepEqual(pm2Events[1], ['pm2', 'delete', 'lark-updater']);
+  assert.deepEqual(pm2Events[1], ['pm2', 'delete', 'vika-updater']);
   assert.deepEqual(pm2Events[2], [
     'pm2',
     'start',
     path.join(fixture.currentRelease, 'ecosystem.config.cjs'),
     '--only',
-    'lark-updater',
+    'vika-updater',
     '--update-env',
   ]);
   const readyIndexes = result.events
@@ -658,7 +658,7 @@ test('failed bootstrap restores and verifies the updater from its old exec relea
   const result = await fixture.run();
   assert.notEqual(result.code, 0);
   assert.deepEqual(result.state, [{
-    name: 'lark-updater',
+    name: 'vika-updater',
     pm2_env: { status: 'online', pm_exec_path: fixture.oldEntry },
   }]);
 
@@ -666,7 +666,7 @@ test('failed bootstrap restores and verifies the updater from its old exec relea
   assert.ok(!pm2Events.some((event) => event[1] === 'startOrReload'));
   assert.deepEqual(
     pm2Events.filter((event) => event[1] === 'delete').map((event) => event[2]),
-    ['lark-updater', 'lark-updater'],
+    ['vika-updater', 'vika-updater'],
   );
   assert.deepEqual(
     pm2Events.filter((event) => event[1] === 'start').map((event) => event[2]),
@@ -699,7 +699,7 @@ test('upgradeTarget shares the deploy lock with deploy.sh', async () => {
       releaseLink: fixture.releaseLink,
       execFileImpl: async () => { called = true; },
     }),
-    /another lark-daemon deploy or upgrade is running/,
+    /another vika deploy or upgrade is running/,
   );
   assert.equal(called, false);
 });
@@ -725,7 +725,7 @@ test('upgradeTarget publishes upstream before rolling the target', async () => {
       return {
         stdout: args[0] === 'jlist'
           ? JSON.stringify([{
-            name: 'lark-daemon-sally',
+            name: 'vika-sally',
             pm2_env: { status: 'online', pm_exec_path: daemonEntry },
           }])
           : '',
@@ -848,7 +848,7 @@ test('publisher advances current and keeps the prior release as rollback', async
   await runGit(source, ['commit', '-m', 'initial']);
   await runGit(root, ['clone', '--bare', source, remote]);
   await mkdir(baseDir, { recursive: true });
-  await writeFile(path.join(baseDir, 'env'), 'LARK_DAEMON_TEST=1\n');
+  await writeFile(path.join(baseDir, 'env'), 'VIKA_TEST=1\n');
   let tick = 0;
   let failValidation = false;
   const options = {
@@ -878,14 +878,14 @@ test('publisher advances current and keeps the prior release as rollback', async
 });
 
 test('server accepts one allowlisted upgrade over its private socket', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-socket-test-');
+  const root = await fixtureTempRoot('vika-updater-socket-test-');
   const socketPath = path.join(root, 'updater.sock');
   const calls = [];
   const updater = await createUpdaterServer({
     socketPath,
     upgrade: async (target) => {
       calls.push(target);
-      return { target, app: `lark-daemon-${target}`, release: '/release', status: 'ready' };
+      return { target, app: `vika-${target}`, release: '/release', status: 'ready' };
     },
   });
   t.after(() => updater.close());
@@ -897,14 +897,14 @@ test('server accepts one allowlisted upgrade over its private socket', async (t)
 });
 
 test('request body timeout does not abort a long-running upgrade response', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-socket-test-');
+  const root = await fixtureTempRoot('vika-updater-socket-test-');
   const socketPath = path.join(root, 'updater.sock');
   const updater = await createUpdaterServer({
     socketPath,
     requestBodyTimeoutMs: 10,
     upgrade: async (target) => {
       await new Promise((resolve) => setTimeout(resolve, 30));
-      return { target, app: 'lark-daemon-sally', release: '/release/current', status: 'ready' };
+      return { target, app: 'vika-sally', release: '/release/current', status: 'ready' };
     },
   });
   t.after(() => updater.close());
@@ -931,7 +931,7 @@ test('client disconnect does not cancel an upgrade already owned by the updater'
       markStarted();
       await finish;
       markCompleted(target);
-      return { target, app: 'lark-daemon-zayn', release: '/release/current', status: 'ready' };
+      return { target, app: 'vika-zayn', release: '/release/current', status: 'ready' };
     },
   });
   t.after(() => updater.close());
@@ -953,7 +953,7 @@ test('client disconnect does not cancel an upgrade already owned by the updater'
 });
 
 test('server rejects a non-allowlisted target without calling upgrade', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-reject-test-');
+  const root = await fixtureTempRoot('vika-updater-reject-test-');
   const socketPath = path.join(root, 'updater.sock');
   let called = false;
   const updater = await createUpdaterServer({
@@ -969,7 +969,7 @@ test('server rejects a non-allowlisted target without calling upgrade', async (t
 });
 
 test('server serializes upgrade requests', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-busy-test-');
+  const root = await fixtureTempRoot('vika-updater-busy-test-');
   const socketPath = path.join(root, 'updater.sock');
   let releaseFirst;
   const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
@@ -977,7 +977,7 @@ test('server serializes upgrade requests', async (t) => {
     socketPath,
     upgrade: async (target) => {
       await firstGate;
-      return { target, app: 'lark-daemon', release: '/release', status: 'ready' };
+      return { target, app: 'vika', release: '/release', status: 'ready' };
     },
   });
   t.after(() => updater.close());
@@ -991,7 +991,7 @@ test('server serializes upgrade requests', async (t) => {
 });
 
 test('a second updater cannot unlink the live updater socket', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-owner-test-');
+  const root = await fixtureTempRoot('vika-updater-owner-test-');
   const socketPath = path.join(root, 'updater.sock');
   const first = await createUpdaterServer({
     socketPath,
@@ -1008,27 +1008,27 @@ test('a second updater cannot unlink the live updater socket', async (t) => {
 });
 
 test('CLI upgrade command reaches the updater over the Unix socket', async (t) => {
-  const root = await fixtureTempRoot('lark-updater-cli-test-');
+  const root = await fixtureTempRoot('vika-updater-cli-test-');
   const socketPath = path.join(root, 'updater.sock');
   const updater = await createUpdaterServer({
     socketPath,
     upgrade: async (target) => ({
       target,
-      app: 'lark-daemon-sally',
+      app: 'vika-sally',
       release: '/release/current',
       status: 'ready',
     }),
   });
   t.after(() => updater.close());
 
-  const bin = fileURLToPath(new URL('../bin/lark-daemon.mjs', import.meta.url));
+  const bin = fileURLToPath(new URL('../bin/vika.mjs', import.meta.url));
   const child = spawn(process.execPath, [bin, 'upgrade', 'sally'], {
     env: {
       ...process.env,
-      LARK_UPDATER_SOCKET: socketPath,
-      LARK_UPDATER_TARGETS_JSON: JSON.stringify({
+      VIKA_UPDATER_SOCKET: socketPath,
+      VIKA_UPDATER_TARGETS_JSON: JSON.stringify({
         sally: {
-          app: 'lark-daemon-sally',
+          app: 'vika-sally',
           readyUrl: 'http://127.0.0.1:3740/ready',
           upgradeSharedWeb: false,
         },
@@ -1047,6 +1047,6 @@ test('CLI upgrade command reaches the updater over the Unix socket', async (t) =
   assert.equal(exitCode, 0, Buffer.concat(stderr).toString('utf8'));
   assert.equal(
     Buffer.concat(stdout).toString('utf8'),
-    'lark-daemon-sally is ready (/release/current)\n',
+    'vika-sally is ready (/release/current)\n',
   );
 });

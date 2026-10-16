@@ -7,7 +7,7 @@ const {
 } = await import('../src/targets.mjs');
 
 function usage() {
-  process.stderr.write(`usage: lark-daemon upgrade <${UPGRADE_TARGETS.join('|')}>\n`);
+  process.stderr.write(`usage: vika upgrade <${UPGRADE_TARGETS.join('|')}>\n`);
 }
 
 function requestUpgrade(socketPath, target) {
@@ -53,7 +53,7 @@ if (command !== 'upgrade' || !target || extra.length > 0) {
   try {
     assertUpgradeTarget(target);
     const result = await requestUpgrade(
-      process.env.LARK_UPDATER_SOCKET || defaultSocketPath(),
+      process.env.VIKA_UPDATER_SOCKET || defaultSocketPath(),
       target,
     );
     const apps = Array.isArray(result.apps) && result.apps.length > 0

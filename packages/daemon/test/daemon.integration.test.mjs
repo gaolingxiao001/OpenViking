@@ -208,7 +208,7 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
 describe('ingress barrier', () => {
   it('answers /help immediately while a model turn is active', async () => {
     const daemon = new PersonalAgentDaemon(
-      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
+      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-vika-test.lock') },
       createLogger('error', { test: 'command-idle-barrier' }),
     );
     const order = [];
@@ -268,7 +268,7 @@ describe('ingress barrier', () => {
 describe('/model immediate switch', () => {
   it('executes /model without waiting for the stuck active turn', async () => {
     const daemon = new PersonalAgentDaemon(
-      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-model.lock') },
+      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-vika-model.lock') },
       createLogger('error', { test: 'model-no-wait' }),
     );
     const order = [];

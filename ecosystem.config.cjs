@@ -34,8 +34,7 @@ function defined(values) {
 function buildEcosystem(sourceEnv = process.env) {
   const homeDir = sourceEnv.HOME;
   if (!homeDir || !path.isAbsolute(homeDir)) throw new Error('HOME must be an absolute path');
-  const baseDir = path.join(homeDir, '.local', 'lib', 'lark-daemon');
-  const shareDir = path.join(homeDir, '.local', 'share');
+  const baseDir = path.join(homeDir, '.vika');
   const inheritedPath = sourceEnv.PATH || '';
   const deployment = loadDeploymentManifest(sourceEnv);
   if (deployment.agents.some((agent) => agent.port === 3737)) {
@@ -48,7 +47,7 @@ function buildEcosystem(sourceEnv = process.env) {
 
   const daemonApps = deployment.agents.map((agent) => ({
     ...common,
-    name: `lark-daemon-${agent.id}`,
+    name: `vika-${agent.id}`,
     script: path.join(daemonDir, 'src', 'main.mjs'),
     cwd: daemonDir,
     restart_delay: 2000,
@@ -59,37 +58,37 @@ function buildEcosystem(sourceEnv = process.env) {
     env: defined({
       ...sharedDaemonEnv,
       NODE_ENV: 'production',
-      LARK_DAEMON_DEPLOYMENT_MANIFEST: deployment.manifestPath,
-      LARK_DAEMON_INSTANCE_ID: agent.id,
-      LARK_DAEMON_UPGRADE_TARGET: agent.id,
-      LARK_DAEMON_HOST: '127.0.0.1',
-      LARK_DAEMON_HTTP_ENABLED: 'true',
-      LARK_DAEMON_CHANNEL: agent.channel,
-      LARK_DAEMON_CONNECTORS_JSON: JSON.stringify(agent.connectors),
-      LARK_DAEMON_EMAIL_CONFIG_FILE: agent.emailConfig || undefined,
-      LARK_DAEMON_PORT: String(agent.port),
+      VIKA_CONFIG: deployment.manifestPath,
+      VIKA_INSTANCE_ID: agent.id,
+      VIKA_UPGRADE_TARGET: agent.id,
+      VIKA_HOST: '127.0.0.1',
+      VIKA_HTTP_ENABLED: 'true',
+      VIKA_CHANNEL: agent.channel,
+      VIKA_CONNECTORS_JSON: JSON.stringify(agent.connectors),
+      VIKA_EMAIL_CONFIG_FILE: agent.emailConfig || undefined,
+      VIKA_PORT: String(agent.port),
       // Empty for an instance without the lark connector, so a profile in
       // pm2's own environment cannot leak into it.
-      LARK_DAEMON_PROFILE: agent.profile || '',
+      VIKA_LARK_PROFILE: agent.profile || '',
       LARKSUITE_CLI_PROFILE: agent.profile || '',
-      LARK_DAEMON_AGENT_NAME: agent.displayName,
-      LARK_DAEMON_DATA_DIR: agent.dataDir,
-      LARK_DAEMON_WORKSPACE: agent.workspace,
-      LARK_DAEMON_MODEL: agent.model,
+      VIKA_AGENT_NAME: agent.displayName,
+      VIKA_DATA_DIR: agent.dataDir,
+      VIKA_WORKSPACE: agent.workspace,
+      VIKA_MODEL: agent.model,
       // Empty values deliberately override any legacy global seed. Managed
       // Agent identity must remain pinned to one daemon/profile instance.
-      LARK_DAEMON_VOLC_SESSION_ID: agent.volcSessionId || '',
-      LARK_DAEMON_VOLC_ENVIRONMENT_ID: agent.volcEnvironmentId || '',
+      VIKA_VOLC_SESSION_ID: agent.volcSessionId || '',
+      VIKA_VOLC_ENVIRONMENT_ID: agent.volcEnvironmentId || '',
       ...(agent.meetingAudio ? {
-        LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
-        LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
-        LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
+        VIKA_MEETING_AUDIO_ENABLED: 'true',
+        VIKA_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
+        VIKA_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
           path.join(daemonDir, 'worker', 'meeting_asr_worker.py'),
           '--worker-dir',
           path.join(releaseDir, 'meeting-asr'),
         ]),
-        LARK_DAEMON_MEETING_AUDIO_WORKER_CWD: releaseDir,
-        LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
+        VIKA_MEETING_AUDIO_WORKER_CWD: releaseDir,
+        VIKA_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
       } : {}),
       ...openVikingAgentEnv(agent),
       PATH: `${executablePath}:${inheritedPath}`,
@@ -104,8 +103,8 @@ function buildEcosystem(sourceEnv = process.env) {
   }));
   const webTargetsJson = JSON.stringify(webTargets);
   for (const [name, value] of [
-    ['LARK_WEB_INSTANCES', webTargetsJson],
-    ['LARK_UPDATER_TARGETS_JSON', updaterTargetsJson],
+    ['VIKA_WEB_INSTANCES', webTargetsJson],
+    ['VIKA_UPDATER_TARGETS_JSON', updaterTargetsJson],
   ]) {
     if (Buffer.byteLength(value) > CONTROL_ENV_MAX_BYTES) {
       throw new Error(`${name} exceeds ${CONTROL_ENV_MAX_BYTES} bytes`);
@@ -121,10 +120,10 @@ function buildEcosystem(sourceEnv = process.env) {
           ...common.filter_env,
           'ARK_',
           'VOLCENGINE_',
-          'LARK_DAEMON_VOLC_',
+          'VIKA_VOLC_',
           'SESSION_ID',
         ],
-        name: 'lark-web',
+        name: 'vika-web',
         script: path.join(webDir, 'src', 'main.mjs'),
         cwd: webDir,
         restart_delay: 1000,
@@ -134,16 +133,16 @@ function buildEcosystem(sourceEnv = process.env) {
         listen_timeout: 10000,
         env: {
           NODE_ENV: 'production',
-          LARK_WEB_HOST: '0.0.0.0',
-          LARK_WEB_PORT: '3737',
-          LARK_WEB_DEFAULT_INSTANCE: deployment.defaultInstance,
-          LARK_WEB_INSTANCES: webTargetsJson,
+          VIKA_WEB_HOST: '0.0.0.0',
+          VIKA_WEB_PORT: '3737',
+          VIKA_WEB_DEFAULT_INSTANCE: deployment.defaultInstance,
+          VIKA_WEB_INSTANCES: webTargetsJson,
           PATH: `${executablePath}:${inheritedPath}`,
         },
       },
       {
         ...common,
-        name: 'lark-updater',
+        name: 'vika-updater',
         script: path.join(updaterDir, 'src', 'main.mjs'),
         cwd: updaterDir,
         restart_delay: 1000,
@@ -154,13 +153,13 @@ function buildEcosystem(sourceEnv = process.env) {
         env: {
           ...systemDaemonEnvOverrides,
           NODE_ENV: 'production',
-          LARK_DAEMON_DEPLOYMENT_MANIFEST: deployment.manifestPath,
-          LARK_UPDATER_TARGETS_JSON: updaterTargetsJson,
-          LARK_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
-          LARK_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),
-          LARK_UPDATER_REMOTE_URL: 'git@code.byted.org:data-arch/lark-daemon.git',
-          LARK_UPDATER_REMOTE_BRANCH: 'main',
-          LARK_UPDATER_SOCKET: path.join(shareDir, 'lark-daemon', 'updater.sock'),
+          VIKA_CONFIG: deployment.manifestPath,
+          VIKA_UPDATER_TARGETS_JSON: updaterTargetsJson,
+          VIKA_UPDATER_RELEASE_LINK: path.join(baseDir, 'current'),
+          VIKA_UPDATER_GIT_DIR: path.join(baseDir, 'upstream.git'),
+          VIKA_UPDATER_REMOTE_URL: 'git@code.byted.org:data-arch/lark-daemon.git',
+          VIKA_UPDATER_REMOTE_BRANCH: 'main',
+          VIKA_UPDATER_SOCKET: path.join(baseDir, 'updater.sock'),
           PATH: `${executablePath}:${inheritedPath}`,
         },
       },

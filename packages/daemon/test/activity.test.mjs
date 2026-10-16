@@ -70,7 +70,7 @@ describe('activity store', { concurrency: false }, () => {
   let store;
 
   beforeEach(() => {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-activity-'));
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-activity-'));
     databasePath = path.join(directory, 'state.sqlite3');
     store = new Store(databasePath, quietLogger);
   });
@@ -415,7 +415,7 @@ describe('daemon activity API', { concurrency: false }, () => {
   let port;
 
   beforeEach(async () => {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-activity-http-'));
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-activity-http-'));
     daemon = new PersonalAgentDaemon({
       dataDir: directory,
       projectDir,

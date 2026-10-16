@@ -1,11 +1,11 @@
 {
-  "name": "lark-local-agent",
+  "name": "vika",
   "version": "0.4.0",
   "private": true,
   "description": "A local personal agent core with connector processes and an activity web module.",
   "type": "module",
   "bin": {
-    "lark-daemon": "packages/updater/bin/lark-daemon.mjs"
+    "vika": "packages/updater/bin/vika.mjs"
   },
   "workspaces": [
     "packages/daemon",

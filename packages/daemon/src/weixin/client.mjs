@@ -59,7 +59,7 @@ export class WeixinClient {
     this.profile = profileId(this.account.accountId);
     if (this.config.weixinAllowFrom.size === 0 && !this.account.userId) {
       throw new Error(
-        'Weixin login returned no scanning user id; configure LARK_DAEMON_WEIXIN_ALLOW_FROM explicitly',
+        'Weixin login returned no scanning user id; configure VIKA_WEIXIN_ALLOW_FROM explicitly',
       );
     }
     this.state.pruneMedia(Date.now() - this.config.retentionMs);

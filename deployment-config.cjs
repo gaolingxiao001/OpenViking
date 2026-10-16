@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const INSTANCE_ID = /^[a-z][a-z0-9-]{0,31}$/;
+// `all` is the upgrade target for every instance; vika-web and vika-updater
+// are the shared control-plane pm2 apps, so these ids cannot name an instance.
+const RESERVED_INSTANCE_IDS = Object.freeze(['all', 'web', 'updater']);
 const CONTROL_ENV_MAX_BYTES = 262_144;
 const DEPLOYMENT_MANIFEST_MAX_BYTES = 1_048_576;
 const TOP_LEVEL_FIELDS = Object.freeze(['version', 'defaultInstance', 'env', 'agents']);
@@ -15,33 +18,33 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'TRAECLI_BIN',
   'CLAUDE_BIN',
   'PI_BIN',
-  'LARK_DAEMON_WEIXIN_ALLOW_FROM',
-  'LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS',
-  'LARK_DAEMON_LOG_LEVEL',
-  'LARK_DAEMON_DRY_RUN',
-  'LARK_DAEMON_IGNORED_SENDER_IDS',
-  'LARK_DAEMON_SEND_TIMEOUT_MS',
-  'LARK_DAEMON_SHUTDOWN_TIMEOUT_MS',
-  'LARK_DAEMON_MAX_REPLY_CHARS',
-  'LARK_DAEMON_MAX_EVENT_BYTES',
-  'LARK_DAEMON_MAX_EVENT_AGE_MS',
-  'LARK_DAEMON_IDLE_REACTION_AFTER_MS',
-  'LARK_DAEMON_OV_IDENTITY',
-  'LARK_DAEMON_RETENTION_MS',
-  'LARK_DAEMON_CODEX_EFFORT',
-  'LARK_DAEMON_TRAEX_EFFORT',
-  'LARK_DAEMON_CLAUDE_EFFORT',
-  'LARK_DAEMON_CLAUDE_MODEL',
-  'LARK_DAEMON_PI_EFFORT',
-  'LARK_DAEMON_PI_MODEL',
-  'LARK_DAEMON_VOLC_SESSION_ID',
-  'LARK_DAEMON_VOLC_ENVIRONMENT_ID',
-  'LARK_DAEMON_VOLC_BASE_URL',
-  'LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS',
-  'LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS',
+  'VIKA_WEIXIN_ALLOW_FROM',
+  'VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS',
+  'VIKA_LOG_LEVEL',
+  'VIKA_DRY_RUN',
+  'VIKA_IGNORED_SENDER_IDS',
+  'VIKA_SEND_TIMEOUT_MS',
+  'VIKA_SHUTDOWN_TIMEOUT_MS',
+  'VIKA_MAX_REPLY_CHARS',
+  'VIKA_MAX_EVENT_BYTES',
+  'VIKA_MAX_EVENT_AGE_MS',
+  'VIKA_IDLE_REACTION_AFTER_MS',
+  'VIKA_OV_IDENTITY',
+  'VIKA_RETENTION_MS',
+  'VIKA_CODEX_EFFORT',
+  'VIKA_TRAEX_EFFORT',
+  'VIKA_CLAUDE_EFFORT',
+  'VIKA_CLAUDE_MODEL',
+  'VIKA_PI_EFFORT',
+  'VIKA_PI_MODEL',
+  'VIKA_VOLC_SESSION_ID',
+  'VIKA_VOLC_ENVIRONMENT_ID',
+  'VIKA_VOLC_BASE_URL',
+  'VIKA_VOLC_REQUEST_TIMEOUT_MS',
+  'VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS',
   'FALLBACK_MODEL',
-  'LARK_DAEMON_COGNITION_MAX_CHARS',
-  'LARK_DAEMON_HISTORY_LIMIT',
+  'VIKA_COGNITION_MAX_CHARS',
+  'VIKA_HISTORY_LIMIT',
 ]);
 // Secrets may flow from the operator environment into daemon/updater PM2
 // processes, but are deliberately excluded from the deployment manifest.
@@ -72,37 +75,37 @@ const AGENT_FIELDS = Object.freeze([
 const MEETING_AUDIO_FIELDS = Object.freeze(['targetChatId', 'asrConfigFile', 'pythonCommand']);
 
 function resolveDeploymentManifestPath(env = process.env) {
-  const override = typeof env.LARK_DAEMON_DEPLOYMENT_MANIFEST === 'string'
-    ? env.LARK_DAEMON_DEPLOYMENT_MANIFEST.trim()
+  const override = typeof env.VIKA_CONFIG === 'string'
+    ? env.VIKA_CONFIG.trim()
     : '';
   if (override) {
     if (!path.isAbsolute(override)) {
-      throw new Error('LARK_DAEMON_DEPLOYMENT_MANIFEST must be an absolute path');
+      throw new Error('VIKA_CONFIG must be an absolute path');
     }
     return path.normalize(override);
   }
   const home = typeof env.HOME === 'string' ? env.HOME.trim() : '';
   if (!home || !path.isAbsolute(home)) throw new Error('HOME must be an absolute path');
-  return path.join(path.normalize(home), '.lark-daemon', 'deployment.json');
+  return path.join(path.normalize(home), '.vika', 'config.json');
 }
 
-// Secrets (DAEMON_SECRET_ENV_FIELDS) are deliberately kept out of deployment.json
+// Secrets (DAEMON_SECRET_ENV_FIELDS) are deliberately kept out of config.json
 // so they never land in a file meant to be inspected/versioned. This sibling file
-// is the deterministic fallback: whoever runs `pm2 restart`/`lark-daemon upgrade`
+// is the deterministic fallback: whoever runs `pm2 restart`/`vika upgrade`
 // no longer needs the secret exported in their own shell for it to take effect.
 function resolveSecretsFilePath(env = process.env) {
-  const override = typeof env.LARK_DAEMON_SECRETS_FILE === 'string'
-    ? env.LARK_DAEMON_SECRETS_FILE.trim()
+  const override = typeof env.VIKA_SECRETS_FILE === 'string'
+    ? env.VIKA_SECRETS_FILE.trim()
     : '';
   if (override) {
     if (!path.isAbsolute(override)) {
-      throw new Error('LARK_DAEMON_SECRETS_FILE must be an absolute path');
+      throw new Error('VIKA_SECRETS_FILE must be an absolute path');
     }
     return path.normalize(override);
   }
   const home = typeof env.HOME === 'string' ? env.HOME.trim() : '';
   if (!home || !path.isAbsolute(home)) return null;
-  return path.join(path.normalize(home), '.lark-daemon', 'secrets.env');
+  return path.join(path.normalize(home), '.vika', 'secrets.env');
 }
 
 function loadSecretsFile(env = process.env) {
@@ -174,8 +177,8 @@ function parseAgent(value, index) {
   }
   assertKnownFields(value, AGENT_FIELDS, label);
   const id = manifestString(value.id, `${label}.id`);
-  if (!INSTANCE_ID.test(id) || id === 'all') {
-    throw new Error(`${label}.id must match ${INSTANCE_ID} and cannot be all`);
+  if (!INSTANCE_ID.test(id) || RESERVED_INSTANCE_IDS.includes(id)) {
+    throw new Error(`${label}.id must match ${INSTANCE_ID} and cannot be ${RESERVED_INSTANCE_IDS.join(', ')}`);
   }
   if (!Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) {
     throw new Error(`${label}.port must be an integer between 1 and 65535`);
@@ -405,59 +408,59 @@ function openVikingAgentEnv(agent) {
 }
 
 function applyDeploymentAgentEnv(env, deployment, requestedId) {
-  const id = requestedId || (typeof env.LARK_DAEMON_INSTANCE_ID === 'string'
-    ? env.LARK_DAEMON_INSTANCE_ID.trim()
+  const id = requestedId || (typeof env.VIKA_INSTANCE_ID === 'string'
+    ? env.VIKA_INSTANCE_ID.trim()
     : '') || deployment.defaultInstance;
   const agent = selectDeploymentAgent(deployment, id);
   Object.assign(env, {
-    LARK_DAEMON_INSTANCE_ID: agent.id,
-    LARK_DAEMON_UPGRADE_TARGET: agent.id,
-    LARK_DAEMON_AGENT_NAME: agent.displayName,
-    LARK_DAEMON_PORT: String(agent.port),
-    LARK_DAEMON_DATA_DIR: agent.dataDir,
-    LARK_DAEMON_WORKSPACE: agent.workspace,
-    LARK_DAEMON_MODEL: agent.model,
+    VIKA_INSTANCE_ID: agent.id,
+    VIKA_UPGRADE_TARGET: agent.id,
+    VIKA_AGENT_NAME: agent.displayName,
+    VIKA_PORT: String(agent.port),
+    VIKA_DATA_DIR: agent.dataDir,
+    VIKA_WORKSPACE: agent.workspace,
+    VIKA_MODEL: agent.model,
   });
   if (agent.profile) {
-    env.LARK_DAEMON_PROFILE = agent.profile;
+    env.VIKA_LARK_PROFILE = agent.profile;
     env.LARKSUITE_CLI_PROFILE = agent.profile;
   } else {
-    delete env.LARK_DAEMON_PROFILE;
+    delete env.VIKA_LARK_PROFILE;
     delete env.LARKSUITE_CLI_PROFILE;
   }
   Object.assign(env, openVikingAgentEnv(agent));
   if (!agent.ovConfig) delete env.OPENVIKING_CLI_CONFIG_FILE;
-  env.LARK_DAEMON_CHANNEL = agent.channel;
-  env.LARK_DAEMON_CONNECTORS_JSON = JSON.stringify(agent.connectors);
-  if (agent.emailConfig) env.LARK_DAEMON_EMAIL_CONFIG_FILE = agent.emailConfig;
-  else delete env.LARK_DAEMON_EMAIL_CONFIG_FILE;
+  env.VIKA_CHANNEL = agent.channel;
+  env.VIKA_CONNECTORS_JSON = JSON.stringify(agent.connectors);
+  if (agent.emailConfig) env.VIKA_EMAIL_CONFIG_FILE = agent.emailConfig;
+  else delete env.VIKA_EMAIL_CONFIG_FILE;
   if (agent.volcSessionId) {
-    env.LARK_DAEMON_VOLC_SESSION_ID = agent.volcSessionId;
-    env.LARK_DAEMON_VOLC_ENVIRONMENT_ID = agent.volcEnvironmentId;
+    env.VIKA_VOLC_SESSION_ID = agent.volcSessionId;
+    env.VIKA_VOLC_ENVIRONMENT_ID = agent.volcEnvironmentId;
   } else {
-    delete env.LARK_DAEMON_VOLC_SESSION_ID;
-    delete env.LARK_DAEMON_VOLC_ENVIRONMENT_ID;
+    delete env.VIKA_VOLC_SESSION_ID;
+    delete env.VIKA_VOLC_ENVIRONMENT_ID;
   }
   if (agent.meetingAudio) {
     Object.assign(env, {
-      LARK_DAEMON_MEETING_AUDIO_ENABLED: 'true',
-      LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
-      LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
+      VIKA_MEETING_AUDIO_ENABLED: 'true',
+      VIKA_MEETING_AUDIO_WORKER_COMMAND: agent.meetingAudio.pythonCommand,
+      VIKA_MEETING_AUDIO_WORKER_ARGS_JSON: JSON.stringify([
         path.join(__dirname, 'packages', 'daemon', 'worker', 'meeting_asr_worker.py'),
         '--worker-dir',
         path.join(__dirname, 'meeting-asr'),
       ]),
-      LARK_DAEMON_MEETING_AUDIO_WORKER_CWD: __dirname,
-      LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
+      VIKA_MEETING_AUDIO_WORKER_CWD: __dirname,
+      VIKA_MEETING_AUDIO_ASR_CONFIG_FILE: agent.meetingAudio.asrConfigFile,
     });
   } else {
     for (const key of [
-      'LARK_DAEMON_MEETING_AUDIO_ENABLED',
-      'LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID',
-      'LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND',
-      'LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON',
-      'LARK_DAEMON_MEETING_AUDIO_WORKER_CWD',
-      'LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE',
+      'VIKA_MEETING_AUDIO_ENABLED',
+      'VIKA_MEETING_AUDIO_TARGET_CHAT_ID',
+      'VIKA_MEETING_AUDIO_WORKER_COMMAND',
+      'VIKA_MEETING_AUDIO_WORKER_ARGS_JSON',
+      'VIKA_MEETING_AUDIO_WORKER_CWD',
+      'VIKA_MEETING_AUDIO_ASR_CONFIG_FILE',
     ]) delete env[key];
   }
   return agent;
@@ -468,7 +471,7 @@ function updaterTargetsFor(deployment) {
   return Object.fromEntries(deployment.agents.map((agent) => [
     agent.id,
     {
-      app: `lark-daemon-${agent.id}`,
+      app: `vika-${agent.id}`,
       readyUrl: `http://127.0.0.1:${agent.port}/ready`,
       upgradeSharedWeb,
     },

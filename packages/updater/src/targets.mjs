@@ -11,20 +11,20 @@ const {
 
 function parseUpdaterTargets(raw) {
   if (Buffer.byteLength(raw) > CONTROL_ENV_MAX_BYTES) {
-    throw new Error(`LARK_UPDATER_TARGETS_JSON exceeds ${CONTROL_ENV_MAX_BYTES} bytes`);
+    throw new Error(`VIKA_UPDATER_TARGETS_JSON exceeds ${CONTROL_ENV_MAX_BYTES} bytes`);
   }
   let value;
   try { value = JSON.parse(raw); } catch {
-    throw new Error('LARK_UPDATER_TARGETS_JSON must be valid JSON');
+    throw new Error('VIKA_UPDATER_TARGETS_JSON must be valid JSON');
   }
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length === 0) {
-    throw new Error('LARK_UPDATER_TARGETS_JSON must be a non-empty object');
+    throw new Error('VIKA_UPDATER_TARGETS_JSON must be a non-empty object');
   }
   return Object.fromEntries(Object.entries(value).map(([id, spec]) => {
-    if (!/^[a-z][a-z0-9-]{0,31}$/.test(id) || id === 'all') {
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(id) || ['all', 'web', 'updater'].includes(id)) {
       throw new Error(`invalid updater target id: ${id}`);
     }
-    const expectedApp = `lark-daemon-${id}`;
+    const expectedApp = `vika-${id}`;
     if (spec?.app !== expectedApp) throw new Error(`${id}.app must be ${expectedApp}`);
     if (spec?.readyUrl !== `http://127.0.0.1:${new URL(spec?.readyUrl).port}/ready`
       || !/^http:\/\/127\.0\.0\.1:\d+\/ready$/.test(spec.readyUrl)) {
@@ -42,8 +42,8 @@ function parseUpdaterTargets(raw) {
   }));
 }
 
-const generatedTargets = process.env.LARK_UPDATER_TARGETS_JSON
-  ? parseUpdaterTargets(process.env.LARK_UPDATER_TARGETS_JSON)
+const generatedTargets = process.env.VIKA_UPDATER_TARGETS_JSON
+  ? parseUpdaterTargets(process.env.VIKA_UPDATER_TARGETS_JSON)
   : parseUpdaterTargets(JSON.stringify(
     updaterTargetsFor(loadDeploymentManifest(process.env)),
   ));
@@ -51,7 +51,7 @@ const generatedTargets = process.env.LARK_UPDATER_TARGETS_JSON
 export const TARGETS = Object.freeze(generatedTargets);
 
 export const SHARED_WEB = Object.freeze({
-  app: 'lark-web',
+  app: 'vika-web',
   config: 'ecosystem.config.cjs',
   readyUrl: 'http://127.0.0.1:3737/ready',
 });
@@ -82,9 +82,9 @@ export function shouldUpgradeSharedWeb(target) {
 }
 
 export function defaultSocketPath(homeDir = os.homedir()) {
-  return path.join(homeDir, '.local', 'share', 'lark-daemon', 'updater.sock');
+  return path.join(homeDir, '.vika', 'updater.sock');
 }
 
 export function defaultReleaseLink(homeDir = os.homedir()) {
-  return path.join(homeDir, '.local', 'lib', 'lark-daemon', 'current');
+  return path.join(homeDir, '.vika', 'current');
 }

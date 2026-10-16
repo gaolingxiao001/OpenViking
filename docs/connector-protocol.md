@@ -247,7 +247,7 @@ Who a decision may reach is decided in one Core function, so routing rules
 (a source that may also post to a group, say) can be added there later. Today
 a non-chat event may only notify the owner, through `notify_owner`: the agent
 passes no chat id, and the Core sends to the owner's `target` on the primary
-IM (`LARK_DAEMON_CHANNEL`). A chat message may name another IM (`source`) when
+IM (`VIKA_CHANNEL`). A chat message may name another IM (`source`) when
 the owner asked to be told there. A chat decision keeps every other delivery
 tool, across Connectors too.
 

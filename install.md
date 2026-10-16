@@ -1,6 +1,8 @@
-# 安装 lark-daemon
+# 安装 Vika
 
 这份文档只讲把 daemon 跑起来。想先了解它解决什么问题，读 [README](./README.md)。
+
+已经在跑 lark-daemon 的部署，先按 [迁移说明](./docs/migrating-from-lark-daemon.md) 手工迁移一次。
 
 ## 准备
 
@@ -11,7 +13,7 @@
 - OpenViking（可选），用来保存跨会话上下文。要用时每个 agent 在 deployment manifest 中配置自己的 `ovConfig`；不配则该实例没有跨会话记忆，切换 runtime 时开空会话，并会关掉用户全局装的 OV 记忆插件（`OPENVIKING_MEMORY_ENABLED=0`）。
 - 全量测试需要 `python3` 为 Python 3.10 或以上，并安装 PyYAML（会议 ASR 用例使用）；实际会议功能的依赖见 `meeting-asr/requirements.txt`。
 
-Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [deployment.example.json](./deployment.example.json)。
+Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [config.example.json](./config.example.json)。
 
 Claude Code 需要 2.1.259 或以上，支持 `--permission-prompts none`；启动预检会检查该参数。daemon 是无人值守会话：Pi 扩展对话框、Codex/TraeX 的审批和用户输入请求会被明确取消或拒绝；Claude 使用官方无人值守设置，并拒绝意外的控制请求。需要向人提问时，模型应通过消息工具发文字或支持的选项卡，结束当前轮次，再等待用户消息或卡片答案。用户的扩展、provider 和其他会话配置不因此被关闭。
 
@@ -35,17 +37,17 @@ daemon 启动 Pi 时只为该会话注册 `personal_agent` MCP server，使用 `
 ## 本地启动
 
 ```bash
-git clone <repo-url> lark-daemon
-cd lark-daemon
-mkdir -p ~/.lark-daemon
-cp deployment.example.json ~/.lark-daemon/deployment.json
-# 编辑 deployment.json：至少填 profile（飞书实例）、dataDir、workspace、model；要用 OV 再填 ovConfig
+git clone <repo-url> vika
+cd vika
+mkdir -p ~/.vika
+cp config.example.json ~/.vika/config.json
+# 编辑 config.json：至少填 profile（飞书实例）、dataDir、workspace、model；要用 OV 再填 ovConfig
 npm run setup
 npm test && npm run check
 npm run start:daemon
 ```
 
-默认配置是 `~/.lark-daemon/deployment.json`。如需放在其他位置，给所有启动、部署和升级命令设置同一个绝对路径的 `LARK_DAEMON_DEPLOYMENT_MANIFEST`。
+默认配置是 `~/.vika/config.json`。如需放在其他位置，给所有启动、部署和升级命令设置同一个绝对路径的 `VIKA_CONFIG`。
 
 ### 微信扫码与单聊链路
 
@@ -53,18 +55,18 @@ npm run start:daemon
 
 ```bash
 npm run weixin:login -- weixin
-LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
+VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```
 
 登录命令按实例读取 manifest，在终端输出二维码。手机确认后，token、机器人账号、扫码用户和长轮询游标保存在该实例的私有 SQLite 中。Core 随后启动独立微信 Connector；它调用 `notifyStart`，持续请求 `getupdates`，把入站文本、图片、文件和微信已有语音转写封装成 `EVENT` 交给 Agent。媒体保存在 `dataDir/weixin/media`。Agent 通过统一的 Agent 工具（Codex/TraeX/Claude/Pi 共用 MCP 适配器）把查询和发送请求经 `dataDir/actions.sock` 交给 Core；Core 先写 outbox，再由 Connector 携带 `context_token` 和由幂等键派生的 `client_id` 调用 `sendmessage`。
 
-默认 allowlist 是扫码用户。`LARK_DAEMON_WEIXIN_ALLOW_FROM` 可配置逗号分隔的完整 iLink 用户 ID；不要填昵称。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
+默认 allowlist 是扫码用户。`VIKA_WEIXIN_ALLOW_FROM` 可配置逗号分隔的完整 iLink 用户 ID；不要填昵称。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
 
 ### 方舟 Self-hosted Managed Agent
 
 这是当前唯一支持且建议的 MA 接入方式，因为只有 Self-hosted Environment 能在同一个原生 turn 中多次调用 Environment 内的本机 CLI。云沙箱的严格 JSON `agent.message` Tool Call bridge 已移除。理论上可把 CLI credential 同步到云沙箱重建类似链路，但目前不建议这样接入。
 
-在目标 agent 中设置 `model: "ark"`，用 `volcSessionId` 指向已绑定 Agent 与 Self-hosted Environment 的 seed session，并用 `volcEnvironmentId` 锁定同一个 Environment。部署层会分别注入 `LARK_DAEMON_VOLC_SESSION_ID` 和 `LARK_DAEMON_VOLC_ENVIRONMENT_ID`；其他 bot 不会继承这组 ID。daemon 启动时会校验 Environment ID 与 `config.type=self_hosted`，不匹配时 fail closed。每个 daemon 实例会从 seed 创建自己的 session，不会共同写 seed session；`ARK_API_KEY` 只放在进程环境中。参考已验证的 [Self-hosted Environment](https://console.volcengine.com/ark/region:cn-beijing/managed-agents/environments/env-20260831031839-rm2nj?searchField=Name)。
+在目标 agent 中设置 `model: "ark"`，用 `volcSessionId` 指向已绑定 Agent 与 Self-hosted Environment 的 seed session，并用 `volcEnvironmentId` 锁定同一个 Environment。部署层会分别注入 `VIKA_VOLC_SESSION_ID` 和 `VIKA_VOLC_ENVIRONMENT_ID`；其他 bot 不会继承这组 ID。daemon 启动时会校验 Environment ID 与 `config.type=self_hosted`，不匹配时 fail closed。每个 daemon 实例会从 seed 创建自己的 session，不会共同写 seed session；`ARK_API_KEY` 只放在进程环境中。参考已验证的 [Self-hosted Environment](https://console.volcengine.com/ark/region:cn-beijing/managed-agents/environments/env-20260831031839-rm2nj?searchField=Name)。
 
 此外要独立常驻官方 Go `EnvironmentWorker`，并给 Worker 设置 `ARK_API_KEY`、`ARK_BASE_URL`、`MA_ENVIRONMENT_ID` 和对应 bot 的 `LARKSUITE_CLI_PROFILE`。Managed Agent 通过 Worker 的 bash 调固定本机 `lark-cli` 完成回复；daemon 只负责 Sessions API/SSE，不执行工具、不回写 tool result，也不要求本轮必须返回 `agent.message`。因此仅通过 CLI 完成回复、随后直接 `end_turn` 也是成功路径。Worker 的部署、存活与升级暂不由 daemon/updater 托管。
 
@@ -75,15 +77,15 @@ LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
 ```bash
 ./scripts/deploy.sh HEAD
 ./scripts/bootstrap-updater.sh
-lark-daemon upgrade all
+vika upgrade all
 ```
 
 平时先把 commit push 到 upstream `main`，再升级：
 
 ```bash
-lark-daemon upgrade <instance-id>
+vika upgrade <instance-id>
 # 共享 Web 有改动时
-lark-daemon upgrade all
+vika upgrade all
 ```
 
 首次发布和自动升级都会先在新 release 内执行 `npm ci`、验证托管 Pi，再运行测试；全部成功后才切换 release 和进程。升级 Pi 也是更新版本锁定后随 release 发布，回滚则使用旧 release 自己的 Pi。安装或验证失败不会覆盖当前 release 的依赖，也不会修改用户全局 Pi。
@@ -93,7 +95,7 @@ lark-daemon upgrade all
 `deploy.sh` 只用于首次安装或 updater 协议变更。查看运行状态：
 
 ```bash
-pm2 status lark-daemon-<instance-id> lark-web lark-updater
+pm2 status vika-<instance-id> vika-web vika-updater
 curl http://127.0.0.1:3737/ready
 ```
 
@@ -101,4 +103,4 @@ curl http://127.0.0.1:3737/ready
 
 ## 多个 agent
 
-在 `deployment.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，用 OV 时还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark` 和 `weixin`。省略两者时走飞书。改动拓扑后，重新执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `lark-daemon upgrade all`。
+在 `config.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，用 OV 时还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark` 和 `weixin`。省略两者时走飞书。改动拓扑后，重新执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `vika upgrade all`。

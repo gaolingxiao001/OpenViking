@@ -721,7 +721,7 @@ describe('owner notices and owner-only actions', () => {
       subject: { type: 'message', id: CARD }, actor: { type: 'user', id: operator },
       message: { id: `ca_${id}`, type: 'card_action' }, content: { text: '[card action]' },
       data: { interaction: { message_id: CARD, conversation_id: 'oc_p2p12345678', tag: 'button',
-        value: { lark_daemon_choice: choice }, ...(form ? { form } : {}) } },
+        value: { vika_choice: choice }, ...(form ? { form } : {}) } },
     }));
     return resolveCardAction(store.db, event, PROFILE);
   };
@@ -815,7 +815,7 @@ describe('owner notices and owner-only actions', () => {
     const card = approvalCard(draft);
     assert.equal(card.body.elements.some((element) => element.tag === 'form'), false);
     assert.deepEqual(card.body.elements.filter((element) => element.tag === 'button')
-      .map((element) => element.behaviors[0].value.lark_daemon_choice), ['send', 'cancel']);
+      .map((element) => element.behaviors[0].value.vika_choice), ['send', 'cancel']);
     assert.equal(approvedText(draft, { reply_body: '   ' }), draft.text);
     // A card never carries an @ (Lark refuses addresses); the approved text gets them back.
     const signed = approvalCard({ ...draft, text: '好的\n— bob@example.com' });

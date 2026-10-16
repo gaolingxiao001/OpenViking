@@ -12,7 +12,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 function baseInfo() {
   return {
     channel_version: WEIXIN_CHANNEL_VERSION,
-    bot_agent: 'lark-daemon/0.4.0',
+    bot_agent: 'vika/0.4.0',
   };
 }
 

@@ -97,7 +97,7 @@ export class PersonalAgentDaemon {
     }
   }
 
-  // Opt-in (LARK_DAEMON_OV_IDENTITY). Every runtime assembles its policy from
+  // Opt-in (VIKA_OV_IDENTITY). Every runtime assembles its policy from
   // this.config, so the read happens once, before the first runtime exists. A
   // failed read only leaves the identity section out.
   async loadOpenVikingIdentity(client) {

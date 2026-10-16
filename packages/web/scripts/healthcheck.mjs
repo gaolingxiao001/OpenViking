@@ -1,5 +1,5 @@
-const host = process.env.LARK_WEB_HOST || '127.0.0.1';
-const port = process.env.LARK_WEB_PORT || '3737';
+const host = process.env.VIKA_WEB_HOST || '127.0.0.1';
+const port = process.env.VIKA_WEB_PORT || '3737';
 
 try {
   const response = await fetch(`http://${host}:${port}/health`, {
