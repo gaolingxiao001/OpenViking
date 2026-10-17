@@ -32,6 +32,10 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
     connect: {
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
       weixin: async ({ plan }) => { calls.push(['weixin', plan.dataDir]); },
+      email: async () => {
+        calls.push(['email']);
+        return { address: 'liuweihan2000@gmail.com', password: 'p', imap: { host: 'imap.gmail.com', port: 993 }, smtp: { host: 'smtp.gmail.com', port: 465 } };
+      },
       greet: async (message) => { calls.push(['greet', message.userId]); },
     },
     control: {
@@ -108,6 +112,24 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   assert.equal(agent.channel, 'weixin');
   assert.match(weixin.written(), /没有检测到 OpenViking/);
   assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
+});
+
+test('a mailbox comes with an IM, is checked before the scans and saved with the manifest', async (t) => {
+  //                          IMs: email alone, then Weixin + email
+  const h = harness(t, ['', '', '', '1', '3', '2,3', 'y']);
+  assert.equal(await setupCommand(h.options), 0);
+  assert.match(h.written(), /邮箱不能单独接/);
+  const [agent] = h.manifest().agents;
+  const file = path.join(h.home, '.vika', 'email', 'primary.json');
+  assert.deepEqual([agent.connectors, agent.channel, agent.emailConfig], [['weixin', 'email'], 'weixin', file]);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).address, 'liuweihan2000@gmail.com');
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.match(h.written(), /微信、邮箱（liuweihan2000@gmail\.com）/);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'weixin', 'start', 'restart', 'start']);
+
+  const declined = harness(t, ['', '', '', '1', '1,3', 'n']);
+  assert.equal(await setupCommand(declined.options), 1);
+  assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'email')), false, 'nothing is saved before the scans');
 });
 
 test('setup stops early when no runtime can run, and reports a start failure after saving', async (t) => {

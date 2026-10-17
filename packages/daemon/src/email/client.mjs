@@ -49,6 +49,30 @@ export function loadAccount(file) {
   });
 }
 
+// Ids carry which account a mail came from: UIDs and UIDVALIDITY are only
+// unique within one mailbox, and an instance may switch to another account.
+export function accountTag(address) {
+  return createHash('sha256').update(address).digest('hex').slice(0, 8);
+}
+
+// Both credentials: an IMAP login with a read-only look at the inbox, then
+// SMTP AUTH. Sends nothing. Resolves with whether new mail is pushed (IDLE).
+export async function verifyAccount(account, { connectTls } = {}) {
+  const imap = new ImapConnection({ ...account.imap, ...(connectTls ? { connect: connectTls } : {}) });
+  let idle;
+  try {
+    await imap.connect();
+    await imap.login(account.user, account.password);
+    await imap.examine(MAILBOX);
+    idle = imap.capabilities.has('IDLE');
+    await imap.logout();
+  } finally {
+    imap.close();
+  }
+  await verifySmtp({ ...account.smtp, user: account.user, password: account.password, ...(connectTls ? { connectTls } : {}) });
+  return { idle };
+}
+
 function people(list) {
   const shown = list.slice(0, MAX_LISTED).map(({ name, address }) => (name ? `${name} <${address}>` : address));
   if (list.length > MAX_LISTED) shown.push(`+${list.length - MAX_LISTED} more`);
@@ -116,6 +140,7 @@ export class EmailClient {
     this.connectTls = connectTls;
     this.state = new EmailState(config.dataDir);
     this.account = null;
+    this.tag = null;
     this.imap = null;
     this.loop = null;
     this.stopping = false;
@@ -145,9 +170,8 @@ export class EmailClient {
   // Both credentials, before anything starts.
   async preflight() {
     this.account = loadAccount(this.config.emailConfigFile);
-    const imap = await this.open();
-    try { await imap.examine(MAILBOX); } finally { await imap.logout(); }
-    await verifySmtp(this.smtpAccount());
+    this.tag = accountTag(this.account.address);
+    await verifyAccount(this.account, { connectTls: this.connectTls });
     this.state.prune(Date.now() - this.config.retentionMs);
     // A mailbox is not an IM: notices to the owner never go here.
     return { version: 'imap-smtp-v1', owner: null };
@@ -166,16 +190,17 @@ export class EmailClient {
     this.imap = imap;
     try {
       const box = await imap.examine(MAILBOX);
-      let cursor = this.state.cursor(MAILBOX);
+      const key = `${this.tag}:${MAILBOX}`;
+      let cursor = this.state.cursor(key);
       if (!cursor || cursor.uidValidity !== box.uidValidity) {
         // First start, or the server renumbered the mailbox: begin with what
         // arrives next instead of reporting the whole inbox.
         if (cursor) this.logger.warn('email_mailbox_renumbered');
         cursor = { uidValidity: box.uidValidity, lastUid: box.uidNext - 1 };
-        this.state.saveCursor(MAILBOX, cursor);
+        this.state.saveCursor(key, cursor);
       }
       while (!this.stopping) {
-        await this.catchUp(imap, cursor, onLine);
+        await this.catchUp(imap, key, cursor, onLine);
         if (this.stopping) break;
         if (imap.capabilities.has('IDLE')) {
           await imap.idle(IDLE_MS, () => this.stopping);
@@ -190,7 +215,7 @@ export class EmailClient {
     }
   }
 
-  async catchUp(imap, cursor, onLine) {
+  async catchUp(imap, key, cursor, onLine) {
     let uids = await imap.searchUids(cursor.lastUid + 1);
     if (uids.length > MAX_CATCH_UP) {
       this.logger.warn('email_catch_up_skipped', { skipped: uids.length - MAX_CATCH_UP });
@@ -216,11 +241,11 @@ export class EmailClient {
           this.logger.warn('email_unreadable', { uid: item.uid, error: safeError(error) });
         }
         cursor.lastUid = Math.max(cursor.lastUid, item.uid);
-        this.state.saveCursor(MAILBOX, cursor);
+        this.state.saveCursor(key, cursor);
       }
       // A UID that vanished between SEARCH and FETCH (deleted) is passed over.
       cursor.lastUid = Math.max(cursor.lastUid, ...batch);
-      this.state.saveCursor(MAILBOX, cursor);
+      this.state.saveCursor(key, cursor);
     }
   }
 
@@ -232,10 +257,10 @@ export class EmailClient {
       return;
     }
     if (item.truncated) mail.text = `[mail body not fetched: ${Math.round(item.size / 1_048_576)} MiB]`;
-    const messageId = `mail:${uidValidity}:${item.uid}`;
+    const messageId = `mail:${this.tag}:${uidValidity}:${item.uid}`;
     const recipients = replyRecipients(mail, this.account.address);
     const line = JSON.stringify(eventMessage('email', {
-      id: `imap:${uidValidity}:${item.uid}`,
+      id: `imap:${this.tag}:${uidValidity}:${item.uid}`,
       kind: mail.bulk ? 'email.list' : 'email.received',
       occurred_at: item.internalDate ?? mail.date ?? Date.now(),
       subject: { type: 'thread', id: threadId(item, mail, messageId) },

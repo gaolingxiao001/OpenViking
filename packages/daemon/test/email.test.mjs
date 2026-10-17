@@ -4,7 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { EmailClient } from '../src/email/client.mjs';
+import { EmailClient, accountTag } from '../src/email/client.mjs';
 import { EmailState } from '../src/email/state.mjs';
 import { fetchAttributes, parseResponse } from '../src/email/imap.mjs';
 import { buildReply, htmlToText, isOwnMessageId, parseAddresses, parseMail, replyMessageId } from '../src/email/mime.mjs';
@@ -13,6 +13,7 @@ import { normalizeEvent } from '../src/event.mjs';
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const ME = 'me@example.com';
 const PASSWORD = 'app-password-123';
+const TAG = accountTag(ME);
 
 function mail({ from = 'Alice <alice@example.com>', to = ME, subject = 'Thursday?', id = 'a1@example.com', headers = [],
   body = 'Can we meet on Thursday?' } = {}) {
@@ -216,9 +217,9 @@ describe('email connector', () => {
     await until(() => events.length === 3);
 
     const [event, news, alert] = events;
-    assert.deepEqual([alert.eventId, alert.kind, alert.title], ['imap:1:7', 'email.received', 'Security alert']);
+    assert.deepEqual([alert.eventId, alert.kind, alert.title], [`imap:${TAG}:1:7`, 'email.received', 'Security alert']);
     assert.deepEqual([event.eventId, event.kind, event.messageId, event.subject, event.senderId, event.title],
-      ['imap:1:5', 'email.received', 'mail:1:5', { type: 'thread', id: 'gmail:9001' }, 'alice@example.com', '周四开会？']);
+      [`imap:${TAG}:1:5`, 'email.received', `mail:${TAG}:1:5`, { type: 'thread', id: 'gmail:9001' }, 'alice@example.com', '周四开会？']);
     assert.equal(event.content, 'From: Alice, A. <alice@example.com>\nTo: me@example.com\nCc: Carol <carol@example.com>\n\nCan we meet?\n\nThanks');
     assert.equal(event.createTimeMs, Date.parse('2026-10-13T08:10:00Z'));
     assert.equal(event.chatId, null);
@@ -244,11 +245,11 @@ describe('email connector', () => {
       socket.write('* 4 FETCH (UID 4 FLAGS (\\Seen))\r\n* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n');
     };
     imap.deliver(mail({ id: 'two@example.com' }));
-    await until(() => events.some((event) => event.eventId === 'imap:1:2'));
+    await until(() => events.some((event) => event.eventId === `imap:${TAG}:1:2`));
     imap.deliver(mail({ id: 'five@example.com' }));
-    await until(() => events.some((event) => event.eventId === 'imap:1:5'));
+    await until(() => events.some((event) => event.eventId === `imap:${TAG}:1:5`));
 
-    assert.deepEqual(events.map((event) => event.eventId), ['imap:1:1', 'imap:1:2', 'imap:1:3', 'imap:1:4', 'imap:1:5']);
+    assert.deepEqual(events.map((event) => event.eventId), [`imap:${TAG}:1:1`, `imap:${TAG}:1:2`, `imap:${TAG}:1:3`, `imap:${TAG}:1:4`, `imap:${TAG}:1:5`]);
   });
 
   it('replies over SMTP to Reply-To, threaded under the mail', async (t) => {
@@ -260,7 +261,7 @@ describe('email connector', () => {
     assert.deepEqual(events[0].data.reply, { to: [{ name: 'Bob', address: 'bob@example.com' }], subject: 'Re: Thursday?' });
 
     // Only the recipients the owner approved, and all of them.
-    const answer = (to) => client.replyMessage({ message_id: 'mail:1:1', content: { type: 'markdown', text: '周四可以\n三点见' },
+    const answer = (to) => client.replyMessage({ message_id: `mail:${TAG}:1:1`, content: { type: 'markdown', text: '周四可以\n三点见' },
       to, idempotency_key: 'ld_reply1' });
     for (const to of [undefined, [], ['bob@example.com', 'eve@example.com'], ['eve@example.com']]) {
       await assert.rejects(answer(to), /do not match the ones the owner approved/);
@@ -276,9 +277,9 @@ describe('email connector', () => {
     assert.equal(reply.text, '周四可以\n三点见');
     assert.ok(isOwnMessageId(reply.messageId), 'its own reply is recognised when it comes back');
 
-    await assert.rejects(client.replyMessage({ message_id: 'mail:1:99', content: { type: 'markdown', text: 'x' }, idempotency_key: 'k' }),
+    await assert.rejects(client.replyMessage({ message_id: `mail:${TAG}:1:99`, content: { type: 'markdown', text: 'x' }, idempotency_key: 'k' }),
       /no longer available/);
-    await assert.rejects(client.replyMessage({ message_id: 'mail:1:1', content: { type: 'file', path: '/x' }, idempotency_key: 'k' }),
+    await assert.rejects(client.replyMessage({ message_id: `mail:${TAG}:1:1`, content: { type: 'file', path: '/x' }, idempotency_key: 'k' }),
       /plain text only/);
     assert.equal(smtp.messages.length, 1);
   });
@@ -305,7 +306,26 @@ describe('email connector', () => {
     imap.deliver(mail({ id: 'three@example.com' }));
     const second = await start();
     await until(() => second.events.length === 2);
-    assert.deepEqual(second.events.map((event) => event.eventId), ['imap:1:2', 'imap:1:3']);
+    assert.deepEqual(second.events.map((event) => event.eventId), [`imap:${TAG}:1:2`, `imap:${TAG}:1:3`]);
+  });
+
+  it('starts afresh on another account, whose mail ids cannot meet the old ones', async (t) => {
+    const { imap, start, config } = await setup(t);
+    const first = await start();
+    imap.deliver(mail({ id: 'one@example.com' }));
+    await until(() => first.events.length === 1);
+    await first.client.stop();
+
+    // Another mailbox with the same UIDVALIDITY, as different providers often have.
+    const account = JSON.parse(fs.readFileSync(config.emailConfigFile, 'utf8'));
+    fs.writeFileSync(config.emailConfigFile, JSON.stringify({ ...account, address: 'other@example.com', username: ME }));
+    imap.deliver(mail({ id: 'before@example.com' }));
+    const second = await start();
+    imap.deliver(mail({ id: 'after@example.com' }));
+    await until(() => second.events.length === 1);
+    const other = accountTag('other@example.com');
+    assert.notEqual(other, TAG);
+    assert.deepEqual([second.events[0].eventId, second.events[0].messageId], [`imap:${other}:1:3`, `mail:${other}:1:3`]);
   });
 
   it('reports a mail whose ids, sender or subject are too long to use as is', async (t) => {
@@ -327,7 +347,7 @@ describe('email connector', () => {
     assert.equal(events[1].actor, null);
     assert.equal(events[2].title.length, 300);
     assert.ok(Math.max(...events.map((event) => JSON.stringify(event.envelope).length)) < 20_000);
-    assert.deepEqual(new EmailState(config.dataDir).cursor('INBOX'), { uidValidity: 1, lastUid: 4 });
+    assert.deepEqual(new EmailState(config.dataDir).cursor(`${TAG}:INBOX`), { uidValidity: 1, lastUid: 4 });
   });
 
   it('passes over a mail it cannot read, and the next one still arrives', async (t) => {
@@ -342,10 +362,10 @@ describe('email connector', () => {
     imap.deliver(mail({ id: 'fine@example.com' }));
     await until(() => events.length === 1);
     assert.deepEqual(exits, []);
-    assert.equal(events[0].eventId, 'imap:1:2');
+    assert.equal(events[0].eventId, `imap:${TAG}:1:2`);
     // Not retried: the cursor is past it, and no reply headers were kept.
-    assert.deepEqual(new EmailState(config.dataDir).cursor('INBOX'), { uidValidity: 1, lastUid: 2 });
-    assert.equal(client.state.mail('mail:1:1'), null);
+    assert.deepEqual(new EmailState(config.dataDir).cursor(`${TAG}:INBOX`), { uidValidity: 1, lastUid: 2 });
+    assert.equal(client.state.mail(`mail:${TAG}:1:1`), null);
   });
 
   it('fails its check on a wrong password without echoing it', async (t) => {

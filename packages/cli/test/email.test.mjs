@@ -1,0 +1,71 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import test from 'node:test';
+import { askEmail, providerFor, writeEmailAccount } from '../src/email.mjs';
+import { Prompter } from '../src/prompt.mjs';
+
+function terminal(answers) {
+  const input = new PassThrough();
+  input.end(answers.map((line) => `${line}\n`).join(''));
+  const output = new PassThrough();
+  let written = '';
+  output.on('data', (chunk) => { written += chunk; });
+  return { prompter: new Prompter({ input, output }), written: () => written };
+}
+
+test('a known provider needs only the address and its client password, spaces dropped', async () => {
+  const tried = [];
+  const { prompter, written } = terminal(['LiuWeihan2000@Gmail.com', 'abcd efgh ijkl mnop']);
+  const account = await askEmail({ prompter, verify: async (given) => { tried.push(given); return { idle: true }; } });
+  assert.deepEqual(account, {
+    address: 'liuweihan2000@gmail.com', password: 'abcdefghijklmnop',
+    imap: { host: 'imap.gmail.com', port: 993 }, smtp: { host: 'smtp.gmail.com', port: 465 },
+  });
+  assert.deepEqual(tried, [{ ...account, user: 'liuweihan2000@gmail.com' }]);
+  assert.match(written(), /Gmail：密码处填应用专用密码/);
+  assert.doesNotMatch(written(), /abcd/, 'the password is never echoed');
+  assert.deepEqual([providerFor('a@qq.com').imap, providerFor('a@163.com').smtp, providerFor('a@126.com').imap],
+    ['imap.qq.com', 'smtp.163.com', 'imap.126.com']);
+});
+
+test('a failed login says why and asks again; an unknown provider asks for its servers', async () => {
+  let attempts = 0;
+  const verify = async ({ password }) => {
+    attempts += 1;
+    if (password !== 'right') throw new Error('IMAP LOGIN failed: NO LOGIN Login error or password error');
+    return { idle: false };
+  };
+  const { prompter, written } = terminal([
+    'me@corp.example', '', '', 'mail.corp.example', '587', 'wrong pass', 'y',
+    '', '', '', '', '', 'right',
+  ]);
+  const account = await askEmail({ prompter, verify });
+  assert.equal(attempts, 2);
+  // Servers default to imap./smtp. of the domain, then to what was typed last time.
+  assert.deepEqual(account, {
+    address: 'me@corp.example', password: 'right',
+    imap: { host: 'imap.corp.example', port: 993 }, smtp: { host: 'mail.corp.example', port: 587 },
+  });
+  assert.match(written(), /登录失败：IMAP LOGIN failed[\s\S]*多半是密码不对/);
+  assert.match(written(), /每分钟查一次/);
+
+  const outlook = terminal(['me@outlook.com']);
+  await assert.rejects(askEmail({ prompter: outlook.prompter, verify }));
+  assert.match(outlook.written(), /只能用 OAuth 登录/);
+
+  const givenUp = terminal(['me@qq.com', 'nope', 'n']);
+  await assert.rejects(askEmail({ prompter: givenUp.prompter, verify }), { name: 'PromptAborted' });
+});
+
+test('the account file is private', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-email-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'email', 'primary.json');
+  writeEmailAccount(file, { address: 'a@qq.com', password: 'p' });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['primary.json']);
+});

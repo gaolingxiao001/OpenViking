@@ -7,8 +7,8 @@ import fs from 'node:fs';
 
 const USAGE = `用法：vika <命令>
 
-  setup                       添加一个 agent 实例（扫码接飞书/微信）
-  login <lark|weixin> [实例]  给实例接入一个 IM，或登录过期后重新授权
+  setup                       添加一个 agent 实例（接飞书、微信、邮箱）
+  login <lark|weixin|email>   接入飞书、微信或邮箱，或登录过期后重新授权；后面可加实例名
   start [实例|web|updater]    启动本机已安装的版本；不写实例时启动全部
   stop [实例|web|updater]     停止
   restart [实例|web|updater]  重启

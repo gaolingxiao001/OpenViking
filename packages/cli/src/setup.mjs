@@ -13,6 +13,8 @@ import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
 import { detectRuntimes, which } from './runtimes.mjs';
 import { showQr } from './qr.mjs';
 import { restartCommand, startCommand } from './control.mjs';
+import { askEmail, emailAccountPath, emailChannelNote, writeEmailAccount } from './email.mjs';
+import { IM_LABELS, imList } from './instances.mjs';
 
 // `vika setup`: add one instance. Every question comes first, then the QR
 // scans, then the manifest is written and the instance started. Nothing is
@@ -60,16 +62,20 @@ async function askPlan({ prompter, manifest, env, homeDir, runtimes, ov }) {
     label: runtime.label, value: runtime, hint: runtime.note, disabled: !runtime.available,
   })), { initial: runtimeIndex });
 
-  const connectors = await prompter.multiselect('接入哪些 IM', [
-    { label: '飞书', value: 'lark' },
-    { label: '微信', value: 'weixin' },
-    { label: '邮箱', value: 'email', hint: '暂不支持在 setup 里配置，见 README', disabled: true },
-  ], { initial: [0] });
-  const channel = connectors.length > 1
-    ? await prompter.select('主渠道（给你发通知用）', connectors.map((connector) => ({
-      label: connector === 'lark' ? '飞书' : '微信', value: connector,
-    })))
-    : connectors[0];
+  let connectors;
+  for (;;) {
+    connectors = await prompter.multiselect('接入哪些 IM', [
+      { label: '飞书', value: 'lark' },
+      { label: '微信', value: 'weixin' },
+      { label: '邮箱', value: 'email', hint: 'IMAP/SMTP，新邮件经飞书或微信告诉你' },
+    ], { initial: [0] });
+    if (connectors.some((connector) => connector !== 'email')) break;
+    out('  邮箱不能单独接：新邮件要经飞书或微信告诉你，再选一个。\n');
+  }
+  const ims = connectors.filter((connector) => connector !== 'email');
+  const channel = ims.length > 1
+    ? await prompter.select('主渠道（给你发通知用）', ims.map((connector) => ({ label: IM_LABELS[connector], value: connector })))
+    : ims[0];
 
   let useOv = false;
   if (ov?.usable) {
@@ -183,7 +189,7 @@ export async function setupCommand({
   homeDir = os.homedir(),
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
-  connect = { lark: connectLark, weixin: connectWeixin, greet },
+  connect = { lark: connectLark, weixin: connectWeixin, email: askEmail, greet },
   control = { start: startCommand, restart: restartCommand },
   allocate = allocatePort,
 } = {}) {
@@ -213,6 +219,7 @@ export async function setupCommand({
   // The whole instance is known before any scan, so a manifest the daemon
   // would reject fails here rather than after two QR codes.
   const ovConfig = plan.useOv ? path.join(vikaHome(env), 'ov', `${plan.id}.json`) : null;
+  const emailConfig = plan.connectors.includes('email') ? emailAccountPath(env, plan.id) : null;
   const agent = {
     id: plan.id,
     displayName: plan.displayName,
@@ -223,13 +230,20 @@ export async function setupCommand({
     dataDir: plan.dataDir,
     workspace: plan.workspace,
     ...(ovConfig ? { ovConfig } : {}),
+    ...(emailConfig ? { emailConfig } : {}),
     model: plan.runtime.model,
   };
   const next = withInstance(manifest, agent,
     plan.runtime.binEnv && plan.runtime.bin ? { [plan.runtime.binEnv]: plan.runtime.bin } : {});
   validateManifest(configPath, next);
+  // The mailbox is checked now (no scan), and saved with the manifest.
+  let emailAccount = null;
+  if (emailConfig) {
+    out(emailChannelNote(plan.channel));
+    emailAccount = await connect.email({ prompter });
+  }
 
-  out(`\n将添加实例 ${plan.id}：${plan.runtime.label}，${plan.connectors.map((c) => (c === 'lark' ? '飞书' : '微信')).join(' + ')}`
+  out(`\n将添加实例 ${plan.id}：${plan.runtime.label}，${imList(plan.connectors)}${emailAccount ? `（${emailAccount.address}）` : ''}`
     + `，${plan.useOv ? '使用' : '不使用'} OpenViking\n  工作目录 ${plan.workspace}\n  数据目录 ${plan.dataDir}\n`);
   if (!await prompter.confirm('开始扫码？')) return 1;
 
@@ -238,6 +252,7 @@ export async function setupCommand({
     : null;
   if (plan.connectors.includes('weixin')) await connect.weixin({ plan, prompter });
   if (ovConfig) writeInstanceOvConfig({ detected: ov, instanceId: plan.id, target: ovConfig });
+  if (emailAccount) writeEmailAccount(emailConfig, emailAccount);
 
   fs.mkdirSync(plan.workspace, { recursive: true, mode: 0o700 });
   writeManifest(configPath, next);

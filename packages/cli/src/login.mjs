@@ -1,5 +1,6 @@
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { restartCommand } from './control.mjs';
+import { askEmail, emailAccountPath, emailChannelNote, readEmailAccount, writeEmailAccount } from './email.mjs';
 import { IM_LABELS, chooseInstance, loadInstances } from './instances.mjs';
 import { LarkCli } from './lark-cli.mjs';
 import { readManifest, validateManifest, withConnector, writeManifest } from './manifest.mjs';
@@ -7,17 +8,30 @@ import { showQr } from './qr.mjs';
 import { which } from './runtimes.mjs';
 import { connectLark, connectWeixin, greet, larkScopes } from './setup.mjs';
 
-// `vika login <lark|weixin> [instance]`: connect an IM to an instance, or
-// authorize it again after a login expired. The instance may be left out
-// when there is only one, and is chosen from a list otherwise. Connecting a
-// new IM is the same scan as in setup, then the instance restarts with it.
+// `vika login <lark|weixin|email> [instance]`: connect an IM or a mailbox to
+// an instance, or authorize it again after a login expired. The instance may
+// be left out when there is only one, and is chosen from a list otherwise.
+// Connecting something new is the same step as in setup, then the instance
+// restarts with it.
+
+const USAGE = '用法：vika login <lark|weixin|email> [实例]\n  接入飞书、微信或邮箱，或在登录过期、改了密码后重新授权；只有一个实例时可以不写实例名。\n';
 
 function larkCliBin(env, deployment) {
   const bundled = bundledLarkCli();
   return env.LARK_CLI_BIN || deployment.env?.LARK_CLI_BIN || (bundled === 'lark-cli' ? which('lark-cli', env) : bundled);
 }
 
-async function reauthorize({ connector, agent, deployment, prompter, env, connect }) {
+async function reauthorize({ connector, agent, deployment, prompter, env, connect, control }) {
+  if (connector === 'email') {
+    // The connector reads its account file when it starts.
+    const previous = readEmailAccount(agent.emailConfig);
+    const account = await connect.email({ prompter, previous });
+    writeEmailAccount(agent.emailConfig, account);
+    if (previous && previous.address !== account.address) prompter.write(`  换成了 ${account.address}：只看之后到达的邮件。\n`);
+    if (!await restart({ agent, prompter, env, control })) return 1;
+    prompter.write(`\n${agent.displayName}（${agent.id}）的邮箱已更新。\n`);
+    return 0;
+  }
   if (connector === 'weixin') {
     await connect.weixin({ plan: agent, prompter });
     prompter.write('运行中的实例会在下次重连时用上新的登录，不用重启。\n');
@@ -33,31 +47,51 @@ async function reauthorize({ connector, agent, deployment, prompter, env, connec
   return 0;
 }
 
+async function restart({ agent, prompter, env, control }) {
+  try {
+    await control.restart(agent.id, { env });
+    return true;
+  } catch (error) {
+    prompter.write(`\n配置已更新，但实例没能重启：${error.message}\n修好后运行 vika restart ${agent.id}\n`);
+    return false;
+  }
+}
+
 export async function loginCommand([connector, requested, ...extra], {
   prompter,
   env = process.env,
   fetchImpl = globalThis.fetch,
-  connect = { lark: connectLark, weixin: connectWeixin, greet },
+  connect = { lark: connectLark, weixin: connectWeixin, email: askEmail, greet },
   control = { restart: restartCommand },
 } = {}) {
-  if (!['lark', 'weixin'].includes(connector) || extra.length) {
-    prompter.write('用法：vika login <lark|weixin> [实例]\n  接入一个 IM，或在登录过期后重新授权；只有一个实例时可以不写实例名。\n');
+  if (!['lark', 'weixin', 'email'].includes(connector) || extra.length) {
+    prompter.write(USAGE);
     return 2;
   }
   const label = IM_LABELS[connector];
   const deployment = loadInstances(env);
-  const agent = await chooseInstance({ deployment, requested, prompter, question: `给哪个实例${label === '飞书' ? '接飞书' : '接微信'}` });
+  const agent = await chooseInstance({ deployment, requested, prompter, question: `给哪个实例接${label}` });
   if (agent.connectors.includes(connector)) {
-    return reauthorize({ connector, agent, deployment, prompter, env, connect });
+    return reauthorize({ connector, agent, deployment, prompter, env, connect, control });
   }
 
-  // A new IM for this instance: check the manifest the daemon would load
+  // Something new for this instance: check the manifest the daemon would load
   // before the scan, write it only after the scan succeeded.
   const { path: configPath, value: manifest } = readManifest(env);
-  const profile = connector === 'lark' ? `vika-${agent.id}` : undefined;
-  const next = withConnector(manifest, agent.id, connector, profile ? { profile } : {});
+  const fields = connector === 'lark' ? { profile: `vika-${agent.id}` }
+    : connector === 'email' ? { emailConfig: emailAccountPath(env, agent.id) } : {};
+  const next = withConnector(manifest, agent.id, connector, fields);
   validateManifest(configPath, next);
   prompter.write(`实例 ${agent.id}（${agent.displayName}）还没有接${label}，现在接入；完成后会重启这个实例。\n`);
+  if (connector === 'email') {
+    prompter.write(emailChannelNote(agent.channel));
+    writeEmailAccount(fields.emailConfig, await connect.email({ prompter }));
+    writeManifest(configPath, next);
+    if (!await restart({ agent, prompter, env, control })) return 1;
+    prompter.write(`\n${agent.displayName}（${agent.id}）已接入邮箱：新邮件到了，它会看情况告诉你。\n`);
+    return 0;
+  }
+  const { profile } = fields;
   let lark = null;
   if (connector === 'lark') {
     const bin = larkCliBin(env, deployment);
@@ -68,12 +102,7 @@ export async function loginCommand([connector, requested, ...extra], {
     await connect.weixin({ plan: agent, prompter });
   }
   writeManifest(configPath, next);
-  try {
-    await control.restart(agent.id, { env });
-  } catch (error) {
-    prompter.write(`\n配置已更新，但实例没能重启：${error.message}\n修好后运行 vika restart ${agent.id}\n`);
-    return 1;
-  }
+  if (!await restart({ agent, prompter, env, control })) return 1;
   if (lark) {
     await connect.greet({
       larkCliBin: lark.bin, profile, userId: lark.ownerOpenId,

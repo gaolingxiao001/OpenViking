@@ -15,7 +15,7 @@ function agent(home, id, overrides = {}) {
   };
 }
 
-function machine(t, agents, { answers = [], tty = false } = {}) {
+function machine(t, agents, { answers = [], tty = false, mailboxes = [] } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-login-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const list = agents(home);
@@ -36,6 +36,10 @@ function machine(t, agents, { answers = [], tty = false } = {}) {
     connect: {
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
       weixin: async ({ plan }) => { calls.push(['weixin', plan.id, plan.dataDir]); },
+      email: async ({ previous }) => {
+        calls.push(['email', previous?.address ?? null]);
+        return { address: mailboxes.shift(), password: 'p', imap: { host: 'imap.qq.com', port: 993 }, smtp: { host: 'smtp.qq.com', port: 465 } };
+      },
       greet: async ({ userId }) => { calls.push(['greet', userId]); },
     },
     control: { restart: async (id) => { calls.push(['restart', id]); } },
@@ -68,6 +72,26 @@ test('Feishu added to a Weixin-only instance gets its own app, profile and a gre
   assert.deepEqual([updated.connectors, updated.profile, updated.channel], [['weixin', 'lark'], 'vika-wx', 'weixin']);
 });
 
+test('a mailbox added later is checked, kept in a private file, and a second login replaces it', async (t) => {
+  const m = machine(t, (home) => [agent(home, 'wx', { channel: 'weixin', connectors: ['weixin'], profile: undefined })],
+    { mailboxes: ['1845679308@qq.com', 'l13241789920@163.com'] });
+  assert.equal(await loginCommand(['email'], m.options), 0);
+  const file = path.join(m.home, '.vika', 'email', 'wx.json');
+  assert.deepEqual(m.calls, [['email', null], ['restart', 'wx']]);
+  const [updated] = m.manifest().agents;
+  assert.deepEqual([updated.connectors, updated.channel, updated.emailConfig], [['weixin', 'email'], 'weixin', file]);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  // Replies are approved on a Feishu card, which a Weixin instance cannot show.
+  assert.match(m.written(), /主 IM 是微信[\s\S]*还不能回邮件/);
+
+  m.calls.length = 0;
+  assert.equal(await loginCommand(['email', 'wx'], m.options), 0);
+  assert.deepEqual(m.calls, [['email', '1845679308@qq.com'], ['restart', 'wx']]);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).address, 'l13241789920@163.com');
+  assert.match(m.written(), /换成了 l13241789920@163\.com：只看之后到达的邮件/);
+  assert.deepEqual(m.manifest().agents[0].connectors, ['weixin', 'email']);
+});
+
 test('with several instances it asks which one, or names them when it cannot ask', async (t) => {
   const two = (home) => [agent(home, 'alpha'), agent(home, 'beta', { port: 3739 })];
   const piped = machine(t, two);
@@ -84,10 +108,11 @@ test('with several instances it asks which one, or names them when it cannot ask
 test('a combination the daemon would reject fails before any scan, and nothing exists yet without setup', async (t) => {
   const ark = machine(t, (home) => [agent(home, 'ark', { model: 'ark', volcSessionId: 'sesn-seed12345678', volcEnvironmentId: 'env-12345678' })]);
   await assert.rejects(loginCommand(['weixin'], ark.options), /cannot use the ark runtime/);
+  await assert.rejects(loginCommand(['email'], ark.options), /cannot use the ark runtime/);
   assert.deepEqual(ark.calls, []);
 
   const empty = machine(t, () => []);
   await assert.rejects(loginCommand(['weixin'], empty.options), /先运行 vika setup/);
   assert.equal(await loginCommand(['setup'], empty.options), 2);
-  assert.match(empty.written(), /用法：vika login <lark\|weixin> \[实例\]/);
+  assert.match(empty.written(), /用法：vika login <lark\|weixin\|email> \[实例\]/);
 });

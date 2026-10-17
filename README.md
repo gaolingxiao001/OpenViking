@@ -27,7 +27,7 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 
 ## 安装
 
-一条命令：`curl -fsSL <下载地址>/install.sh | sh`，装好后 `vika setup` 扫码接飞书/微信。机器上不需要 Node。细节看 [install.md](./install.md)：依赖、setup、升级回滚、开机自启、多 agent 和发布新版本。
+一条命令：`curl -fsSL <下载地址>/install.sh | sh`，装好后 `vika setup` 接飞书、微信或邮箱。机器上不需要 Node。细节看 [install.md](./install.md)：依赖、setup、升级回滚、开机自启、多 agent 和发布新版本。
 
 ### 微信单聊 MVP
 
@@ -75,16 +75,7 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 邮箱 Connector 用 IMAP 只读监听一个邮箱的收件箱（不会把邮件标成已读，也不移动、不删除），用 SMTP 回信。新邮件到达后，Agent 判断要不要告诉你，要的话发到你在主 IM 上的私聊。Agent 从不直接发邮件：无论是你让它回，还是它觉得该回，它都只能起草，Core 把草稿放在一张卡片上发给你（收件人、主题和可编辑的正文），你点"发送"才会以卡片上的内容发出，点"不发了"就作废。卡片只有你能操作，三天后过期，目前需要主 IM 是飞书。首次启动只从之后到达的邮件开始；订阅和群发邮件标为 `kind=email.list`，自动回复（含多数退信）和它自己的回信直接跳过；程序自动发出的通知（安全告警、任务失败等）照常交给 Agent 判断。
 
-在实例上加 `email` 并指向账号文件（文件权限必须是 0600，不要写进 `env`）：
-
-```json
-{
-  "id": "primary",
-  "channel": "lark",
-  "connectors": ["lark", "email"],
-  "emailConfig": "/Users/you/.vika/email-primary.json"
-}
-```
+用 `vika login email` 给实例接上邮箱（`vika setup` 里也可以直接勾选）：输入邮箱地址和专用密码，Gmail、QQ、163/126/yeah.net 自动带出服务器，其他邮箱手填。先实际登录一次 IMAP 和 SMTP，成功才保存。账号存在 `~/.vika/email/<实例>.json`（0600），实例配置里写的是它的路径（`emailConfig`）。再执行一次可以换密码或换邮箱，换邮箱后只看之后到达的邮件。账号文件格式如下，手写时文件权限必须是 0600，不要写进 `env`：
 
 ```json
 {
