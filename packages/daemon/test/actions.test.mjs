@@ -829,7 +829,7 @@ describe('owner notices and owner-only actions', () => {
       ['weixin', 'message.send', 'wx-owner', 'markdown']);
     assert.equal(draft.input.content.text, [
       '待你确认的邮件回复 #1', '发件邮箱：me@qq.com', '收件人：Alice <alice@example.com>', '主题：Re: 周四开会？',
-      '————', '周四可以', '————', '回复「发送 1」发出', '回复「不发 1」作废', '回复「修改 1 新的正文」改成你写的内容',
+      '━━━━ 回信正文 ━━━━', '周四可以', '━━━━ 正文结束 ━━━━', '回复「发送 1」发出', '回复「不发 1」作废', '回复「修改 1 新的正文」改成你写的内容',
       '3 天内有效；也可以直接告诉我怎么改，我重新起草。',
     ].join('\n'));
     // The same request again is the same draft.
@@ -847,7 +847,7 @@ describe('owner notices and owner-only actions', () => {
     assert.equal(await answer(service, store, '修改 1 周五下午可以\n回头见'), null);
     assert.deepEqual(mails(connectors), [], 'an edit sends nothing');
     assert.match(told(connectors)[0], /^在「修改 1」后面写上新的正文/);
-    assert.match(told(connectors)[1], /^已按你的修改更新 #1，确认后才会发出：\n发件邮箱：me@qq\.com[\s\S]*————\n周五下午可以\n回头见\n————\n回复「发送 1」发出/);
+    assert.match(told(connectors)[1], /^已按你的修改更新 #1，确认后才会发出：\n发件邮箱：me@qq\.com[\s\S]*━━━━ 回信正文 ━━━━\n周五下午可以\n回头见\n━━━━ 正文结束 ━━━━\n回复「发送 1」发出/);
 
     const note = await answer(service, store, '发送 1');
     assert.deepEqual(mails(connectors), [['email-qq', 'mail:1:7', '周五下午可以\n回头见', ['alice@example.com']]]);

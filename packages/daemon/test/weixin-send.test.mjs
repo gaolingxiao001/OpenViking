@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { sendWeixinMessage } from '../src/weixin/send.mjs';
+import { sendWeixinMessage, weixinText } from '../src/weixin/send.mjs';
 
 function state({ written = true } = {}) {
   return {
@@ -27,6 +27,11 @@ it('derives the Weixin client id from the Core idempotency key, so a retry stays
   assert.equal(bodies[0].msg.client_id, first.client_id);
   assert.equal(bodies[0].msg.context_token, 'context-token');
   assert.deepEqual(bodies[0].msg.item_list, [{ type: 1, text_item: { text: 'hi' } }]);
+});
+
+it('keeps every line break visible on Weixin, which shows text the way Markdown does', () => {
+  assert.equal(weixinText('标题\n第一行\n\n第二段\n```\na\nb\n```\n完'), '标题\n\n第一行\n\n第二段\n\n```\na\nb\n```\n\n完');
+  assert.equal(weixinText('一行'), '一行');
 });
 
 it('rejects anyone but the owner, an owner who has not written yet, unsupported bodies and oversized text', async (t) => {

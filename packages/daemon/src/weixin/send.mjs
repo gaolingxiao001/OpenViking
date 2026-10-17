@@ -11,6 +11,24 @@ function clientIdFor(idempotencyKey, peerId) {
   return `vika-${digest.slice(0, 32)}`;
 }
 
+// Weixin shows a bot's text the way Markdown does: a single line break turns
+// into a space, and only a blank line starts a new line. Each line break is
+// made a blank line so the text reads as written; fenced code keeps its own.
+export function weixinText(text) {
+  const lines = text.split('\n');
+  let fenced = false;
+  let out = '';
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      const previous = lines[index - 1];
+      out += !fenced && previous.trim() && line.trim() ? '\n\n' : '\n';
+    }
+    out += line;
+    if (/^\s*```/.test(line)) fenced = !fenced;
+  });
+  return out;
+}
+
 export async function sendWeixinMessage({ state, to, content, idempotencyKey }) {
   const account = state.account();
   if (!account?.token) throw new Error('Weixin is not logged in; run vika login weixin <instance> first');
@@ -27,10 +45,11 @@ export async function sendWeixinMessage({ state, to, content, idempotencyKey }) 
   const common = { apiBaseUrl: account.baseUrl, token: account.token, to, contextToken, clientId };
   let response;
   if (content.type === 'markdown') {
-    if (content.text.length > WEIXIN_TEXT_LIMIT) {
+    const text = weixinText(content.text);
+    if (text.length > WEIXIN_TEXT_LIMIT) {
       throw new Error(`Weixin text exceeds the ${WEIXIN_TEXT_LIMIT}-character limit`);
     }
-    response = await sendText({ ...common, text: content.text });
+    response = await sendText({ ...common, text });
   } else if (content.type === 'file') {
     const media = readOutboundMedia(content.path);
     const item = await uploadOutboundMedia({ account, to, media });
