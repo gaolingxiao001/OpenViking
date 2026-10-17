@@ -35,7 +35,6 @@ function machine(t, agents, { answers = [], tty = false } = {}) {
     env: { HOME: home, PATH: '', LARK_CLI_BIN: '/opt/lark-cli' },
     connect: {
       weixin: async ({ plan }) => { calls.push(['weixin', plan.id]); },
-      greetWeixin: async ({ dataDir, text }) => { calls.push(['greetWeixin', dataDir, text]); },
       email: async ({ fixed, taken }) => { calls.push(['email', fixed?.address ?? null, taken]); return { ...fixed, password: 'new' }; },
     },
     control: { restart: async (id) => { calls.push(['restart', id]); } },
@@ -48,9 +47,9 @@ test('login renews what an instance has; connecting a new IM is setup\'s', async
   const m = machine(t, (home) => [agent(home, 'haha', { channel: 'weixin', connectors: ['weixin'], profile: undefined })]);
   const before = fs.readFileSync(path.join(m.home, '.vika', 'config.json'), 'utf8');
   assert.equal(await loginCommand(['weixin'], m.options), 0);
-  const dataDir = path.join(m.home, '.vika', 'data', 'haha');
-  assert.deepEqual(m.calls.map((call) => call.slice(0, 2)), [['weixin', 'haha'], ['greetWeixin', dataDir]]);
-  assert.match(m.calls[1][2], /微信重新登录好了/);
+  assert.deepEqual(m.calls, [['weixin', 'haha']]);
+  // A new login is a new conversation: the owner writes first again.
+  assert.match(m.written(), /最后一步：在微信里给机器人发一句话/);
   assert.equal(fs.readFileSync(path.join(m.home, '.vika', 'config.json'), 'utf8'), before, 'the manifest is untouched');
 
   await assert.rejects(loginCommand(['lark'], m.options), /还没有实例接飞书；要接入，运行 vika setup 修改实例/);

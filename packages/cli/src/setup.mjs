@@ -1,9 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loginWeixin } from '../../daemon/src/weixin/auth.mjs';
-import { sendWeixinMessage } from '../../daemon/src/weixin/send.mjs';
 import { WeixinState } from '../../daemon/src/weixin/state.mjs';
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { LarkCli } from './lark-cli.mjs';
@@ -404,25 +402,17 @@ export function greet({ larkCliBin, profile, userId, text }) {
   return new LarkCli(larkCliBin).sendText({ profile, userId, text });
 }
 
-// The bot's first Weixin message to its owner, the account that scanned.
-export async function greetWeixin({ dataDir, text }) {
-  const state = new WeixinState(dataDir);
-  try {
-    await sendWeixinMessage({ state, to: state.account()?.userId, content: { type: 'markdown', text },
-      idempotencyKey: `vika-greeting-${randomUUID()}` });
-  } finally {
-    state.close();
-  }
-}
+// Weixin delivers a bot's message only after the owner has written to it
+// since the scan, so the bot cannot say hello first: the owner does.
+export const WEIXIN_FIRST_MESSAGE = '在微信里给机器人发一句话（比如「你好」），它回复你就说明接好了。'
+  + '在你发第一句话之前它没法主动找你：新邮件提醒、待你确认的邮件回复都发不到微信。';
 
-// What the bot says when an IM is newly connected; on the primary IM, also
-// that it reaches the owner there.
-function greeting(im, { name, newInstance, primary }) {
+// What the bot says on Feishu when it is newly connected; on the primary IM,
+// also that it reaches the owner there.
+function greeting({ name, newInstance, primary }) {
   const hello = newInstance
-    ? (im === 'lark'
-      ? `你好，我是 ${name}，已经在你的电脑上跑起来了。直接给我发消息就行；把我拉进群，我也能参与群聊。`
-      : `你好，我是 ${name}，已经在你的电脑上跑起来了。直接在微信里给我发消息就行。`)
-    : `你好，我是 ${name}，现在也能在${IM_LABELS[im]}里找到我了。`;
+    ? `你好，我是 ${name}，已经在你的电脑上跑起来了。直接给我发消息就行；把我拉进群，我也能参与群聊。`
+    : `你好，我是 ${name}，现在也能在飞书里找到我了。`;
   return primary ? `${hello}以后我主动找你的消息（比如新邮件提醒、待你确认的邮件回复）会发到这里。` : hello;
 }
 
@@ -432,7 +422,7 @@ export async function setupCommand({
   homeDir = os.homedir(),
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
-  connect = { lark: connectLark, weixin: connectWeixin, email: askEmail, greet, greetWeixin },
+  connect = { lark: connectLark, weixin: connectWeixin, email: askEmail, greet },
   control = { start: startCommand, restart: restartCommand },
   allocate = allocatePort,
 } = {}) {
@@ -549,16 +539,13 @@ export async function setupCommand({
       });
     }
   }
-  const hello = (im) => greeting(im, { name: state.displayName, newInstance: !current, primary: im === state.channel });
   if (lark) {
-    await connect.greet({ larkCliBin, profile: lark.profile, userId: lark.ownerOpenId, text: hello('lark') })
+    const text = greeting({ name: state.displayName, newInstance: !current, primary: state.channel === 'lark' });
+    await connect.greet({ larkCliBin, profile: lark.profile, userId: lark.ownerOpenId, text })
       .catch((error) => out(`  飞书打招呼的消息没发出去：${error.message}\n`));
   }
-  if (newIms.includes('weixin')) {
-    await connect.greetWeixin({ dataDir: state.dataDir, text: hello('weixin') })
-      .catch((error) => out(`  微信打招呼的消息没发出去：${error.message}\n`));
-  }
   out(`\n${state.displayName}（${id}）${current ? '已更新' : '已就绪'}。\n`);
+  if (newIms.includes('weixin')) out(`\n最后一步：${WEIXIN_FIRST_MESSAGE}\n`);
   return 0;
 }
 

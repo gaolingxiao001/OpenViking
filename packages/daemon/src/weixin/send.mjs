@@ -14,11 +14,17 @@ function clientIdFor(idempotencyKey, peerId) {
 export async function sendWeixinMessage({ state, to, content, idempotencyKey }) {
   const account = state.account();
   if (!account?.token) throw new Error('Weixin is not logged in; run vika login weixin <instance> first');
-  // The bot talks only with its owner, the account that scanned the login QR
-  // code; Weixin accepts a message to it even before the owner has written.
+  // The bot talks only with its owner, the account that scanned the login QR code.
   if (!account.userId || to !== account.userId) throw new Error('Weixin can only message the account that scanned the login QR code');
+  // Weixin accepts a message without the context token of the owner's last
+  // message to this login, then never delivers it: until the owner writes
+  // to the bot after a scan, it cannot reach them.
+  const contextToken = state.contextToken(to);
+  if (!contextToken) {
+    throw new Error('The Weixin owner has not written to this bot since it logged in; it cannot reach them until they send it a message');
+  }
   const clientId = clientIdFor(idempotencyKey, to);
-  const common = { apiBaseUrl: account.baseUrl, token: account.token, to, contextToken: state.contextToken(to), clientId };
+  const common = { apiBaseUrl: account.baseUrl, token: account.token, to, contextToken, clientId };
   let response;
   if (content.type === 'markdown') {
     if (content.text.length > WEIXIN_TEXT_LIMIT) {

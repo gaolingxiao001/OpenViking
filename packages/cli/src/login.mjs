@@ -5,7 +5,7 @@ import { IM_LABELS, chooseInstance, loadInstances } from './instances.mjs';
 import { LarkCli } from './lark-cli.mjs';
 import { showQr } from './qr.mjs';
 import { which } from './runtimes.mjs';
-import { connectWeixin, greetWeixin, larkScopes } from './setup.mjs';
+import { WEIXIN_FIRST_MESSAGE, connectWeixin, larkScopes } from './setup.mjs';
 
 // `vika login <lark|weixin|email> [instance]`: authorize again what an
 // instance already has, after a login expired or a password changed.
@@ -33,7 +33,7 @@ async function restart({ agent, prompter, env, control }) {
 export async function loginCommand([connector, requested, ...extra], {
   prompter,
   env = process.env,
-  connect = { weixin: connectWeixin, email: askEmail, greetWeixin },
+  connect = { weixin: connectWeixin, email: askEmail },
   control = { restart: restartCommand },
 } = {}) {
   if (!['lark', 'weixin', 'email'].includes(connector) || extra.length) {
@@ -54,9 +54,8 @@ export async function loginCommand([connector, requested, ...extra], {
 
   if (connector === 'weixin') {
     await connect.weixin({ plan: agent, prompter });
-    await connect.greetWeixin({ dataDir: agent.dataDir, text: `${agent.displayName} 的微信重新登录好了，可以继续在这里找我。` })
-      .catch((error) => prompter.write(`  微信消息没发出去：${error.message}\n`));
-    prompter.write('运行中的实例会在下次重连时用上新的登录，不用重启。\n');
+    // A new login starts a new conversation: the owner writes first again.
+    prompter.write(`运行中的实例会在下次重连时用上新的登录，不用重启。\n\n最后一步：${WEIXIN_FIRST_MESSAGE}\n`);
     return 0;
   }
   if (connector === 'email') {

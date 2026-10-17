@@ -37,7 +37,6 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
         return { address: 'liuweihan2000@gmail.com', password: 'p', imap: { host: 'imap.gmail.com', port: 993 }, smtp: { host: 'smtp.gmail.com', port: 465 } };
       },
       greet: async (message) => { calls.push(['greet', message.userId]); },
-      greetWeixin: async ({ dataDir, text }) => { calls.push(['greetWeixin', dataDir, text]); },
     },
     control: {
       start: async (target) => { calls.push(['start', target]); if (failStart) throw new Error('pm2 is not installed'); },
@@ -83,10 +82,9 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
     ['restart', 'web'],
     ['start', 'updater'],
     ['greet', 'ou_owner'],
-    ['greetWeixin', dataDir],
   ]);
-  // Each IM gets a hello; the primary one also hears that the bot reaches the owner there.
-  assert.match(h.calls.at(-1)[2], /^你好，我是 小V，已经在你的电脑上跑起来了。直接在微信里给我发消息就行。以后我主动找你的消息/);
+  // Feishu gets a hello; Weixin delivers nothing until the owner writes, so the owner is told to.
+  assert.match(h.written(), /已就绪。\n\n最后一步：在微信里给机器人发一句话（比如「你好」）[\s\S]*都发不到微信。\n$/);
   assert.match(h.written(), /主渠道微信/);
 });
 
@@ -119,7 +117,7 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   assert.equal(agent.channel, 'weixin');
   assert.match(weixin.written(), /没有检测到 OpenViking/);
   assert.match(weixin.written(), /主渠道是微信：你没找机器人、它主动找你时（比如新邮件提醒、待你确认的邮件回复）发到这里/);
-  assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start', 'greetWeixin']);
+  assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
 });
 
 test('mailboxes come with an IM, are checked before the scans and saved with the manifest', async (t) => {
@@ -142,7 +140,7 @@ test('mailboxes come with an IM, are checked before the scans and saved with the
   assert.equal(JSON.parse(fs.readFileSync(file('email-qq'), 'utf8')).address, '1845679308@qq.com');
   assert.equal(fs.statSync(file('email-gmail')).mode & 0o777, 0o600);
   assert.match(h.written(), /微信、邮箱（liuweihan2000@gmail\.com、1845679308@qq\.com）/);
-  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'email', 'weixin', 'start', 'restart', 'start', 'greetWeixin']);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'email', 'weixin', 'start', 'restart', 'start']);
 
   const declined = harness(t, ['', '', '', '1', '1,3', 'n', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
@@ -171,8 +169,8 @@ test('changing an instance lists every setting; only the ones opened change', as
   assert.match(h.written(), /1\) 机器人名字\s+ASD\n  2\) 工作目录\s+~\/ws\n  3\) Agent 运行时\s+Codex\n  4\) 接入的 IM\s+飞书\n  5\) 主渠道\s+飞书\n  6\) 邮箱\s+没有接\n  7\) OpenViking\s+不用\n  8\) 保存\n  9\) 放弃修改/);
   assert.match(h.written(), /4\) 接入的 IM\s+飞书、微信（已改）[\s\S]*5\) 主渠道\s+微信（已改）\n[\s\S]*8\) 保存（2 项改动）/);
   assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
-  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']].concat([['greetWeixin', before.dataDir]]));
-  assert.match(h.calls.at(-1)[2], /^你好，我是 ASD，现在也能在微信里找到我了。以后我主动找你的消息/);
+  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']]);
+  assert.match(h.written(), /ASD（asd）已更新。\n\n最后一步：在微信里给机器人发一句话/);
 
   // Saving nothing, or leaving, writes and restarts nothing.
   for (const [answers, said] of [[['2', '8'], /没有改动/], [['2', '1', '新名字', '9'], /已放弃，没有保存任何改动/]]) {

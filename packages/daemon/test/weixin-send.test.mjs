@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { it } from 'node:test';
 import { sendWeixinMessage } from '../src/weixin/send.mjs';
 
-function state() {
+function state({ written = true } = {}) {
   return {
     account: () => ({ token: 'bot-token', baseUrl: 'https://weixin.example', userId: 'peer@im.wechat' }),
-    contextToken: () => 'context-token',
+    contextToken: () => (written ? 'context-token' : null),
   };
 }
 
@@ -29,10 +29,12 @@ it('derives the Weixin client id from the Core idempotency key, so a retry stays
   assert.deepEqual(bodies[0].msg.item_list, [{ type: 1, text_item: { text: 'hi' } }]);
 });
 
-it('rejects anyone but the owner, unsupported bodies and oversized text before calling Weixin', async (t) => {
+it('rejects anyone but the owner, an owner who has not written yet, unsupported bodies and oversized text', async (t) => {
   const fetch = t.mock.method(globalThis, 'fetch', async () => assert.fail('must not call Weixin'));
   const send = (fields) => sendWeixinMessage({ state: state(), to: 'peer@im.wechat', content: text('hi'), idempotencyKey: 'k', ...fields });
   await assert.rejects(() => send({ to: 'someone@im.wechat' }), /only message the account that scanned the login QR code/);
+  // Weixin would take it and never deliver it.
+  await assert.rejects(() => send({ state: state({ written: false }) }), /has not written to this bot since it logged in/);
   await assert.rejects(() => send({ content: { type: 'card', card: {} } }), /does not support card messages/);
   await assert.rejects(() => send({ content: text('x'.repeat(4_001)) }), /4000-character limit/);
   assert.equal(fetch.mock.callCount(), 0);

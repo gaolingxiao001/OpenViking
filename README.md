@@ -67,7 +67,7 @@ vika login weixin weixin
 VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```
 
-终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。接好后机器人会先在微信里给你发一条自我介绍。带有微信语音转写的消息会以转写文本进入 Agent。机器人只和扫码的那个微信号单聊，不能和别人聊，也不能进群。
+终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。扫码后先在微信里给机器人发一句话（比如「你好」）：微信只送达你发过消息之后机器人发的消息，在这之前它没法主动找你（新邮件提醒、待你确认的邮件回复都发不到微信），每次重新扫码登录后都一样。一个微信号同时只能连一个机器人，给另一个实例扫码会让这个实例的微信掉线。带有微信语音转写的消息会以转写文本进入 Agent。机器人只和扫码的那个微信号单聊，不能和别人聊，也不能进群。
 
 这个 MVP 使用一个微信账号，支持单聊文本、入站图片和文件、微信提供的语音转写，以及出站图片和文件。入站媒体经腾讯 CDN 下载和 AES 解密后保存在该实例的 `dataDir/weixin/media`，单个文件和出站 workspace 文件上限均为 20 MiB，并随 daemon 的保留周期清理。原始语音解码/ASR、视频、群聊、引用和 reaction 尚未接入。协议实现固定对齐 `Tencent/openclaw-weixin` 2.4.9，来源与许可证见 [微信协议说明](packages/daemon/src/weixin/NOTICE.md) 和 [MIT 许可证](packages/daemon/src/weixin/LICENSE.openclaw-weixin)。
 
