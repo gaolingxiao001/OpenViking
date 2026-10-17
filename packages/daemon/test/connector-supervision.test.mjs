@@ -131,6 +131,40 @@ describe('Connector supervision', () => {
   });
 });
 
+describe('several mailboxes', () => {
+  it('runs each mailbox as its own process with its own account, and one failing leaves the other running', async (t) => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'connector-mailboxes-'));
+    fs.writeFileSync(path.join(dataDir, 'email-qq.mode'), 'fail-check');
+    const registry = new ProcessRegistry(logger);
+    const manager = new ConnectorManager({
+      connectors: ['lark', 'email'],
+      emailAccounts: [{ id: 'email-gmail', configFile: '/vika/email/gmail.json' }, { id: 'email-qq', configFile: '/vika/email/qq.json' }],
+      dataDir, projectDir: process.cwd(), maxEventBytes: 100_000,
+      connectorWorkerPath: fixture, connectorRestartDelaysMs: [60_000], connectorStableAfterMs: 100,
+    }, registry, logger);
+    t.after(async () => {
+      await manager.stop();
+      await registry.stopAll(1_000);
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    });
+    const info = await manager.preflight();
+    assert.deepEqual(Object.keys(info.connectors), ['lark', 'email-gmail']);
+    assert.match(info.failed['email-qq'], /login expired/);
+    const events = [];
+    await manager.startSubscription((event) => events.push(`${event.connector}/${event.instance}`), () => {});
+    await waitFor(() => events.length === 2);
+    assert.deepEqual(events.sort(), ['email/email-gmail', 'lark/lark']);
+    assert.equal(fs.readFileSync(path.join(dataDir, 'email-gmail.account'), 'utf8'), '/vika/email/gmail.json');
+    assert.equal(fs.readFileSync(path.join(dataDir, 'email-qq.account'), 'utf8'), '/vika/email/qq.json');
+    assert.deepEqual(Object.fromEntries(Object.entries(manager.snapshot()).map(([id, { state }]) => [id, state])),
+      { lark: 'running', 'email-gmail': 'running', 'email-qq': 'restarting' });
+    // A mailbox that is down still has its manifest; delivery to it is refused as unavailable.
+    assert.deepEqual(manager.manifests().map(([id, manifest]) => [id, manifest.name]),
+      [['lark', 'lark'], ['email-gmail', 'email'], ['email-qq', 'email']]);
+    assert.equal(manager.available('email-qq'), false);
+  });
+});
+
 describe('daemon with a failing Connector (mock env)', { concurrency: false }, () => {
   it('keeps Lark serving while Weixin keeps failing, and takes Weixin back after a new login', async () => {
     const env = await startMockEnv({

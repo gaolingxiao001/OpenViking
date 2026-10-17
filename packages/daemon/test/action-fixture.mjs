@@ -16,7 +16,8 @@ export function fakeConnectors({ ids = ['lark'], run = null, owners = {} } = {})
     updates,
     owners,
     async updateCard(messageId, card) { updates.push({ messageId, card }); },
-    manifests: () => ids.map((id) => [id, getConnectorManifest(id)]),
+    // An instance id names its connector before any -suffix (email-gmail).
+    manifests: () => ids.map((id) => [id, getConnectorManifest(id.split('-')[0])]),
     owner: (id) => owners[id] ?? null,
     async invoke(connector, action, input) {
       calls.push({ connector, action, input });

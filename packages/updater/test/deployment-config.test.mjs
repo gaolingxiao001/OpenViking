@@ -8,6 +8,7 @@ import test from 'node:test';
 const require = createRequire(import.meta.url);
 const {
   applyDeploymentAgentEnv,
+  deploymentDaemonEnvOverrides,
   applyDeploymentDaemonEnv,
   loadDeploymentManifest,
   resolveDeploymentManifestPath,
@@ -19,9 +20,9 @@ function validManifest() {
     version: 1,
     defaultInstance: 'beta',
     env: {
-      LARK_DAEMON_LOG_LEVEL: 'info',
-      LARK_DAEMON_DRY_RUN: 'false',
-      LARK_DAEMON_TRAEX_EFFORT: 'medium',
+      VIKA_LOG_LEVEL: 'info',
+      VIKA_DRY_RUN: 'false',
+      VIKA_TRAEX_EFFORT: 'medium',
       TEAM_TASK_BOARD_URL: '',
     },
     agents: [
@@ -30,13 +31,13 @@ function validManifest() {
         displayName: 'Alpha',
         profile: 'cli_alpha',
         port: 3738,
-        dataDir: '/srv/lark-daemon/data/alpha',
-        workspace: '/srv/lark-daemon/workspaces/alpha',
-        ovConfig: '/srv/lark-daemon/ov/alpha.json',
+        dataDir: '/srv/vika/data/alpha',
+        workspace: '/srv/vika/workspaces/alpha',
+        ovConfig: '/srv/vika/ov/alpha.json',
         model: 'gpt-5.6-sol',
         meetingAudio: {
           pythonCommand: '/usr/bin/python3',
-          asrConfigFile: '/srv/lark-daemon/secrets/alpha-asr.yaml',
+          asrConfigFile: '/srv/vika/secrets/alpha-asr.yaml',
         },
       },
       {
@@ -44,9 +45,9 @@ function validManifest() {
         displayName: 'Beta',
         profile: 'cli_beta',
         port: 3740,
-        dataDir: '/srv/lark-daemon/data/beta',
-        workspace: '/srv/lark-daemon/workspaces/beta',
-        ovConfig: '/srv/lark-daemon/ov/beta.json',
+        dataDir: '/srv/vika/data/beta',
+        workspace: '/srv/vika/workspaces/beta',
+        ovConfig: '/srv/vika/ov/beta.json',
         model: 'gpt-5.6-sol',
       },
       {
@@ -54,9 +55,9 @@ function validManifest() {
         displayName: 'Gamma',
         profile: 'cli_gamma',
         port: 3741,
-        dataDir: '/srv/lark-daemon/data/gamma',
-        workspace: '/srv/lark-daemon/workspaces/gamma',
-        ovConfig: '/srv/lark-daemon/ov/gamma.json',
+        dataDir: '/srv/vika/data/gamma',
+        workspace: '/srv/vika/workspaces/gamma',
+        ovConfig: '/srv/vika/ov/gamma.json',
         model: 'gpt-5.6-sol',
       },
     ],
@@ -65,7 +66,7 @@ function validManifest() {
 
 function withManifest(value, callback) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-deployment-'));
-  const manifestPath = path.join(directory, 'deployment.json');
+  const manifestPath = path.join(directory, 'config.json');
   fs.writeFileSync(manifestPath, `${JSON.stringify(value, null, 2)}\n`);
   try {
     return callback(manifestPath);
@@ -77,15 +78,15 @@ function withManifest(value, callback) {
 test('loads any number of agents from one absolute deployment manifest', () => {
   withManifest(validManifest(), (manifestPath) => {
     const deployment = loadDeploymentManifest({
-      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+      VIKA_CONFIG: manifestPath,
     });
 
     assert.equal(deployment.version, 1);
     assert.equal(deployment.defaultInstance, 'beta');
     assert.deepEqual(deployment.env, {
-      LARK_DAEMON_LOG_LEVEL: 'info',
-      LARK_DAEMON_DRY_RUN: 'false',
-      LARK_DAEMON_TRAEX_EFFORT: 'medium',
+      VIKA_LOG_LEVEL: 'info',
+      VIKA_DRY_RUN: 'false',
+      VIKA_TRAEX_EFFORT: 'medium',
       TEAM_TASK_BOARD_URL: '',
     });
     assert.deepEqual(deployment.agents.map(({ id }) => id), ['alpha', 'beta', 'gamma']);
@@ -93,7 +94,7 @@ test('loads any number of agents from one absolute deployment manifest', () => {
     assert.equal(selectDeploymentAgent(deployment, 'gamma').profile, 'cli_gamma');
     assert.deepEqual(selectDeploymentAgent(deployment, 'alpha').meetingAudio, {
       pythonCommand: '/usr/bin/python3',
-      asrConfigFile: '/srv/lark-daemon/secrets/alpha-asr.yaml',
+      asrConfigFile: '/srv/vika/secrets/alpha-asr.yaml',
     });
     assert.equal(selectDeploymentAgent(deployment, 'beta').meetingAudio, null);
   });
@@ -102,12 +103,12 @@ test('loads any number of agents from one absolute deployment manifest', () => {
 test('defaults the manifest path under HOME and accepts an explicit absolute override', () => {
   assert.equal(
     resolveDeploymentManifestPath({ HOME: '/Users/test' }),
-    '/Users/test/.lark-daemon/deployment.json',
+    '/Users/test/.vika/config.json',
   );
   assert.equal(resolveDeploymentManifestPath({
     HOME: '/Users/test',
-    LARK_DAEMON_DEPLOYMENT_MANIFEST: '/srv/lark/deployment.json',
-  }), '/srv/lark/deployment.json');
+    VIKA_CONFIG: '/srv/lark/config.json',
+  }), '/srv/lark/config.json');
   assert.throws(
     () => resolveDeploymentManifestPath({ HOME: 'relative' }),
     /HOME must be an absolute path/,
@@ -118,22 +119,22 @@ test('system environment overrides manifest daemon env while agent identity stay
   withManifest(validManifest(), (manifestPath) => {
     const env = {
       HOME: '/Users/test',
-      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
-      LARK_DAEMON_LOG_LEVEL: 'debug',
+      VIKA_CONFIG: manifestPath,
+      VIKA_LOG_LEVEL: 'debug',
       ARK_API_KEY: 'system-only-secret',
-      LARK_DAEMON_PORT: '9999',
-      LARK_DAEMON_PROFILE: 'wrong',
+      VIKA_PORT: '9999',
+      VIKA_LARK_PROFILE: 'wrong',
     };
     const deployment = loadDeploymentManifest(env);
     applyDeploymentDaemonEnv(env, deployment);
     applyDeploymentAgentEnv(env, deployment, 'alpha');
 
-    assert.equal(env.LARK_DAEMON_LOG_LEVEL, 'debug');
-    assert.equal(env.LARK_DAEMON_DRY_RUN, 'false');
+    assert.equal(env.VIKA_LOG_LEVEL, 'debug');
+    assert.equal(env.VIKA_DRY_RUN, 'false');
     assert.equal(env.TEAM_TASK_BOARD_URL, '');
     assert.equal(env.ARK_API_KEY, 'system-only-secret');
-    assert.equal(env.LARK_DAEMON_PORT, '3738');
-    assert.equal(env.LARK_DAEMON_PROFILE, 'cli_alpha');
+    assert.equal(env.VIKA_PORT, '3738');
+    assert.equal(env.VIKA_LARK_PROFILE, 'cli_alpha');
   });
 });
 
@@ -141,16 +142,19 @@ test('falls back to a secrets file for daemon-wide secrets missing from the envi
   withManifest(validManifest(), (manifestPath) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-secrets-'));
     const secretsPath = path.join(directory, 'secrets.env');
-    fs.writeFileSync(secretsPath, '# comment\nARK_API_KEY=from-file-secret\n');
+    fs.writeFileSync(secretsPath, '# comment\nARK_API_KEY=from-file-secret\nVIKA_TOS_ACCESS_KEY=bucket-read-key\nOTHER=ignored\n');
     try {
       const env = {
         HOME: '/Users/test',
-        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
-        LARK_DAEMON_SECRETS_FILE: secretsPath,
+        VIKA_CONFIG: manifestPath,
+        VIKA_SECRETS_FILE: secretsPath,
       };
       const deployment = loadDeploymentManifest(env);
       applyDeploymentDaemonEnv(env, deployment);
       assert.equal(env.ARK_API_KEY, 'from-file-secret');
+      // The updater downloads releases from the private test bucket with it.
+      assert.equal(deploymentDaemonEnvOverrides(env).VIKA_TOS_ACCESS_KEY, 'bucket-read-key');
+      assert.equal(env.OTHER, undefined);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -165,8 +169,8 @@ test('the environment still wins over the secrets file', () => {
     try {
       const env = {
         HOME: '/Users/test',
-        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
-        LARK_DAEMON_SECRETS_FILE: secretsPath,
+        VIKA_CONFIG: manifestPath,
+        VIKA_SECRETS_FILE: secretsPath,
         ARK_API_KEY: 'from-shell-env',
       };
       const deployment = loadDeploymentManifest(env);
@@ -182,8 +186,8 @@ test('a missing secrets file is not an error', () => {
   withManifest(validManifest(), (manifestPath) => {
     const env = {
       HOME: '/Users/test',
-      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
-      LARK_DAEMON_SECRETS_FILE: '/no/such/file/secrets.env',
+      VIKA_CONFIG: manifestPath,
+      VIKA_SECRETS_FILE: '/no/such/file/secrets.env',
     };
     const deployment = loadDeploymentManifest(env);
     applyDeploymentDaemonEnv(env, deployment);
@@ -193,19 +197,19 @@ test('a missing secrets file is not an error', () => {
 
 test('manifest env accepts only string values from the daemon-wide allowlist', () => {
   const cases = [
-    ['reserved identity', 'LARK_DAEMON_PROFILE', 'cli_wrong', /env field is not allowed: LARK_DAEMON_PROFILE/],
-    ['reserved control plane', 'LARK_UPDATER_SOCKET', '/tmp/wrong', /env field is not allowed: LARK_UPDATER_SOCKET/],
+    ['reserved identity', 'VIKA_LARK_PROFILE', 'cli_wrong', /env field is not allowed: VIKA_LARK_PROFILE/],
+    ['reserved control plane', 'VIKA_UPDATER_SOCKET', '/tmp/wrong', /env field is not allowed: VIKA_UPDATER_SOCKET/],
     ['system-only secret', 'ARK_API_KEY', 'must-not-live-in-manifest', /env field is not allowed: ARK_API_KEY/],
-    ['removed Codex model', 'LARK_DAEMON_CODEX_MODEL', 'gpt-5.6-sol', /env field is not allowed: LARK_DAEMON_CODEX_MODEL/],
+    ['removed Codex model', 'VIKA_CODEX_MODEL', 'gpt-5.6-sol', /env field is not allowed: VIKA_CODEX_MODEL/],
     ['unknown key', 'UNRELATED_SETTING', 'value', /env field is not allowed: UNRELATED_SETTING/],
-    ['non-string', 'LARK_DAEMON_HISTORY_LIMIT', 30, /env\.LARK_DAEMON_HISTORY_LIMIT must be a string/],
+    ['non-string', 'VIKA_HISTORY_LIMIT', 30, /env\.VIKA_HISTORY_LIMIT must be a string/],
   ];
   for (const [name, key, value, error] of cases) {
     const manifest = validManifest();
     manifest.env[key] = value;
     withManifest(manifest, (manifestPath) => {
       assert.throws(() => loadDeploymentManifest({
-        LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
+        VIKA_CONFIG: manifestPath,
       }), error, name);
     });
   }
@@ -214,24 +218,24 @@ test('manifest env accepts only string values from the daemon-wide allowlist', (
 test('foreground selection defaults to defaultInstance and pins every identity boundary', () => {
   withManifest(validManifest(), (manifestPath) => {
     const env = {
-      LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath,
-      LARK_DAEMON_VOLC_SESSION_ID: 'legacy-global-seed',
-      LARK_DAEMON_VOLC_ENVIRONMENT_ID: 'legacy-global-environment',
+      VIKA_CONFIG: manifestPath,
+      VIKA_VOLC_SESSION_ID: 'legacy-global-seed',
+      VIKA_VOLC_ENVIRONMENT_ID: 'legacy-global-environment',
     };
     const deployment = loadDeploymentManifest(env);
     applyDeploymentAgentEnv(env, deployment);
 
     assert.deepEqual({
-      id: env.LARK_DAEMON_INSTANCE_ID,
-      target: env.LARK_DAEMON_UPGRADE_TARGET,
-      name: env.LARK_DAEMON_AGENT_NAME,
-      profile: env.LARK_DAEMON_PROFILE,
+      id: env.VIKA_INSTANCE_ID,
+      target: env.VIKA_UPGRADE_TARGET,
+      name: env.VIKA_AGENT_NAME,
+      profile: env.VIKA_LARK_PROFILE,
       cliProfile: env.LARKSUITE_CLI_PROFILE,
-      port: env.LARK_DAEMON_PORT,
-      dataDir: env.LARK_DAEMON_DATA_DIR,
-      workspace: env.LARK_DAEMON_WORKSPACE,
+      port: env.VIKA_PORT,
+      dataDir: env.VIKA_DATA_DIR,
+      workspace: env.VIKA_WORKSPACE,
       ovConfig: env.OPENVIKING_CLI_CONFIG_FILE,
-      model: env.LARK_DAEMON_MODEL,
+      model: env.VIKA_MODEL,
     }, {
       id: 'beta',
       target: 'beta',
@@ -239,14 +243,14 @@ test('foreground selection defaults to defaultInstance and pins every identity b
       profile: 'cli_beta',
       cliProfile: 'cli_beta',
       port: '3740',
-      dataDir: '/srv/lark-daemon/data/beta',
-      workspace: '/srv/lark-daemon/workspaces/beta',
-      ovConfig: '/srv/lark-daemon/ov/beta.json',
+      dataDir: '/srv/vika/data/beta',
+      workspace: '/srv/vika/workspaces/beta',
+      ovConfig: '/srv/vika/ov/beta.json',
       model: 'gpt-5.6-sol',
     });
-    assert.equal(env.LARK_DAEMON_CODEX_MODEL, undefined);
-    assert.equal(env.LARK_DAEMON_VOLC_SESSION_ID, undefined);
-    assert.equal(env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, undefined);
+    assert.equal(env.VIKA_CODEX_MODEL, undefined);
+    assert.equal(env.VIKA_VOLC_SESSION_ID, undefined);
+    assert.equal(env.VIKA_VOLC_ENVIRONMENT_ID, undefined);
   });
 });
 
@@ -256,13 +260,13 @@ test('pins Ark as a generic initial model without misconfiguring Codex', () => {
   manifest.agents[1].volcSessionId = 'sesn-beta-self-hosted';
   manifest.agents[1].volcEnvironmentId = 'env-beta-self-hosted';
   withManifest(manifest, (manifestPath) => {
-    const env = { LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath };
+    const env = { VIKA_CONFIG: manifestPath };
     const deployment = loadDeploymentManifest(env);
     applyDeploymentAgentEnv(env, deployment);
-    assert.equal(env.LARK_DAEMON_MODEL, 'ark');
-    assert.equal(env.LARK_DAEMON_CODEX_MODEL, undefined);
-    assert.equal(env.LARK_DAEMON_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
-    assert.equal(env.LARK_DAEMON_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
+    assert.equal(env.VIKA_MODEL, 'ark');
+    assert.equal(env.VIKA_CODEX_MODEL, undefined);
+    assert.equal(env.VIKA_VOLC_SESSION_ID, 'sesn-beta-self-hosted');
+    assert.equal(env.VIKA_VOLC_ENVIRONMENT_ID, 'env-beta-self-hosted');
   });
 });
 
@@ -284,7 +288,7 @@ test('requires a complete per-agent self-hosted binding for Ark', () => {
     mutate(manifest.agents[1]);
     withManifest(manifest, (manifestPath) => {
       assert.throws(
-        () => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
+        () => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }),
         error,
         name,
       );
@@ -292,32 +296,67 @@ test('requires a complete per-agent self-hosted binding for Ark', () => {
   }
 });
 
-test('connects a mailbox only together with its private account file', () => {
+test('connects mailboxes only together with the email connector, each account file once', () => {
   const manifest = validManifest();
+  const mailboxes = [{ id: 'email-gmail', config: '/srv/vika/secrets/beta-gmail.json' }, { id: 'email-qq', config: '/srv/vika/secrets/beta-qq.json' }];
   manifest.agents[1].connectors = ['email', 'lark'];
-  manifest.agents[1].emailConfig = '/srv/lark-daemon/secrets/beta-email.json';
+  manifest.agents[1].emailAccounts = mailboxes;
   withManifest(manifest, (manifestPath) => {
-    const env = { LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath, LARK_DAEMON_EMAIL_CONFIG_FILE: '/stale.json' };
+    const env = { VIKA_CONFIG: manifestPath, VIKA_EMAIL_ACCOUNTS_JSON: '[]' };
     const deployment = loadDeploymentManifest(env);
     // A mailbox is never the primary IM, wherever it is listed.
     assert.equal(selectDeploymentAgent(deployment).channel, 'lark');
     applyDeploymentAgentEnv(env, deployment, 'beta');
-    assert.equal(env.LARK_DAEMON_CONNECTORS_JSON, '["email","lark"]');
-    assert.equal(env.LARK_DAEMON_EMAIL_CONFIG_FILE, '/srv/lark-daemon/secrets/beta-email.json');
+    assert.equal(env.VIKA_CONNECTORS_JSON, '["email","lark"]');
+    assert.deepEqual(JSON.parse(env.VIKA_EMAIL_ACCOUNTS_JSON), mailboxes);
     applyDeploymentAgentEnv(env, deployment, 'gamma');
-    assert.equal(env.LARK_DAEMON_EMAIL_CONFIG_FILE, undefined);
+    assert.equal(env.VIKA_EMAIL_ACCOUNTS_JSON, undefined);
   });
-  for (const mutate of [
-    (agent) => { agent.connectors = ['lark', 'email']; },
-    (agent) => { agent.emailConfig = '/srv/lark-daemon/secrets/beta-email.json'; },
+  for (const [mutate, error] of [
+    [(agent) => { agent.connectors = ['lark', 'email']; }, /emailAccounts and the email connector must be configured together/],
+    [(agent) => { agent.emailAccounts = mailboxes; }, /emailAccounts and the email connector must be configured together/],
+    [(agent) => { agent.connectors = ['lark', 'email']; agent.emailAccounts = [mailboxes[0], { ...mailboxes[1], id: 'email-gmail' }]; }, /two mailboxes called email-gmail/],
+    [(agent) => { agent.connectors = ['lark', 'email']; agent.emailAccounts = [{ ...mailboxes[0], id: 'Gmail' }]; }, /must be email-<name>/],
+    [(agent) => { agent.connectors = ['lark', 'email']; agent.emailAccounts = [mailboxes[0], { ...mailboxes[1], config: mailboxes[0].config }]; }, /duplicate email account file/],
   ]) {
     const broken = validManifest();
     mutate(broken.agents[1]);
     withManifest(broken, (manifestPath) => {
-      assert.throws(() => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
-        /emailConfig and the email connector must be configured together/);
+      assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), error);
     });
   }
+});
+
+
+test('an instance runs without OpenViking, and without a profile when it has no lark connector', () => {
+  const manifest = validManifest();
+  delete manifest.agents[1].ovConfig;
+  delete manifest.agents[2].ovConfig;
+  manifest.agents[2].channel = 'weixin';
+  manifest.agents[2].connectors = ['weixin'];
+  delete manifest.agents[2].profile;
+  withManifest(manifest, (manifestPath) => {
+    const env = {
+      VIKA_CONFIG: manifestPath,
+      OPENVIKING_CLI_CONFIG_FILE: '/stale/ovcli.conf',
+      VIKA_LARK_PROFILE: 'stale',
+      LARKSUITE_CLI_PROFILE: 'stale',
+    };
+    const deployment = loadDeploymentManifest(env);
+    assert.equal(selectDeploymentAgent(deployment, 'beta').ovConfig, null);
+    applyDeploymentAgentEnv(env, deployment, 'alpha');
+    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/srv/vika/ov/alpha.json');
+    assert.equal(env.OPENVIKING_MEMORY_ENABLED, '1');
+    // Without OV the user's own memory plugins are switched off for this instance.
+    applyDeploymentAgentEnv(env, deployment, 'beta');
+    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, undefined);
+    assert.equal(env.OPENVIKING_MEMORY_ENABLED, '0');
+    assert.equal(env.LARKSUITE_CLI_PROFILE, 'cli_beta');
+    applyDeploymentAgentEnv(env, deployment, 'gamma');
+    assert.equal(selectDeploymentAgent(deployment, 'gamma').profile, null);
+    assert.equal(env.VIKA_LARK_PROFILE, undefined);
+    assert.equal(env.LARKSUITE_CLI_PROFILE, undefined);
+  });
 });
 
 test('rejects unknown and missing manifest fields instead of guessing', () => {
@@ -339,8 +378,13 @@ test('rejects unknown and missing manifest fields instead of guessing', () => {
     },
     {
       name: 'missing agent field',
-      mutate: (manifest) => { delete manifest.agents[0].ovConfig; },
-      error: /agents\[0\]\.ovConfig is required/,
+      mutate: (manifest) => { delete manifest.agents[0].profile; },
+      error: /agents\[0\]\.profile is required/,
+    },
+    {
+      name: 'profile on an instance without the lark connector',
+      mutate: (manifest) => { manifest.agents[1].channel = 'weixin'; manifest.agents[1].connectors = ['weixin']; },
+      error: /agents\[1\]\.profile is only used by the lark connector/,
     },
     {
       name: 'display name too long for Web routing',
@@ -354,10 +398,21 @@ test('rejects unknown and missing manifest fields instead of guessing', () => {
     fixture.mutate(manifest);
     withManifest(manifest, (manifestPath) => {
       assert.throws(
-        () => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
+        () => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }),
         fixture.error,
         fixture.name,
       );
+    });
+  }
+});
+
+test('an instance id cannot take the name of a shared control-plane app', () => {
+  for (const id of ['all', 'web', 'updater']) {
+    const manifest = validManifest();
+    manifest.agents[1].id = id;
+    manifest.defaultInstance = 'alpha';
+    withManifest(manifest, (manifestPath) => {
+      assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /cannot be all, web, updater/, id);
     });
   }
 });
@@ -369,18 +424,18 @@ test('rejects duplicate agent identities, endpoints, and storage boundaries', ()
     ['port', (manifest) => { manifest.agents[1].port = 3738; }, /duplicate agent port: 3738/],
     [
       'dataDir',
-      (manifest) => { manifest.agents[1].dataDir = '/srv/lark-daemon/data/alpha'; },
-      /duplicate agent dataDir: \/srv\/lark-daemon\/data\/alpha/,
+      (manifest) => { manifest.agents[1].dataDir = '/srv/vika/data/alpha'; },
+      /duplicate agent dataDir: \/srv\/vika\/data\/alpha/,
     ],
     [
       'workspace',
-      (manifest) => { manifest.agents[1].workspace = '/srv/lark-daemon/workspaces/alpha'; },
-      /duplicate agent workspace: \/srv\/lark-daemon\/workspaces\/alpha/,
+      (manifest) => { manifest.agents[1].workspace = '/srv/vika/workspaces/alpha'; },
+      /duplicate agent workspace: \/srv\/vika\/workspaces\/alpha/,
     ],
     [
       'ovConfig',
-      (manifest) => { manifest.agents[1].ovConfig = '/srv/lark-daemon/ov/alpha.json'; },
-      /duplicate agent ovConfig: \/srv\/lark-daemon\/ov\/alpha\.json/,
+      (manifest) => { manifest.agents[1].ovConfig = '/srv/vika/ov/alpha.json'; },
+      /duplicate agent ovConfig: \/srv\/vika\/ov\/alpha\.json/,
     ],
   ];
 
@@ -389,7 +444,7 @@ test('rejects duplicate agent identities, endpoints, and storage boundaries', ()
     mutate(manifest);
     withManifest(manifest, (manifestPath) => {
       assert.throws(
-        () => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
+        () => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }),
         error,
         name,
       );
@@ -411,12 +466,12 @@ test('rejects invalid defaults, relative paths, and overlapping agent storage', 
     ],
     [
       'cross-agent overlap',
-      (manifest) => { manifest.agents[1].workspace = '/srv/lark-daemon/data/alpha/nested'; },
+      (manifest) => { manifest.agents[1].workspace = '/srv/vika/data/alpha/nested'; },
       /agent storage paths overlap: agents\[0\]\.dataDir and agents\[1\]\.workspace/,
     ],
     [
       'same-agent overlap',
-      (manifest) => { manifest.agents[0].workspace = '/srv/lark-daemon/data/alpha/work'; },
+      (manifest) => { manifest.agents[0].workspace = '/srv/vika/data/alpha/work'; },
       /agent storage paths overlap: agents\[0\]\.dataDir and agents\[0\]\.workspace/,
     ],
   ];
@@ -426,7 +481,7 @@ test('rejects invalid defaults, relative paths, and overlapping agent storage', 
     mutate(manifest);
     withManifest(manifest, (manifestPath) => {
       assert.throws(
-        () => loadDeploymentManifest({ LARK_DAEMON_DEPLOYMENT_MANIFEST: manifestPath }),
+        () => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }),
         error,
         name,
       );

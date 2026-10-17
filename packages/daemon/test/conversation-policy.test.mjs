@@ -55,6 +55,7 @@ describe('conversation policy assemble', () => {
       openVikingPromptPath: path.join(directory, 'openviking.md'),
       harnessPromptPath: path.join(directory, 'harness.md'),
       meetingAudioPromptPath: path.join(directory, 'meeting-audio.md'),
+      openVikingConfigPath: path.join(directory, 'ovcli.conf'),
     };
     fs.writeFileSync(files.systemPromptPath, 'base {{AGENT_NAME}}\n');
     fs.writeFileSync(files.openVikingPromptPath, 'ov via skill and MCP\n');
@@ -80,6 +81,12 @@ describe('conversation policy assemble', () => {
         meetingAudio: {},
       });
       assert.match(withAudio, /meeting-audio plugin/);
+
+      // Without OpenViking configured, no OV section reaches the prompt.
+      const withoutOV = assembleConversationPolicy({ ...files, openVikingConfigPath: '', agentName: '斯斯', profile: 'cli_alpha' });
+      assert.match(withoutOV, /base 斯斯/);
+      assert.match(withoutOV, /profile=cli_alpha/);
+      assert.doesNotMatch(withoutOV, /ov via skill and MCP|<context-workdir>/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -116,28 +123,21 @@ describe('conversation policy assemble', () => {
     }
   });
 
-  it('injects OpenViking identity.md into the assembled prompt', () => {
+  it('injects the identity the daemon loaded, and nothing without one', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-policy-id-'));
     const files = {
       systemPromptPath: path.join(directory, 'system-prompt.md'),
       openVikingPromptPath: path.join(directory, 'openviking.md'),
       harnessPromptPath: path.join(directory, 'empty.md'),
-      openVikingConfigPath: path.join(directory, 'ov.json'),
     };
     fs.writeFileSync(files.systemPromptPath, 'base\n');
     fs.writeFileSync(files.openVikingPromptPath, 'ov plugin\n');
     fs.writeFileSync(files.harnessPromptPath, '');
-    fs.writeFileSync(files.openVikingConfigPath, JSON.stringify({ user: 'amy' }));
     try {
-      const reads = [];
-      const injected = assembleConversationPolicy(files, {
-        env: {},
-        readResource: (uri) => {
-          reads.push(uri);
-          return uri === 'viking://user/amy/identity.md' ? '# I am Alice' : '';
-        },
+      const injected = assembleConversationPolicy({
+        ...files,
+        openVikingIdentity: { user: 'amy', uri: 'viking://user/amy/identity.md', text: '# I am Alice' },
       });
-      assert.deepEqual(reads, ['viking://user/amy/identity.md']);
       assert.match(injected, /OpenViking identity/);
       assert.match(injected, /viking:\/\/user\/amy\/identity\.md/);
       assert.match(injected, /I am Alice/);
@@ -147,12 +147,9 @@ describe('conversation policy assemble', () => {
         'the routing boundary must follow untrusted identity prose',
       );
 
-      const fallback = assembleConversationPolicy(files, {
-        env: {},
-        readResource: (uri) => (uri === 'viking://user/amy/memories/identity.md' ? 'fallback identity' : ''),
-      });
-      assert.match(fallback, /memories\/identity\.md/);
-      assert.match(fallback, /fallback identity/);
+      for (const openVikingIdentity of [undefined, { user: 'amy', uri: 'viking://user/amy/identity.md', text: '' }]) {
+        assert.doesNotMatch(assembleConversationPolicy({ ...files, openVikingIdentity }), /OpenViking identity/);
+      }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

@@ -35,7 +35,7 @@ try {
   process.exit(1);
 }
 
-const logger = createLogger(config.logLevel, { service: 'lark-web' });
+const logger = createLogger(config.logLevel, { service: 'vika-web' });
 const server = new ActivityWebServer(config, logger);
 let stopping = false;
 

@@ -1,9 +1,10 @@
 // Shared mock environment for harness e2e tests: a real PersonalAgentDaemon wired to a
 // fake lark-cli (events fed dynamically through an NDJSON file) and a fake
 // codex app-server (scriptable turn outcome, records everything it is told).
-// OpenViking is quiet by default; pass { identity } to serve a fake identity
-// through a PATH-shimmed `ov` binary. No process.env mutation otherwise: every
-// path the fake binaries need is embedded into the generated scripts.
+// OpenViking is a quiet fake client by default; pass { identity } to turn
+// identity injection on and serve that text from it, or { openViking: false }
+// to run an instance with no OV at all. No process.env mutation:
+// every path the fake binaries need is embedded into the generated scripts.
 //
 // Operations, not plumbing:
 //   const env = await startMockEnv();
@@ -174,19 +175,6 @@ function fakeCodexSource(dir, { behavior, failBlob }) {
   `;
 }
 
-// PATH-shimmed `ov` for identity mode: `ov read viking://user/<id>/identity.md`
-// prints the fixture identity; anything else fails like a missing resource.
-function fakeOvSource(identity) {
-  return `
-    const [verb, uri] = process.argv.slice(2);
-    if (verb === 'read' && /identity\\.md$/.test(String(uri))) {
-      process.stdout.write(${JSON.stringify(identity)});
-      process.exit(0);
-    }
-    process.exit(1);
-  `;
-}
-
 function readLines(file) {
   let content;
   try { content = fs.readFileSync(file, 'utf8'); } catch { return []; }
@@ -198,10 +186,11 @@ function readLines(file) {
 export async function startMockEnv({
   codex = {},
   identity = null,
+  openViking = true,
   config: configOverrides = {},
   prepare = null,
 } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-daemon-mock-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-mock-'));
   const binDir = path.join(dir, 'bin');
   fs.mkdirSync(binDir);
   const fakeLark = path.join(binDir, 'fake-lark-cli.mjs');
@@ -213,19 +202,11 @@ export async function startMockEnv({
   }));
   fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
 
-  // OpenViking: quiet by default — point the config at a file that does not
-  // exist so no user id resolves and no `ov` subprocess is ever spawned. With
-  // an identity fixture, write a real config and shim `ov` onto PATH (the one
-  // process-global mutation, restored on stop).
-  let openVikingConfigPath = path.join(dir, 'absent-ov-config.json');
-  let previousPath = null;
-  if (identity !== null) {
-    openVikingConfigPath = path.join(dir, 'ov-config.json');
-    fs.writeFileSync(openVikingConfigPath, JSON.stringify({ user: 'e2e-user' }));
-    writeExecutable(path.join(binDir, 'ov'), fakeOvSource(identity));
-    previousPath = process.env.PATH;
-    process.env.PATH = `${binDir}:${previousPath}`;
-  }
+  // OpenViking: identity injection stays off unless the test passes an
+  // identity, which the fake client then serves for the config's user.
+  const openVikingConfigPath = path.join(dir, 'ov-config.json');
+  fs.writeFileSync(openVikingConfigPath, JSON.stringify({ user: 'e2e-user' }));
+  const ovReads = [];
 
   const config = {
     ...getConfig(),
@@ -243,7 +224,8 @@ export async function startMockEnv({
     profile: 'test-profile',
     initialModel: '',
     claudeModel: '',
-    openVikingConfigPath,
+    openVikingConfigPath: openViking ? openVikingConfigPath : '',
+    openVikingIdentityEnabled: identity !== null,
     ignoredSenderIds: new Set(),
     port: 0,
     httpEnabled: false,
@@ -251,19 +233,24 @@ export async function startMockEnv({
     logLevel: 'error',
     // getConfig() freezes meetingAudio paths under the live dataDir. Overriding
     // dataDir does not rebuild that object, so a developer shell with
-    // LARK_DAEMON_MEETING_AUDIO_ENABLED would bind the production socket.
+    // VIKA_MEETING_AUDIO_ENABLED would bind the production socket.
     meetingAudio: null,
     ...configOverrides,
   };
-  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), {
+  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), openViking ? {
     ovClient: {
       messages: new Map(),
       async create(sessionId) { return { session_id: sessionId, uri: `viking://session/${sessionId}` }; },
       async append(id, message) { const rows = this.messages.get(id) || []; rows.push({ ...message, parts: [{ type: 'text', text: message.content }] }); this.messages.set(id, rows); },
       async context(id) { return { latest_archive_overview: '', messages: this.messages.get(id) || [], stats: { totalArchives: 0 } }; },
       async request() { return { pending_tokens: 0 }; },
+      async read(uri) {
+        ovReads.push(uri);
+        if (identity !== null && uri === 'viking://user/e2e-user/identity.md') return identity;
+        throw Object.assign(new Error('missing'), { httpStatus: 404 });
+      },
     },
-  });
+  } : {});
 
   const env = {
     dir,
@@ -284,6 +271,11 @@ export async function startMockEnv({
     // developer_instructions is a `-c` config override).
     codexSpawnArgs() {
       return readLines(path.join(dir, 'codex-spawns.ndjson')).map((line) => JSON.parse(line));
+    },
+
+    // Every URI the daemon read from the fake OV client.
+    ovReads() {
+      return [...ovReads];
     },
 
     // argv of every outbound lark-cli reply/send call.
@@ -329,7 +321,6 @@ export async function startMockEnv({
       try {
         await daemon.shutdown('mock-env-stop', 0);
       } finally {
-        if (previousPath !== null) process.env.PATH = previousPath;
         fs.rmSync(dir, { recursive: true, force: true });
       }
     },

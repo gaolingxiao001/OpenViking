@@ -29,9 +29,18 @@ function appendTail(current, chunk, limit = 8_000) {
   return next.length <= limit ? next : next.slice(-limit);
 }
 
-function childConfig(config, connector) {
+// The Connector processes an instance runs: one per IM, and one per mailbox
+// (an email instance is `email-<name>`). `type` picks the worker's client.
+export function connectorInstances(config) {
+  return config.connectors.flatMap((type) => (type === 'email'
+    ? (config.emailAccounts ?? []).map(({ id, configFile }) => ({ id, type, emailConfigFile: configFile }))
+    : [{ id: type, type }]));
+}
+
+function childConfig(config, instance) {
   return {
-    channel: connector,
+    channel: instance.type,
+    instance: instance.id,
     projectDir: config.projectDir,
     dataDir: config.dataDir,
     tempDir: config.tempDir,
@@ -39,7 +48,7 @@ function childConfig(config, connector) {
     larkCliBin: config.larkCliBin,
     weixinAllowFrom: [...(config.weixinAllowFrom ?? [])],
     weixinLongPollTimeoutMs: config.weixinLongPollTimeoutMs,
-    emailConfigFile: config.emailConfigFile,
+    emailConfigFile: instance.emailConfigFile ?? null,
     retentionMs: config.retentionMs,
     maxEventBytes: config.maxEventBytes,
     sendTimeoutMs: config.sendTimeoutMs,
@@ -49,8 +58,10 @@ function childConfig(config, connector) {
 }
 
 export class ConnectorProcess {
-  constructor(id, config, registry, logger) {
-    this.id = id;
+  constructor(instance, config, registry, logger) {
+    this.instance = typeof instance === 'string' ? { id: instance, type: instance } : instance;
+    this.id = this.instance.id;
+    this.type = this.instance.type;
     this.config = config;
     this.registry = registry;
     this.logger = logger;
@@ -59,7 +70,7 @@ export class ConnectorProcess {
     this.stderrTail = '';
     this.pending = new Map();
     this.manifest = null;
-    this.profile = id === 'lark' ? config.profile : null;
+    this.profile = this.type === 'lark' ? config.profile : null;
     // Kept across restarts: the last owner this Connector reported.
     this.owner = null;
     this.checked = false;
@@ -85,8 +96,8 @@ export class ConnectorProcess {
     this.reportedError = null;
     const workerPath = this.config.connectorWorkerPath || defaultWorkerPath;
     const env = sanitizeNonArkChildEnv(process.env);
-    env.PERSONAL_AGENT_CONNECTOR_CONFIG = JSON.stringify(childConfig(this.config, this.id));
-    const child = this.registry.register(spawn(process.execPath, [workerPath, this.id], {
+    env.PERSONAL_AGENT_CONNECTOR_CONFIG = JSON.stringify(childConfig(this.config, this.instance));
+    const child = this.registry.register(spawn(process.execPath, [workerPath, this.type], {
       cwd: this.config.projectDir,
       env,
       shell: false,
@@ -154,7 +165,7 @@ export class ConnectorProcess {
       return;
     }
     if (message.type === 'EVENT') {
-      if (message.connector !== this.id || message.instance !== this.id) {
+      if (message.connector !== this.type || message.instance !== this.id) {
         this.logger.warn('connector_event_invalid', { connector: this.id });
         return;
       }
@@ -207,7 +218,7 @@ export class ConnectorProcess {
     this.spawn();
     const spec = await this.request('spec', {}, 10_000);
     this.manifest = connectorManifest(spec?.manifest);
-    if (this.manifest.name !== this.id) throw new Error(`connector spec name mismatch: ${this.id}`);
+    if (this.manifest.name !== this.type) throw new Error(`connector spec name mismatch: ${this.id}`);
     const checked = await this.request('check', {}, 30_000);
     this.checked = true;
     this.profile = checked?.profile || this.profile;
@@ -283,9 +294,9 @@ export class ConnectorManager {
   constructor(config, registry, logger) {
     this.config = config;
     this.logger = logger;
-    this.connectors = new Map(config.connectors.map((id) => [
-      id,
-      new ConnectorProcess(id, config, registry, logger.child({ connector: id })),
+    this.connectors = new Map(connectorInstances(config).map((instance) => [
+      instance.id,
+      new ConnectorProcess(instance, config, registry, logger.child({ connector: instance.id })),
     ]));
     this.profile = config.profile || null;
     this.restartDelaysMs = config.connectorRestartDelaysMs ?? RESTART_DELAYS_MS;

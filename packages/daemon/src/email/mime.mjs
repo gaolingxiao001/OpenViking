@@ -340,11 +340,11 @@ function mailDate(ms) {
 // when it comes back into the inbox.
 export function replyMessageId(idempotencyKey, fromAddress) {
   const domain = fromAddress.split('@')[1] || 'localhost';
-  return `lark-daemon.${createHash('sha256').update(String(idempotencyKey)).digest('hex').slice(0, 32)}@${domain}`;
+  return `vika.${createHash('sha256').update(String(idempotencyKey)).digest('hex').slice(0, 32)}@${domain}`;
 }
 
 export function isOwnMessageId(messageId) {
-  return /^lark-daemon\.[0-9a-f]{32}@/.test(messageId ?? '');
+  return /^vika\.[0-9a-f]{32}@/.test(messageId ?? '');
 }
 
 // A plain-text reply that threads under the original: Re: subject,

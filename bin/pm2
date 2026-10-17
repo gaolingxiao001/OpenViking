@@ -1,0 +1,7 @@
+#!/bin/sh
+# The release's pinned pm2, run by the release's own Node when it has one
+# (an installed release ships node/; a source checkout uses the node on PATH).
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+NODE="$ROOT/node/bin/node"
+[ -x "$NODE" ] || NODE=node
+exec "$NODE" "$ROOT/node_modules/pm2/bin/pm2" "$@"

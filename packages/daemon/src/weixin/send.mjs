@@ -8,12 +8,12 @@ const WEIXIN_TEXT_LIMIT = 4_000;
 // from it keeps a retried attempt on the same Weixin message id.
 function clientIdFor(idempotencyKey, peerId) {
   const digest = createHash('sha256').update(idempotencyKey).update('\0').update(peerId).digest('hex');
-  return `lark-daemon-${digest.slice(0, 32)}`;
+  return `vika-${digest.slice(0, 32)}`;
 }
 
 export async function sendWeixinMessage({ state, to, content, idempotencyKey }) {
   const account = state.account();
-  if (!account?.token) throw new Error('Weixin is not logged in; run npm run weixin:login first');
+  if (!account?.token) throw new Error('Weixin is not logged in; run vika login weixin <instance> first');
   if (!state.knowsPeer(to)) throw new Error('Weixin recipient is not an authenticated inbound conversation');
   const clientId = clientIdFor(idempotencyKey, to);
   const common = { apiBaseUrl: account.baseUrl, token: account.token, to, contextToken: state.contextToken(to), clientId };

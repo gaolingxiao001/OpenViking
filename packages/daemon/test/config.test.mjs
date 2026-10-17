@@ -25,9 +25,9 @@ afterEach(() => {
 
 describe('configuration safety', { concurrency: false }, () => {
   it('keeps meeting audio entirely disabled unless explicitly configured', () => {
-    setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'false');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', undefined);
-    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', undefined);
+    setEnv('VIKA_MEETING_AUDIO_ENABLED', 'false');
+    setEnv('VIKA_MEETING_AUDIO_TARGET_CHAT_ID', undefined);
+    setEnv('VIKA_MEETING_AUDIO_WORKER_COMMAND', undefined);
     assert.equal(getConfig().meetingAudio, null);
   });
 
@@ -35,11 +35,11 @@ describe('configuration safety', { concurrency: false }, () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-asr-config-'));
     const asrConfigFile = path.join(directory, 'config.yaml');
     fs.writeFileSync(asrConfigFile, 'asr: {}\n', { mode: 0o600 });
-    setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'true');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE', asrConfigFile);
+    setEnv('VIKA_MEETING_AUDIO_ENABLED', 'true');
+    setEnv('VIKA_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
+    setEnv('VIKA_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
+    setEnv('VIKA_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
+    setEnv('VIKA_MEETING_AUDIO_ASR_CONFIG_FILE', asrConfigFile);
     try {
       const config = getConfig();
       assert.match(config.meetingAudio.spoolPath, /meeting-audio-spool\.sqlite3$/);
@@ -54,65 +54,75 @@ describe('configuration safety', { concurrency: false }, () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-asr-private-'));
     const asrConfigFile = path.join(directory, 'config.yaml');
     fs.writeFileSync(asrConfigFile, 'asr: {}\n', { mode: 0o644 });
-    setEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', 'true');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
-    setEnv('LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE', asrConfigFile);
+    setEnv('VIKA_MEETING_AUDIO_ENABLED', 'true');
+    setEnv('VIKA_MEETING_AUDIO_TARGET_CHAT_ID', 'oc_target12345678');
+    setEnv('VIKA_MEETING_AUDIO_WORKER_COMMAND', '/usr/bin/python3');
+    setEnv('VIKA_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py"]');
+    setEnv('VIKA_MEETING_AUDIO_ASR_CONFIG_FILE', asrConfigFile);
     try {
       assert.throws(() => getConfig(), /ASR_CONFIG_FILE must have mode 0600/);
       fs.chmodSync(asrConfigFile, 0o600);
-      setEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py","--config","other.yaml"]');
+      setEnv('VIKA_MEETING_AUDIO_WORKER_ARGS_JSON', '["worker.py","--config","other.yaml"]');
       assert.throws(() => getConfig(), /must not contain --config/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it('takes a mailbox only with a private account file, and never as the primary IM', () => {
+  it('takes mailboxes only with private account files, and never as the primary IM', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-email-config-'));
     const accountFile = path.join(directory, 'email.json');
+    const otherFile = path.join(directory, 'other.json');
     fs.writeFileSync(accountFile, '{}', { mode: 0o644 });
-    setEnv('LARK_DAEMON_CHANNEL', 'lark');
-    setEnv('LARK_DAEMON_CONNECTORS_JSON', '["lark","email"]');
+    fs.writeFileSync(otherFile, '{}', { mode: 0o600 });
+    setEnv('VIKA_CHANNEL', 'lark');
+    setEnv('VIKA_CONNECTORS_JSON', '["lark","email"]');
+    const accounts = (list) => setEnv('VIKA_EMAIL_ACCOUNTS_JSON', JSON.stringify(list));
     try {
-      setEnv('LARK_DAEMON_EMAIL_CONFIG_FILE', undefined);
-      assert.throws(() => getConfig(), /LARK_DAEMON_EMAIL_CONFIG_FILE must be an absolute path/);
-      setEnv('LARK_DAEMON_EMAIL_CONFIG_FILE', accountFile);
-      assert.throws(() => getConfig(), /EMAIL_CONFIG_FILE must have mode 0600/);
+      setEnv('VIKA_EMAIL_ACCOUNTS_JSON', undefined);
+      assert.throws(() => getConfig(), /VIKA_EMAIL_ACCOUNTS_JSON must list the mailboxes/);
+      accounts([{ id: 'email-gmail', config: accountFile }]);
+      assert.throws(() => getConfig(), /email account file of email-gmail must have mode 0600/);
       fs.chmodSync(accountFile, 0o600);
-      assert.deepEqual([getConfig().connectors, getConfig().emailConfigFile], [['lark', 'email'], accountFile]);
-      setEnv('LARK_DAEMON_CHANNEL', 'email');
-      assert.throws(() => getConfig(), /LARK_DAEMON_CHANNEL/);
+      accounts([{ id: 'email-gmail', config: accountFile }, { id: 'email-gmail', config: otherFile }]);
+      assert.throws(() => getConfig(), /invalid or repeated mailbox id/);
+      accounts([{ id: 'gmail', config: accountFile }]);
+      assert.throws(() => getConfig(), /invalid or repeated mailbox id/);
+      accounts([{ id: 'email-gmail', config: accountFile }, { id: 'email-qq', config: otherFile }]);
+      assert.deepEqual([getConfig().connectors, getConfig().emailAccounts],
+        [['lark', 'email'], [{ id: 'email-gmail', configFile: accountFile }, { id: 'email-qq', configFile: otherFile }]]);
+      setEnv('VIKA_CHANNEL', 'email');
+      assert.throws(() => getConfig(), /VIKA_CHANNEL/);
     } finally {
+      setEnv('VIKA_EMAIL_ACCOUNTS_JSON', undefined);
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 
   it('rejects a mismatched daemon and lark-cli profile', () => {
-    setEnv('LARK_DAEMON_PROFILE', 'cli_expected');
+    setEnv('VIKA_LARK_PROFILE', 'cli_expected');
     setEnv('LARKSUITE_CLI_PROFILE', 'cli_wrong');
     assert.throws(() => getConfig(), /must match LARKSUITE_CLI_PROFILE/);
   });
 
   it('rejects a non-loopback health server', () => {
-    setEnv('LARK_DAEMON_HOST', '0.0.0.0');
+    setEnv('VIKA_HOST', '0.0.0.0');
     assert.throws(() => getConfig(), /loopback/);
   });
 
   it('rejects writable workspaces that contain the daemon', () => {
-    setEnv('LARK_DAEMON_WORKSPACE', path.dirname(projectDir));
+    setEnv('VIKA_WORKSPACE', path.dirname(projectDir));
     assert.throws(() => getConfig(), /running daemon directory/);
   });
 
   it('rejects an out-of-range codex effort', () => {
-    setEnv('LARK_DAEMON_CODEX_EFFORT', 'turbo');
-    assert.throws(() => getConfig(), /LARK_DAEMON_CODEX_EFFORT/);
+    setEnv('VIKA_CODEX_EFFORT', 'turbo');
+    assert.throws(() => getConfig(), /VIKA_CODEX_EFFORT/);
   });
 
   it('does not read the removed Codex model environment variable', () => {
-    setEnv('LARK_DAEMON_MODEL', undefined);
-    setEnv('LARK_DAEMON_CODEX_MODEL', 'gpt-5.6-sol');
+    setEnv('VIKA_MODEL', undefined);
+    setEnv('VIKA_CODEX_MODEL', 'gpt-5.6-sol');
     const config = getConfig();
     assert.equal(config.initialModel, '');
     assert.equal(Object.hasOwn(config, 'codexModel'), false);
@@ -121,7 +131,7 @@ describe('configuration safety', { concurrency: false }, () => {
   it('accepts TraeX CLI path and reasoning effort', () => {
     setEnv('TRAEX_BIN', '/opt/local/bin/traecli');
     setEnv('TRAECLI_BIN', '/ignored/traecli');
-    setEnv('LARK_DAEMON_TRAEX_EFFORT', 'xhigh');
+    setEnv('VIKA_TRAEX_EFFORT', 'xhigh');
     const config = getConfig();
     assert.equal(config.traexBin, '/opt/local/bin/traecli');
     assert.equal(config.traexEffort, 'xhigh');
@@ -129,29 +139,29 @@ describe('configuration safety', { concurrency: false }, () => {
     setEnv('TRAEX_BIN', undefined);
     assert.equal(getConfig().traexBin, '/ignored/traecli');
 
-    setEnv('LARK_DAEMON_TRAEX_EFFORT', 'turbo');
-    assert.throws(() => getConfig(), /LARK_DAEMON_TRAEX_EFFORT/);
+    setEnv('VIKA_TRAEX_EFFORT', 'turbo');
+    assert.throws(() => getConfig(), /VIKA_TRAEX_EFFORT/);
   });
 
   it('accepts Pi CLI path and thinking-level effort', () => {
     setEnv('PI_BIN', undefined);
     assert.equal(getConfig().piBin, managedPiBin());
     setEnv('PI_BIN', '/opt/homebrew/bin/pi');
-    setEnv('LARK_DAEMON_PI_MODEL', 'openai/gpt-4o');
-    setEnv('LARK_DAEMON_PI_EFFORT', 'xhigh');
+    setEnv('VIKA_PI_MODEL', 'openai/gpt-4o');
+    setEnv('VIKA_PI_EFFORT', 'xhigh');
     const config = getConfig();
     assert.equal(config.piBin, '/opt/homebrew/bin/pi');
     assert.equal(config.piModel, 'openai/gpt-4o');
     assert.equal(config.piEffort, 'xhigh');
-    setEnv('LARK_DAEMON_PI_EFFORT', 'turbo');
-    assert.throws(() => getConfig(), /LARK_DAEMON_PI_EFFORT/);
+    setEnv('VIKA_PI_EFFORT', 'turbo');
+    assert.throws(() => getConfig(), /VIKA_PI_EFFORT/);
   });
 
   it('loads the managed-agent seed session without exposing the API key publicly', () => {
     setEnv('ARK_API_KEY', 'secret-test-key');
-    setEnv('LARK_DAEMON_MODEL', 'ark');
-    setEnv('LARK_DAEMON_VOLC_SESSION_ID', 'sesn-test12345678');
-    setEnv('LARK_DAEMON_VOLC_ENVIRONMENT_ID', 'env-test12345678');
+    setEnv('VIKA_MODEL', 'ark');
+    setEnv('VIKA_VOLC_SESSION_ID', 'sesn-test12345678');
+    setEnv('VIKA_VOLC_ENVIRONMENT_ID', 'env-test12345678');
     setEnv('SESSION_ID', 'sesn-generic-wins-only-as-fallback');
     const config = getConfig();
     assert.equal(config.volcApiKey, 'secret-test-key');
@@ -162,7 +172,7 @@ describe('configuration safety', { concurrency: false }, () => {
   });
 
   it('rejects a non-HTTPS managed-agent endpoint', () => {
-    setEnv('LARK_DAEMON_VOLC_BASE_URL', 'http://ark.example.test/api/v3');
+    setEnv('VIKA_VOLC_BASE_URL', 'http://ark.example.test/api/v3');
     assert.throws(() => getConfig(), /valid HTTPS URL/);
   });
 });
@@ -172,12 +182,13 @@ describe('release-owned system prompt', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
     const systemPromptPath = path.join(directory, 'system-prompt.md');
     const empty = path.join(directory, 'empty.md');
-    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{LARK_DAEMON_UPGRADE_TARGET}}\n');
+    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{VIKA_UPGRADE_TARGET}}\n');
     fs.writeFileSync(empty, '');
     try {
       const text = loadSystemPrompt({
         systemPromptPath,
         openVikingPromptPath: empty,
+        openVikingConfigPath: path.join(directory, 'ovcli.conf'),
         harnessPromptPath: empty,
         teamTaskBoardUrl: 'https://board.example',
         agentName: '斯斯',
@@ -200,6 +211,7 @@ describe('release-owned system prompt', () => {
       const baseConfig = {
         systemPromptPath,
         openVikingPromptPath: empty,
+        openVikingConfigPath: path.join(directory, 'ovcli.conf'),
         harnessPromptPath: empty,
       };
       const withoutAudio = loadSystemPrompt({ ...baseConfig, meetingAudio: null });

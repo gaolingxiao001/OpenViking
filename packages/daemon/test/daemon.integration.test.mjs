@@ -176,12 +176,39 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
       await env.stop();
     }
   });
+
+  it('runs an instance with no OpenViking: no OV prompt, no OV tool, messages still flow', async () => {
+    const env = await startMockEnv({ openViking: false });
+    try {
+      assert.equal(env.daemon.ovContext, null);
+      assert.ok(!env.daemon.actions.tools().some((tool) => tool.name === 'read_openviking_session_context'));
+      const instructions = env.codexSpawnArgs()[0].find((argument) => argument.startsWith('developer_instructions='));
+      assert.doesNotMatch(instructions, /## OpenViking memory|<context-workdir>/);
+      env.receive(textMessage({ messageId: 'om-no-ov', text: 'hello' }));
+      await env.waitForCodexInput(/om-no-ov/);
+      assert.equal(env.daemon.store.stats().inbound.DONE, 1);
+    } finally {
+      await env.stop();
+    }
+  });
+
+  it('leaves the OpenViking identity out unless it is turned on', async () => {
+    const env = await startMockEnv();
+    try {
+      const instructions = env.codexSpawnArgs()[0].find((argument) => argument.startsWith('developer_instructions='));
+      assert.ok(instructions, 'codex is spawned with developer_instructions');
+      assert.doesNotMatch(instructions, /OpenViking identity/);
+      assert.deepEqual(env.ovReads(), []);
+    } finally {
+      await env.stop();
+    }
+  });
 });
 
 describe('ingress barrier', () => {
   it('answers /help immediately while a model turn is active', async () => {
     const daemon = new PersonalAgentDaemon(
-      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-test.lock') },
+      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-vika-test.lock') },
       createLogger('error', { test: 'command-idle-barrier' }),
     );
     const order = [];
@@ -241,7 +268,7 @@ describe('ingress barrier', () => {
 describe('/model immediate switch', () => {
   it('executes /model without waiting for the stuck active turn', async () => {
     const daemon = new PersonalAgentDaemon(
-      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-lark-daemon-model.lock') },
+      { dataDir: os.tmpdir(), lockPath: path.join(os.tmpdir(), 'unused-vika-model.lock') },
       createLogger('error', { test: 'model-no-wait' }),
     );
     const order = [];

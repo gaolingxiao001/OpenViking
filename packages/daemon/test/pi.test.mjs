@@ -20,14 +20,14 @@ const baseConfig = {
   piBin: 'pi',
   piModel: 'openai/gpt-4o',
   piEffort: 'medium',
-  workspace: '/tmp/lark-agent-workspace',
+  workspace: '/tmp/vika-workspace',
   projectDir: '/release',
-  dataDir: '/tmp/lark-daemon-pi-data',
-  databasePath: '/tmp/lark-daemon-test.sqlite3',
+  dataDir: '/tmp/vika-pi-data',
+  databasePath: '/tmp/vika-test.sqlite3',
   profile: 'test-profile',
   connectors: ['lark'],
   larkCliBin: '/fake/lark-cli',
-  actionSocketPath: '/tmp/lark-daemon-pi-data/actions.sock',
+  actionSocketPath: '/tmp/vika-pi-data/actions.sock',
   actionMcpPath: '/release/packages/daemon/src/actions/mcp.mjs',
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
@@ -215,7 +215,7 @@ describe('PiAgent persistent rpc runtime', () => {
     assert.ok(args.includes('--session-id'));
     const env = calls.at(-1).options.env;
     assert.equal(env.LARKSUITE_CLI_PROFILE, 'test-profile');
-    assert.equal(env.PERSONAL_AGENT_SOCKET, '/tmp/lark-daemon-pi-data/actions.sock');
+    assert.equal(env.PERSONAL_AGENT_SOCKET, '/tmp/vika-pi-data/actions.sock');
     assert.equal(env.PERSONAL_AGENT_AUTHORITY, agent.authorityToken);
     assert.equal(env.LARK_APP_SECRET, undefined);
     assert.equal(env.PI_LARK_TOOLS_CONFIG, undefined);

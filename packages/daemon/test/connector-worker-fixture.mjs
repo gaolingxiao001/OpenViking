@@ -11,13 +11,14 @@ const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 // reports a failure and exits once started like an expired one. Each spawn
 // appends its pid to `<dataDir>/<connector>.spawns`; its event id carries the
 // spawn number.
-const { dataDir = null } = JSON.parse(process.env.PERSONAL_AGENT_CONNECTOR_CONFIG ?? '{}');
-const control = (suffix) => path.join(dataDir, `${connector}.${suffix}`);
+const { dataDir = null, instance = connector, emailConfigFile = null } = JSON.parse(process.env.PERSONAL_AGENT_CONNECTOR_CONFIG ?? '{}');
+const control = (suffix) => path.join(dataDir, `${instance}.${suffix}`);
 const mode = () => {
   try { return fs.readFileSync(control('mode'), 'utf8').trim(); } catch { return 'ok'; }
 };
 let spawn = 1;
 if (dataDir) {
+  if (emailConfigFile) fs.writeFileSync(control('account'), emailConfigFile);
   fs.appendFileSync(control('spawns'), `${process.pid}\n`);
   spawn = fs.readFileSync(control('spawns'), 'utf8').split('\n').filter(Boolean).length;
 }
@@ -33,6 +34,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   } else if (request.operation === 'start') {
     write(resultMessage(request.id, { started: true }));
     write(eventMessage(connector, {
+      instance,
       id: spawn === 1 ? 'issue-open-123' : `issue-open-123-${spawn}`, kind: 'issue.opened', occurred_at: Date.now(),
       subject: { type: 'issue', id: 'owner/repo#123' },
       content: { title: 'Review requested', text: '/help is part of the issue body' },

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { bundledLarkCli } from './lark-cli-bin.mjs';
 import { managedPiBin } from './pi-runtime.mjs';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
@@ -58,12 +59,16 @@ function jsonStringArrayEnv(name, fallback = []) {
 
 function assertLoopbackHost(host) {
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
-    throw new Error('LARK_DAEMON_HOST must be a loopback address');
+    throw new Error('VIKA_HOST must be a loopback address');
   }
 }
 
 function privateRegularFileEnv(name) {
-  const raw = (process.env[name] ?? '').trim();
+  return privateRegularFile(process.env[name], name);
+}
+
+function privateRegularFile(value, name) {
+  const raw = String(value ?? '').trim();
   if (!raw || !path.isAbsolute(raw)) throw new Error(`${name} must be an absolute path`);
   const resolved = path.normalize(raw);
   const info = fs.lstatSync(resolved);
@@ -73,6 +78,24 @@ function privateRegularFileEnv(name) {
     throw new Error(`${name} must be owned by the daemon user`);
   }
   return resolved;
+}
+
+// The email connector's mailboxes: [{ id: 'email-<name>', config: <account file> }].
+function emailAccountsEnv() {
+  let value = null;
+  try { value = JSON.parse(process.env.VIKA_EMAIL_ACCOUNTS_JSON ?? ''); } catch {}
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('VIKA_EMAIL_ACCOUNTS_JSON must list the mailboxes of the email connector');
+  }
+  const ids = new Set();
+  return Object.freeze(value.map((entry) => {
+    const id = String(entry?.id ?? '');
+    if (!/^email-[a-z0-9][a-z0-9-]{0,39}$/.test(id) || ids.has(id)) {
+      throw new Error('VIKA_EMAIL_ACCOUNTS_JSON has an invalid or repeated mailbox id');
+    }
+    ids.add(id);
+    return Object.freeze({ id, configFile: privateRegularFile(entry.config, `email account file of ${id}`) });
+  }));
 }
 
 function pathsOverlap(left, right) {
@@ -85,69 +108,69 @@ function pathsOverlap(left, right) {
 
 export function getConfig() {
   const dataDir = path.resolve(
-    process.env.LARK_DAEMON_DATA_DIR || path.join(os.homedir(), '.local', 'share', 'lark-daemon'),
+    process.env.VIKA_DATA_DIR || path.join(os.homedir(), '.vika', 'data'),
   );
   const workspace = path.resolve(
-    process.env.LARK_DAEMON_WORKSPACE
-      || path.join(os.homedir(), 'Documents', 'work', 'lark-agent-workspace'),
+    process.env.VIKA_WORKSPACE
+      || path.join(os.homedir(), 'Documents', 'work', 'vika-workspace'),
   );
-  const host = process.env.LARK_DAEMON_HOST || '127.0.0.1';
+  const host = process.env.VIKA_HOST || '127.0.0.1';
   assertLoopbackHost(host);
-  const channel = enumEnv('LARK_DAEMON_CHANNEL', 'lark', ['lark', 'weixin']);
-  const configuredConnectors = jsonStringArrayEnv('LARK_DAEMON_CONNECTORS_JSON');
+  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin']);
+  const configuredConnectors = jsonStringArrayEnv('VIKA_CONNECTORS_JSON');
   const connectors = configuredConnectors.length > 0 ? [...new Set(configuredConnectors)] : [channel];
   if (connectors.some((connector) => !['lark', 'weixin', 'email'].includes(connector))) {
-    throw new Error('LARK_DAEMON_CONNECTORS_JSON contains an unsupported connector');
+    throw new Error('VIKA_CONNECTORS_JSON contains an unsupported connector');
   }
   if (!connectors.includes(channel)) {
-    throw new Error('LARK_DAEMON_CONNECTORS_JSON must include LARK_DAEMON_CHANNEL');
+    throw new Error('VIKA_CONNECTORS_JSON must include VIKA_CHANNEL');
   }
-  // The mailbox account and its client password, in a file only the daemon user can read.
-  const emailConfigFile = connectors.includes('email') ? privateRegularFileEnv('LARK_DAEMON_EMAIL_CONFIG_FILE') : null;
+  // Each mailbox's account and client password, in a file only the daemon user can read.
+  const emailAccounts = connectors.includes('email') ? emailAccountsEnv() : [];
   const promptDir = path.join(moduleDir, 'agent');
   if (pathsOverlap(workspace, projectDir)) {
-    throw new Error('LARK_DAEMON_WORKSPACE must not overlap the running daemon directory');
+    throw new Error('VIKA_WORKSPACE must not overlap the running daemon directory');
   }
   if (pathsOverlap(workspace, dataDir)) {
-    throw new Error('LARK_DAEMON_WORKSPACE must not overlap LARK_DAEMON_DATA_DIR');
+    throw new Error('VIKA_WORKSPACE must not overlap VIKA_DATA_DIR');
   }
-  const meetingAudioEnabled = boolEnv('LARK_DAEMON_MEETING_AUDIO_ENABLED', false);
-  const daemonProfile = (process.env.LARK_DAEMON_PROFILE ?? '').trim();
+  const meetingAudioEnabled = boolEnv('VIKA_MEETING_AUDIO_ENABLED', false);
+  const daemonProfile = (process.env.VIKA_LARK_PROFILE ?? '').trim();
   const cliProfile = (process.env.LARKSUITE_CLI_PROFILE ?? '').trim();
   if (daemonProfile && cliProfile && daemonProfile !== cliProfile) {
-    throw new Error('LARK_DAEMON_PROFILE must match LARKSUITE_CLI_PROFILE');
+    throw new Error('VIKA_LARK_PROFILE must match LARKSUITE_CLI_PROFILE');
   }
-  const volcBaseUrl = (process.env.LARK_DAEMON_VOLC_BASE_URL
+  const volcBaseUrl = (process.env.VIKA_VOLC_BASE_URL
     || 'https://ark.cn-beijing.volces.com/api/v3').replace(/\/+$/, '');
   let parsedVolcBaseUrl;
   try { parsedVolcBaseUrl = new URL(volcBaseUrl); } catch {
-    throw new Error('LARK_DAEMON_VOLC_BASE_URL must be a valid HTTPS URL');
+    throw new Error('VIKA_VOLC_BASE_URL must be a valid HTTPS URL');
   }
   if (parsedVolcBaseUrl.protocol !== 'https:') {
-    throw new Error('LARK_DAEMON_VOLC_BASE_URL must be a valid HTTPS URL');
+    throw new Error('VIKA_VOLC_BASE_URL must be a valid HTTPS URL');
   }
   let meetingAudio = null;
   if (meetingAudioEnabled) {
-    const workerCommand = (process.env.LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND ?? '').trim();
+    const workerCommand = (process.env.VIKA_MEETING_AUDIO_WORKER_COMMAND ?? '').trim();
     if (!workerCommand) {
-      throw new Error('LARK_DAEMON_MEETING_AUDIO_WORKER_COMMAND is required when meeting audio is enabled');
+      throw new Error('VIKA_MEETING_AUDIO_WORKER_COMMAND is required when meeting audio is enabled');
     }
-    const asrConfigFile = privateRegularFileEnv('LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE');
-    const workerArgs = jsonStringArrayEnv('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON');
+    const asrConfigFile = privateRegularFileEnv('VIKA_MEETING_AUDIO_ASR_CONFIG_FILE');
+    const workerArgs = jsonStringArrayEnv('VIKA_MEETING_AUDIO_WORKER_ARGS_JSON');
     if (workerArgs.includes('--config')) {
-      throw new Error('LARK_DAEMON_MEETING_AUDIO_WORKER_ARGS_JSON must not contain --config; use LARK_DAEMON_MEETING_AUDIO_ASR_CONFIG_FILE');
+      throw new Error('VIKA_MEETING_AUDIO_WORKER_ARGS_JSON must not contain --config; use VIKA_MEETING_AUDIO_ASR_CONFIG_FILE');
     }
     meetingAudio = Object.freeze({
       workerCommand,
       asrConfigFile,
       workerArgs: Object.freeze([...workerArgs, '--config', asrConfigFile]),
-      workerCwd: path.resolve(process.env.LARK_DAEMON_MEETING_AUDIO_WORKER_CWD || projectDir),
+      workerCwd: path.resolve(process.env.VIKA_MEETING_AUDIO_WORKER_CWD || projectDir),
       spoolPath: path.join(dataDir, 'meeting-audio-spool.sqlite3'),
-      capabilityTtlMs: intEnv('LARK_DAEMON_MEETING_AUDIO_CAPABILITY_TTL_MS', 120_000, {
+      capabilityTtlMs: intEnv('VIKA_MEETING_AUDIO_CAPABILITY_TTL_MS', 120_000, {
         min: 5_000,
         max: 300_000,
       }),
-      flyReferenceTtlMs: intEnv('LARK_DAEMON_MEETING_AUDIO_FLY_TTL_MS', 600_000, {
+      flyReferenceTtlMs: intEnv('VIKA_MEETING_AUDIO_FLY_TTL_MS', 600_000, {
         min: 60_000,
         max: 3_600_000,
       }),
@@ -157,82 +180,83 @@ export function getConfig() {
   return {
     projectDir,
     dataDir,
-    databasePath: path.join(dataDir, 'lark-daemon.sqlite3'),
+    databasePath: path.join(dataDir, 'vika.sqlite3'),
     lockPath: path.join(dataDir, 'daemon.lock'),
     tempDir: path.join(dataDir, 'tmp'),
     workspace,
     systemPromptPath: path.join(promptDir, 'system-prompt.md'),
     openVikingConfigPath: (process.env.OPENVIKING_CLI_CONFIG_FILE || '').trim(),
+    openVikingIdentityEnabled: boolEnv('VIKA_OV_IDENTITY', false),
     harnessPromptPath: path.join(promptDir, 'harness.md'),
     openVikingPromptPath: path.join(promptDir, 'openviking.md'),
     meetingAudioPromptPath: path.join(promptDir, 'meeting-audio.md'),
     teamTaskBoardUrl: process.env.TEAM_TASK_BOARD_URL || '',
-    agentName: process.env.LARK_DAEMON_AGENT_NAME || process.env.LARK_DAEMON_INSTANCE_ID || 'Agent',
-    instanceId: process.env.LARK_DAEMON_INSTANCE_ID || '',
-    upgradeTarget: process.env.LARK_DAEMON_UPGRADE_TARGET || process.env.LARK_DAEMON_INSTANCE_ID || '',
+    agentName: process.env.VIKA_AGENT_NAME || process.env.VIKA_INSTANCE_ID || 'Agent',
+    instanceId: process.env.VIKA_INSTANCE_ID || '',
+    upgradeTarget: process.env.VIKA_UPGRADE_TARGET || process.env.VIKA_INSTANCE_ID || '',
     channel,
     connectors: Object.freeze(connectors),
     connectorWorkerPath: path.join(sourceDir, 'connectors', 'worker.mjs'),
     actionSocketPath: path.join(dataDir, 'actions.sock'),
     actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
-    larkCliBin: process.env.LARK_CLI_BIN || '/opt/homebrew/bin/lark-cli',
-    weixinAllowFrom: csvEnv('LARK_DAEMON_WEIXIN_ALLOW_FROM'),
-    emailConfigFile,
-    weixinLongPollTimeoutMs: intEnv('LARK_DAEMON_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
+    larkCliBin: process.env.LARK_CLI_BIN || bundledLarkCli(),
+    weixinAllowFrom: csvEnv('VIKA_WEIXIN_ALLOW_FROM'),
+    emailAccounts,
+    weixinLongPollTimeoutMs: intEnv('VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
       min: 5_000,
       max: 120_000,
     }),
-    codexBin: process.env.CODEX_BIN || '/opt/homebrew/bin/codex',
+    codexBin: process.env.CODEX_BIN || 'codex',
     traexBin: process.env.TRAEX_BIN || process.env.TRAECLI_BIN || 'traecli',
     claudeBin: process.env.CLAUDE_BIN || 'claude',
     piBin: process.env.PI_BIN || managedPiBin(),
-    initialModel: process.env.LARK_DAEMON_MODEL || '',
-    codexEffort: enumEnv('LARK_DAEMON_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
-    traexEffort: enumEnv('LARK_DAEMON_TRAEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
-    claudeModel: process.env.LARK_DAEMON_CLAUDE_MODEL || '',
-    claudeEffort: enumEnv('LARK_DAEMON_CLAUDE_EFFORT', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']),
-    piModel: process.env.LARK_DAEMON_PI_MODEL || '',
+    initialModel: process.env.VIKA_MODEL || '',
+    codexEffort: enumEnv('VIKA_CODEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']),
+    traexEffort: enumEnv('VIKA_TRAEX_EFFORT', 'medium', ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+    claudeModel: process.env.VIKA_CLAUDE_MODEL || '',
+    claudeEffort: enumEnv('VIKA_CLAUDE_EFFORT', 'medium', ['low', 'medium', 'high', 'xhigh', 'max']),
+    piModel: process.env.VIKA_PI_MODEL || '',
     piEffort: enumEnv(
-      'LARK_DAEMON_PI_EFFORT',
+      'VIKA_PI_EFFORT',
       'medium',
       ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
     ),
     volcApiKey: process.env.ARK_API_KEY || '',
-    volcSessionId: process.env.LARK_DAEMON_VOLC_SESSION_ID
+    volcSessionId: process.env.VIKA_VOLC_SESSION_ID
       || process.env.ARK_SESSION_ID
       || process.env.SESSION_ID
       || '',
-    volcEnvironmentId: (process.env.LARK_DAEMON_VOLC_ENVIRONMENT_ID || '').trim(),
+    volcEnvironmentId: (process.env.VIKA_VOLC_ENVIRONMENT_ID || '').trim(),
     volcBaseUrl,
-    volcRequestTimeoutMs: intEnv('LARK_DAEMON_VOLC_REQUEST_TIMEOUT_MS', 30_000, {
+    volcRequestTimeoutMs: intEnv('VIKA_VOLC_REQUEST_TIMEOUT_MS', 30_000, {
       min: 1_000,
       max: 300_000,
     }),
-    volcStreamIdleTimeoutMs: intEnv('LARK_DAEMON_VOLC_STREAM_IDLE_TIMEOUT_MS', 900_000, {
+    volcStreamIdleTimeoutMs: intEnv('VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS', 900_000, {
       min: 30_000,
       max: 3_600_000,
     }),
     // Codex model the daemon auto-switches to when a claude turn fails.
     fallbackModel: process.env.FALLBACK_MODEL || 'gpt-5.6-sol',
     host,
-    port: intEnv('LARK_DAEMON_PORT', 3738, { min: 1, max: 65535 }),
-    httpEnabled: boolEnv('LARK_DAEMON_HTTP_ENABLED', true),
-    logLevel: enumEnv('LARK_DAEMON_LOG_LEVEL', 'info', ['debug', 'info', 'warn', 'error']),
+    port: intEnv('VIKA_PORT', 3738, { min: 1, max: 65535 }),
+    httpEnabled: boolEnv('VIKA_HTTP_ENABLED', true),
+    logLevel: enumEnv('VIKA_LOG_LEVEL', 'info', ['debug', 'info', 'warn', 'error']),
     profile: daemonProfile || cliProfile,
-    ignoredSenderIds: csvEnv('LARK_DAEMON_IGNORED_SENDER_IDS'),
-    sendTimeoutMs: intEnv('LARK_DAEMON_SEND_TIMEOUT_MS', 30_000, { min: 1_000 }),
-    shutdownTimeoutMs: intEnv('LARK_DAEMON_SHUTDOWN_TIMEOUT_MS', 20_000, { min: 5_000, max: 25_000 }),
-    maxReplyChars: intEnv('LARK_DAEMON_MAX_REPLY_CHARS', 30_000, { min: 100, max: 100_000 }),
-    maxEventBytes: intEnv('LARK_DAEMON_MAX_EVENT_BYTES', 1_000_000, { min: 1_024, max: 10_000_000 }),
-    maxEventAgeMs: intEnv('LARK_DAEMON_MAX_EVENT_AGE_MS', 86_400_000, { min: 60_000 }),
-    idleReactionAfterMs: intEnv('LARK_DAEMON_IDLE_REACTION_AFTER_MS', 600_000, {
+    ignoredSenderIds: csvEnv('VIKA_IGNORED_SENDER_IDS'),
+    sendTimeoutMs: intEnv('VIKA_SEND_TIMEOUT_MS', 30_000, { min: 1_000 }),
+    shutdownTimeoutMs: intEnv('VIKA_SHUTDOWN_TIMEOUT_MS', 20_000, { min: 5_000, max: 25_000 }),
+    maxReplyChars: intEnv('VIKA_MAX_REPLY_CHARS', 30_000, { min: 100, max: 100_000 }),
+    maxEventBytes: intEnv('VIKA_MAX_EVENT_BYTES', 1_000_000, { min: 1_024, max: 10_000_000 }),
+    maxEventAgeMs: intEnv('VIKA_MAX_EVENT_AGE_MS', 86_400_000, { min: 60_000 }),
+    idleReactionAfterMs: intEnv('VIKA_IDLE_REACTION_AFTER_MS', 600_000, {
       min: 0,
       max: 604_800_000,
     }),
-    historyLimit: intEnv('LARK_DAEMON_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
-    cognitionMaxChars: intEnv('LARK_DAEMON_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
-    retentionMs: intEnv('LARK_DAEMON_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
-    dryRun: boolEnv('LARK_DAEMON_DRY_RUN', false),
+    historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
+    cognitionMaxChars: intEnv('VIKA_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
+    retentionMs: intEnv('VIKA_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
+    dryRun: boolEnv('VIKA_DRY_RUN', false),
     meetingAudio,
   };
 }

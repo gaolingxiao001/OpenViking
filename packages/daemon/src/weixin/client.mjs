@@ -54,12 +54,12 @@ export class WeixinClient {
   async preflight() {
     this.account = this.state.account();
     if (!this.account?.token) {
-      throw new Error('Weixin is not logged in; run npm run weixin:login -- <instance-id> first');
+      throw new Error('Weixin is not logged in; run vika login weixin <instance-id> first');
     }
     this.profile = profileId(this.account.accountId);
     if (this.config.weixinAllowFrom.size === 0 && !this.account.userId) {
       throw new Error(
-        'Weixin login returned no scanning user id; configure LARK_DAEMON_WEIXIN_ALLOW_FROM explicitly',
+        'Weixin login returned no scanning user id; configure VIKA_WEIXIN_ALLOW_FROM explicitly',
       );
     }
     this.state.pruneMedia(Date.now() - this.config.retentionMs);

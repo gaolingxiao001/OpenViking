@@ -1,5 +1,5 @@
 {
-  "name": "@lark-local/daemon",
+  "name": "@vika/daemon",
   "version": "0.4.0",
   "private": true,
   "description": "Personal Agent connectors, runtime execution, SQLite state, and private activity API.",
@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.2.0",
+    "@larksuite/cli": "1.0.94",
     "qrcode-terminal": "0.12.0"
   },
   "scripts": {

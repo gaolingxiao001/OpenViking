@@ -33,7 +33,7 @@ sys.stdout = sys.stderr
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="lark-daemon meeting ASR worker")
+    parser = argparse.ArgumentParser(description="vika meeting ASR worker")
     parser.add_argument(
         "--worker-dir", "--poc-dir", dest="worker_dir", required=True,
         help="release meeting-asr directory",

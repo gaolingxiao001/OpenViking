@@ -43,7 +43,8 @@ function redirectedBaseUrl(host) {
   return parsed.origin;
 }
 
-export async function loginWeixin({ state, timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
+// readVerifyCode lets `vika setup` ask through its own prompt.
+export async function loginWeixin({ state, timeoutMs = LOGIN_TIMEOUT_MS, readVerifyCode = readLine } = {}) {
   const existing = state.account();
   let apiBaseUrl = existing?.baseUrl || DEFAULT_WEIXIN_API_BASE_URL;
   let qr = await fetchLoginQr({ localTokens: existing?.token ? [existing.token] : [] });
@@ -68,7 +69,7 @@ export async function loginWeixin({ state, timeoutMs = LOGIN_TIMEOUT_MS } = {}) 
       continue;
     }
     if (status.status === 'need_verifycode') {
-      verifyCode = await readLine('请输入微信显示的验证码：');
+      verifyCode = await readVerifyCode('请输入微信显示的验证码：');
       if (!/^\d{4,8}$/.test(verifyCode)) throw new Error('验证码格式无效');
       continue;
     }

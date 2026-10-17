@@ -13,6 +13,7 @@ import {
   statusMessage,
 } from './protocol.mjs';
 
+// The connector type; an email worker serves the one mailbox in its config.
 const connectorId = process.argv[2];
 const manifest = getConnectorManifest(connectorId);
 let config;
@@ -22,6 +23,7 @@ try {
   config = {
     ...parsed,
     channel: connectorId,
+    instance: parsed.instance || connectorId,
     connectorWorker: true,
     weixinAllowFrom: new Set(parsed.weixinAllowFrom ?? []),
   };
@@ -44,7 +46,7 @@ function workerLogger(level = 'info', base = {}) {
       time: new Date().toISOString(),
       level: kind,
       message,
-      connector: connectorId,
+      connector: config.instance,
       ...base,
       ...Object.fromEntries(Object.entries(fields).map(([key, value]) => (
         [key, key.toLowerCase().includes('token') ? '[REDACTED]' : value instanceof Error ? safeError(value) : value]

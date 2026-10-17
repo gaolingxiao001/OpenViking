@@ -54,8 +54,12 @@ describe('agent tools', () => {
     assert.ok(names(lark.service).includes('read_meeting_inbox'));
     const weixin = setup(t, { ids: ['weixin'] });
     assert.deepEqual(names(weixin.service), [
-      'send_message', 'notify_owner', 'reply_message', 'get_message_media', 'read_openviking_session_context',
+      'send_message', 'notify_owner', 'reply_message', 'get_message_media',
     ]);
+    // The OV session tool exists only for an instance configured with OpenViking.
+    assert.ok(!names(lark.service).includes('read_openviking_session_context'));
+    const withOV = setup(t, { ids: ['weixin'], ovClient: {} });
+    assert.ok(names(withOV.service).includes('read_openviking_session_context'));
   });
 
   it('validates input against the tool schema before any connector call', async (t) => {
@@ -717,7 +721,7 @@ describe('owner notices and owner-only actions', () => {
       subject: { type: 'message', id: CARD }, actor: { type: 'user', id: operator },
       message: { id: `ca_${id}`, type: 'card_action' }, content: { text: '[card action]' },
       data: { interaction: { message_id: CARD, conversation_id: 'oc_p2p12345678', tag: 'button',
-        value: { lark_daemon_choice: choice }, ...(form ? { form } : {}) } },
+        value: { vika_choice: choice }, ...(form ? { form } : {}) } },
     }));
     return resolveCardAction(store.db, event, PROFILE);
   };
@@ -763,6 +767,30 @@ describe('owner notices and owner-only actions', () => {
     await assert.rejects(call('reply_message', { message_id: 'mail:1:9', markdown: 'x', decision_id: 'imap:1:9' }),
       (error) => error.code === 'invalid_target' && /no address to reply to/.test(error.message));
     assert.equal(connectors.calls.length, 3);
+  });
+
+  it('answers each mail from the mailbox it arrived in, and the card says which', async (t) => {
+    const { store, call, connectors } = setup(t, { ids: ['lark', 'email-gmail', 'email-qq'], profile: PROFILE,
+      run: (connector) => (connector.startsWith('email-') ? { sent: true } : { message_id: CARD, chat_id: 'oc_p2p12345678' }) });
+    store.ingest(chatEvent({ messageId: 'om_hello12345678', eventId: 'evt-hello', chatId: 'oc_p2p12345678', senderId: OWNER.id }));
+    const to = [{ name: '', address: 'alice@example.com' }];
+    store.ingest(mailEvent({ uid: 7, instance: 'email-gmail', reply: { from: 'me@gmail.com', to, subject: 'Re: a' } }));
+    const qq = mailEvent({ uid: 8, instance: 'email-qq', thread: 'gmail:108', reply: { from: 'me@qq.com', to, subject: 'Re: b' } });
+    store.ingest(qq);
+    assert.match(formatInboundLine(qq), /^\[source=email instance=email-qq kind=email\.received msg=mail:1:8 /);
+
+    // source=email names the connector; the mailbox the mail arrived in answers.
+    await call('reply_message', { source: 'email', message_id: 'mail:1:8', markdown: '好的', decision_id: 'imap:1:8' });
+    const card = connectors.calls.at(-1).input.content.card;
+    assert.match(card.body.elements[0].text.content, /^发件邮箱：me＠qq\.com\n收件人：alice＠example\.com\n主题：Re: b$/);
+    await assert.rejects(call('reply_message', { source: 'email', message_id: 'mail:9:9', markdown: 'x', decision_id: 'imap:1:7' }),
+      (error) => error.code === 'route_ambiguous' && /email-gmail, email-qq/.test(error.message));
+
+    const pressed = click(store);
+    store.ingest(pressed);
+    await new ActionService({ config: { maxReplyChars: 1_000 }, store, connectors, logger }).settleApproval(pressed);
+    assert.deepEqual(connectors.calls.filter(({ connector }) => connector.startsWith('email-'))
+      .map(({ connector, input }) => [connector, input.message_id]), [['email-qq', 'mail:1:8']]);
   });
 
   it('sends the approved draft as the owner left it, once, and shows the outcome on the card', async (t) => {
@@ -811,7 +839,7 @@ describe('owner notices and owner-only actions', () => {
     const card = approvalCard(draft);
     assert.equal(card.body.elements.some((element) => element.tag === 'form'), false);
     assert.deepEqual(card.body.elements.filter((element) => element.tag === 'button')
-      .map((element) => element.behaviors[0].value.lark_daemon_choice), ['send', 'cancel']);
+      .map((element) => element.behaviors[0].value.vika_choice), ['send', 'cancel']);
     assert.equal(approvedText(draft, { reply_body: '   ' }), draft.text);
     // A card never carries an @ (Lark refuses addresses); the approved text gets them back.
     const signed = approvalCard({ ...draft, text: '好的\n— bob@example.com' });

@@ -1,4 +1,4 @@
-# Personal Agent daemon
+# Vika
 
 把你本机上的 coding agent 接进飞书和微信。Core 维护一个共享的 Pi session 和 OpenViking 空间；每个消息源由独立 Connector 子进程接入。
 
@@ -27,11 +27,11 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 
 ## 安装
 
-看 [install.md](./install.md)。里面有依赖、飞书权限、`deployment.json`、首次部署、多 agent 和日常升级。
+一条命令：`curl -fsSL <下载地址>/install.sh | sh`，装好后 `vika setup` 接飞书、微信或邮箱。机器上不需要 Node。细节看 [install.md](./install.md)：依赖、setup、升级回滚、开机自启、多 agent 和发布新版本。
 
 ### 微信单聊 MVP
 
-可以在 `deployment.json` 中增加一个微信实例。`channel` 是兼容字段；`connectors` 声明该 Core 启动的 Connector。`profile` 目前仍是必填字段，但纯微信实例不会用它访问飞书：
+可以在 `config.json` 中增加一个微信实例。`channel` 是兼容字段；`connectors` 声明该 Core 启动的 Connector。`profile` 是飞书 Connector 的 lark-cli profile，纯微信实例不填（填了会被拒绝）；`ovConfig` 可选：
 
 ```json
 {
@@ -39,9 +39,8 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
   "displayName": "Weixin Pi",
   "channel": "weixin",
   "connectors": ["weixin"],
-  "profile": "weixin_unused",
   "port": 3741,
-  "dataDir": "/Users/you/.local/share/lark-daemon-weixin",
+  "dataDir": "/Users/you/.vika/data/weixin",
   "workspace": "/Users/you/Documents/work/weixin-workspace",
   "ovConfig": "/Users/you/.openviking/ovcli.conf.weixin",
   "model": "pi"
@@ -58,34 +57,41 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 }
 ```
 
-随后对这个实例执行一次 `npm run weixin:login -- <instance-id>`。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
+随后执行一次 `vika login weixin`（有多个实例时会让你选，或写上实例名）。已有实例后补接入微信也是这条命令：它会扫码、把微信加进这个实例的 `connectors` 并重启实例。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
 
 安装依赖后扫码，再以前台方式启动这个实例：
 
 ```bash
 npm install
-npm run weixin:login -- weixin
-LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
+vika login weixin weixin
+VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```
 
-终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。带有微信语音转写的消息会以转写文本进入 Agent。默认只接受完成扫码的微信用户，避免其他联系人触发本机 Agent。需要显式增加发送者时，可在 manifest 的共享 `env` 中设置 `LARK_DAEMON_WEIXIN_ALLOW_FROM`，值为逗号分隔的完整微信 iLink 用户 ID。
+终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。带有微信语音转写的消息会以转写文本进入 Agent。默认只接受完成扫码的微信用户，避免其他联系人触发本机 Agent。需要显式增加发送者时，可在 manifest 的共享 `env` 中设置 `VIKA_WEIXIN_ALLOW_FROM`，值为逗号分隔的完整微信 iLink 用户 ID。
 
 这个 MVP 使用一个微信账号，支持单聊文本、入站图片和文件、微信提供的语音转写，以及出站图片和文件。入站媒体经腾讯 CDN 下载和 AES 解密后保存在该实例的 `dataDir/weixin/media`，单个文件和出站 workspace 文件上限均为 20 MiB，并随 daemon 的保留周期清理。原始语音解码/ASR、视频、群聊、引用和 reaction 尚未接入。协议实现固定对齐 `Tencent/openclaw-weixin` 2.4.9，来源与许可证见 [微信协议说明](packages/daemon/src/weixin/NOTICE.md) 和 [MIT 许可证](packages/daemon/src/weixin/LICENSE.openclaw-weixin)。
 
 ### 邮箱
 
-邮箱 Connector 用 IMAP 只读监听一个邮箱的收件箱（不会把邮件标成已读，也不移动、不删除），用 SMTP 回信。新邮件到达后，Agent 判断要不要告诉你，要的话发到你在主 IM 上的私聊。Agent 从不直接发邮件：无论是你让它回，还是它觉得该回，它都只能起草，Core 把草稿放在一张卡片上发给你（收件人、主题和可编辑的正文），你点"发送"才会以卡片上的内容发出，点"不发了"就作废。卡片只有你能操作，三天后过期，目前需要主 IM 是飞书。首次启动只从之后到达的邮件开始；订阅和群发邮件标为 `kind=email.list`，自动回复（含多数退信）和它自己的回信直接跳过；程序自动发出的通知（安全告警、任务失败等）照常交给 Agent 判断。
+邮箱 Connector 用 IMAP 只读监听收件箱（不会把邮件标成已读，也不移动、不删除），用 SMTP 回信。一个实例可以同时接多个邮箱，每个邮箱是一个独立的 Connector 实例（`email-gmail`、`email-qq` 这样的名字），各跑一个子进程：一个邮箱密码失效或被限流，只有它自己退避重连，其他邮箱照常收信。新邮件到达后，Agent 判断要不要告诉你，要的话发到你在主 IM 上的私聊。Agent 从不直接发邮件：无论是你让它回，还是它觉得该回，它都只能起草，Core 把草稿放在一张卡片上发给你（收件人、主题和可编辑的正文），你点"发送"才会以卡片上的内容发出，点"不发了"就作废。卡片只有你能操作，三天后过期，目前需要主 IM 是飞书。首次启动只从之后到达的邮件开始；订阅和群发邮件标为 `kind=email.list`，自动回复（含多数退信）和它自己的回信直接跳过；程序自动发出的通知（安全告警、任务失败等）照常交给 Agent 判断。
 
-在实例上加 `email` 并指向账号文件（文件权限必须是 0600，不要写进 `env`）：
+用 `vika login email` 给实例接上邮箱（`vika setup` 里也可以直接勾选，并连续接几个）：输入邮箱地址和专用密码，Gmail、QQ、163/126/yeah.net 自动带出服务器，其他邮箱手填。先实际登录一次 IMAP 和 SMTP，成功才保存。已经接了邮箱的实例再执行 `vika login email`，可以再接一个、给某个邮箱换密码，或者移除某个邮箱。回信从邮件所在的那个邮箱发出，审批卡片上会写明发件邮箱。
+
+每个邮箱的账号存在 `~/.vika/email/<实例>/<邮箱名>.json`（0600），实例配置里是它们的列表：
 
 ```json
 {
   "id": "primary",
   "channel": "lark",
   "connectors": ["lark", "email"],
-  "emailConfig": "/Users/you/.lark-daemon/email-primary.json"
+  "emailAccounts": [
+    { "id": "email-gmail", "config": "/Users/you/.vika/email/primary/email-gmail.json" },
+    { "id": "email-qq", "config": "/Users/you/.vika/email/primary/email-qq.json" }
+  ]
 }
 ```
+
+邮箱名是 `email-` 加小写字母、数字和 `-`。账号文件格式如下，手写时文件权限必须是 0600，不要写进 `env`：
 
 ```json
 {
@@ -103,7 +109,7 @@ LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
 方舟只支持 Self-hosted Managed Agent。最小接入流程：
 
 1. 在方舟控制台创建或选择 `config.type=self_hosted` 的 Environment，把目标 Agent 绑定到该 Environment，并创建一个 seed session。可参考[已验证的 Self-hosted Environment](https://console.volcengine.com/ark/region:cn-beijing/managed-agents/environments/env-20260831031839-rm2nj?searchField=Name)。
-2. 在 `deployment.json` 的目标 agent 中同时配置 seed session 和 Environment；二者必须属于同一个 Environment，每个 bot 使用独立配置：
+2. 在 `config.json` 的目标 agent 中同时配置 seed session 和 Environment；二者必须属于同一个 Environment，每个 bot 使用独立配置：
 
    ```json
    {
@@ -113,7 +119,7 @@ LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
    }
    ```
 
-3. daemon 进程需要 `ARK_API_KEY`。另外独立常驻官方 Go `EnvironmentWorker`，给 Worker 设置以下进程环境变量；密钥不要写入 `deployment.json`：
+3. daemon 进程需要 `ARK_API_KEY`。另外独立常驻官方 Go `EnvironmentWorker`，给 Worker 设置以下进程环境变量；密钥不要写入 `config.json`：
 
    ```bash
    ARK_API_KEY="..."
@@ -142,8 +148,8 @@ LARK_DAEMON_INSTANCE_ID=weixin npm run start:daemon
 - 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn。Codex/TraeX/Claude/Pi 已有 turn 时使用即时 steer；Ark 的后续消息进入下一 turn。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和音视频会以受限资源引用进入 Agent；Codex/TraeX/Claude/Pi 可用 `get_message_media` 按消息中的 image_key/file_key（微信按消息 ID）取回本地文件，图片通过 MCP 工具结果直接交给模型，内容本身不会直接塞进入站 prompt。Self-hosted Ark 不继承 daemon 的 Agent 工具，只有 Worker 环境另行提供等价本地能力时才能读取。未知消息类型不会触发回复。
-- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `lark-daemon upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model traex` 切到 TraeX（`/model trae:<model>` 指定 TraeX 模型），用 `/model pi` 切到 Pi（`/model pi:provider/id` 指定模型），用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按当前动态 runtime 解析，不在动态 runtime 上时按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 OV archive overview + live messages。Codex/TraeX/Claude/Pi 支持 daemon 侧 `/effort`；Ark 的 model/effort 由远端 Agent 配置管理。
-- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/TraeX/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的 Worker/CLI 路径不使用 daemon 的临时 reaction helper，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。Core 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `LARK_DAEMON_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
+- 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `vika upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model traex` 切到 TraeX（`/model trae:<model>` 指定 TraeX 模型），用 `/model pi` 切到 Pi（`/model pi:provider/id` 指定模型），用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按当前动态 runtime 解析，不在动态 runtime 上时按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 OV archive overview + live messages。Codex/TraeX/Claude/Pi 支持 daemon 侧 `/effort`；Ark 的 model/effort 由远端 Agent 配置管理。
+- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/TraeX/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的 Worker/CLI 路径不使用 daemon 的临时 reaction helper，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。Core 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `VIKA_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
 
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
@@ -169,42 +175,40 @@ Codex/TraeX/Claude/Pi（MCP）的发消息、回复、reaction、撤回都经 Co
 ## 本地开发验证
 
 ```bash
-cd lark-daemon
-mkdir -p ~/.lark-daemon
-cp deployment.example.json ~/.lark-daemon/deployment.json
+cd vika
+mkdir -p ~/.vika
+cp config.example.json ~/.vika/config.json
 npm test
 npm run check
 npm run start:daemon   # 127.0.0.1:3738
 npm run start:web      # 127.0.0.1:3737
 ```
 
-源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式 PM2 release 安装在 `~/.local/lib/lark-daemon/releases/`；每个实例的工作区由 release 之外的持久 manifest 独立配置。
+源码目录应使用独立的小工作区，避免测试中的 Codex 改到 daemon 自身。正式安装在 `~/.vika/releases/`，由 Vika 自己的 pm2 托管；每个实例的工作区由 release 之外的持久 manifest 独立配置。
 
 ## 日常运维
 
 ```bash
-pm2 status lark-daemon-<instance-id> lark-web lark-updater
-pm2 logs lark-daemon-<instance-id> --lines 100
+vika status
+vika logs <instance-id>
 curl http://127.0.0.1:3737/ready
-lark-daemon upgrade <instance-id>
-lark-daemon upgrade all
+vika upgrade <instance-id>
+vika upgrade all
 ```
 
-`deploy.sh` 是首次安装或 updater 控制面协议变更时的 bootstrap 工具，不是日常升级步骤。
-
-`lark-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 manifest 中的 agent id 和 `all`，从固定的 upstream `main` 发布 release；请求不能传 SHA、ref、路径、remote 或 shell。新 commit 会先打成隔离 release，链接共享 env，跑完整测试与 syntax check，全部通过后才原子切换 `current`。随后 updater 从同一份 ecosystem config 滚动目标 daemon；`all` 还会滚动共享 Web。相同 commit 的第二次请求直接复用已验证 release。整个过程持有同一把 deploy lock。
+`vika-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 manifest 中的 agent id 和 `all`，每次请求都重读 manifest；请求不能传版本、路径、下载地址或 shell。它只装下载地址上 `latest` 指向的已发布版本：核对 SHA-256、用安装包自带的 Node 冒烟检查后才原子切换 `current`，随后从同一份 ecosystem config 滚动目标 daemon，`all` 还会滚动共享 Web，最后从新版本重启自己。相同版本的第二次请求直接复用。整个过程和安装脚本共用同一把 deploy lock。
 
 ### 可横向扩展的多 Agent 部署
 
-每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 JSON manifest，完整格式见 [`deployment.example.json`](./deployment.example.json)。顶层只接受 `version`、`defaultInstance`、`env`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`，可用 `channel` 选择 `lark` 或 `weixin`，省略时默认 `lark`。
+每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 JSON manifest，完整格式见 [`config.example.json`](./config.example.json)。顶层只接受 `version`、`defaultInstance`、`env`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`，可用 `channel` 选择 `lark` 或 `weixin`，省略时默认 `lark`。
 
-`env` 是所有 daemon 共用的运行参数，只接受示例中列出的 key，所有 JSON value 都必须是字符串（包括布尔值和数字；空字符串允许）。同名系统进程环境变量优先于 manifest `env`，可用于临时覆盖。Agent identity、channel、Lark profile、端口、dataDir、workspace、OV config、model，以及 Web/updater 控制面字段不能放进 `env`；未知或保留字段会让 preflight 直接失败。每个 agent 的 `profile` 会同时固定注入 `LARK_DAEMON_PROFILE` 和 `LARKSUITE_CLI_PROFILE`；微信实例的 Agent 子进程不会继承这两个飞书变量。
+`env` 是所有 daemon 共用的运行参数，只接受示例中列出的 key，所有 JSON value 都必须是字符串（包括布尔值和数字；空字符串允许）。同名系统进程环境变量优先于 manifest `env`，可用于临时覆盖。Agent identity、channel、Lark profile、端口、dataDir、workspace、OV config、model，以及 Web/updater 控制面字段不能放进 `env`；未知或保留字段会让 preflight 直接失败。每个 agent 的 `profile` 会同时固定注入 `VIKA_LARK_PROFILE` 和 `LARKSUITE_CLI_PROFILE`；微信实例的 Agent 子进程不会继承这两个飞书变量。
 
-启动 preflight 严格拒绝未知字段、相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `lark-daemon-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
+启动 preflight 严格拒绝未知字段、相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `vika-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
 
-`npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `LARK_DAEMON_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `deploy.sh HEAD`、`bootstrap-updater.sh` 和 `lark-daemon upgrade all`。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `lark-daemon upgrade <id>`。
+`npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `VIKA_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `vika upgrade all`（或 `vika start <新实例>` 加 `vika restart web`）。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `vika upgrade <id>`。
 
-首次安装，或 release 修改了 updater 自身协议时，运行一次 `deploy.sh` + `bootstrap-updater.sh`。普通代码升级只需先把 commit push 到 upstream `main`，再调用 `lark-daemon upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
+代码升级先由维护者发布新版本（见 install.md），再调用 `vika upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
 
 ## Activity 页面
 

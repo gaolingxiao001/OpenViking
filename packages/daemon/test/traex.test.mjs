@@ -11,8 +11,8 @@ const baseConfig = {
   systemPromptPath,
   traexBin: 'traecli',
   traexEffort: 'medium',
-  workspace: '/tmp/lark-agent-workspace',
-  databasePath: '/tmp/lark-daemon-test.sqlite3',
+  workspace: '/tmp/vika-workspace',
+  databasePath: '/tmp/vika-test.sqlite3',
   profile: 'test-profile',
   historyLimit: 30,
 };

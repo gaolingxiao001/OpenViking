@@ -171,7 +171,7 @@ describe('Volc managed-agent runtime', () => {
     });
     assert.match(agent.transportPolicy, /Managed Agent self-hosted delivery runtime/);
     assert.match(agent.transportPolicy, /official self-hosted Environment Worker is the only tool executor/);
-    assert.doesNotMatch(agent.transportPolicy, /strict JSON|lark-daemon-tools\/v1/);
+    assert.doesNotMatch(agent.transportPolicy, /strict JSON|vika-tools\/v1/);
     assert.match(agent.transportPolicy, /one native turn may call it repeatedly before end_turn/);
 
     agent.connected = true;

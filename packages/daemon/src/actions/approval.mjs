@@ -30,14 +30,16 @@ function header(title, template) {
 function button(label, choice, primary = false) {
   return {
     tag: 'button', name: choice, text: text(label), type: primary ? 'primary' : 'default',
-    behaviors: [{ type: 'callback', value: { lark_daemon_choice: choice } }],
+    behaviors: [{ type: 'callback', value: { vika_choice: choice } }],
   };
 }
 
 // Everything from the mail is shown as plain text: a subject or a name cannot
 // turn into a link or a mention.
 function details(draft) {
-  return { tag: 'div', text: text(shown(`收件人：${people(draft.to)}\n主题：${draft.subject}`)) };
+  // With several mailboxes, which one the reply goes out from.
+  const from = draft.from ? `发件邮箱：${draft.from}\n` : '';
+  return { tag: 'div', text: text(shown(`${from}收件人：${people(draft.to)}\n主题：${draft.subject}`)) };
 }
 
 export function approvalQuestion(draft, ownerId) {

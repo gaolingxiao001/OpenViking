@@ -520,7 +520,7 @@ describe('meeting audio runtime vertical slice', () => {
         PATH: '/usr/bin',
         SECRET_TOKEN: 'must-not-leak',
         GITHUB_TOKEN: 'must-not-leak',
-        LARK_DAEMON_PROFILE: 'must-not-leak',
+        VIKA_LARK_PROFILE: 'must-not-leak',
         FEISHU_APP_SECRET: 'must-not-leak',
       },
       spawn,
@@ -543,7 +543,7 @@ describe('meeting audio runtime vertical slice', () => {
       onExit: (event) => exits.push(event),
     });
     assert.equal(children.length, 1);
-    assert.equal(spawnOptions[0].env.LARK_DAEMON_PROFILE, undefined);
+    assert.equal(spawnOptions[0].env.VIKA_LARK_PROFILE, undefined);
     assert.equal(spawnOptions[0].env.FEISHU_APP_SECRET, undefined);
     assert.equal(spawnOptions[0].env.SECRET_TOKEN, undefined);
     assert.equal(spawnOptions[0].env.GITHUB_TOKEN, undefined);

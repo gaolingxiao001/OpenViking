@@ -947,7 +947,7 @@ export class CodexAgent {
       });
 
       this._request('initialize', {
-        clientInfo: { name: 'lark-daemon', version: '1' },
+        clientInfo: { name: 'vika', version: '1' },
         capabilities: { experimentalApi: true },
       }).then(() => {
         this._notify('initialized', {});
