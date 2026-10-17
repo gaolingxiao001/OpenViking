@@ -46,7 +46,6 @@ function childConfig(config, instance) {
     tempDir: config.tempDir,
     profile: config.profile,
     larkCliBin: config.larkCliBin,
-    weixinAllowFrom: [...(config.weixinAllowFrom ?? [])],
     weixinLongPollTimeoutMs: config.weixinLongPollTimeoutMs,
     emailConfigFile: instance.emailConfigFile ?? null,
     retentionMs: config.retentionMs,

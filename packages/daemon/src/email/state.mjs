@@ -15,9 +15,10 @@ export class EmailState {
     const databasePath = path.join(directory, 'state.sqlite3');
     this.db = new DatabaseSync(databasePath);
     try { fs.chmodSync(databasePath, 0o600); } catch {}
+    // Waits out another process holding the database (the CLI next to a running daemon).
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA synchronous = FULL');
-    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS cursors (
         mailbox TEXT PRIMARY KEY,

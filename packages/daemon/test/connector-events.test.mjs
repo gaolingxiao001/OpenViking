@@ -228,7 +228,7 @@ it('Lark and Weixin both produce standard chat events, including thread and atta
   assert.equal(lark.threadId, 'omt_test');
   assert.equal(lark.replyRoute.input.message_id, 'om_test');
   const client = Object.assign(Object.create(WeixinClient.prototype), {
-    account: { accountId: 'account', userId: 'peer' }, config: { weixinAllowFrom: new Set() }, logger,
+    account: { accountId: 'account', userId: 'peer' }, config: {}, logger,
     state: { recordInbound() {}, mediaForMessage: () => [{ kind: 'file', fileName: 'report.pdf' }] },
   });
   let weixin;
