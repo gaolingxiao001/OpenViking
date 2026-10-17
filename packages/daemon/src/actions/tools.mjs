@@ -85,7 +85,7 @@ export const TOOLS = [
     name: 'reply_message',
     action: 'message.reply',
     title: 'Reply to a message',
-    description: 'Reply as the bot to one message with exactly one of markdown, file_path, file_key, card, or choices. Lark: set reply_in_thread to continue or start its thread; for a card action, message_id is its card= id. A mail (source=email) is never answered directly: your markdown becomes a draft on a card in the owner\'s direct chat, and it is sent only if the owner presses send there, possibly after editing it. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
+    description: 'Reply as the bot to one message with exactly one of markdown, file_path, file_key, card, or choices. Lark: set reply_in_thread to continue or start its thread; for a card action, message_id is its card= id. A mail (source=email) is never answered directly: your markdown becomes a draft the owner confirms in their direct chat on the primary IM (a card on Lark, a numbered message elsewhere), and it is sent only if the owner confirms it there, possibly after editing it. One final delivery per decision, only when the user asked for it or a requested follow-up is due.',
     inputSchema: schema({
       source: SOURCE,
       message_id: { type: 'string', pattern: ID, description: 'Full message id (msg= or card=) to reply to. Never guess or shorten.' },

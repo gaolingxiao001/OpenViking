@@ -250,6 +250,15 @@ export class PersonalAgentDaemon {
             ? (accepted) => this.meeting.handleEvent(accepted.data.meeting) : null;
         },
         onSlashCommand: (command, event, inbound) => this.handleSlashCommand(command, event, inbound),
+        // The owner's answer to a numbered mail draft: the Core sends, edits or
+        // drops it, and the model hears what actually went out.
+        approvalReply: (text, event) => {
+          const reply = this.actions.matchApprovalReply(text, event);
+          return reply && { verb: reply.verb, handle: (accepted, inbound) => void this.actions
+            .answerApproval({ ...accepted, seq: inbound?.seq }, reply)
+            .then((note) => note && this.harness.deliverNote(accepted, note))
+            .catch((error) => this.logger.error('approval_answer_failed', { error: safeError(error) })) };
+        },
         onInboundChat: (chatId) => this.chatNames.schedule(chatId),
         afterEvent: (event) => {
           const card = settledChoiceCard(event);

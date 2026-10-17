@@ -2,11 +2,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { eventIdentity } from '../event.mjs';
 import { registerCard } from '../card-messages.mjs';
+import {
+  cancelApproval, claimApproval, createApproval, editApproval, finishApproval, getApproval, supersedeApprovals,
+} from '../approvals.mjs';
 import { meetingContextLines } from '../meeting/index.mjs';
 import { OVSessionClient } from '../ov-session-context.mjs';
 import { opaqueRef, safeError } from '../logger.mjs';
 import { readMetadataTag } from '../runtime-input.mjs';
-import { approvalCard, approvalQuestion, approvedText, settledApprovalCard } from './approval.mjs';
+import {
+  APPROVAL_SECONDS, approvalCard, approvalMessage, approvalNote, approvalQuestion, approvalStatusText, approvedText,
+  parseApprovalReply, settledApprovalCard,
+} from './approval.mjs';
 import { resolveContent } from './content.mjs';
 import { TOOLS, publicTool, validateInput } from './tools.mjs';
 
@@ -492,11 +498,11 @@ export class ActionService {
     if (!target || target.chat_id) {
       throw blocked('invalid_target', `message_id must be a mail this daemon received (its msg= value). ${NO_ACTION}`);
     }
+    // The owner answers on their primary IM: a card where it can show one,
+    // else a numbered message.
     const { connector: im, owner } = this.ownerRoute(fence, undefined, caller);
     caller.trace.approval = connector;
-    if (!this.manifest(im).actions['message.send'].content?.includes('card')) {
-      throw blocked('unsupported', `Approving a ${connector} reply needs a card, which ${im} cannot show. ${NO_ACTION}`);
-    }
+    const byCard = Boolean(this.manifest(im).actions['message.send'].content?.includes('card'));
     this.authorize(fence, { toOwner: true });
     const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     let draftText;
@@ -509,10 +515,10 @@ export class ActionService {
     } catch (error) {
       throw blocked('invalid_content', error.message);
     }
-    // The card shows every recipient, and exactly those are sent to.
+    // The draft shows every recipient, and exactly those are sent to.
     const reply = JSON.parse(target.event_json).data?.reply ?? {};
     if (!Array.isArray(reply.to)) {
-      throw blocked('unsupported', `This mail asks for replies to go to ${reply.recipients ?? 'more'} addresses, more than an approval card shows in full, so it cannot be answered here. Tell the owner instead. ${NO_ACTION}`);
+      throw blocked('unsupported', `This mail asks for replies to go to ${reply.recipients ?? 'more'} addresses, more than an approval draft shows in full, so it cannot be answered here. Tell the owner instead. ${NO_ACTION}`);
     }
     if (reply.to.length === 0) throw blocked('invalid_target', `This mail has no address to reply to. ${NO_ACTION}`);
     const draft = {
@@ -520,16 +526,15 @@ export class ActionService {
       to: reply.to, subject: reply.subject, responseSeq: responseTo.seq,
       ...(typeof reply.from === 'string' ? { from: reply.from } : {}),
     };
+    const key = this.key(input.idempotency_key, 'approval', connector, eventRef(fence), input.message_id, draftText);
+    const delivery = { caller, connector: im, action: 'message.send', key,
+      summary: `[mail reply draft for the owner to approve] ${draftText}`,
+      scope: {}, fence, inboundSeq: responseTo.seq, metadata: { notify: 'owner', decisionEvent: fence.event_id } };
+    if (!byCard) return this.proposeByMessage({ delivery, draft, im, owner });
     const question = approvalQuestion(draft, owner.id);
     const result = await this.deliver({
-      caller, connector: im, action: 'message.send',
+      ...delivery,
       input: { ...owner.target, content: { type: 'card', card: approvalCard(draft) } },
-      key: this.key(input.idempotency_key, 'approval', connector, eventRef(fence), input.message_id, draftText),
-      summary: `[mail reply draft for the owner to approve] ${draftText}`,
-      scope: {},
-      fence,
-      inboundSeq: responseTo.seq,
-      metadata: { notify: 'owner', decisionEvent: fence.event_id },
     });
     const warning = this.rememberCard({ type: 'card', question }, result, { connector: im, chatId: null, seen: [fence] });
     if (result.dry_run) return this.deliveryResult(result, 'approval card');
@@ -542,6 +547,61 @@ export class ActionService {
     };
   }
 
+  // The draft as a numbered message, for a primary IM without cards. The
+  // number is the approval row, made before the message so it can carry it.
+  async proposeByMessage({ delivery, draft, im, owner }) {
+    const { approval, created } = createApproval(this.store.db, {
+      requestKey: delivery.key, im, ownerId: owner.id, draft, ttlMs: APPROVAL_SECONDS * 1_000,
+    });
+    if (!created) {
+      return { text: `This draft is already waiting for the owner as #${approval.id}. Nothing more to do.`, data: { approval: approval.id } };
+    }
+    let result;
+    try {
+      result = await this.deliver({
+        ...delivery,
+        input: { ...owner.target, content: { type: 'markdown', text: approvalMessage(draft, approval.id) } },
+      });
+    } catch (error) {
+      // The owner never saw it, so its number can never be answered.
+      if (!delivery.caller.trace.invoked) finishApproval(this.store.db, approval.id, 'failed');
+      throw error;
+    }
+    if (result.dry_run) return this.deliveryResult(result, `approval draft #${approval.id}`);
+    supersedeApprovals(this.store.db, { connector: draft.connector, messageId: draft.message_id, by: approval.id });
+    return {
+      text: `Nothing was sent yet: the draft is waiting in the owner's direct chat (${im}) as #${approval.id}. The mail goes out only when the owner confirms it there, possibly with their own edit; their answer is handled by the daemon and reported to you. If the owner asks for changes, draft it again: the new draft replaces this one. Do not send or repeat it another way.`,
+      data: { ...result, approval: approval.id },
+    };
+  }
+
+  // Sends a draft the owner approved, as `text`. One approval (`key`) sends
+  // at most once, whatever was edited.
+  async sendApproved({ draft, text, key, trace }) {
+    if (text.length > this.config.maxReplyChars) {
+      return { state: 'failed', text, note: `超过 ${this.config.maxReplyChars} 字，没有发送。` };
+    }
+    const mail = this.store.eventByMessageId(draft.message_id, draft.connector);
+    try {
+      const result = await this.deliver({
+        caller: { trace }, connector: draft.connector, action: draft.action,
+        input: { message_id: draft.message_id, content: { type: 'markdown', text },
+          to: draft.to.map((recipient) => recipient.address) },
+        key,
+        summary: text,
+        scope: {},
+        inboundSeq: draft.responseSeq,
+        metadata: mail?.event_json ? { event: JSON.parse(mail.event_json) } : {},
+      });
+      return { state: 'sent', text, duplicate: Boolean(result.duplicate) };
+    } catch (error) {
+      // Blocked before the Connector was asked: nothing went out.
+      return trace.invoked
+        ? { state: 'uncertain', text, note: '邮件服务器没有确认收到，可能已经发出，不会自动重发。' }
+        : { state: 'failed', text, note: `没有发出：${safeError(error)}` };
+    }
+  }
+
   // The owner pressed a button on an approval card: send the draft as they left
   // it, or drop it, then show the outcome on the card. Runs outside the model;
   // the card answer was already accepted once (first press wins).
@@ -549,35 +609,11 @@ export class ActionService {
     const { draft } = event.question;
     const cardId = event.parentId;
     const trace = { purpose: 'approval', connector: draft.connector, action: draft.action, choice: event.answer.key };
-    let settled;
-    if (event.answer.key !== 'send') {
-      settled = { state: 'cancelled' };
-    } else {
+    let settled = { state: 'cancelled' };
+    if (event.answer.key === 'send') {
       const text = approvedText(draft, event.data.interaction?.form);
-      if (text.length > this.config.maxReplyChars) {
-        settled = { state: 'failed', text, note: `超过 ${this.config.maxReplyChars} 字，没有发送。` };
-      } else {
-        const mail = this.store.eventByMessageId(draft.message_id, draft.connector);
-        try {
-          const result = await this.deliver({
-            caller: { trace }, connector: draft.connector, action: draft.action,
-            input: { message_id: draft.message_id, content: { type: 'markdown', text },
-              to: draft.to.map((recipient) => recipient.address) },
-            // One approval sends at most once, whatever was edited.
-            key: actionKey('approved', draft.connector, cardId),
-            summary: text,
-            scope: {},
-            inboundSeq: draft.responseSeq,
-            metadata: mail?.event_json ? { event: JSON.parse(mail.event_json) } : {},
-          });
-          settled = { state: 'sent', text, edited: text !== draft.text, duplicate: Boolean(result.duplicate) };
-        } catch (error) {
-          // Blocked before the Connector was asked: nothing went out.
-          settled = trace.invoked
-            ? { state: 'uncertain', text, note: '邮件服务器没有确认收到，可能已经发出，不会自动重发。' }
-            : { state: 'failed', text, note: `没有发出：${safeError(error)}` };
-        }
-      }
+      settled = { ...await this.sendApproved({ draft, text, key: actionKey('approved', draft.connector, cardId), trace }),
+        edited: text !== draft.text };
     }
     this.logger.info('approval_settled', { ...trace, outcome: settled.state, edited: settled.edited ?? false });
     try {
@@ -586,6 +622,58 @@ export class ActionService {
       this.logger.warn('approval_card_update_failed', { error: safeError(error) });
     }
     return settled;
+  }
+
+  // The owner's 发送 N / 不发 N / 修改 N in their direct chat, when N is a
+  // draft sent to them on that IM. Anything else is an ordinary message.
+  matchApprovalReply(text, event) {
+    const reply = parseApprovalReply(text);
+    if (!reply) return null;
+    const approval = getApproval(this.store.db, reply.number);
+    if (!approval || approval.im !== event.connectorInstance || approval.ownerId !== event.senderId) return null;
+    return { ...reply, approval };
+  }
+
+  // Carries out the owner's answer and tells them what happened. Resolves with
+  // the line the model hears about it, or null when there is nothing to tell.
+  async answerApproval(event, { verb, number, body }) {
+    const db = this.store.db;
+    const tell = (text) => this.replyToEvent(event, text, 'approval-answer');
+    const status = async () => {
+      const approval = getApproval(db, number);
+      await tell(approvalStatusText(number, { ...approval, from: approval.draft.from }));
+      return null;
+    };
+    const { draft, edited } = getApproval(db, number);
+    const trace = { purpose: 'approval', connector: draft.connector, action: draft.action, choice: verb };
+    if (verb === 'edit') {
+      if (!body) {
+        await tell(`在「修改 ${number}」后面写上新的正文，例如：修改 ${number} 周五下午可以`);
+        return null;
+      }
+      if (body.length > this.config.maxReplyChars) {
+        await tell(`新的正文超过 ${this.config.maxReplyChars} 字，没有修改 #${number}。`);
+        return null;
+      }
+      const updated = editApproval(db, number, body);
+      if (!updated) return status();
+      this.logger.info('approval_edited', trace);
+      await tell(approvalMessage(updated.draft, number, { edited: true }));
+      return null;
+    }
+    if (verb === 'cancel') {
+      if (!cancelApproval(db, number)) return status();
+      this.logger.info('approval_settled', { ...trace, outcome: 'cancelled' });
+      await tell(approvalStatusText(number, { state: 'cancelled' }));
+      return approvalNote(draft, { state: 'cancelled' });
+    }
+    if (!claimApproval(db, number)) return status();
+    const settled = { ...await this.sendApproved({ draft, text: draft.text,
+      key: actionKey('approved', draft.connector, `approval-${number}`), trace }), edited };
+    finishApproval(db, number, settled.state);
+    this.logger.info('approval_settled', { ...trace, outcome: settled.state, edited });
+    await tell(approvalStatusText(number, { ...settled, from: draft.from }));
+    return approvalNote(draft, settled);
   }
 
   async reactToMessage(input, caller) {
