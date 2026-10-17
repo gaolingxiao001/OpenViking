@@ -159,40 +159,55 @@ function existing(h, agent) {
   return full;
 }
 
-test('changing an instance asks each question with its current answer; Enter keeps it', async (t) => {
-  //            change asd  name ws runtime IMs  primary  confirm
-  const h = harness(t, ['2', '', '', '', '1,2', '2', 'y']);
+// The change menu: 1 名字 2 工作目录 3 运行时 4 IM 5 主渠道 6 邮箱 7 OpenViking 8 保存 9 放弃.
+test('changing an instance lists every setting; only the ones opened change', async (t) => {
+  //                    change asd  IMs  lark+weixin  primary  weixin  save
+  const h = harness(t, ['2',        '4', '1,2',       '5',     '2',    '8']);
   const before = existing(h, {});
   assert.equal(await setupCommand(h.options), 0);
   const [after] = h.manifest().agents;
   assert.deepEqual(after, { ...before, connectors: ['lark', 'weixin'], channel: 'weixin' });
+  // The list shows every value; what was changed is marked.
+  assert.match(h.written(), /1\) 机器人名字\s+ASD\n  2\) 工作目录\s+~\/ws\n  3\) Agent 运行时\s+Codex\n  4\) 接入的 IM\s+飞书\n  5\) 主渠道\s+飞书\n  6\) 邮箱\s+没有接\n  7\) OpenViking\s+不用\n  8\) 保存\n  9\) 放弃修改/);
+  assert.match(h.written(), /4\) 接入的 IM\s+飞书、微信（已改）[\s\S]*5\) 主渠道\s+微信（已改）\n[\s\S]*8\) 保存（2 项改动）/);
   assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
-  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd'], ['greetWeixin', before.dataDir]]);
+  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']].concat([['greetWeixin', before.dataDir]]));
   assert.match(h.calls.at(-1)[2], /^你好，我是 ASD，现在也能在微信里找到我了。以后我主动找你的消息/);
 
-  // Nothing changed: nothing is written or restarted.
-  const same = harness(t, ['2', '', '', '', '', '']);
-  existing(same, { connectors: ['lark', 'weixin'], channel: 'weixin' });
-  assert.equal(await setupCommand(same.options), 0);
-  assert.match(same.written(), /没有改动/);
-  assert.deepEqual(same.calls, []);
+  // Saving nothing, or leaving, writes and restarts nothing.
+  for (const [answers, said] of [[['2', '8'], /没有改动/], [['2', '1', '新名字', '9'], /已放弃，没有保存任何改动/]]) {
+    const idle = harness(t, answers);
+    const config = existing(idle, {});
+    assert.equal(await setupCommand(idle.options), 0);
+    assert.match(idle.written(), said);
+    assert.deepEqual(idle.manifest().agents, [config]);
+    assert.deepEqual(idle.calls, []);
+  }
 });
 
-test('dropping the primary IM moves the primary to what is left, and its profile goes', async (t) => {
-  //                    change  name ws runtime IMs(weixin only) confirm
-  const h = harness(t, ['2', '', '', '', '2', 'y']);
+test('dropping the primary IM moves the primary to what is left; a change the daemon would reject goes back to the list', async (t) => {
+  //                    change  IMs  weixin  save
+  const h = harness(t, ['2',    '4', '2',    '8']);
   existing(h, { connectors: ['lark', 'weixin'], channel: 'lark' });
   assert.equal(await setupCommand(h.options), 0);
   const [after] = h.manifest().agents;
   assert.deepEqual([after.connectors, after.channel, after.profile], [['weixin'], 'weixin', undefined]);
-  assert.match(h.written(), /主渠道是微信：你没找机器人、它主动找你时[\s\S]*不再接飞书\n  主渠道：飞书 → 微信/);
-  assert.match(h.written(), /保存并重启这个实例？/);
+  assert.match(h.written(), /主渠道原来是飞书，它不再接入，改成微信。[\s\S]*不再接飞书\n  主渠道：飞书 → 微信/);
   assert.deepEqual(h.calls, [['restart', 'asd']]);
+
+  //                     change IMs  +weixin save  (refused)  leave
+  const ark = harness(t, ['2',  '4', '1,2',  '8',             '9']);
+  const config = existing(ark, { model: 'ark', volcSessionId: 'sesn-seed12345678', volcEnvironmentId: 'env-12345678' });
+  assert.equal(await setupCommand(ark.options), 0);
+  assert.match(ark.written(), /3\) Agent 运行时\s+ark\n/);
+  assert.match(ark.written(), /这样改不行：.*cannot use the ark runtime[\s\S]*9\) 放弃修改/);
+  assert.deepEqual(ark.manifest().agents, [config]);
+  assert.deepEqual(ark.calls, []);
 });
 
-test('an instance\'s mailboxes are changed from a menu until done', async (t) => {
-  //                    change name ws runtime IMs  [mail menu: remove gmail, done]  confirm
-  const h = harness(t, ['2', '', '', '', '', '5', '1', 'y']);
+test('an instance\'s mailboxes are changed from their own menu until done', async (t) => {
+  //                    change  mailboxes  remove gmail  done  save
+  const h = harness(t, ['2',    '6',       '5',          '1',  '8']);
   const file = (id) => path.join(h.home, '.vika', 'email', 'asd', `${id}.json`);
   for (const [id, address] of [['email-gmail', 'me@gmail.com'], ['email-qq', 'me@qq.com']]) {
     fs.mkdirSync(path.dirname(file(id)), { recursive: true });
@@ -201,7 +216,8 @@ test('an instance\'s mailboxes are changed from a menu until done', async (t) =>
   existing(h, { connectors: ['lark', 'email'],
     emailAccounts: [{ id: 'email-gmail', config: file('email-gmail') }, { id: 'email-qq', config: file('email-qq') }] });
   assert.equal(await setupCommand(h.options), 0);
-  assert.match(h.written(), /邮箱（已接入：me@gmail\.com、me@qq\.com）[\s\S]*邮箱（已接入：me@qq\.com）/);
+  assert.match(h.written(), /6\) 邮箱\s+me@gmail\.com、me@qq\.com\n/);
+  assert.match(h.written(), /邮箱（已接入：me@gmail\.com、me@qq\.com）[\s\S]*邮箱（已接入：me@qq\.com）[\s\S]*6\) 邮箱\s+me@qq\.com（已改）/);
   assert.deepEqual(h.manifest().agents[0].emailAccounts, [{ id: 'email-qq', config: file('email-qq') }]);
   assert.equal(fs.existsSync(file('email-gmail')), false);
   assert.match(h.written(), /移除邮箱 me@gmail\.com（删掉保存的密码）/);

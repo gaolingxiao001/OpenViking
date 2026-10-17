@@ -19,6 +19,10 @@ const PROVIDERS = [
   ...['163.com', '126.com', 'yeah.net'].map((domain) => ({ domains: [domain], imap: `imap.${domain}`, smtp: `smtp.${domain}`, ...NETEASE })),
 ];
 
+// The owner gave up on a mailbox: setup's menu goes back to its list, any
+// other caller stops as on any cancel.
+export class EmailCancelled extends PromptAborted {}
+
 // Mailboxes that take only OAuth, which the connector does not speak.
 const OAUTH_ONLY = ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'];
 
@@ -108,7 +112,7 @@ export async function askEmail({ prompter, previous = null, fixed = null, taken 
     } catch (error) {
       out(`  登录失败：${explain(error, provider, password)}\n`);
       last = account;
-      if (!await prompter.confirm('重新输入？')) throw new PromptAborted();
+      if (!await prompter.confirm('重新输入？')) throw new EmailCancelled();
     }
   }
 }
