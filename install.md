@@ -96,7 +96,7 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置：
 
-1. 依次问实例名、机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）、接哪些 IM（飞书、微信、邮箱多选；邮箱不能单独选，飞书和微信都选时再问主渠道），以及要不要用本机检测到的 OpenViking。选了邮箱就接着问邮箱地址和专用密码，当场登录 IMAP 和 SMTP 验证；Gmail、QQ、163/126/yeah.net 不用填服务器。
+1. 依次问实例名、机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）、接哪些 IM（飞书、微信、邮箱多选；邮箱不能单独选，飞书和微信都选时再问主渠道），以及要不要用本机检测到的 OpenViking。选了邮箱就接着问邮箱地址和专用密码，当场登录 IMAP 和 SMTP 验证，可以连续接几个；Gmail、QQ、163/126/yeah.net 不用填服务器。
 2. 飞书扫两次码：第一次创建机器人应用，按 `permission.json` 申请完整权限、订阅长连接事件和卡片回调，平台自动发版；第二次授权 owner 的用户身份。微信扫一次码。所有问题问完才开始扫码；扫码全部成功后才写配置。
 3. 写入 `~/.vika/config.json`，启动这个实例、重启共享 Web、确保 updater 在跑，然后机器人在飞书私聊里打个招呼。
 
@@ -110,7 +110,7 @@ vika login lark|weixin|email [实例]         # 给实例接入飞书/微信/邮
 vika pi                                     # 打开内置 Pi，例如 /login 配模型
 ```
 
-setup 时没选的 IM，之后用 `vika login weixin`、`vika login lark` 或 `vika login email` 补上：扫码（邮箱是填地址和专用密码，先实际登录 IMAP 和 SMTP 验证）后写进这个实例的配置并重启它；只有一个实例时不用写实例名，多个时会列出来让你选。对已经接入的再执行一次就是重新授权；邮箱可以借此换密码或换成另一个邮箱。`vika` 不带参数会列出本机所有实例和它们接入的 IM。
+setup 时没选的 IM，之后用 `vika login weixin`、`vika login lark` 或 `vika login email` 补上：扫码（邮箱是填地址和专用密码，先实际登录 IMAP 和 SMTP 验证）后写进这个实例的配置并重启它；只有一个实例时不用写实例名，多个时会列出来让你选。对已经接入的再执行一次就是重新授权；`vika login email` 在已有邮箱时会让你选：再接一个、给某个邮箱换密码，或移除某个。`vika` 不带参数会列出本机所有实例和它们接入的 IM。
 
 ## 升级与回滚
 

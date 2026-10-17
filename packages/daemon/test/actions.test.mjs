@@ -769,6 +769,30 @@ describe('owner notices and owner-only actions', () => {
     assert.equal(connectors.calls.length, 3);
   });
 
+  it('answers each mail from the mailbox it arrived in, and the card says which', async (t) => {
+    const { store, call, connectors } = setup(t, { ids: ['lark', 'email-gmail', 'email-qq'], profile: PROFILE,
+      run: (connector) => (connector.startsWith('email-') ? { sent: true } : { message_id: CARD, chat_id: 'oc_p2p12345678' }) });
+    store.ingest(chatEvent({ messageId: 'om_hello12345678', eventId: 'evt-hello', chatId: 'oc_p2p12345678', senderId: OWNER.id }));
+    const to = [{ name: '', address: 'alice@example.com' }];
+    store.ingest(mailEvent({ uid: 7, instance: 'email-gmail', reply: { from: 'me@gmail.com', to, subject: 'Re: a' } }));
+    const qq = mailEvent({ uid: 8, instance: 'email-qq', thread: 'gmail:108', reply: { from: 'me@qq.com', to, subject: 'Re: b' } });
+    store.ingest(qq);
+    assert.match(formatInboundLine(qq), /^\[source=email instance=email-qq kind=email\.received msg=mail:1:8 /);
+
+    // source=email names the connector; the mailbox the mail arrived in answers.
+    await call('reply_message', { source: 'email', message_id: 'mail:1:8', markdown: '好的', decision_id: 'imap:1:8' });
+    const card = connectors.calls.at(-1).input.content.card;
+    assert.match(card.body.elements[0].text.content, /^发件邮箱：me＠qq\.com\n收件人：alice＠example\.com\n主题：Re: b$/);
+    await assert.rejects(call('reply_message', { source: 'email', message_id: 'mail:9:9', markdown: 'x', decision_id: 'imap:1:7' }),
+      (error) => error.code === 'route_ambiguous' && /email-gmail, email-qq/.test(error.message));
+
+    const pressed = click(store);
+    store.ingest(pressed);
+    await new ActionService({ config: { maxReplyChars: 1_000 }, store, connectors, logger }).settleApproval(pressed);
+    assert.deepEqual(connectors.calls.filter(({ connector }) => connector.startsWith('email-'))
+      .map(({ connector, input }) => [connector, input.message_id]), [['email-qq', 'mail:1:8']]);
+  });
+
   it('sends the approved draft as the owner left it, once, and shows the outcome on the card', async (t) => {
     const { store, call, connectors } = mailSetup(t);
     // The owner's direct chat with the bot, where the card lands.

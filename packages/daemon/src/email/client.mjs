@@ -138,7 +138,7 @@ export class EmailClient {
     this.config = config;
     this.logger = logger;
     this.connectTls = connectTls;
-    this.state = new EmailState(config.dataDir);
+    this.state = new EmailState(config.dataDir, config.instance ?? 'email');
     this.account = null;
     this.tag = null;
     this.imap = null;
@@ -260,6 +260,7 @@ export class EmailClient {
     const messageId = `mail:${this.tag}:${uidValidity}:${item.uid}`;
     const recipients = replyRecipients(mail, this.account.address);
     const line = JSON.stringify(eventMessage('email', {
+      instance: this.config.instance ?? 'email',
       id: `imap:${this.tag}:${uidValidity}:${item.uid}`,
       kind: mail.bulk ? 'email.list' : 'email.received',
       occurred_at: item.internalDate ?? mail.date ?? Date.now(),
@@ -275,7 +276,7 @@ export class EmailClient {
       message: { id: messageId, type: 'email' },
       // Who a reply goes to, in full, for the owner to check on the approval
       // card; past the limit only how many.
-      data: { reply: { subject: replySubject(mail.subject),
+      data: { reply: { from: this.account.address, subject: replySubject(mail.subject),
         ...(recipients.length <= MAX_REPLY_RECIPIENTS ? { to: recipients } : { recipients: recipients.length }) } },
     }));
     // The event is built and checked before the reply headers are kept, so a
@@ -293,6 +294,8 @@ export class EmailClient {
   // if it is still exactly this mail's reply recipients.
   async replyMessage({ message_id: messageId, content, to: approved, idempotency_key: idempotencyKey }) {
     if (content?.type !== 'markdown') throw new Error('email replies are plain text only');
+    // A mail id names its account: a mail of another mailbox is never answered from this one.
+    if (!String(messageId).startsWith(`mail:${this.tag}:`)) throw new Error('That mail arrived in another mailbox');
     const original = this.state.mail(messageId);
     if (!original) throw new Error('That mail is no longer available to reply to');
     const own = this.account.address;

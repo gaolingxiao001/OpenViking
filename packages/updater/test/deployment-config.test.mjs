@@ -296,33 +296,37 @@ test('requires a complete per-agent self-hosted binding for Ark', () => {
   }
 });
 
-test('connects a mailbox only together with its private account file', () => {
+test('connects mailboxes only together with the email connector, each account file once', () => {
   const manifest = validManifest();
+  const mailboxes = [{ id: 'email-gmail', config: '/srv/vika/secrets/beta-gmail.json' }, { id: 'email-qq', config: '/srv/vika/secrets/beta-qq.json' }];
   manifest.agents[1].connectors = ['email', 'lark'];
-  manifest.agents[1].emailConfig = '/srv/vika/secrets/beta-email.json';
+  manifest.agents[1].emailAccounts = mailboxes;
   withManifest(manifest, (manifestPath) => {
-    const env = { VIKA_CONFIG: manifestPath, VIKA_EMAIL_CONFIG_FILE: '/stale.json' };
+    const env = { VIKA_CONFIG: manifestPath, VIKA_EMAIL_ACCOUNTS_JSON: '[]' };
     const deployment = loadDeploymentManifest(env);
     // A mailbox is never the primary IM, wherever it is listed.
     assert.equal(selectDeploymentAgent(deployment).channel, 'lark');
     applyDeploymentAgentEnv(env, deployment, 'beta');
     assert.equal(env.VIKA_CONNECTORS_JSON, '["email","lark"]');
-    assert.equal(env.VIKA_EMAIL_CONFIG_FILE, '/srv/vika/secrets/beta-email.json');
+    assert.deepEqual(JSON.parse(env.VIKA_EMAIL_ACCOUNTS_JSON), mailboxes);
     applyDeploymentAgentEnv(env, deployment, 'gamma');
-    assert.equal(env.VIKA_EMAIL_CONFIG_FILE, undefined);
+    assert.equal(env.VIKA_EMAIL_ACCOUNTS_JSON, undefined);
   });
-  for (const mutate of [
-    (agent) => { agent.connectors = ['lark', 'email']; },
-    (agent) => { agent.emailConfig = '/srv/vika/secrets/beta-email.json'; },
+  for (const [mutate, error] of [
+    [(agent) => { agent.connectors = ['lark', 'email']; }, /emailAccounts and the email connector must be configured together/],
+    [(agent) => { agent.emailAccounts = mailboxes; }, /emailAccounts and the email connector must be configured together/],
+    [(agent) => { agent.connectors = ['lark', 'email']; agent.emailAccounts = [mailboxes[0], { ...mailboxes[1], id: 'email-gmail' }]; }, /two mailboxes called email-gmail/],
+    [(agent) => { agent.connectors = ['lark', 'email']; agent.emailAccounts = [{ ...mailboxes[0], id: 'Gmail' }]; }, /must be email-<name>/],
+    [(agent) => { agent.connectors = ['lark', 'email']; agent.emailAccounts = [mailboxes[0], { ...mailboxes[1], config: mailboxes[0].config }]; }, /duplicate email account file/],
   ]) {
     const broken = validManifest();
     mutate(broken.agents[1]);
     withManifest(broken, (manifestPath) => {
-      assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }),
-        /emailConfig and the email connector must be configured together/);
+      assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), error);
     });
   }
 });
+
 
 test('an instance runs without OpenViking, and without a profile when it has no lark connector', () => {
   const manifest = validManifest();

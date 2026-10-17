@@ -37,11 +37,12 @@
    [ -f ~/.lark-daemon/secrets.env ] && cp ~/.lark-daemon/secrets.env ~/.vika/secrets.env
    ```
 
-   macOS 的 `sed` 一样认 `-i.bak`。`emailConfig`、`ovConfig` 等写的是绝对路径，原文件留在 `~/.lark-daemon` 也能用。
+   macOS 的 `sed` 一样认 `-i.bak`。邮箱账号文件、`ovConfig` 等写的是绝对路径，原文件留在 `~/.lark-daemon` 也能用。
 
 3. 按新规则改 `~/.vika/config.json`：
    - 没有 `lark` Connector 的实例（例如纯微信）删掉 `profile`，否则启动会报 `profile is only used by the lark connector`。
    - `ovConfig` 现在可选；不用 OV 的实例可以删掉。
+   - `emailConfig` 换成了邮箱列表 `emailAccounts`：`"emailConfig": "<账号文件>"` 改成 `"emailAccounts": [{ "id": "email-gmail", "config": "<账号文件>" }]`，`id` 是 `email-` 加小写字母、数字和 `-`。
 
 4. 每个实例的数据库改名，连同 SQLite 的 `-wal`、`-shm` 文件：
 
@@ -60,7 +61,7 @@
 
    Vika 现在用自己的 pm2，状态在 `~/.vika/pm2`；第 1 步旧进程所在的全局 pm2 不再需要。
 
-7. 确认 `vika status` 里各进程都是 online/ready，并在飞书里收发一条消息后，再删掉旧目录：`~/.local/lib/lark-daemon`、`~/.local/bin/lark-daemon`。`~/.lark-daemon` 里还有 `emailConfig` 等被引用的文件时先保留。
+7. 确认 `vika status` 里各进程都是 online/ready，并在飞书里收发一条消息后，再删掉旧目录：`~/.local/lib/lark-daemon`、`~/.local/bin/lark-daemon`。`~/.lark-daemon` 里还有邮箱账号文件等被引用的文件时先保留。
 
 ## 已知影响
 

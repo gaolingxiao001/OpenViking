@@ -36,9 +36,10 @@ function machine(t, agents, { answers = [], tty = false, mailboxes = [] } = {}) 
     connect: {
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
       weixin: async ({ plan }) => { calls.push(['weixin', plan.id, plan.dataDir]); },
-      email: async ({ previous }) => {
-        calls.push(['email', previous?.address ?? null]);
-        return { address: mailboxes.shift(), password: 'p', imap: { host: 'imap.qq.com', port: 993 }, smtp: { host: 'smtp.qq.com', port: 465 } };
+      email: async ({ fixed, taken }) => {
+        calls.push(['email', fixed?.address ?? null, taken]);
+        return fixed ? { ...fixed, password: 'new' }
+          : { address: mailboxes.shift(), password: 'p', imap: { host: 'imap.x.com', port: 993 }, smtp: { host: 'smtp.x.com', port: 465 } };
       },
       greet: async ({ userId }) => { calls.push(['greet', userId]); },
     },
@@ -72,24 +73,41 @@ test('Feishu added to a Weixin-only instance gets its own app, profile and a gre
   assert.deepEqual([updated.connectors, updated.profile, updated.channel], [['weixin', 'lark'], 'vika-wx', 'weixin']);
 });
 
-test('a mailbox added later is checked, kept in a private file, and a second login replaces it', async (t) => {
+test('mailboxes are added one by one, each in its own private file, and can be updated or removed', async (t) => {
+  //                                                          add  update qq  remove qq  yes  remove 163  yes
   const m = machine(t, (home) => [agent(home, 'wx', { channel: 'weixin', connectors: ['weixin'], profile: undefined })],
-    { mailboxes: ['1845679308@qq.com', 'l13241789920@163.com'] });
+    { mailboxes: ['1845679308@qq.com', 'l13241789920@163.com'], answers: ['1', '2', '4', 'y', '3', 'y'] });
+  const file = (id) => path.join(m.home, '.vika', 'email', 'wx', `${id}.json`);
+  const mailboxes = () => m.manifest().agents[0].emailAccounts;
+
   assert.equal(await loginCommand(['email'], m.options), 0);
-  const file = path.join(m.home, '.vika', 'email', 'wx.json');
-  assert.deepEqual(m.calls, [['email', null], ['restart', 'wx']]);
+  assert.deepEqual(m.calls, [['email', null, []], ['restart', 'wx']]);
   const [updated] = m.manifest().agents;
-  assert.deepEqual([updated.connectors, updated.channel, updated.emailConfig], [['weixin', 'email'], 'weixin', file]);
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.deepEqual([updated.connectors, updated.channel], [['weixin', 'email'], 'weixin']);
+  assert.deepEqual(mailboxes(), [{ id: 'email-qq', config: file('email-qq') }]);
+  assert.equal(fs.statSync(file('email-qq')).mode & 0o777, 0o600);
   // Replies are approved on a Feishu card, which a Weixin instance cannot show.
   assert.match(m.written(), /主 IM 是微信[\s\S]*还不能回邮件/);
 
   m.calls.length = 0;
+  assert.equal(await loginCommand(['email'], m.options), 0);
+  assert.deepEqual(m.calls, [['email', null, ['1845679308@qq.com']], ['restart', 'wx']]);
+  assert.deepEqual(mailboxes().map(({ id }) => id), ['email-qq', 'email-163']);
+  assert.match(m.written(), /已接入 1 个邮箱：1845679308@qq\.com[\s\S]*已接入邮箱 l13241789920@163\.com（email-163）/);
+
+  // A new password for one mailbox asks for nothing else.
+  m.calls.length = 0;
   assert.equal(await loginCommand(['email', 'wx'], m.options), 0);
-  assert.deepEqual(m.calls, [['email', '1845679308@qq.com'], ['restart', 'wx']]);
-  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).address, 'l13241789920@163.com');
-  assert.match(m.written(), /换成了 l13241789920@163\.com：只看之后到达的邮件/);
-  assert.deepEqual(m.manifest().agents[0].connectors, ['weixin', 'email']);
+  assert.deepEqual(m.calls, [['email', '1845679308@qq.com', ['l13241789920@163.com']], ['restart', 'wx']]);
+  assert.equal(JSON.parse(fs.readFileSync(file('email-qq'), 'utf8')).password, 'new');
+
+  assert.equal(await loginCommand(['email'], m.options), 0);
+  assert.deepEqual(mailboxes(), [{ id: 'email-163', config: file('email-163') }]);
+  assert.equal(fs.existsSync(file('email-qq')), false, 'the removed password is deleted');
+
+  // The last one removed disconnects email altogether.
+  assert.equal(await loginCommand(['email'], m.options), 0);
+  assert.deepEqual([m.manifest().agents[0].connectors, m.manifest().agents[0].emailAccounts], [['weixin'], undefined]);
 });
 
 test('with several instances it asks which one, or names them when it cannot ask', async (t) => {

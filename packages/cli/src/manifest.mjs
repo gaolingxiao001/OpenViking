@@ -116,3 +116,27 @@ export function withConnector(manifest, id, connector, fields = {}) {
   Object.assign(agent, fields);
   return next;
 }
+
+// One more mailbox ({ id, config }) for an instance; the first one also
+// connects the email connector.
+export function withEmailAccount(manifest, id, mailbox) {
+  const agent = manifest.agents.find((candidate) => candidate.id === id);
+  if (!agent) throw new Error(`no instance ${id} in the manifest`);
+  const next = (agent.connectors ?? []).includes('email') ? structuredClone(manifest) : withConnector(manifest, id, 'email');
+  const target = next.agents.find((candidate) => candidate.id === id);
+  target.emailAccounts = [...(target.emailAccounts ?? []), mailbox];
+  return next;
+}
+
+// The last mailbox removed also disconnects the email connector.
+export function withoutEmailAccount(manifest, id, mailboxId) {
+  const next = structuredClone(manifest);
+  const agent = next.agents.find((candidate) => candidate.id === id);
+  if (!agent) throw new Error(`no instance ${id} in the manifest`);
+  agent.emailAccounts = (agent.emailAccounts ?? []).filter((mailbox) => mailbox.id !== mailboxId);
+  if (agent.emailAccounts.length === 0) {
+    delete agent.emailAccounts;
+    agent.connectors = (agent.connectors ?? []).filter((connector) => connector !== 'email');
+  }
+  return next;
+}

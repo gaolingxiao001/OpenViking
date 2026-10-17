@@ -168,7 +168,7 @@ function plainTls(options) {
   return socket;
 }
 
-async function setup(t, { mails = [], password = PASSWORD, gmail = true } = {}) {
+async function setup(t, { mails = [], password = PASSWORD, gmail = true, instance = undefined } = {}) {
   const imap = await fakeImap(t, { mails, gmail });
   const smtp = await fakeSmtp(t);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'email-'));
@@ -176,7 +176,7 @@ async function setup(t, { mails = [], password = PASSWORD, gmail = true } = {}) 
   const configFile = path.join(directory, 'account.json');
   fs.writeFileSync(configFile, JSON.stringify({ address: ME, password,
     imap: { host: '127.0.0.1', port: imap.port }, smtp: { host: '127.0.0.1', port: smtp.port, secure: true } }), { mode: 0o600 });
-  const config = { emailConfigFile: configFile, dataDir: directory, retentionMs: 86_400_000 };
+  const config = { emailConfigFile: configFile, dataDir: directory, retentionMs: 86_400_000, ...(instance ? { instance } : {}) };
   const clients = [];
   const start = async () => {
     const client = new EmailClient(config, null, quiet, { connectTls: plainTls });
@@ -258,7 +258,7 @@ describe('email connector', () => {
     imap.deliver(mail({ id: 'q1@example.com', headers: ['Reply-To: Bob <bob@example.com>', 'References: <root@example.com>'] }));
     await until(() => events.length === 1);
     // The event says where a reply would go, for the owner's approval card.
-    assert.deepEqual(events[0].data.reply, { to: [{ name: 'Bob', address: 'bob@example.com' }], subject: 'Re: Thursday?' });
+    assert.deepEqual(events[0].data.reply, { from: ME, to: [{ name: 'Bob', address: 'bob@example.com' }], subject: 'Re: Thursday?' });
 
     // Only the recipients the owner approved, and all of them.
     const answer = (to) => client.replyMessage({ message_id: `mail:${TAG}:1:1`, content: { type: 'markdown', text: '周四可以\n三点见' },
@@ -292,7 +292,7 @@ describe('email connector', () => {
     imap.deliver(mail({ id: 'many@example.com', headers: [replyTo(21)] }));
     await until(() => events.length === 2);
     assert.equal(events[0].data.reply.to.length, 20);
-    assert.deepEqual(events[1].data.reply, { subject: 'Re: Thursday?', recipients: 21 });
+    assert.deepEqual(events[1].data.reply, { from: ME, subject: 'Re: Thursday?', recipients: 21 });
   });
 
   it('picks up after a restart where it stopped, without reporting a mail twice', async (t) => {
@@ -307,6 +307,17 @@ describe('email connector', () => {
     const second = await start();
     await until(() => second.events.length === 2);
     assert.deepEqual(second.events.map((event) => event.eventId), [`imap:${TAG}:1:2`, `imap:${TAG}:1:3`]);
+  });
+
+  it('reports as its own mailbox instance, and answers only mail of that mailbox', async (t) => {
+    const { imap, start } = await setup(t, { instance: 'email-work' });
+    const { client, events } = await start();
+    imap.deliver(mail({ id: 'one@example.com' }));
+    await until(() => events.length === 1);
+    assert.deepEqual([events[0].source, events[0].connectorInstance], ['email', 'email-work']);
+    assert.ok(fs.existsSync(path.join(client.config.dataDir, 'email', 'email-work', 'state.sqlite3')), 'its own state database');
+    await assert.rejects(client.replyMessage({ message_id: `mail:${accountTag('other@example.com')}:1:1`,
+      content: { type: 'markdown', text: 'x' }, to: ['alice@example.com'], idempotency_key: 'k' }), /another mailbox/);
   });
 
   it('starts afresh on another account, whose mail ids cannot meet the old ones', async (t) => {

@@ -13,7 +13,7 @@ import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
 import { detectRuntimes, which } from './runtimes.mjs';
 import { showQr } from './qr.mjs';
 import { restartCommand, startCommand } from './control.mjs';
-import { askEmail, emailAccountPath, emailChannelNote, writeEmailAccount } from './email.mjs';
+import { askEmail, emailAccountPath, emailChannelNote, emailInstanceId, writeEmailAccount } from './email.mjs';
 import { IM_LABELS, imList } from './instances.mjs';
 
 // `vika setup`: add one instance. Every question comes first, then the QR
@@ -219,7 +219,7 @@ export async function setupCommand({
   // The whole instance is known before any scan, so a manifest the daemon
   // would reject fails here rather than after two QR codes.
   const ovConfig = plan.useOv ? path.join(vikaHome(env), 'ov', `${plan.id}.json`) : null;
-  const emailConfig = plan.connectors.includes('email') ? emailAccountPath(env, plan.id) : null;
+  const wantsEmail = plan.connectors.includes('email');
   const agent = {
     id: plan.id,
     displayName: plan.displayName,
@@ -230,20 +230,29 @@ export async function setupCommand({
     dataDir: plan.dataDir,
     workspace: plan.workspace,
     ...(ovConfig ? { ovConfig } : {}),
-    ...(emailConfig ? { emailConfig } : {}),
+    // A stand-in until the mailboxes are known; their names come from the addresses.
+    ...(wantsEmail ? { emailAccounts: [{ id: 'email-check', config: emailAccountPath(env, plan.id, 'check') }] } : {}),
     model: plan.runtime.model,
   };
-  const next = withInstance(manifest, agent,
-    plan.runtime.binEnv && plan.runtime.bin ? { [plan.runtime.binEnv]: plan.runtime.bin } : {});
-  validateManifest(configPath, next);
-  // The mailbox is checked now (no scan), and saved with the manifest.
-  let emailAccount = null;
-  if (emailConfig) {
-    out(emailChannelNote(plan.channel));
-    emailAccount = await connect.email({ prompter });
-  }
+  const pinned = plan.runtime.binEnv && plan.runtime.bin ? { [plan.runtime.binEnv]: plan.runtime.bin } : {};
+  validateManifest(configPath, withInstance(manifest, agent, pinned));
 
-  out(`\n将添加实例 ${plan.id}：${plan.runtime.label}，${imList(plan.connectors)}${emailAccount ? `（${emailAccount.address}）` : ''}`
+  // Mailboxes are checked now (no scan), and saved with the manifest.
+  const mailboxes = [];
+  if (wantsEmail) {
+    out(emailChannelNote(plan.channel));
+    do {
+      const account = await connect.email({ prompter, taken: mailboxes.map(({ account: { address } }) => address) });
+      const id = emailInstanceId(account.address, mailboxes.map((mailbox) => mailbox.id));
+      mailboxes.push({ id, config: emailAccountPath(env, plan.id, id), account });
+    } while (await prompter.confirm('再接一个邮箱？', false));
+    agent.emailAccounts = mailboxes.map(({ id, config }) => ({ id, config }));
+  }
+  const next = withInstance(manifest, agent, pinned);
+  validateManifest(configPath, next);
+
+  const addresses = mailboxes.length ? `（${mailboxes.map(({ account }) => account.address).join('、')}）` : '';
+  out(`\n将添加实例 ${plan.id}：${plan.runtime.label}，${imList(plan.connectors)}${addresses}`
     + `，${plan.useOv ? '使用' : '不使用'} OpenViking\n  工作目录 ${plan.workspace}\n  数据目录 ${plan.dataDir}\n`);
   if (!await prompter.confirm('开始扫码？')) return 1;
 
@@ -252,7 +261,7 @@ export async function setupCommand({
     : null;
   if (plan.connectors.includes('weixin')) await connect.weixin({ plan, prompter });
   if (ovConfig) writeInstanceOvConfig({ detected: ov, instanceId: plan.id, target: ovConfig });
-  if (emailAccount) writeEmailAccount(emailConfig, emailAccount);
+  for (const { config, account } of mailboxes) writeEmailAccount(config, account);
 
   fs.mkdirSync(plan.workspace, { recursive: true, mode: 0o700 });
   writeManifest(configPath, next);

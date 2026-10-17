@@ -4,10 +4,12 @@ import { DatabaseSync } from 'node:sqlite';
 
 // The Email Connector's own state: how far it has read the inbox, and the
 // headers a reply needs for each mail it reported. Private to the daemon user.
+// One database per mailbox instance: each mailbox runs in its own process.
 export class EmailState {
-  constructor(dataDir) {
+  constructor(dataDir, instance = 'email') {
     if (!path.isAbsolute(dataDir)) throw new Error('Email data directory must be absolute');
-    const directory = path.join(dataDir, 'email');
+    if (!/^email(-[a-z0-9-]+)?$/.test(instance)) throw new Error('Email instance name is invalid');
+    const directory = path.join(dataDir, 'email', instance);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(directory, 0o700); } catch {}
     const databasePath = path.join(directory, 'state.sqlite3');

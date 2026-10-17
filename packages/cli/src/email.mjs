@@ -4,9 +4,10 @@ import { verifyAccount } from '../../daemon/src/email/client.mjs';
 import { vikaHome } from './manifest.mjs';
 import { PromptAborted } from './prompt.mjs';
 
-// The mailbox step of `vika setup` and `vika login email`: an address and the
+// The mailbox steps of `vika setup` and `vika login email`: an address and the
 // provider's client password, checked by logging in to IMAP and SMTP before
-// anything is saved. A known provider needs no server names.
+// anything is saved. A known provider needs no server names. An instance may
+// watch several mailboxes; each is its own Connector instance, `email-<name>`.
 
 const NETEASE = { label: '网易邮箱', password: '授权码', where: '网页版邮箱 → 设置 → POP3/SMTP/IMAP，开启「IMAP/SMTP 服务」后生成' };
 
@@ -21,8 +22,25 @@ const PROVIDERS = [
 // Mailboxes that take only OAuth, which the connector does not speak.
 const OAUTH_ONLY = ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'];
 
-export function emailAccountPath(env, id) {
-  return path.join(vikaHome(env), 'email', `${id}.json`);
+export function emailAccountPath(env, agentId, mailboxId) {
+  return path.join(vikaHome(env), 'email', agentId, `${mailboxId}.json`);
+}
+
+function slug(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// A name the model and the logs can read: the provider (email-gmail), then
+// the mailbox's own name when the instance already has one there.
+export function emailInstanceId(address, taken = []) {
+  const [local, domain = ''] = address.split('@');
+  const provider = slug(domain.split('.')[0]) || 'mail';
+  const candidates = [`email-${provider}`, `email-${provider}-${slug(local)}`.slice(0, 46).replace(/-+$/, '')];
+  for (const candidate of candidates) if (candidate.length > 6 && !taken.includes(candidate)) return candidate;
+  for (let index = 2; ; index += 1) {
+    const candidate = `email-${provider}-${index}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
 }
 
 export function providerFor(address) {
@@ -30,9 +48,10 @@ export function providerFor(address) {
   return PROVIDERS.find((provider) => provider.domains.includes(domain)) ?? null;
 }
 
-function addressProblem(value) {
+function addressProblem(value, taken) {
   if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) return '邮箱地址不对';
   if (OAUTH_ONLY.includes(value.split('@')[1].toLowerCase())) return 'Outlook / Hotmail 只能用 OAuth 登录，暂时接不了，换一个邮箱';
+  if (taken.includes(value.toLowerCase())) return '这个邮箱已经接入了';
   return null;
 }
 
@@ -62,17 +81,21 @@ function explain(error, provider, password) {
 }
 
 // Asks until both logins succeed. Resolves with the account file's content.
-export async function askEmail({ prompter, previous = null, verify = verifyAccount }) {
+// `fixed` is a saved account whose password changes: only the password is asked.
+// `taken` lists addresses the instance already watches.
+export async function askEmail({ prompter, previous = null, fixed = null, taken = [], verify = verifyAccount }) {
   const out = (text) => prompter.write(text);
-  out('\n── 邮箱 ──\n  只读收件箱（不会标已读、不移动、不删除）；回信要你确认后才发。\n');
-  let last = previous;
+  out(fixed ? `\n── 邮箱 ${fixed.address} ──\n` : '\n── 邮箱 ──\n  只读收件箱（不会标已读、不移动、不删除）；回信要你确认后才发。\n');
+  let last = fixed ?? previous;
   for (;;) {
-    const address = (await prompter.text('邮箱地址', { initial: last?.address ?? '', validate: addressProblem })).toLowerCase();
+    const address = fixed?.address
+      ?? (await prompter.text('邮箱地址', { initial: last?.address ?? '', validate: (value) => addressProblem(value, taken) })).toLowerCase();
     const provider = providerFor(address);
     const known = provider ? { imap: { host: provider.imap, port: 993 }, smtp: { host: provider.smtp, port: 465 } } : null;
     if (provider) out(`  ${provider.label}：密码处填${provider.password}，${provider.where}。\n`);
-    else out('  不认识这个邮箱的服务器，需要手动填写；密码处填邮箱给第三方客户端用的专用密码（授权码），没有的话才是登录密码。\n');
-    const hosts = known ?? await servers(prompter, address.split('@')[1], last?.address === address ? last : null);
+    else if (!fixed) out('  不认识这个邮箱的服务器，需要手动填写；密码处填邮箱给第三方客户端用的专用密码（授权码），没有的话才是登录密码。\n');
+    const hosts = fixed ? { imap: fixed.imap, smtp: fixed.smtp }
+      : known ?? await servers(prompter, address.split('@')[1], last?.address === address ? last : null);
     // A known provider's client password never has spaces; Gmail shows it in groups of four.
     const typed = await prompter.secret(provider?.password ?? '密码');
     const password = provider ? typed.replace(/\s+/g, '') : typed;
@@ -88,6 +111,14 @@ export async function askEmail({ prompter, previous = null, verify = verifyAccou
       if (!await prompter.confirm('重新输入？')) throw new PromptAborted();
     }
   }
+}
+
+// The instance's mailboxes with their addresses, read from the account files.
+export function mailboxesOf(agent) {
+  return (agent.emailAccounts ?? []).map((mailbox) => {
+    const account = readEmailAccount(mailbox.config);
+    return { ...mailbox, account, address: account?.address ?? null };
+  });
 }
 
 // The account file is the only place the password lives: 0600, written whole.

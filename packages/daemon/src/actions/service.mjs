@@ -160,9 +160,9 @@ export class ActionService {
   route(caller, operation, kind, source, { messageId = null, chatId = null } = {}) {
     caller.trace.action = operation;
     const candidates = this.supporting(operation, kind);
-    const known = source
-      ?? (messageId ? this.store.connectorForMessage(messageId) : null)
+    const owner = (messageId ? this.store.connectorForMessage(messageId) : null)
       ?? (chatId ? this.store.connectorForChat(chatId) : null);
+    const known = source ? this.instanceNamed(source, owner) : owner;
     if (known) {
       if (!candidates.includes(known)) throw blocked('unsupported', `${known} does not support ${operation}. ${NO_ACTION}`);
       caller.trace.connector = known;
@@ -173,6 +173,20 @@ export class ActionService {
     }
     caller.trace.connector = candidates[0];
     return candidates[0];
+  }
+
+  // `source` is an instance, or a connector that runs several (one per
+  // mailbox): then the one of them that owns the target, or the only one.
+  instanceNamed(source, owner) {
+    const manifests = this.connectors.manifests();
+    if (manifests.some(([id]) => id === source)) return source;
+    const instances = manifests.filter(([, manifest]) => manifest.name === source).map(([id]) => id);
+    if (instances.includes(owner)) return owner;
+    if (instances.length === 1) return instances[0];
+    if (instances.length > 1) {
+      throw blocked('route_ambiguous', `${source} has several instances; pass source as one of: ${instances.join(', ')}. ${NO_ACTION}`);
+    }
+    return source;
   }
 
   // The accepted inbound events an input reference names: the event= value as
@@ -504,6 +518,7 @@ export class ActionService {
     const draft = {
       connector, action: 'message.reply', message_id: input.message_id, text: draftText,
       to: reply.to, subject: reply.subject, responseSeq: responseTo.seq,
+      ...(typeof reply.from === 'string' ? { from: reply.from } : {}),
     };
     const question = approvalQuestion(draft, owner.id);
     const result = await this.deliver({

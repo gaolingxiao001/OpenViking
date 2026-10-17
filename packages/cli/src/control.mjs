@@ -173,7 +173,7 @@ export async function statusCommand(options) {
   const processes = new Map((await pm2Processes(context)).map((processInfo) => [processInfo?.name, processInfo]));
   let ims = new Map();
   try {
-    ims = new Map((loadInstances(context.env)?.agents ?? []).map((agent) => [`vika-${agent.id}`, imList(agent.connectors)]));
+    ims = new Map((loadInstances(context.env)?.agents ?? []).map((agent) => [`vika-${agent.id}`, imList(agent.connectors, agent.emailAccounts?.length)]));
   } catch {}
   const rows = [];
   for (const spec of apps) {

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { askEmail, providerFor, writeEmailAccount } from '../src/email.mjs';
+import { askEmail, emailInstanceId, providerFor, writeEmailAccount } from '../src/email.mjs';
 import { Prompter } from '../src/prompt.mjs';
 
 function terminal(answers) {
@@ -60,12 +60,30 @@ test('a failed login says why and asks again; an unknown provider asks for its s
   await assert.rejects(askEmail({ prompter: givenUp.prompter, verify }), { name: 'PromptAborted' });
 });
 
+test('a new password keeps the saved servers; an address already watched is refused; names read as the provider', async () => {
+  const saved = { address: 'me@corp.example', password: 'old', imap: { host: 'mail.corp.example', port: 993 }, smtp: { host: 'mail.corp.example', port: 587 } };
+  const update = terminal(['new-password']);
+  const account = await askEmail({ prompter: update.prompter, fixed: saved, verify: async () => ({ idle: true }) });
+  assert.deepEqual(account, { ...saved, password: 'new-password' });
+  assert.doesNotMatch(update.written(), /邮箱地址|服务器/);
+
+  const twice = terminal(['1845679308@qq.com', 'l13241789920@163.com', 'code']);
+  assert.equal((await askEmail({ prompter: twice.prompter, taken: ['1845679308@qq.com'], verify: async () => ({ idle: true }) })).address,
+    'l13241789920@163.com');
+  assert.match(twice.written(), /这个邮箱已经接入了/);
+
+  assert.deepEqual([emailInstanceId('liuweihan2000@gmail.com'), emailInstanceId('1845679308@qq.com'), emailInstanceId('l13241789920@163.com')],
+    ['email-gmail', 'email-qq', 'email-163']);
+  assert.equal(emailInstanceId('a.b+c@gmail.com', ['email-gmail']), 'email-gmail-a-b-c');
+  assert.equal(emailInstanceId('x@gmail.com', ['email-gmail', 'email-gmail-x']), 'email-gmail-2');
+});
+
 test('the account file is private', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-email-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const file = path.join(directory, 'email', 'primary.json');
+  const file = path.join(directory, 'email', 'primary', 'email-qq.json');
   writeEmailAccount(file, { address: 'a@qq.com', password: 'p' });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
-  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['primary.json']);
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['email-qq.json']);
 });

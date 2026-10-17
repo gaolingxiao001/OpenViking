@@ -68,7 +68,7 @@ function buildEcosystem(sourceEnv = process.env) {
       VIKA_HTTP_ENABLED: 'true',
       VIKA_CHANNEL: agent.channel,
       VIKA_CONNECTORS_JSON: JSON.stringify(agent.connectors),
-      VIKA_EMAIL_CONFIG_FILE: agent.emailConfig || undefined,
+      VIKA_EMAIL_ACCOUNTS_JSON: agent.emailAccounts.length > 0 ? JSON.stringify(agent.emailAccounts) : undefined,
       VIKA_PORT: String(agent.port),
       // Empty for an instance without the lark connector, so a profile in
       // pm2's own environment cannot leak into it.

@@ -155,7 +155,7 @@ export class PersonalAgentDaemon {
       // once subscriptions start.
       const transportInfo = await this.connectors.preflight();
       this.config.profile = transportInfo.profile;
-      const checked = this.connectorIds.filter((id) => !(id in transportInfo.failed));
+      const checked = Object.keys(transportInfo.connectors);
       this.logger.info('connector_preflight_ok', {
         connectors: checked,
         failed: Object.keys(transportInfo.failed),

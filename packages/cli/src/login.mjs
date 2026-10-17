@@ -1,9 +1,12 @@
+import fs from 'node:fs';
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { restartCommand } from './control.mjs';
-import { askEmail, emailAccountPath, emailChannelNote, readEmailAccount, writeEmailAccount } from './email.mjs';
+import { askEmail, emailAccountPath, emailChannelNote, emailInstanceId, mailboxesOf, writeEmailAccount } from './email.mjs';
 import { IM_LABELS, chooseInstance, loadInstances } from './instances.mjs';
 import { LarkCli } from './lark-cli.mjs';
-import { readManifest, validateManifest, withConnector, writeManifest } from './manifest.mjs';
+import {
+  readManifest, validateManifest, withConnector, withEmailAccount, withoutEmailAccount, writeManifest,
+} from './manifest.mjs';
 import { showQr } from './qr.mjs';
 import { which } from './runtimes.mjs';
 import { connectLark, connectWeixin, greet, larkScopes } from './setup.mjs';
@@ -21,17 +24,7 @@ function larkCliBin(env, deployment) {
   return env.LARK_CLI_BIN || deployment.env?.LARK_CLI_BIN || (bundled === 'lark-cli' ? which('lark-cli', env) : bundled);
 }
 
-async function reauthorize({ connector, agent, deployment, prompter, env, connect, control }) {
-  if (connector === 'email') {
-    // The connector reads its account file when it starts.
-    const previous = readEmailAccount(agent.emailConfig);
-    const account = await connect.email({ prompter, previous });
-    writeEmailAccount(agent.emailConfig, account);
-    if (previous && previous.address !== account.address) prompter.write(`  换成了 ${account.address}：只看之后到达的邮件。\n`);
-    if (!await restart({ agent, prompter, env, control })) return 1;
-    prompter.write(`\n${agent.displayName}（${agent.id}）的邮箱已更新。\n`);
-    return 0;
-  }
+async function reauthorize({ connector, agent, deployment, prompter, env, connect }) {
   if (connector === 'weixin') {
     await connect.weixin({ plan: agent, prompter });
     prompter.write('运行中的实例会在下次重连时用上新的登录，不用重启。\n');
@@ -44,6 +37,64 @@ async function reauthorize({ connector, agent, deployment, prompter, env, connec
   showQr(prompter.output, login.url, `扫码重新授权 ${agent.displayName}（${agent.profile}）以你的身份读消息`);
   await larkCli.finishUserLogin({ profile: agent.profile, deviceCode: login.deviceCode });
   prompter.write(`${agent.profile} 已重新授权；运行中的实例会自动用上新的登录\n`);
+  return 0;
+}
+
+// Mailboxes: add one, change one's password, or remove one. Each mailbox
+// connector reads its account file when it starts, so the instance restarts.
+async function emailLogin({ agent, prompter, env, connect, control }) {
+  const out = (text) => prompter.write(text);
+  const name = `${agent.displayName}（${agent.id}）`;
+  const mailboxes = mailboxesOf(agent);
+  const shown = (mailbox) => mailbox.address ?? mailbox.id;
+  const choice = mailboxes.length === 0 ? { kind: 'add' } : await prompter.select(
+    `${name}已接入 ${mailboxes.length} 个邮箱：${mailboxes.map(shown).join('、')}`,
+    [
+      { label: '再接一个邮箱', value: { kind: 'add' } },
+      ...mailboxes.map((mailbox) => ({ label: `更新 ${shown(mailbox)} 的密码`, value: { kind: 'update', mailbox } })),
+      ...mailboxes.map((mailbox) => ({ label: `移除 ${shown(mailbox)}`, value: { kind: 'remove', mailbox } })),
+    ],
+  );
+  const { path: configPath, value: manifest } = readManifest(env);
+
+  if (choice.kind === 'update') {
+    const { mailbox } = choice;
+    const account = await connect.email({ prompter, fixed: mailbox.account,
+      taken: mailboxes.filter((other) => other !== mailbox).map((other) => other.address) });
+    writeEmailAccount(mailbox.config, account);
+    if (!await restart({ agent, prompter, env, control })) return 1;
+    out(`\n${name}的邮箱 ${account.address} 已更新。\n`);
+    return 0;
+  }
+  if (choice.kind === 'remove') {
+    const { mailbox } = choice;
+    if (!await prompter.confirm(`不再收 ${shown(mailbox)} 的邮件，并删掉保存的密码？`, false)) return 1;
+    const next = withoutEmailAccount(manifest, agent.id, mailbox.id);
+    validateManifest(configPath, next);
+    writeManifest(configPath, next);
+    fs.rmSync(mailbox.config, { force: true });
+    if (!await restart({ agent, prompter, env, control })) return 1;
+    out(`\n${name}已移除邮箱 ${shown(mailbox)}。\n`);
+    return 0;
+  }
+
+  // A new mailbox: the manifest is checked before the password is asked, with
+  // a stand-in for the mailbox whose name depends on the address.
+  const taken = mailboxes.map((mailbox) => mailbox.id);
+  const stand = { id: emailInstanceId('check@mail', taken), config: emailAccountPath(env, agent.id, 'check') };
+  validateManifest(configPath, withEmailAccount(manifest, agent.id, stand));
+  if (mailboxes.length === 0) {
+    out(`实例 ${agent.id}（${agent.displayName}）还没有接邮箱，现在接入；完成后会重启这个实例。\n${emailChannelNote(agent.channel)}`);
+  }
+  const account = await connect.email({ prompter, taken: mailboxes.map((mailbox) => mailbox.address).filter(Boolean) });
+  const id = emailInstanceId(account.address, taken);
+  const mailbox = { id, config: emailAccountPath(env, agent.id, id) };
+  const next = withEmailAccount(manifest, agent.id, mailbox);
+  validateManifest(configPath, next);
+  writeEmailAccount(mailbox.config, account);
+  writeManifest(configPath, next);
+  if (!await restart({ agent, prompter, env, control })) return 1;
+  out(`\n${name}已接入邮箱 ${account.address}（${id}）：新邮件到了，它会看情况告诉你。\n`);
   return 0;
 }
 
@@ -71,26 +122,18 @@ export async function loginCommand([connector, requested, ...extra], {
   const label = IM_LABELS[connector];
   const deployment = loadInstances(env);
   const agent = await chooseInstance({ deployment, requested, prompter, question: `给哪个实例接${label}` });
+  if (connector === 'email') return emailLogin({ agent, prompter, env, connect, control });
   if (agent.connectors.includes(connector)) {
-    return reauthorize({ connector, agent, deployment, prompter, env, connect, control });
+    return reauthorize({ connector, agent, deployment, prompter, env, connect });
   }
 
-  // Something new for this instance: check the manifest the daemon would load
+  // A new IM for this instance: check the manifest the daemon would load
   // before the scan, write it only after the scan succeeded.
   const { path: configPath, value: manifest } = readManifest(env);
-  const fields = connector === 'lark' ? { profile: `vika-${agent.id}` }
-    : connector === 'email' ? { emailConfig: emailAccountPath(env, agent.id) } : {};
+  const fields = connector === 'lark' ? { profile: `vika-${agent.id}` } : {};
   const next = withConnector(manifest, agent.id, connector, fields);
   validateManifest(configPath, next);
   prompter.write(`实例 ${agent.id}（${agent.displayName}）还没有接${label}，现在接入；完成后会重启这个实例。\n`);
-  if (connector === 'email') {
-    prompter.write(emailChannelNote(agent.channel));
-    writeEmailAccount(fields.emailConfig, await connect.email({ prompter }));
-    writeManifest(configPath, next);
-    if (!await restart({ agent, prompter, env, control })) return 1;
-    prompter.write(`\n${agent.displayName}（${agent.id}）已接入邮箱：新邮件到了，它会看情况告诉你。\n`);
-    return 0;
-  }
   const { profile } = fields;
   let lark = null;
   if (connector === 'lark') {

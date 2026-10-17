@@ -64,7 +64,11 @@ function assertLoopbackHost(host) {
 }
 
 function privateRegularFileEnv(name) {
-  const raw = (process.env[name] ?? '').trim();
+  return privateRegularFile(process.env[name], name);
+}
+
+function privateRegularFile(value, name) {
+  const raw = String(value ?? '').trim();
   if (!raw || !path.isAbsolute(raw)) throw new Error(`${name} must be an absolute path`);
   const resolved = path.normalize(raw);
   const info = fs.lstatSync(resolved);
@@ -74,6 +78,24 @@ function privateRegularFileEnv(name) {
     throw new Error(`${name} must be owned by the daemon user`);
   }
   return resolved;
+}
+
+// The email connector's mailboxes: [{ id: 'email-<name>', config: <account file> }].
+function emailAccountsEnv() {
+  let value = null;
+  try { value = JSON.parse(process.env.VIKA_EMAIL_ACCOUNTS_JSON ?? ''); } catch {}
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('VIKA_EMAIL_ACCOUNTS_JSON must list the mailboxes of the email connector');
+  }
+  const ids = new Set();
+  return Object.freeze(value.map((entry) => {
+    const id = String(entry?.id ?? '');
+    if (!/^email-[a-z0-9][a-z0-9-]{0,39}$/.test(id) || ids.has(id)) {
+      throw new Error('VIKA_EMAIL_ACCOUNTS_JSON has an invalid or repeated mailbox id');
+    }
+    ids.add(id);
+    return Object.freeze({ id, configFile: privateRegularFile(entry.config, `email account file of ${id}`) });
+  }));
 }
 
 function pathsOverlap(left, right) {
@@ -103,8 +125,8 @@ export function getConfig() {
   if (!connectors.includes(channel)) {
     throw new Error('VIKA_CONNECTORS_JSON must include VIKA_CHANNEL');
   }
-  // The mailbox account and its client password, in a file only the daemon user can read.
-  const emailConfigFile = connectors.includes('email') ? privateRegularFileEnv('VIKA_EMAIL_CONFIG_FILE') : null;
+  // Each mailbox's account and client password, in a file only the daemon user can read.
+  const emailAccounts = connectors.includes('email') ? emailAccountsEnv() : [];
   const promptDir = path.join(moduleDir, 'agent');
   if (pathsOverlap(workspace, projectDir)) {
     throw new Error('VIKA_WORKSPACE must not overlap the running daemon directory');
@@ -179,7 +201,7 @@ export function getConfig() {
     actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || bundledLarkCli(),
     weixinAllowFrom: csvEnv('VIKA_WEIXIN_ALLOW_FROM'),
-    emailConfigFile,
+    emailAccounts,
     weixinLongPollTimeoutMs: intEnv('VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
       min: 5_000,
       max: 120_000,

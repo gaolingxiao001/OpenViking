@@ -69,22 +69,32 @@ describe('configuration safety', { concurrency: false }, () => {
     }
   });
 
-  it('takes a mailbox only with a private account file, and never as the primary IM', () => {
+  it('takes mailboxes only with private account files, and never as the primary IM', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-email-config-'));
     const accountFile = path.join(directory, 'email.json');
+    const otherFile = path.join(directory, 'other.json');
     fs.writeFileSync(accountFile, '{}', { mode: 0o644 });
+    fs.writeFileSync(otherFile, '{}', { mode: 0o600 });
     setEnv('VIKA_CHANNEL', 'lark');
     setEnv('VIKA_CONNECTORS_JSON', '["lark","email"]');
+    const accounts = (list) => setEnv('VIKA_EMAIL_ACCOUNTS_JSON', JSON.stringify(list));
     try {
-      setEnv('VIKA_EMAIL_CONFIG_FILE', undefined);
-      assert.throws(() => getConfig(), /VIKA_EMAIL_CONFIG_FILE must be an absolute path/);
-      setEnv('VIKA_EMAIL_CONFIG_FILE', accountFile);
-      assert.throws(() => getConfig(), /EMAIL_CONFIG_FILE must have mode 0600/);
+      setEnv('VIKA_EMAIL_ACCOUNTS_JSON', undefined);
+      assert.throws(() => getConfig(), /VIKA_EMAIL_ACCOUNTS_JSON must list the mailboxes/);
+      accounts([{ id: 'email-gmail', config: accountFile }]);
+      assert.throws(() => getConfig(), /email account file of email-gmail must have mode 0600/);
       fs.chmodSync(accountFile, 0o600);
-      assert.deepEqual([getConfig().connectors, getConfig().emailConfigFile], [['lark', 'email'], accountFile]);
+      accounts([{ id: 'email-gmail', config: accountFile }, { id: 'email-gmail', config: otherFile }]);
+      assert.throws(() => getConfig(), /invalid or repeated mailbox id/);
+      accounts([{ id: 'gmail', config: accountFile }]);
+      assert.throws(() => getConfig(), /invalid or repeated mailbox id/);
+      accounts([{ id: 'email-gmail', config: accountFile }, { id: 'email-qq', config: otherFile }]);
+      assert.deepEqual([getConfig().connectors, getConfig().emailAccounts],
+        [['lark', 'email'], [{ id: 'email-gmail', configFile: accountFile }, { id: 'email-qq', configFile: otherFile }]]);
       setEnv('VIKA_CHANNEL', 'email');
       assert.throws(() => getConfig(), /VIKA_CHANNEL/);
     } finally {
+      setEnv('VIKA_EMAIL_ACCOUNTS_JSON', undefined);
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });

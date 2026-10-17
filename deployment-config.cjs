@@ -71,8 +71,11 @@ const AGENT_FIELDS = Object.freeze([
   'volcSessionId',
   'volcEnvironmentId',
   'meetingAudio',
-  'emailConfig',
+  'emailAccounts',
 ]);
+// Each mailbox is its own email Connector instance; the id is how the model
+// and the logs tell them apart.
+const EMAIL_INSTANCE_ID = /^email-[a-z0-9][a-z0-9-]{0,39}$/;
 
 const MEETING_AUDIO_FIELDS = Object.freeze(['targetChatId', 'asrConfigFile', 'pythonCommand']);
 
@@ -244,11 +247,9 @@ function parseAgent(value, index) {
   if (meetingAudio && !connectors.includes('lark')) {
     throw new Error(`${label}.meetingAudio requires the lark connector`);
   }
-  const emailConfig = value.emailConfig === undefined || value.emailConfig === null
-    ? null
-    : manifestAbsolutePath(value.emailConfig, `${label}.emailConfig`);
-  if (connectors.includes('email') !== Boolean(emailConfig)) {
-    throw new Error(`${label}.emailConfig and the email connector must be configured together`);
+  const emailAccounts = manifestEmailAccounts(value.emailAccounts, `${label}.emailAccounts`);
+  if (connectors.includes('email') !== (emailAccounts.length > 0)) {
+    throw new Error(`${label}.emailAccounts and the email connector must be configured together`);
   }
   if (connectors.includes('email') && model === 'ark') {
     throw new Error(`${label} using the email connector cannot use the ark runtime`);
@@ -274,7 +275,23 @@ function parseAgent(value, index) {
     volcSessionId,
     volcEnvironmentId,
     meetingAudio,
-    emailConfig,
+    emailAccounts: Object.freeze(emailAccounts),
+  });
+}
+
+function manifestEmailAccounts(value, label) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const ids = new Set();
+  return value.map((entry, index) => {
+    const entryLabel = `${label}[${index}]`;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${entryLabel} must be an object`);
+    assertKnownFields(entry, ['id', 'config'], entryLabel);
+    const id = manifestString(entry.id, `${entryLabel}.id`, { maxLength: 46 });
+    if (!EMAIL_INSTANCE_ID.test(id)) throw new Error(`${entryLabel}.id must be email-<name> in lowercase letters, digits and -`);
+    if (ids.has(id)) throw new Error(`${label} has two mailboxes called ${id}`);
+    ids.add(id);
+    return Object.freeze({ id, config: manifestAbsolutePath(entry.config, `${entryLabel}.config`) });
   });
 }
 
@@ -295,6 +312,12 @@ function assertUniqueAgentFields(agents) {
       if (seen.has(agent[field])) throw new Error(`duplicate agent ${field}: ${agent[field]}`);
       seen.add(agent[field]);
     }
+  }
+  // Two watchers of one account file would report every mail twice.
+  const accountFiles = new Set();
+  for (const { config } of agents.flatMap((agent) => agent.emailAccounts)) {
+    if (accountFiles.has(config)) throw new Error(`duplicate email account file: ${config}`);
+    accountFiles.add(config);
   }
 }
 
@@ -434,8 +457,8 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
   if (!agent.ovConfig) delete env.OPENVIKING_CLI_CONFIG_FILE;
   env.VIKA_CHANNEL = agent.channel;
   env.VIKA_CONNECTORS_JSON = JSON.stringify(agent.connectors);
-  if (agent.emailConfig) env.VIKA_EMAIL_CONFIG_FILE = agent.emailConfig;
-  else delete env.VIKA_EMAIL_CONFIG_FILE;
+  if (agent.emailAccounts.length > 0) env.VIKA_EMAIL_ACCOUNTS_JSON = JSON.stringify(agent.emailAccounts);
+  else delete env.VIKA_EMAIL_ACCOUNTS_JSON;
   if (agent.volcSessionId) {
     env.VIKA_VOLC_SESSION_ID = agent.volcSessionId;
     env.VIKA_VOLC_ENVIRONMENT_ID = agent.volcEnvironmentId;

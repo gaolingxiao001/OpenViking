@@ -175,7 +175,7 @@ carries `event=`. A non-chat event that can itself be answered (a mail) carries
 its reply target as `msg=` as well:
 
 ```text
-[source=email kind=email.received msg=mail:1:18475 event=imap:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ body
+[source=email instance=email-gmail kind=email.received msg=mail:3f2a9c1b:1:18475 event=imap:3f2a9c1b:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ body
 ```
  An optional `instance=` is included when it differs from
 `source=`. Tag values percent-encode whitespace, brackets and `%`, so an id

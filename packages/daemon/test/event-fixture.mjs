@@ -39,6 +39,7 @@ export function chatEvent(fields = {}) {
 export function mailEvent(fields = {}) {
   const uid = fields.uid ?? 7;
   return normalizeEvent(eventMessage('email', {
+    ...(fields.instance ? { instance: fields.instance } : {}),
     id: `imap:1:${uid}`, kind: fields.kind ?? 'email.received', occurred_at: fields.createTimeMs ?? Date.now(),
     subject: { type: 'thread', id: fields.thread ?? 'gmail:100' },
     actor: { type: 'email', id: fields.from ?? 'alice@example.com' },

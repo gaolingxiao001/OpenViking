@@ -47,13 +47,13 @@ describe('OpenViking env seam', () => {
       PATH: '/bin',
       LARK_APP_SECRET: 'no',
       ARK_API_KEY: 'no',
-      VIKA_EMAIL_CONFIG_FILE: '/private/mailbox.json',
+      VIKA_EMAIL_ACCOUNTS_JSON: '[{"id":"email-gmail","config":"/private/mailbox.json"}]',
       OPENVIKING_CLI_CONFIG_FILE: '/tmp/ov.conf',
       OPENVIKING_MEMORY_ENABLED: '1',
     }, { profile: 'fixed' });
     assert.equal(env.LARK_APP_SECRET, undefined);
     // The daemon's own settings never reach a runtime.
-    assert.equal(env.VIKA_EMAIL_CONFIG_FILE, undefined);
+    assert.equal(env.VIKA_EMAIL_ACCOUNTS_JSON, undefined);
     assert.equal(env.ARK_API_KEY, undefined);
     assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/tmp/ov.conf');
     assert.equal(env.OPENVIKING_MEMORY_ENABLED, '1');

@@ -114,20 +114,29 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
 });
 
-test('a mailbox comes with an IM, is checked before the scans and saved with the manifest', async (t) => {
-  //                          IMs: email alone, then Weixin + email
-  const h = harness(t, ['', '', '', '1', '3', '2,3', 'y']);
+test('mailboxes come with an IM, are checked before the scans and saved with the manifest', async (t) => {
+  //                          IMs: email alone, then Weixin + email; two mailboxes
+  const h = harness(t, ['', '', '', '1', '3', '2,3', 'y', 'n', 'y']);
+  const accounts = ['liuweihan2000@gmail.com', '1845679308@qq.com'];
+  const taken = [];
+  h.options.connect.email = async ({ taken: given }) => {
+    h.calls.push(['email']);
+    taken.push(given);
+    return { address: accounts.shift(), password: 'p', imap: { host: 'imap.x.com', port: 993 }, smtp: { host: 'smtp.x.com', port: 465 } };
+  };
   assert.equal(await setupCommand(h.options), 0);
   assert.match(h.written(), /邮箱不能单独接/);
   const [agent] = h.manifest().agents;
-  const file = path.join(h.home, '.vika', 'email', 'primary.json');
-  assert.deepEqual([agent.connectors, agent.channel, agent.emailConfig], [['weixin', 'email'], 'weixin', file]);
-  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).address, 'liuweihan2000@gmail.com');
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-  assert.match(h.written(), /微信、邮箱（liuweihan2000@gmail\.com）/);
-  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'weixin', 'start', 'restart', 'start']);
+  const file = (id) => path.join(h.home, '.vika', 'email', 'primary', `${id}.json`);
+  assert.deepEqual([agent.connectors, agent.channel, agent.emailAccounts], [['weixin', 'email'], 'weixin',
+    [{ id: 'email-gmail', config: file('email-gmail') }, { id: 'email-qq', config: file('email-qq') }]]);
+  assert.deepEqual(taken, [[], ['liuweihan2000@gmail.com']]);
+  assert.equal(JSON.parse(fs.readFileSync(file('email-qq'), 'utf8')).address, '1845679308@qq.com');
+  assert.equal(fs.statSync(file('email-gmail')).mode & 0o777, 0o600);
+  assert.match(h.written(), /微信、邮箱（liuweihan2000@gmail\.com、1845679308@qq\.com）/);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'email', 'weixin', 'start', 'restart', 'start']);
 
-  const declined = harness(t, ['', '', '', '1', '1,3', 'n']);
+  const declined = harness(t, ['', '', '', '1', '1,3', 'n', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
   assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'email')), false, 'nothing is saved before the scans');
 });
