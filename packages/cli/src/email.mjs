@@ -53,10 +53,10 @@ async function servers(prompter, domain, previous) {
 }
 
 // Why a login failed, in words that point at the usual cause.
-function explain(error, provider) {
+function explain(error, provider, password) {
   const message = String(error?.message ?? error);
   if (/IMAP LOGIN failed|SMTP AUTH/.test(message)) {
-    return `${message}\n  多半是密码不对：这里要填${provider?.password ?? '邮箱给第三方客户端用的专用密码'}，不是网页登录密码。`;
+    return `${message}\n  多半是密码不对（这次收到 ${password.length} 个字符）：这里要填${provider?.password ?? '邮箱给第三方客户端用的专用密码'}，不是网页登录密码。`;
   }
   return message;
 }
@@ -83,7 +83,7 @@ export async function askEmail({ prompter, previous = null, verify = verifyAccou
       out(`  收信和发信都登录成功${idle ? '' : '（这个邮箱不推送新邮件，每分钟查一次）'}\n`);
       return account;
     } catch (error) {
-      out(`  登录失败：${explain(error, provider)}\n`);
+      out(`  登录失败：${explain(error, provider, password)}\n`);
       last = account;
       if (!await prompter.confirm('重新输入？')) throw new PromptAborted();
     }

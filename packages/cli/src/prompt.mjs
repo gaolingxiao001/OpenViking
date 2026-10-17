@@ -80,16 +80,25 @@ export class Prompter {
     return { pressed, stop };
   }
 
+  // One * per character, so typing or a paste is visibly received; asks
+  // again rather than accept nothing.
   async secret(question) {
     if (!this.tty) return this.text(question);
-    this.write(`? ${question}: `);
-    let buffer = '';
-    return this.keys((str, key) => {
-      if (key.name === 'return' || key.name === 'enter') { this.write('\n'); return buffer.trim(); }
-      if (key.name === 'backspace') { buffer = buffer.slice(0, -1); return undefined; }
-      if (str && !key.ctrl && !key.meta && str >= ' ') buffer += str;
-      return undefined;
-    });
+    for (;;) {
+      this.write(`? ${question}: `);
+      let buffer = '';
+      const value = await this.keys((str, key) => {
+        if (key.name === 'return' || key.name === 'enter') { this.write('\n'); return buffer.trim(); }
+        if (key.name === 'backspace') {
+          if (buffer) { buffer = [...buffer].slice(0, -1).join(''); this.write('\b \b'); }
+          return undefined;
+        }
+        if (str && !key.ctrl && !key.meta && str >= ' ') { buffer += str; this.write('*'.repeat([...str].length)); }
+        return undefined;
+      });
+      if (value) return value;
+      this.write('  没有收到输入，再输一次（每个字符会显示成 *）\n');
+    }
   }
 
   async text(question, { initial = '', validate = () => null } = {}) {

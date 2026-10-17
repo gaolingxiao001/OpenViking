@@ -78,7 +78,7 @@ test('terminal: typed text, backspace, and ctrl-c', async () => {
   await assert.rejects(prompter.text('名字'), PromptAborted);
 });
 
-test('terminal: a key can interrupt a wait, and a secret is not echoed', async () => {
+test('terminal: a key can interrupt a wait, and a secret shows only stars', async () => {
   const { prompter, input, type } = terminal();
   const watch = prompter.watchKey('m');
   type('x', 'm');
@@ -93,4 +93,15 @@ test('terminal: a key can interrupt a wait, and a secret is not echoed', async (
   type('s', '3', 'c', '\r');
   assert.equal(await prompter.secret('App Secret'), 's3c');
   assert.doesNotMatch(echoed, /s3c/);
+  assert.match(echoed, /App Secret: \*\*\*\n/);
+
+  // Nothing typed is not an answer; a paste arrives whole.
+  echoed = '';
+  const asked = prompter.secret('授权码');
+  type('\r');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  type('abcd efgh', 'x', '\x7f', '\r');
+  assert.equal(await asked, 'abcd efgh');
+  assert.match(echoed, /没有收到输入/);
+  assert.match(echoed, /授权码: \*{10}\x08 \x08\n/);
 });
