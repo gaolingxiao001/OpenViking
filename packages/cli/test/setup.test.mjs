@@ -37,6 +37,7 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
         return { address: 'liuweihan2000@gmail.com', password: 'p', imap: { host: 'imap.gmail.com', port: 993 }, smtp: { host: 'smtp.gmail.com', port: 465 } };
       },
       greet: async (message) => { calls.push(['greet', message.userId]); },
+      greetWeixin: async ({ dataDir, text }) => { calls.push(['greetWeixin', dataDir, text]); },
     },
     control: {
       start: async (target) => { calls.push(['start', target]); if (failStart) throw new Error('pm2 is not installed'); },
@@ -74,20 +75,26 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
   }]);
   assert.equal(JSON.parse(fs.readFileSync(manifest.agents[0].ovConfig, 'utf8')).actor_peer_id, 'primary');
   assert.ok(fs.statSync(manifest.agents[0].workspace).isDirectory());
-  assert.deepEqual(h.calls, [
-    ['lark', 'primary', 'vika-primary'],
-    ['weixin', path.join(h.home, '.vika', 'data', 'primary')],
+  const dataDir = path.join(h.home, '.vika', 'data', 'primary');
+  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [
+    ['lark', 'primary'],
+    ['weixin', dataDir],
     ['start', 'primary'],
     ['restart', 'web'],
     ['start', 'updater'],
     ['greet', 'ou_owner'],
+    ['greetWeixin', dataDir],
   ]);
+  // Each IM gets a hello; the primary one also hears that the bot reaches the owner there.
+  assert.match(h.calls.at(-1)[2], /^你好，我是 小V，已经在你的电脑上跑起来了。直接在微信里给我发消息就行。以后我主动找你的消息/);
+  assert.match(h.written(), /主渠道微信/);
 });
 
 test('a second instance keeps the shared env and the default instance', async (t) => {
   const h = harness(t, ['', '', '', '3', '1', 'y']);
   assert.equal(await setupCommand(h.options), 0);
-  const second = harness(t, ['', 'Second', '', '3', '1', 'y']);
+  //                        new
+  const second = harness(t, ['1', '', 'Second', '', '3', '1', 'y']);
   fs.mkdirSync(path.join(second.home, '.vika'), { recursive: true });
   fs.copyFileSync(path.join(h.home, '.vika', 'config.json'), path.join(second.home, '.vika', 'config.json'));
   second.options.allocate = async () => 3739;
@@ -111,7 +118,8 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   assert.equal(agent.profile, undefined);
   assert.equal(agent.channel, 'weixin');
   assert.match(weixin.written(), /没有检测到 OpenViking/);
-  assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
+  assert.match(weixin.written(), /主渠道是微信：你没找机器人、它主动找你时（比如新邮件提醒、待你确认的邮件回复）发到这里/);
+  assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start', 'greetWeixin']);
 });
 
 test('mailboxes come with an IM, are checked before the scans and saved with the manifest', async (t) => {
@@ -134,11 +142,70 @@ test('mailboxes come with an IM, are checked before the scans and saved with the
   assert.equal(JSON.parse(fs.readFileSync(file('email-qq'), 'utf8')).address, '1845679308@qq.com');
   assert.equal(fs.statSync(file('email-gmail')).mode & 0o777, 0o600);
   assert.match(h.written(), /微信、邮箱（liuweihan2000@gmail\.com、1845679308@qq\.com）/);
-  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'email', 'weixin', 'start', 'restart', 'start']);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'email', 'weixin', 'start', 'restart', 'start', 'greetWeixin']);
 
   const declined = harness(t, ['', '', '', '1', '1,3', 'n', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
   assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'email')), false, 'nothing is saved before the scans');
+});
+
+// An instance already on the machine, for setup to change.
+function existing(h, agent) {
+  fs.mkdirSync(path.join(h.home, '.vika'), { recursive: true });
+  const full = { id: 'asd', displayName: 'ASD', channel: 'lark', connectors: ['lark'], profile: 'vika-asd', port: 3738,
+    dataDir: path.join(h.home, '.vika', 'data', 'asd'), workspace: path.join(h.home, 'ws'), model: 'codex:', ...agent };
+  fs.writeFileSync(path.join(h.home, '.vika', 'config.json'),
+    JSON.stringify({ version: 1, defaultInstance: full.id, env: {}, agents: [full] }));
+  return full;
+}
+
+test('changing an instance asks each question with its current answer; Enter keeps it', async (t) => {
+  //            change asd  name ws runtime IMs  primary  confirm
+  const h = harness(t, ['2', '', '', '', '1,2', '2', 'y']);
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  const [after] = h.manifest().agents;
+  assert.deepEqual(after, { ...before, connectors: ['lark', 'weixin'], channel: 'weixin' });
+  assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
+  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd'], ['greetWeixin', before.dataDir]]);
+  assert.match(h.calls.at(-1)[2], /^你好，我是 ASD，现在也能在微信里找到我了。以后我主动找你的消息/);
+
+  // Nothing changed: nothing is written or restarted.
+  const same = harness(t, ['2', '', '', '', '', '']);
+  existing(same, { connectors: ['lark', 'weixin'], channel: 'weixin' });
+  assert.equal(await setupCommand(same.options), 0);
+  assert.match(same.written(), /没有改动/);
+  assert.deepEqual(same.calls, []);
+});
+
+test('dropping the primary IM moves the primary to what is left, and its profile goes', async (t) => {
+  //                    change  name ws runtime IMs(weixin only) confirm
+  const h = harness(t, ['2', '', '', '', '2', 'y']);
+  existing(h, { connectors: ['lark', 'weixin'], channel: 'lark' });
+  assert.equal(await setupCommand(h.options), 0);
+  const [after] = h.manifest().agents;
+  assert.deepEqual([after.connectors, after.channel, after.profile], [['weixin'], 'weixin', undefined]);
+  assert.match(h.written(), /主渠道是微信：你没找机器人、它主动找你时[\s\S]*不再接飞书\n  主渠道：飞书 → 微信/);
+  assert.match(h.written(), /保存并重启这个实例？/);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
+});
+
+test('an instance\'s mailboxes are changed from a menu until done', async (t) => {
+  //                    change name ws runtime IMs  [mail menu: remove gmail, done]  confirm
+  const h = harness(t, ['2', '', '', '', '', '5', '1', 'y']);
+  const file = (id) => path.join(h.home, '.vika', 'email', 'asd', `${id}.json`);
+  for (const [id, address] of [['email-gmail', 'me@gmail.com'], ['email-qq', 'me@qq.com']]) {
+    fs.mkdirSync(path.dirname(file(id)), { recursive: true });
+    fs.writeFileSync(file(id), JSON.stringify({ address, password: 'p', imap: { host: 'i', port: 993 }, smtp: { host: 's', port: 465 } }), { mode: 0o600 });
+  }
+  existing(h, { connectors: ['lark', 'email'],
+    emailAccounts: [{ id: 'email-gmail', config: file('email-gmail') }, { id: 'email-qq', config: file('email-qq') }] });
+  assert.equal(await setupCommand(h.options), 0);
+  assert.match(h.written(), /邮箱（已接入：me@gmail\.com、me@qq\.com）[\s\S]*邮箱（已接入：me@qq\.com）/);
+  assert.deepEqual(h.manifest().agents[0].emailAccounts, [{ id: 'email-qq', config: file('email-qq') }]);
+  assert.equal(fs.existsSync(file('email-gmail')), false);
+  assert.match(h.written(), /移除邮箱 me@gmail\.com（删掉保存的密码）/);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
 });
 
 test('setup stops early when no runtime can run, and reports a start failure after saving', async (t) => {

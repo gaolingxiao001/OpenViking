@@ -9,6 +9,14 @@ const { loadDeploymentManifest, resolveDeploymentManifestPath } = require('../..
 
 export const IM_LABELS = Object.freeze({ lark: '飞书', weixin: '微信', email: '邮箱' });
 
+// The primary IM (`channel`) is where the bot reaches the owner unasked.
+export const PRIMARY_MEANING = '你没找机器人、它主动找你时（比如新邮件提醒、待你确认的邮件回复）发到这里';
+
+// A manifest agent's connectors, as the loader reads them.
+export function connectorsOf(agent) {
+  return agent.connectors ?? [agent.channel ?? 'lark'];
+}
+
 export function imList(connectors, mailboxes = 0) {
   return connectors.map((connector) => (connector === 'email' && mailboxes > 1
     ? `${IM_LABELS.email}×${mailboxes}` : IM_LABELS[connector] ?? connector)).join('、');

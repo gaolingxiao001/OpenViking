@@ -85,7 +85,7 @@ function explain(error, provider, password) {
 // `taken` lists addresses the instance already watches.
 export async function askEmail({ prompter, previous = null, fixed = null, taken = [], verify = verifyAccount }) {
   const out = (text) => prompter.write(text);
-  out(fixed ? `\n── 邮箱 ${fixed.address} ──\n` : '\n── 邮箱 ──\n  只读收件箱（不会标已读、不移动、不删除）；回信要你确认后才发。\n');
+  out(fixed ? `\n── 邮箱 ${fixed.address} ──\n` : '\n── 邮箱 ──\n  只读收件箱（不会标已读、不移动、不删除）；回信先发到主渠道给你确认，你同意了才发出。\n');
   let last = fixed ?? previous;
   for (;;) {
     const address = fixed?.address
@@ -137,9 +137,4 @@ export function readEmailAccount(file) {
   } catch {
     return null;
   }
-}
-
-// Replies are approved on a Feishu card; another primary IM still gets notices.
-export function emailChannelNote(channel) {
-  return channel === 'lark' ? '' : '  主 IM 是微信：新邮件会通知到微信；回信暂时要在飞书卡片上确认，所以这个实例还不能回邮件。\n';
 }

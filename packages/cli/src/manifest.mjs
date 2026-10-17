@@ -79,6 +79,18 @@ export function withInstance(manifest, agent, env = {}) {
   return next;
 }
 
+// The manifest with one instance changed in place.
+export function withChangedInstance(manifest, agent, env = {}) {
+  const next = structuredClone(manifest);
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && next.env[key] === undefined) next.env[key] = value;
+  }
+  const index = next.agents.findIndex((candidate) => candidate.id === agent.id);
+  if (index < 0) throw new Error(`no instance ${agent.id} in the manifest`);
+  next.agents[index] = agent;
+  return next;
+}
+
 function stage(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const temporary = `${filePath}.${process.pid}.tmp`;
@@ -103,40 +115,3 @@ export function writeManifest(filePath, value) {
   fs.renameSync(temporary, filePath);
 }
 
-// The manifest with one more IM on an existing instance. An instance written
-// before `connectors` existed has only its `channel`; that stays its primary IM.
-export function withConnector(manifest, id, connector, fields = {}) {
-  const next = structuredClone(manifest);
-  const agent = next.agents.find((candidate) => candidate.id === id);
-  if (!agent) throw new Error(`no instance ${id} in the manifest`);
-  const connectors = agent.connectors ?? [agent.channel ?? 'lark'];
-  if (connectors.includes(connector)) throw new Error(`instance ${id} already uses ${connector}`);
-  agent.channel ??= connectors[0];
-  agent.connectors = [...connectors, connector];
-  Object.assign(agent, fields);
-  return next;
-}
-
-// One more mailbox ({ id, config }) for an instance; the first one also
-// connects the email connector.
-export function withEmailAccount(manifest, id, mailbox) {
-  const agent = manifest.agents.find((candidate) => candidate.id === id);
-  if (!agent) throw new Error(`no instance ${id} in the manifest`);
-  const next = (agent.connectors ?? []).includes('email') ? structuredClone(manifest) : withConnector(manifest, id, 'email');
-  const target = next.agents.find((candidate) => candidate.id === id);
-  target.emailAccounts = [...(target.emailAccounts ?? []), mailbox];
-  return next;
-}
-
-// The last mailbox removed also disconnects the email connector.
-export function withoutEmailAccount(manifest, id, mailboxId) {
-  const next = structuredClone(manifest);
-  const agent = next.agents.find((candidate) => candidate.id === id);
-  if (!agent) throw new Error(`no instance ${id} in the manifest`);
-  agent.emailAccounts = (agent.emailAccounts ?? []).filter((mailbox) => mailbox.id !== mailboxId);
-  if (agent.emailAccounts.length === 0) {
-    delete agent.emailAccounts;
-    agent.connectors = (agent.connectors ?? []).filter((connector) => connector !== 'email');
-  }
-  return next;
-}
