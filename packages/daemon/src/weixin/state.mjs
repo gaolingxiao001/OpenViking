@@ -27,9 +27,10 @@ export class WeixinState {
     this.mediaDirectory = path.join(directory, 'media');
     this.db = new DatabaseSync(this.databasePath);
     try { fs.chmodSync(this.databasePath, 0o600); } catch {}
+    // Waits out another process holding the database (the CLI next to a running daemon).
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA synchronous = FULL');
-    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS account (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -258,12 +259,6 @@ export class WeixinState {
 
   contextToken(peerId) {
     return this.db.prepare('SELECT token FROM context_tokens WHERE peer_id = ?').get(peerId)?.token ?? null;
-  }
-
-  knowsPeer(peerId) {
-    return Boolean(this.db.prepare(
-      'SELECT 1 FROM inbound_routes WHERE peer_id = ? LIMIT 1',
-    ).get(peerId));
   }
 
   close() {

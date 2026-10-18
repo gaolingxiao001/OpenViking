@@ -23,7 +23,7 @@
 
 Core 根据 manifest 启动 Connector 子进程。飞书 Connector 通过 `lark-cli` 长连接收消息；微信 Connector 通过腾讯 `openclaw-weixin` 的 iLink HTTP 协议长轮询。两者输出统一的 `EVENT` 信封，并进入同一个 `AgentRuntime`。每个 Connector 单独失败、单独重连：微信登录过期这类问题只让微信停下，飞书和 runtime 照常运行。出站方向，所有 runtime 都调用同一套 Agent 工具（`send_message`、`reply_message` 等）：Codex/TraeX/Claude/Pi 均经同一个 MCP 适配器，只负责把调用转发给 Core 的本机 socket。Core 统一校验运行权、新鲜度、路由与内容，写入唯一的 `outbox` 表后再由对应 Connector 执行；daemon 自己的失败通知和 slash 命令回复走同一条路径。协议和生命周期见 [Connector protocol 0.2](docs/connector-protocol.md)。
 
-Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `connector_events`，按来源实例和事件 ID 去重；聊天、消息和回复路由字段可选。GitHub issue、Calendar 提醒等可以使用 `kind`、`subject`、标题与正文进入 runtime，无须包装成飞书消息。内置 Connector 为飞书、微信和邮箱（IMAP/SMTP）；新增来源需实现 Connector。非聊天事件只能经 `notify_owner` 通知 owner（你本人）：Agent 不选目的地，Core 发到主 IM（`channel`）上你的私聊。owner 身份由 Connector 自检时给出：飞书是该 profile 用 lark-cli 做 user 登录的账号，微信是扫码登录的账号。协议已更新为 0.2，本次为未上线产品的直接 schema 变更，使用新的数据目录，不迁移旧 `inbound` 表。
+Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `connector_events`，按来源实例和事件 ID 去重；聊天、消息和回复路由字段可选。GitHub issue、Calendar 提醒等可以使用 `kind`、`subject`、标题与正文进入 runtime，无须包装成飞书消息。内置 Connector 为飞书、微信和邮箱（IMAP/SMTP）；新增来源需实现 Connector。非聊天事件只能经 `notify_owner` 通知 owner（你本人）：Agent 不选目的地，Core 发到主渠道（`channel`）上你的私聊。主渠道就是机器人主动找你时用的 IM：你没先找它、它直接找你的消息（新邮件提醒、待你确认的邮件回复等）都发到这里；你在哪个 IM 里找它，它就在哪里回你。owner 身份由 Connector 自检时给出：飞书是该 profile 用 lark-cli 做 user 登录的账号，微信是扫码登录的账号。协议已更新为 0.2，本次为未上线产品的直接 schema 变更，使用新的数据目录，不迁移旧 `inbound` 表。
 
 ## 安装
 
@@ -57,7 +57,7 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 }
 ```
 
-随后执行一次 `vika login weixin`（有多个实例时会让你选，或写上实例名）。已有实例后补接入微信也是这条命令：它会扫码、把微信加进这个实例的 `connectors` 并重启实例。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
+随后执行一次 `vika login weixin` 扫码登录（有多个实例时会让你选，或写上实例名）。给已有实例补接微信用 `vika setup`，选"修改"这个实例。不配置 `connectors` 时仍按旧的 `channel` 启动单个 Connector。
 
 安装依赖后扫码，再以前台方式启动这个实例：
 
@@ -67,15 +67,20 @@ vika login weixin weixin
 VIKA_INSTANCE_ID=weixin npm run start:daemon
 ```
 
-终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。带有微信语音转写的消息会以转写文本进入 Agent。默认只接受完成扫码的微信用户，避免其他联系人触发本机 Agent。需要显式增加发送者时，可在 manifest 的共享 `env` 中设置 `VIKA_WEIXIN_ALLOW_FROM`，值为逗号分隔的完整微信 iLink 用户 ID。
+终端会显示二维码和备用链接。用微信扫码并在手机确认后，凭证写入该实例的 `dataDir/weixin/state.sqlite3`；随后可以给新出现的机器人联系人发送文本、图片或文件。扫码后先在微信里给机器人发一句话（比如「你好」）：微信只送达你发过消息之后机器人发的消息，在这之前它没法主动找你（新邮件提醒、待你确认的邮件回复都发不到微信），每次重新扫码登录后都一样。一个微信号同时只能连一个机器人，给另一个实例扫码会让这个实例的微信掉线。带有微信语音转写的消息会以转写文本进入 Agent。机器人只和扫码的那个微信号单聊，不能和别人聊，也不能进群。
 
 这个 MVP 使用一个微信账号，支持单聊文本、入站图片和文件、微信提供的语音转写，以及出站图片和文件。入站媒体经腾讯 CDN 下载和 AES 解密后保存在该实例的 `dataDir/weixin/media`，单个文件和出站 workspace 文件上限均为 20 MiB，并随 daemon 的保留周期清理。原始语音解码/ASR、视频、群聊、引用和 reaction 尚未接入。协议实现固定对齐 `Tencent/openclaw-weixin` 2.4.9，来源与许可证见 [微信协议说明](packages/daemon/src/weixin/NOTICE.md) 和 [MIT 许可证](packages/daemon/src/weixin/LICENSE.openclaw-weixin)。
 
 ### 邮箱
 
-邮箱 Connector 用 IMAP 只读监听收件箱（不会把邮件标成已读，也不移动、不删除），用 SMTP 回信。一个实例可以同时接多个邮箱，每个邮箱是一个独立的 Connector 实例（`email-gmail`、`email-qq` 这样的名字），各跑一个子进程：一个邮箱密码失效或被限流，只有它自己退避重连，其他邮箱照常收信。新邮件到达后，Agent 判断要不要告诉你，要的话发到你在主 IM 上的私聊。Agent 从不直接发邮件：无论是你让它回，还是它觉得该回，它都只能起草，Core 把草稿放在一张卡片上发给你（收件人、主题和可编辑的正文），你点"发送"才会以卡片上的内容发出，点"不发了"就作废。卡片只有你能操作，三天后过期，目前需要主 IM 是飞书。首次启动只从之后到达的邮件开始；订阅和群发邮件标为 `kind=email.list`，自动回复（含多数退信）和它自己的回信直接跳过；程序自动发出的通知（安全告警、任务失败等）照常交给 Agent 判断。
+邮箱 Connector 用 IMAP 只读监听收件箱（不会把邮件标成已读，也不移动、不删除），用 SMTP 回信。一个实例可以同时接多个邮箱，每个邮箱是一个独立的 Connector 实例（`email-gmail`、`email-qq` 这样的名字），各跑一个子进程：一个邮箱密码失效或被限流，只有它自己退避重连，其他邮箱照常收信。新邮件到达后，Agent 判断要不要告诉你，要的话发到你在主渠道上的私聊。Agent 从不直接发邮件：无论是你让它回，还是它觉得该回，它都只能起草，Core 把草稿（发件邮箱、收件人、主题和正文）发到主渠道等你确认，只有你确认了才发出：
 
-用 `vika login email` 给实例接上邮箱（`vika setup` 里也可以直接勾选，并连续接几个）：输入邮箱地址和专用密码，Gmail、QQ、163/126/yeah.net 自动带出服务器，其他邮箱手填。先实际登录一次 IMAP 和 SMTP，成功才保存。已经接了邮箱的实例再执行 `vika login email`，可以再接一个、给某个邮箱换密码，或者移除某个邮箱。回信从邮件所在的那个邮箱发出，审批卡片上会写明发件邮箱。
+- 主渠道是飞书：草稿是一张卡片，正文可以直接在卡片上改，点"发送"按卡片上的内容发出，点"不发了"就作废。
+- 主渠道是微信：草稿是一条带编号的消息，回复「发送 3」发出，「不发 3」作废，「修改 3 新的正文」把正文换成你写的内容（改完会把新草稿再发你一遍，还要回「发送 3」才发出）。也可以直接告诉 Agent 怎么改，它会重新起草一份，旧编号随之作废。这几句回复由 Core 处理，不经过 Agent，只认你本人在私聊里发的、整条消息正好是这个格式的回复。
+
+草稿只有你能确认，只认第一次，三天后过期。首次启动只从之后到达的邮件开始；订阅和群发邮件标为 `kind=email.list`，自动回复（含多数退信）和它自己的回信直接跳过；程序自动发出的通知（安全告警、任务失败等）照常交给 Agent 判断。
+
+在 `vika setup` 里勾选邮箱接入（新建或修改实例都行，可以连续接几个）：输入邮箱地址和专用密码，Gmail、QQ、163/126/yeah.net 自动带出服务器，其他邮箱手填。先实际登录一次 IMAP 和 SMTP，成功才保存。已经接了邮箱的实例，在 `vika setup` 修改它时会给一个邮箱菜单：再接一个、给某个邮箱换密码，或者移除某个；只是换密码的话，`vika login email` 更快。回信从邮件所在的那个邮箱发出，待确认的草稿上会写明发件邮箱。
 
 每个邮箱的账号存在 `~/.vika/email/<实例>/<邮箱名>.json`（0600），实例配置里是它们的列表：
 

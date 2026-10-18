@@ -82,7 +82,7 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 登录命令按实例读取 manifest，在终端输出二维码。手机确认后，token、机器人账号、扫码用户和长轮询游标保存在该实例的私有 SQLite 中。Core 随后启动独立微信 Connector；它调用 `notifyStart`，持续请求 `getupdates`，把入站文本、图片、文件和微信已有语音转写封装成 `EVENT` 交给 Agent。媒体保存在 `dataDir/weixin/media`。Agent 通过统一的 Agent 工具（Codex/TraeX/Claude/Pi 共用 MCP 适配器）把查询和发送请求经 `dataDir/actions.sock` 交给 Core；Core 先写 outbox，再由 Connector 携带 `context_token` 和由幂等键派生的 `client_id` 调用 `sendmessage`。
 
-默认 allowlist 是扫码用户。`VIKA_WEIXIN_ALLOW_FROM` 可配置逗号分隔的完整 iLink 用户 ID；不要填昵称。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
+机器人只和扫码的微信号单聊，其他发送者的消息直接忽略。一个微信号同时只能连一个机器人：给另一个实例扫码，这个实例的微信会报会话过期。扫码后要先给机器人发一句话，微信才会送达它主动发的消息；Vika 在收到你的第一句话之前不会尝试主动发微信，直接报错。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
 
 ### 方舟 Self-hosted Managed Agent
 
@@ -92,11 +92,11 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 此外要独立常驻官方 Go `EnvironmentWorker`，并给 Worker 设置 `ARK_API_KEY`、`ARK_BASE_URL`、`MA_ENVIRONMENT_ID` 和对应 bot 的 `LARKSUITE_CLI_PROFILE`。Managed Agent 通过 Worker 的 bash 调固定本机 `lark-cli` 完成回复；daemon 只负责 Sessions API/SSE，不执行工具、不回写 tool result，也不要求本轮必须返回 `agent.message`。因此仅通过 CLI 完成回复、随后直接 `end_turn` 也是成功路径。Worker 的部署、存活与升级暂不由 daemon/updater 托管。
 
-## 用 vika setup 添加实例
+## 用 vika setup 添加和修改实例
 
-发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置：
+发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置。机器上已经有实例时，它先问是新建一个实例还是修改某个已有实例。修改时列出这个实例的全部配置项和现在的值（机器人名字、工作目录、运行时、接入的 IM、主渠道、邮箱、OpenViking），用 ↑↓ 选一项、回车进去改，改完回到列表，改过的项标"（已改）"，没进去改的保持原样；实例名不能改。选"保存"后列出改动，只给新接的 IM 扫码，然后写配置并重启这个实例；选"放弃修改"什么都不动。接入新的 IM、加减邮箱、切换主渠道都在这里做。
 
-1. 依次问实例名、机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）、接哪些 IM（飞书、微信、邮箱多选；邮箱不能单独选，飞书和微信都选时再问主渠道），以及要不要用本机检测到的 OpenViking。选了邮箱就接着问邮箱地址和专用密码，当场登录 IMAP 和 SMTP 验证，可以连续接几个；Gmail、QQ、163/126/yeah.net 不用填服务器。
+1. 依次问实例名、机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）、接哪些 IM（飞书、微信、邮箱多选；邮箱不能单独选），主渠道（飞书和微信都选时让你选，只选一个时就是它；机器人主动找你的消息，比如新邮件提醒、待你确认的邮件回复，都发到主渠道），以及要不要用本机检测到的 OpenViking。选了邮箱就接着问邮箱地址和专用密码，当场登录 IMAP 和 SMTP 验证，可以连续接几个；Gmail、QQ、163/126/yeah.net 不用填服务器。
 2. 飞书扫两次码：第一次创建机器人应用，按 `permission.json` 申请完整权限、订阅长连接事件和卡片回调，平台自动发版；第二次授权 owner 的用户身份。微信扫一次码。所有问题问完才开始扫码；扫码全部成功后才写配置。
 3. 写入 `~/.vika/config.json`，启动这个实例、重启共享 Web、确保 updater 在跑，然后机器人在飞书私聊里打个招呼。
 
@@ -106,11 +106,11 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 vika start|stop|restart [实例|web|updater]   # 用本机已安装的 release，不拉代码
 vika status
 vika logs [实例]
-vika login lark|weixin|email [实例]         # 给实例接入飞书/微信/邮箱，或登录过期、改密码后重新授权
+vika login lark|weixin|email [实例]         # 登录过期或改了密码后重新授权
 vika pi                                     # 打开内置 Pi，例如 /login 配模型
 ```
 
-setup 时没选的 IM，之后用 `vika login weixin`、`vika login lark` 或 `vika login email` 补上：扫码（邮箱是填地址和专用密码，先实际登录 IMAP 和 SMTP 验证）后写进这个实例的配置并重启它；只有一个实例时不用写实例名，多个时会列出来让你选。对已经接入的再执行一次就是重新授权；`vika login email` 在已有邮箱时会让你选：再接一个、给某个邮箱换密码，或移除某个。`vika` 不带参数会列出本机所有实例和它们接入的 IM。
+`vika login` 只给实例已经接入的 IM 重新授权：飞书重新扫码授权用户身份，微信重新扫码登录，邮箱选一个换密码；只有一个实例时不用写实例名，多个时会列出接了这个 IM 的实例让你选。要接入新的 IM，运行 `vika setup` 修改实例。新接入飞书后，机器人会在飞书里先发一条自我介绍；微信要你先给机器人发一句话，它才能主动找你（每次重新扫码后都一样）。`vika` 不带参数会列出本机所有实例和它们接入的 IM。
 
 ## 升级与回滚
 

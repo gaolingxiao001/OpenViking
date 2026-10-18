@@ -74,20 +74,25 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
   }]);
   assert.equal(JSON.parse(fs.readFileSync(manifest.agents[0].ovConfig, 'utf8')).actor_peer_id, 'primary');
   assert.ok(fs.statSync(manifest.agents[0].workspace).isDirectory());
-  assert.deepEqual(h.calls, [
-    ['lark', 'primary', 'vika-primary'],
-    ['weixin', path.join(h.home, '.vika', 'data', 'primary')],
+  const dataDir = path.join(h.home, '.vika', 'data', 'primary');
+  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [
+    ['lark', 'primary'],
+    ['weixin', dataDir],
     ['start', 'primary'],
     ['restart', 'web'],
     ['start', 'updater'],
     ['greet', 'ou_owner'],
   ]);
+  // Feishu gets a hello; Weixin delivers nothing until the owner writes, so the owner is told to.
+  assert.match(h.written(), /已就绪。\n\n最后一步：在微信里给机器人发一句话（比如「你好」）[\s\S]*都发不到微信。\n$/);
+  assert.match(h.written(), /主渠道微信/);
 });
 
 test('a second instance keeps the shared env and the default instance', async (t) => {
   const h = harness(t, ['', '', '', '3', '1', 'y']);
   assert.equal(await setupCommand(h.options), 0);
-  const second = harness(t, ['', 'Second', '', '3', '1', 'y']);
+  //                        new
+  const second = harness(t, ['1', '', 'Second', '', '3', '1', 'y']);
   fs.mkdirSync(path.join(second.home, '.vika'), { recursive: true });
   fs.copyFileSync(path.join(h.home, '.vika', 'config.json'), path.join(second.home, '.vika', 'config.json'));
   second.options.allocate = async () => 3739;
@@ -111,6 +116,7 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   assert.equal(agent.profile, undefined);
   assert.equal(agent.channel, 'weixin');
   assert.match(weixin.written(), /没有检测到 OpenViking/);
+  assert.match(weixin.written(), /主渠道是微信：你没找机器人、它主动找你时（比如新邮件提醒、待你确认的邮件回复）发到这里/);
   assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
 });
 
@@ -139,6 +145,81 @@ test('mailboxes come with an IM, are checked before the scans and saved with the
   const declined = harness(t, ['', '', '', '1', '1,3', 'n', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
   assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'email')), false, 'nothing is saved before the scans');
+});
+
+// An instance already on the machine, for setup to change.
+function existing(h, agent) {
+  fs.mkdirSync(path.join(h.home, '.vika'), { recursive: true });
+  const full = { id: 'asd', displayName: 'ASD', channel: 'lark', connectors: ['lark'], profile: 'vika-asd', port: 3738,
+    dataDir: path.join(h.home, '.vika', 'data', 'asd'), workspace: path.join(h.home, 'ws'), model: 'codex:', ...agent };
+  fs.writeFileSync(path.join(h.home, '.vika', 'config.json'),
+    JSON.stringify({ version: 1, defaultInstance: full.id, env: {}, agents: [full] }));
+  return full;
+}
+
+// The change menu: 1 名字 2 工作目录 3 运行时 4 IM 5 主渠道 6 邮箱 7 OpenViking 8 保存 9 放弃.
+test('changing an instance lists every setting; only the ones opened change', async (t) => {
+  //                    change asd  IMs  lark+weixin  primary  weixin  save
+  const h = harness(t, ['2',        '4', '1,2',       '5',     '2',    '8']);
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  const [after] = h.manifest().agents;
+  assert.deepEqual(after, { ...before, connectors: ['lark', 'weixin'], channel: 'weixin' });
+  // The list shows every value; what was changed is marked.
+  assert.match(h.written(), /1\) 机器人名字\s+ASD\n  2\) 工作目录\s+~\/ws\n  3\) Agent 运行时\s+Codex\n  4\) 接入的 IM\s+飞书\n  5\) 主渠道\s+飞书\n  6\) 邮箱\s+没有接\n  7\) OpenViking\s+不用\n  8\) 保存\n  9\) 放弃修改/);
+  assert.match(h.written(), /4\) 接入的 IM\s+飞书、微信（已改）[\s\S]*5\) 主渠道\s+微信（已改）\n[\s\S]*8\) 保存（2 项改动）/);
+  assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
+  assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']]);
+  assert.match(h.written(), /ASD（asd）已更新。\n\n最后一步：在微信里给机器人发一句话/);
+
+  // Saving nothing, or leaving, writes and restarts nothing.
+  for (const [answers, said] of [[['2', '8'], /没有改动/], [['2', '1', '新名字', '9'], /已放弃，没有保存任何改动/]]) {
+    const idle = harness(t, answers);
+    const config = existing(idle, {});
+    assert.equal(await setupCommand(idle.options), 0);
+    assert.match(idle.written(), said);
+    assert.deepEqual(idle.manifest().agents, [config]);
+    assert.deepEqual(idle.calls, []);
+  }
+});
+
+test('dropping the primary IM moves the primary to what is left; a change the daemon would reject goes back to the list', async (t) => {
+  //                    change  IMs  weixin  save
+  const h = harness(t, ['2',    '4', '2',    '8']);
+  existing(h, { connectors: ['lark', 'weixin'], channel: 'lark' });
+  assert.equal(await setupCommand(h.options), 0);
+  const [after] = h.manifest().agents;
+  assert.deepEqual([after.connectors, after.channel, after.profile], [['weixin'], 'weixin', undefined]);
+  assert.match(h.written(), /主渠道原来是飞书，它不再接入，改成微信。[\s\S]*不再接飞书\n  主渠道：飞书 → 微信/);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
+
+  //                     change IMs  +weixin save  (refused)  leave
+  const ark = harness(t, ['2',  '4', '1,2',  '8',             '9']);
+  const config = existing(ark, { model: 'ark', volcSessionId: 'sesn-seed12345678', volcEnvironmentId: 'env-12345678' });
+  assert.equal(await setupCommand(ark.options), 0);
+  assert.match(ark.written(), /3\) Agent 运行时\s+ark\n/);
+  assert.match(ark.written(), /这样改不行：.*cannot use the ark runtime[\s\S]*9\) 放弃修改/);
+  assert.deepEqual(ark.manifest().agents, [config]);
+  assert.deepEqual(ark.calls, []);
+});
+
+test('an instance\'s mailboxes are changed from their own menu until done', async (t) => {
+  //                    change  mailboxes  remove gmail  done  save
+  const h = harness(t, ['2',    '6',       '5',          '1',  '8']);
+  const file = (id) => path.join(h.home, '.vika', 'email', 'asd', `${id}.json`);
+  for (const [id, address] of [['email-gmail', 'me@gmail.com'], ['email-qq', 'me@qq.com']]) {
+    fs.mkdirSync(path.dirname(file(id)), { recursive: true });
+    fs.writeFileSync(file(id), JSON.stringify({ address, password: 'p', imap: { host: 'i', port: 993 }, smtp: { host: 's', port: 465 } }), { mode: 0o600 });
+  }
+  existing(h, { connectors: ['lark', 'email'],
+    emailAccounts: [{ id: 'email-gmail', config: file('email-gmail') }, { id: 'email-qq', config: file('email-qq') }] });
+  assert.equal(await setupCommand(h.options), 0);
+  assert.match(h.written(), /6\) 邮箱\s+me@gmail\.com、me@qq\.com\n/);
+  assert.match(h.written(), /邮箱（已接入：me@gmail\.com、me@qq\.com）[\s\S]*邮箱（已接入：me@qq\.com）[\s\S]*6\) 邮箱\s+me@qq\.com（已改）/);
+  assert.deepEqual(h.manifest().agents[0].emailAccounts, [{ id: 'email-qq', config: file('email-qq') }]);
+  assert.equal(fs.existsSync(file('email-gmail')), false);
+  assert.match(h.written(), /移除邮箱 me@gmail\.com（删掉保存的密码）/);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
 });
 
 test('setup stops early when no runtime can run, and reports a start failure after saving', async (t) => {

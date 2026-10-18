@@ -25,7 +25,6 @@ try {
     channel: connectorId,
     instance: parsed.instance || connectorId,
     connectorWorker: true,
-    weixinAllowFrom: new Set(parsed.weixinAllowFrom ?? []),
   };
 } catch {
   process.stderr.write('connector worker configuration is invalid\n');

@@ -10,6 +10,7 @@ import {
 } from './activity.mjs';
 import { MeetingStore, migrateMeetingStore } from './meeting/store.mjs';
 import { migrateCardMessages, acceptCardAnswer } from './card-messages.mjs';
+import { migrateApprovals, pruneApprovals } from './approvals.mjs';
 import { normalizeEvent, eventIdentity } from './event.mjs';
 
 function number(value) {
@@ -183,6 +184,7 @@ export class Store {
 
   migrate() {
     migrateCardMessages(this.db);
+    migrateApprovals(this.db);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
@@ -1587,6 +1589,7 @@ export class Store {
       const outbox = this.db.prepare(`
         DELETE FROM outbox WHERE updated_at_ms < ? AND status IN ('SENT', 'UNCERTAIN')
       `).run(cutoff);
+      const approvals = pruneApprovals(this.db, cutoff);
       const conversations = this.db.prepare(`
         DELETE FROM conversations
         WHERE NOT EXISTS (SELECT 1 FROM connector_events WHERE connector_events.conv_key = conversations.conv_key)
@@ -1596,6 +1599,7 @@ export class Store {
         meetingEvents: meeting.events,
         meetingSessions: meeting.sessions,
         outbox: number(outbox.changes),
+        approvals: number(approvals),
         conversations: number(conversations.changes),
       };
     });

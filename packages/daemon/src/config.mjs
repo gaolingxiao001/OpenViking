@@ -200,7 +200,6 @@ export function getConfig() {
     actionSocketPath: path.join(dataDir, 'actions.sock'),
     actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || bundledLarkCli(),
-    weixinAllowFrom: csvEnv('VIKA_WEIXIN_ALLOW_FROM'),
     emailAccounts,
     weixinLongPollTimeoutMs: intEnv('VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
       min: 5_000,

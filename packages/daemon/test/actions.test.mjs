@@ -793,6 +793,117 @@ describe('owner notices and owner-only actions', () => {
       .map(({ connector, input }) => [connector, input.message_id]), [['email-qq', 'mail:1:8']]);
   });
 
+  // A primary IM without cards: the draft is a numbered message the owner answers.
+  const WX_OWNER = { id: 'wx-owner', target: { chat_id: 'wx-owner' } };
+  const weixinSetup = (t) => setup(t, { ids: ['weixin', 'email-qq'], channel: 'weixin', owners: { weixin: WX_OWNER },
+    run: (connector) => (connector.startsWith('email-') ? { sent: true } : { message_id: 'wx-delivered' }) });
+  const QQ_TO = [{ name: 'Alice', address: 'alice@example.com' }];
+  const qqMail = (uid = 7) => mailEvent({ uid, instance: 'email-qq', thread: `gmail:${uid}`,
+    reply: { from: 'me@qq.com', to: QQ_TO, subject: 'Re: 周四开会？' } });
+  let ownerMessages = 0;
+  const fromOwner = (store, content, sender = 'wx-owner') => {
+    ownerMessages += 1;
+    const event = chatEvent({ source: 'weixin', messageId: `wx-in-${ownerMessages}`, eventId: `wx-in-${ownerMessages}`,
+      chatId: sender, senderId: sender, content });
+    store.ingest(event);
+    return event;
+  };
+  const answer = async (service, store, content) => {
+    const event = fromOwner(store, content);
+    const reply = service.matchApprovalReply(content, event);
+    assert.ok(reply, `${content} is an answer`);
+    return service.answerApproval(event, reply);
+  };
+  const told = (connectors) => connectors.calls.filter(({ connector, action }) => connector === 'weixin' && action === 'message.reply')
+    .map(({ input }) => input.content.text);
+  const mails = (connectors) => connectors.calls.filter(({ connector }) => connector.startsWith('email-'))
+    .map(({ connector, input }) => [connector, input.message_id, input.content.text, input.to]);
+
+  it('on a primary IM without cards, the draft is a numbered message the owner answers 修改 and 发送', async (t) => {
+    const { store, call, connectors, service } = weixinSetup(t);
+    store.ingest(qqMail());
+    const propose = () => call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: 'imap:1:7' });
+    assert.match((await propose()).text, /waiting in the owner's direct chat \(weixin\) as #1\./);
+    const [draft] = connectors.calls;
+    assert.deepEqual([draft.connector, draft.action, draft.input.chat_id, draft.input.content.type],
+      ['weixin', 'message.send', 'wx-owner', 'markdown']);
+    assert.equal(draft.input.content.text, [
+      '待你确认的邮件回复 #1', '发件邮箱：me@qq.com', '收件人：Alice <alice@example.com>', '主题：Re: 周四开会？',
+      '━━━━ 回信正文 ━━━━', '周四可以', '━━━━ 正文结束 ━━━━', '回复「发送 1」发出', '回复「不发 1」作废', '回复「修改 1 新的正文」改成你写的内容',
+      '3 天内有效；也可以直接告诉我怎么改，我重新起草。',
+    ].join('\n'));
+    // The same request again is the same draft.
+    assert.match((await propose()).text, /already waiting for the owner as #1/);
+    assert.equal(connectors.calls.length, 1);
+
+    // Only the owner's whole-message answer to an existing draft counts.
+    const other = fromOwner(store, '发送 1', 'wx-someone');
+    assert.equal(service.matchApprovalReply('发送 1', other), null);
+    const owner = fromOwner(store, '发送 9');
+    assert.equal(service.matchApprovalReply('发送 9', owner), null);
+    assert.equal(service.matchApprovalReply('发送 1 谢谢', owner), null);
+
+    assert.equal(await answer(service, store, '修改 1'), null);
+    assert.equal(await answer(service, store, '修改 1 周五下午可以\n回头见'), null);
+    assert.deepEqual(mails(connectors), [], 'an edit sends nothing');
+    assert.match(told(connectors)[0], /^在「修改 1」后面写上新的正文/);
+    assert.match(told(connectors)[1], /^已按你的修改更新 #1，确认后才会发出：\n发件邮箱：me@qq\.com[\s\S]*━━━━ 回信正文 ━━━━\n周五下午可以\n回头见\n━━━━ 正文结束 ━━━━\n回复「发送 1」发出/);
+
+    const note = await answer(service, store, '发送 1');
+    assert.deepEqual(mails(connectors), [['email-qq', 'mail:1:7', '周五下午可以\n回头见', ['alice@example.com']]]);
+    assert.equal(told(connectors).at(-1), '#1 已从 me@qq.com 发出。');
+    assert.match(note, /^\[mail reply sent\] .*"text":"周五下午可以\\n回头见".*"edited_by_owner":true/);
+    // Sent once: a second 发送 only says so.
+    assert.equal(await answer(service, store, '发送 1'), null);
+    assert.equal(mails(connectors).length, 1);
+    assert.equal(told(connectors).at(-1), '#1 已从 me@qq.com 发出。');
+  });
+
+  it('a newer draft replaces the pending one, 不发 drops a draft, and an old one expires', async (t) => {
+    const { store, call, connectors, service } = weixinSetup(t);
+    store.ingest(qqMail());
+    await call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: 'imap:1:7' });
+    await call('reply_message', { message_id: 'mail:1:7', markdown: '周四三点可以', decision_id: 'imap:1:7' });
+    assert.equal(await answer(service, store, '发送 1'), null);
+    assert.equal(told(connectors).at(-1), '#1 已被新的草稿 #2 替代；要发出请回复「发送 2」。');
+    assert.match(await answer(service, store, '不发 2'), /^\[mail reply cancelled\]/);
+    assert.equal(told(connectors).at(-1), '#2 已作废，不会发出。');
+    assert.equal(await answer(service, store, '发送 2'), null);
+    assert.equal(told(connectors).at(-1), '#2 已作废，不会发出。');
+
+    store.ingest(qqMail(8));
+    await call('reply_message', { message_id: 'mail:1:8', markdown: '好的', decision_id: 'imap:1:8' });
+    store.db.prepare('UPDATE approvals SET expires_at_ms = ? WHERE id = 3').run(Date.now() - 1);
+    assert.equal(await answer(service, store, '发送 3'), null);
+    assert.equal(told(connectors).at(-1), '#3 已过期（3 天内有效），没有发出；需要的话让我重新起草。');
+    assert.deepEqual(mails(connectors), []);
+  });
+
+  it('the owner\'s answer never reaches the model, an ordinary message does', async (t) => {
+    const store = new Store(':memory:', logger);
+    const delivered = [];
+    const handled = [];
+    const harness = new Harness({
+      config: { maxEventBytes: 100_000, maxEventAgeMs: 60_000, ignoredSenderIds: new Set() }, store, logger, recordActivity() {},
+      runtime: { snapshot: () => ({ session: { connected: true }, work: { turnInProgress: false } }),
+        submit: (items) => { delivered.push(...items); return { accepted: true }; } },
+      onSlashCommand: () => assert.fail('not a slash command'),
+      approvalReply: (text) => (text === '发送 1' ? { verb: 'send', handle: (event, inbound) => handled.push([event.content, inbound.seq]) } : null),
+    });
+    t.after(() => { harness.stop(); store.close(); });
+    const message = (id, content) => eventMessage('weixin', { id, kind: 'message.created', occurred_at: Date.now(),
+      subject: { type: 'conversation', id: 'wx-owner' }, actor: { type: 'user', id: 'wx-owner' },
+      conversation: { id: 'wx-owner', type: 'p2p' }, message: { id: `m-${id}`, type: 'text' }, content: { text: content },
+      reply_route: { action: 'message.reply', input: { message_id: `m-${id}` } } });
+    harness.handleConnectorEvent(message('a', '发送 1'));
+    harness.handleConnectorEvent(message('b', '帮我看看邮件'));
+    await harness.ingressBarrier;
+    assert.equal(handled.length, 1);
+    assert.equal(handled[0][0], '发送 1');
+    assert.deepEqual(delivered.map((item) => /帮我看看邮件$/.test(item.text)), [true]);
+    assert.equal(store.db.prepare("SELECT filter_reason FROM connector_events WHERE event_id = 'a'").get().filter_reason, 'approval_reply');
+  });
+
   it('sends the approved draft as the owner left it, once, and shows the outcome on the card', async (t) => {
     const { store, call, connectors } = mailSetup(t);
     // The owner's direct chat with the bot, where the card lands.

@@ -74,8 +74,8 @@ Connector. `content` lists the message bodies an action accepts (`markdown`,
 features; `idempotent: true` means the provider honours the idempotency key, so
 the Core may retry an `UNCERTAIN` attempt with the same key; `approval: true`
 means the action speaks for the owner (an email reply), so the Core never runs it
-for the agent: it puts the draft on a card in the owner's direct chat and runs
-it only when the owner presses send there. `queries` lists the
+for the agent: it shows the draft to the owner on the primary IM and runs it
+only when the owner confirms it there. `queries` lists the
 read-only operations. The Core offers an agent tool only when some configured
 Connector declares the operation behind it, and checks every call against the
 target Connector's declaration.
@@ -255,16 +255,22 @@ An action declared `approval` (an email reply) is authorized by the owner, not
 by a decision: who asked does not matter, since a decision only proves which
 input the agent acted on, and an old message from the owner stays fresh in its
 own chat however many mails arrive. Any decision, the mail itself included, may
-propose one; the Core sends the owner a card on the primary IM with the
-recipients and subject (from the mail event's `data.reply`) and the draft in an
-editable input (read-only beyond 1000 characters), registered as a question
-only the owner can answer, once, within three days. The card lists every
+propose one. The Core shows the owner the draft on the primary IM with the
+recipients and subject (from the mail event's `data.reply`), in the form that IM
+can show. On an IM with cards (Lark) it is a card with the draft in an editable
+input (read-only beyond 1000 characters), registered as a question only the
+owner can answer, once, within three days. On any other IM it is a numbered
+message; the owner answers with the whole message `发送 N` (send), `不发 N`
+(drop) or `修改 N <text>` (replace the text, shown again for confirmation), and
+the Core takes such a message as an answer only from that draft's owner on that
+IM, once, within three days; anything else is an ordinary message. A newer
+draft for the same mail replaces a pending numbered one. The draft lists every
 recipient: a mail that would be answered to more than 20 addresses reports only
 their number in `data.reply` and cannot be answered. On send the Core delivers
-the text the owner left there to the recipients the card showed, passed as
-`to`; the Connector sends only if they are exactly the mail's reply recipients.
-The key is per card, so the reply goes out at most once,
-and updates the card to sent, cancelled, not sent or uncertain. The model has no
+the text the owner approved to the recipients the draft showed, passed as `to`;
+the Connector sends only if they are exactly the mail's reply recipients. The
+key is per card or numbered draft, so the reply goes out at most once, and the
+owner sees the outcome: sent, cancelled, not sent or uncertain. The model has no
 part in that; afterwards the Core tells it, as a line in the owner's chat, what
 actually went out (with the owner's edits) or that nothing did. A reply is recorded where its target is: one to
 a mail has no chat, and its history line is rendered from the mail's event.

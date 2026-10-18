@@ -21,6 +21,7 @@ export class Harness {
     prepareEvent = (event) => event,
     eventHandler = () => null,
     onSlashCommand,
+    approvalReply = () => null,
     onInboundChat = null,
     afterEvent = null,
     isStopping = () => false,
@@ -35,6 +36,7 @@ export class Harness {
     this.prepareEvent = prepareEvent;
     this.eventHandler = eventHandler;
     this.onSlashCommand = onSlashCommand;
+    this.approvalReply = approvalReply;
     this.onInboundChat = onInboundChat;
     this.afterEvent = afterEvent;
     this.isStopping = isStopping;
@@ -93,10 +95,14 @@ export class Harness {
     // A slash in any other event body remains ordinary model input.
     const commandText = filterReason ? null : commandCandidate(event);
     const command = commandText === null ? null : parseCommand(commandText);
+    // The owner answering a numbered draft (发送 N ...) is the Core's to
+    // carry out, like a slash command; it never reaches the model as such.
+    const approval = commandText === null || command ? null : this.approvalReply(commandText, event);
     const handler = this.eventHandler(event);
     let result;
     try {
-      result = this.store.ingest(event, command ? 'slash_command' : filterReason, Date.now(), { journal: !handler });
+      result = this.store.ingest(event, command ? 'slash_command' : approval ? 'approval_reply' : filterReason,
+        Date.now(), { journal: !handler });
     } catch (error) {
       this.logger.error('event_persist_failed', { error: safeError(error) });
       this.recordActivity('system.persist_failed', {
@@ -126,6 +132,12 @@ export class Harness {
         this.groupBurst.flushAll();
         await this.onSlashCommand(command, event, result.inbound);
       });
+      return;
+    }
+    if (approval) {
+      this.logger.info('event_approval_reply', { messageRef: opaqueRef(event.messageId), verb: approval.verb });
+      // Off the ingress queue: an SMTP send may be slow.
+      this.enqueueIngress(() => { approval.handle(event, result.inbound); });
       return;
     }
     if (result.filterReason) {

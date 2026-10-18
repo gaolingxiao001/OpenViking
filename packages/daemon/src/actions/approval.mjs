@@ -1,11 +1,13 @@
 // A delivery that speaks for the owner (a mail reply) is never sent by the
-// model. The Core puts the draft on a card in the owner's direct chat, and only
-// the owner's press on that card sends it, with any edits made there. The card
-// is registered as a question answered once by the owner; the draft rides in it.
+// model. The Core shows the draft to the owner on their primary IM and only the
+// owner's own answer sends it, with any edits they made. On an IM with cards
+// (Lark) the draft is a card, registered as a question answered once by the
+// owner, the draft riding in it. Elsewhere it is a numbered message the owner
+// answers 发送 N, 不发 N or 修改 N <text> (approvals.mjs keeps those).
 
 // Lark inputs hold at most 1000 characters; a longer draft is shown read-only.
 export const EDITABLE_CHARS = 1_000;
-const APPROVAL_SECONDS = 3 * 24 * 60 * 60;
+export const APPROVAL_SECONDS = 3 * 24 * 60 * 60;
 const BODY_FIELD = 'reply_body';
 
 function text(content) {
@@ -124,4 +126,50 @@ export function approvalNote(draft, settled) {
     ...(settled.edited ? { edited_by_owner: true } : {}),
     ...(settled.note ? { note: settled.note } : {}),
   })}`;
+}
+
+// The draft as a message, for an IM without cards. Addresses are shown as
+// they are: the Lark audit that refuses them does not apply here.
+export function approvalMessage(draft, number, { edited = false } = {}) {
+  return [
+    edited ? `已按你的修改更新 #${number}，确认后才会发出：` : `待你确认的邮件回复 #${number}`,
+    ...(draft.from ? [`发件邮箱：${draft.from}`] : []),
+    `收件人：${people(draft.to)}`,
+    `主题：${draft.subject}`,
+    '━━━━ 回信正文 ━━━━',
+    draft.text,
+    '━━━━ 正文结束 ━━━━',
+    `回复「发送 ${number}」发出`,
+    `回复「不发 ${number}」作废`,
+    `回复「修改 ${number} 新的正文」改成你写的内容`,
+    '3 天内有效；也可以直接告诉我怎么改，我重新起草。',
+  ].join('\n');
+}
+
+const REPLY_VERBS = { 发送: 'send', 不发: 'cancel', 修改: 'edit' };
+const REPLY = /^(发送|不发|修改)\s*#?(\d{1,9})(?:[\s:：]*([\s\S]+))?$/;
+
+// The owner's answer to a numbered draft, or null for any other message: the
+// whole message must be the answer, and only 修改 takes text after the number.
+export function parseApprovalReply(text) {
+  const match = REPLY.exec(String(text ?? '').trim());
+  if (!match) return null;
+  const verb = REPLY_VERBS[match[1]];
+  const body = (match[3] ?? '').trim();
+  if (verb !== 'edit' && body) return null;
+  return { verb, number: Number(match[2]), body };
+}
+
+// What the owner is told about a numbered draft once it is no longer pending,
+// or right after their answer settled it (`note` explains a failure).
+export function approvalStatusText(number, { state, from = null, supersededBy = null, note = null }) {
+  switch (state) {
+    case 'sent': return `#${number} 已${from ? `从 ${from} ` : ''}发出。`;
+    case 'cancelled': return `#${number} 已作废，不会发出。`;
+    case 'expired': return `#${number} 已过期（3 天内有效），没有发出；需要的话让我重新起草。`;
+    case 'superseded': return `#${number} 已被新的草稿 #${supersededBy} 替代；要发出请回复「发送 ${supersededBy}」。`;
+    case 'sending': return `#${number} 正在发送。`;
+    case 'uncertain': return `#${number} 邮件服务器没有确认收到，可能已经发出，不会自动重发。`;
+    default: return `#${number} ${note ?? '没有发出。'}`;
+  }
 }

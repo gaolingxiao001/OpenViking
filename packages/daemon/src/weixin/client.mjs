@@ -57,10 +57,9 @@ export class WeixinClient {
       throw new Error('Weixin is not logged in; run vika login weixin <instance-id> first');
     }
     this.profile = profileId(this.account.accountId);
-    if (this.config.weixinAllowFrom.size === 0 && !this.account.userId) {
-      throw new Error(
-        'Weixin login returned no scanning user id; configure VIKA_WEIXIN_ALLOW_FROM explicitly',
-      );
+    // The bot talks only with the account that scanned the login QR code.
+    if (!this.account.userId) {
+      throw new Error('Weixin login returned no scanning user id; scan the QR code again (vika login weixin)');
     }
     this.state.pruneMedia(Date.now() - this.config.retentionMs);
     return {
@@ -72,7 +71,6 @@ export class WeixinClient {
   }
 
   allowed(peerId) {
-    if (this.config.weixinAllowFrom.size > 0) return this.config.weixinAllowFrom.has(peerId);
     return this.account.userId === peerId;
   }
 
