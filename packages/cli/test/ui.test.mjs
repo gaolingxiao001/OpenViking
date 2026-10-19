@@ -127,7 +127,8 @@ test('a code too big for the window waits for the window to grow, then draws its
   const { output, written } = screen({ columns: 100, rows: 40 });
   const prompter = new Prompter({ input: new PassThrough(), output, env: {} });
   const scan = showScan(prompter, { url, title: '第 1 次扫码', env: {} });
-  assert.match(stripAnsi(written()), /这个二维码要 \d+×\d+ 的终端，现在是 100×40/);
+  assert.match(stripAnsi(written()), /终端二维码需要 \d+×\d+，现在是 100×40/);
+  assert.match(stripAnsi(written()), /二维码图片[\s\S]*scan\.png/);
   assert.doesNotMatch(written(), /█/);
   Object.assign(output, { columns: 200, rows: 120 });
   output.emit('resize');
