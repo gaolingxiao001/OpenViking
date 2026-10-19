@@ -54,7 +54,7 @@ test('OpenViking: a config whose server is down is reported, not offered', async
   fs.writeFileSync(config, JSON.stringify({ url: 'https://down.example' }));
   const detected = await detectOpenViking({ env: { OPENVIKING_CLI_CONFIG_FILE: config }, homeDir: home, fetchImpl: healthServer({}).fetchImpl });
   assert.equal(detected.usable, false);
-  assert.equal(detected.reason, 'unreachable');
+  assert.equal(detected.reason, '连不上');
 });
 
 test('OpenViking: without a config only a dev-mode local server is usable', async (t) => {
@@ -71,7 +71,7 @@ test('OpenViking: without a config only a dev-mode local server is usable', asyn
     [`${LOCAL_OV_URL}/health`]: { status: 'ok', auth_mode: 'trusted' },
   }).fetchImpl });
   assert.equal(trusted.usable, false);
-  assert.match(trusted.reason, /credentials/);
+  assert.match(trusted.reason, /需要凭据/);
   assert.equal(await detectOpenViking({ env: {}, homeDir: home, fetchImpl: healthServer({}).fetchImpl }), null);
 });
 

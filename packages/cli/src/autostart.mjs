@@ -62,6 +62,10 @@ function targets(homeDir, platform) {
     : { file: path.join(homeDir, '.config', 'systemd', 'user', 'vika.service') };
 }
 
+export function autostartEnabled({ homeDir = os.homedir(), platform = process.platform } = {}) {
+  return fs.existsSync(targets(homeDir, platform).file);
+}
+
 export async function autostartCommand([action, ...extra], {
   env = process.env,
   homeDir = os.homedir(),

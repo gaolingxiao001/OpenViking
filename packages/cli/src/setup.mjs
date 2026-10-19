@@ -1,20 +1,27 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { loginWeixin } from '../../daemon/src/weixin/auth.mjs';
 import { WeixinState } from '../../daemon/src/weixin/state.mjs';
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
+import { managedPiBin } from '../../daemon/src/pi-runtime.mjs';
 import { LarkCli } from './lark-cli.mjs';
 import { createApp, inspectApp, missingScopes } from './lark-app.mjs';
 import {
-  allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaHome, withChangedInstance,
-  withInstance, writeManifest,
+  WEB_PORT, allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand, vikaHome,
+  withChangedInstance, withInstance, writeManifest,
 } from './manifest.mjs';
 import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
 import { detectRuntimes, which } from './runtimes.mjs';
-import { showQr } from './qr.mjs';
+import { showScan } from './qr.mjs';
 import { restartCommand, startCommand } from './control.mjs';
+import { autostartCommand, autostartEnabled } from './autostart.mjs';
+import { openingBanner } from './banner.mjs';
+import { box, padEnd, width } from './ui.mjs';
+import { releaseInfo } from './version.mjs';
 import { EmailCancelled, askEmail, emailAccountPath, emailInstanceId, mailboxesOf, writeEmailAccount } from './email.mjs';
+import { GoBack } from './prompt.mjs';
 import { IM_LABELS, PRIMARY_MEANING, connectorsOf, imList } from './instances.mjs';
 
 // `vika setup`: add an instance, or change one. A new instance is asked
@@ -62,7 +69,20 @@ async function chooseTarget(prompter, manifest) {
     ...agents.map((agent) => ({
       label: `修改 ${agent.displayName}（${agent.id}）`, hint: imList(connectorsOf(agent), agent.emailAccounts?.length), value: agent,
     })),
-  ]);
+  ], { back: false });
+}
+
+// Back to the first question, 要做什么: setup starts over from there.
+class StartOver extends Error {}
+
+// ← where a menu has a way out: the menu's answer instead of going back.
+async function orElse(ask, menu, value) {
+  try {
+    return await ask();
+  } catch (error) {
+    if (menu && error instanceof GoBack) return value;
+    throw error;
+  }
 }
 
 // A runtime that is no longer detected stays selectable as it is.
@@ -107,6 +127,7 @@ async function askName({ prompter, current }, state) {
   state.displayName = await prompter.text(hasLark
     ? '机器人名字（已经建好的飞书应用名不会跟着改）'
     : '机器人名字（也是飞书应用名，@它时用这个名字）', {
+    label: '机器人名字',
     initial: state.displayName,
     validate: (value) => (value.length > 40 ? '最多 40 个字符' : null),
   });
@@ -114,6 +135,7 @@ async function askName({ prompter, current }, state) {
 
 async function askWorkspace({ prompter, env, homeDir }, state) {
   state.workspace = path.resolve(expandHome(await prompter.text('工作目录（agent 在这里读写文件）', {
+    label: '工作目录',
     initial: shortenHome(state.workspace, homeDir),
     validate: (value) => {
       const resolved = path.resolve(expandHome(value, homeDir));
@@ -132,10 +154,10 @@ async function askRuntime({ prompter, runtimes, kept }, state) {
 }
 
 // A primary IM that was dropped moves to what is left, Feishu first.
-function keepChannel({ out }, state) {
+function keepChannel({ prompter }, state) {
   if (ims(state).includes(state.channel)) return;
   const next = ims(state).includes('lark') ? 'lark' : ims(state)[0];
-  out(`  主渠道原来是${IM_LABELS[state.channel]}，它不再接入，改成${IM_LABELS[next]}。\n`);
+  prompter.info(`主渠道原来是${IM_LABELS[state.channel]}，它不再接入，改成${IM_LABELS[next]}。`);
   state.channel = next;
 }
 
@@ -152,7 +174,7 @@ async function addMailbox({ prompter, env, connect, menu }, state) {
   try {
     account = await connect.email({ prompter, taken: mailboxList(state).map(addressOf) });
   } catch (error) {
-    if (menu && error instanceof EmailCancelled) return false;
+    if (menu && (error instanceof EmailCancelled || error instanceof GoBack)) return false;
     throw error;
   }
   const id = emailInstanceId(account.address, mailboxList(state).map((mailbox) => mailbox.id));
@@ -163,7 +185,7 @@ async function addMailbox({ prompter, env, connect, menu }, state) {
 async function addMailboxes(ctx, state) {
   do {
     if (!await addMailbox(ctx, state)) break;
-  } while (await ctx.prompter.confirm('再接一个邮箱？', false));
+  } while (await orElse(() => ctx.prompter.confirm('再接一个邮箱？', false), ctx.menu, false));
   const has = mailboxList(state).length > 0;
   state.connectors = state.connectors.filter((connector) => connector !== 'email').concat(has ? ['email'] : []);
 }
@@ -174,7 +196,7 @@ async function askIms(ctx, state) {
     connectors = await ctx.prompter.multiselect('接入哪些 IM', IM_CHOICES,
       { initial: IM_CHOICES.map(({ value }, index) => (state.connectors.includes(value) ? index : -1)).filter((index) => index >= 0) });
     if (connectors.some((connector) => connector !== 'email')) break;
-    ctx.out('  邮箱不能单独接：新邮件提醒和回信确认要发到飞书或微信，再选一个。\n');
+    ctx.prompter.warn('邮箱不能单独接：新邮件提醒和回信确认要发到飞书或微信，再选一个。');
   }
   const hadEmail = state.connectors.includes('email');
   state.connectors = connectors;
@@ -185,20 +207,21 @@ async function askIms(ctx, state) {
 }
 
 // The primary IM is its own question: Feishu unless it is left out.
-async function askChannel({ prompter, out, menu }, state) {
+async function askChannel({ prompter, menu }, state) {
   const choices = ims(state);
   if (choices.length > 1) {
     const preferred = [state.channel, 'lark'].find((im) => choices.includes(im)) ?? choices[0];
-    state.channel = await prompter.select(`主渠道：${PRIMARY_MEANING}`,
-      choices.map((connector) => ({ label: IM_LABELS[connector], value: connector })), { initial: choices.indexOf(preferred) });
+    prompter.info(`主渠道：${PRIMARY_MEANING}。`);
+    state.channel = await prompter.select('主渠道选哪个',
+      choices.map((connector) => ({ label: IM_LABELS[connector], value: connector })), { initial: choices.indexOf(preferred), label: '主渠道' });
     return;
   }
   state.channel = choices[0];
-  out(`  主渠道是${IM_LABELS[state.channel]}：${PRIMARY_MEANING}。${menu ? '只接了一个 IM 时只能是它，要换先在「接入的 IM」里多接一个。' : ''}\n`);
+  prompter.info(`主渠道是${IM_LABELS[state.channel]}：${PRIMARY_MEANING}。${menu ? '只接了一个 IM 时只能是它，要换先在「接入的 IM」里多接一个。' : ''}`);
 }
 
 // 'keep' leaves the instance's OpenViking config as it is.
-async function askOv({ prompter, out, ov, current }, state) {
+async function askOv({ prompter, ov, current }, state) {
   if (current?.ovConfig) {
     state.useOv = await prompter.select('OpenViking（跨会话记忆）', [
       { label: '继续使用', value: 'keep' },
@@ -210,9 +233,9 @@ async function askOv({ prompter, out, ov, current }, state) {
       { label: current ? '不用' : '跳过', value: false },
     ], { initial: !current || state.useOv ? 0 : 1 });
   } else if (ov) {
-    out(`  检测到 OpenViking（${ov.url}），但现在用不了：${ov.reason}。先跳过，以后可以重新运行 setup。\n`);
+    prompter.info(`OpenViking（${ov.url}）现在用不了：${ov.reason}。先跳过，之后可以重新运行 setup。`);
   } else {
-    out('  没有检测到 OpenViking，跳过。以后装好 OV 后可以重新运行 setup。\n');
+    prompter.info('没有检测到 OpenViking（跨会话记忆），跳过。以后装好 OV 后可以重新运行 setup。');
   }
 }
 
@@ -224,12 +247,12 @@ async function askMailboxes(ctx, state) {
   }
   for (;;) {
     const kept = state.mail.kept;
-    const choice = await ctx.prompter.select(`邮箱（已接入：${mailboxList(state).map(addressOf).join('、')}）`, [
+    const choice = await orElse(() => ctx.prompter.select(`邮箱（已接入：${mailboxList(state).map(addressOf).join('、')}）`, [
       { label: '不改了', value: { kind: 'done' } },
       { label: '再接一个邮箱', value: { kind: 'add' } },
       ...kept.map((mailbox) => ({ label: `更新 ${addressOf(mailbox)} 的密码`, value: { kind: 'update', mailbox } })),
       ...mailboxList(state).map((mailbox) => ({ label: `移除 ${addressOf(mailbox)}`, value: { kind: 'remove', mailbox } })),
-    ]);
+    ], { label: '邮箱' }), ctx.menu, { kind: 'done' });
     if (choice.kind === 'done') break;
     if (choice.kind === 'add') await addMailbox(ctx, state);
     if (choice.kind === 'update') {
@@ -238,7 +261,7 @@ async function askMailboxes(ctx, state) {
           taken: mailboxList(state).filter((mailbox) => mailbox !== choice.mailbox).map(addressOf) });
         state.mail.updated.set(choice.mailbox.id, { config: choice.mailbox.config, account });
       } catch (error) {
-        if (!(error instanceof EmailCancelled)) throw error;
+        if (!(error instanceof EmailCancelled || error instanceof GoBack)) throw error;
       }
     }
     if (choice.kind === 'remove') {
@@ -275,21 +298,37 @@ function padded(label, width = 13) {
 
 // Changing an instance: every setting with its value; the owner opens the
 // ones to change, then saves. Resolves with the state to save, or null.
-async function editInstance(ctx, state, { describe, check }) {
+// The list stays in one place: before it is drawn again, the screen goes
+// back to where it first was, so what a setting asked or said is gone and
+// its new value shows in the list instead. `page` keeps that place, and the
+// cursor, when the list is come back to from a code waiting to be scanned.
+async function editInstance(ctx, state, { describe, check, before, page }) {
   const { prompter, out, current } = ctx;
-  const before = Object.fromEntries(SETTINGS.map(({ key, shown }) => [key, shown(state, ctx)]));
-  let cursor = 0;
+  page.mark ??= prompter.mark();
+  let notice = null;
   for (;;) {
+    prompter.rewind(page.mark);
+    if (notice) prompter.warn(notice);
+    notice = null;
     const changes = describe(state);
     const changed = (key, value) => value !== before[key] || (key === 'mailboxes' && changes.some((line) => line.includes('邮箱')));
-    const choice = await prompter.select(`修改 ${current.displayName}（${current.id}）：选一项回车修改，改好后选「保存」`, [
-      ...SETTINGS.map(({ key, label, shown }, index) => {
-        const value = shown(state, ctx);
-        return { label: padded(label), hint: `${value}${changed(key, value) ? '（已改）' : ''}`, value: index };
-      }),
-      { label: changes.length ? `保存（${changes.length} 项改动）` : '保存', value: 'save' },
-      { label: '放弃修改', value: 'quit' },
-    ], { initial: cursor });
+    let choice;
+    try {
+      choice = await prompter.select(`修改 ${current.displayName}（${current.id}）：选一项回车修改，改好后选「保存」`, [
+        ...SETTINGS.map(({ key, label, shown }, index) => {
+          const value = shown(state, ctx);
+          return { label: padded(label), hint: `${value}${changed(key, value) ? '（已改）' : ''}`, value: index };
+        }),
+        { label: changes.length ? `保存（${changes.length} 项改动）` : '保存', value: 'save' },
+        { label: '放弃修改', value: 'quit' },
+      ], { initial: page.cursor ?? 0, label: `修改 ${current.displayName}` });
+    } catch (error) {
+      if (!(error instanceof GoBack)) throw error;
+      // Back to 要做什么, unless that would drop changes nobody saved.
+      if (changes.length === 0) throw new StartOver();
+      notice = `有 ${changes.length} 项改动还没保存：选「保存」，或者「放弃修改」`;
+      continue;
+    }
     if (choice === 'quit') {
       out('\n已放弃，没有保存任何改动。\n');
       return null;
@@ -301,12 +340,67 @@ async function editInstance(ctx, state, { describe, check }) {
       }
       const problem = check(state);
       if (!problem) return state;
-      out(`  这样改不行：${problem}\n`);
+      notice = `这样改不行：${problem}`;
       continue;
     }
-    cursor = choice;
-    await SETTINGS[choice].ask(ctx, state);
+    page.cursor = choice;
+    // ← inside a setting leaves it as it was and comes back to the list.
+    try {
+      await SETTINGS[choice].ask(ctx, state);
+    } catch (error) {
+      if (!(error instanceof GoBack)) throw error;
+    }
   }
+}
+
+// A new instance is asked step by step, in sections. ← goes back to the
+// step that asked before (steps that only said something are passed over),
+// and from the first question back to 要做什么 when there is one. A step
+// returns DECLINED to stop the setup.
+const DECLINED = Symbol('declined');
+
+// `run` remembers the way through: the steps answered, and where on screen
+// each began, so ← takes the screen back to how it was when that step was
+// reached. From the scans, setup comes back in at the last step.
+async function wizard(ctx, state, steps, run) {
+  const { prompter } = ctx;
+  run.answered ??= [];
+  run.marks ??= [];
+  const sectionOf = (index) => steps.slice(0, index + 1).reverse().find((candidate) => candidate.section)?.section ?? null;
+  let index = run.at ?? 0;
+  let shown = index > 0 ? sectionOf(index - 1) : null;
+  const back = (to) => {
+    prompter.rewind(run.marks[to]);
+    shown = to > 0 ? sectionOf(to - 1) : null;
+    index = to;
+  };
+  while (index < steps.length) {
+    run.marks[index] = prompter.mark();
+    const section = sectionOf(index);
+    if (section && section !== shown) {
+      prompter.section(section.title, section);
+      shown = section;
+    }
+    const asked = prompter.asked;
+    try {
+      if (await steps[index].ask(ctx, state) === DECLINED) return DECLINED;
+      if (prompter.asked !== asked) run.answered.push(index);
+      index += 1;
+    } catch (error) {
+      if (!(error instanceof GoBack)) throw error;
+      if (run.answered.length) back(run.answered.pop());
+      else if (ctx.startOver) throw new StartOver();
+      else back(index);
+    }
+  }
+  return null;
+}
+
+// Back in at the last step (the confirmation), as it was before it was answered.
+function returnToLast(prompter, steps, run) {
+  run.answered.pop();
+  run.at = steps.length - 1;
+  prompter.rewind(run.marks[run.at], { whole: true });
 }
 
 // If the confirmation never arrives, the app may still exist: its App ID and
@@ -319,17 +413,15 @@ async function manualApp(prompter) {
   return { appId, appSecret, brand, ownerOpenId: null };
 }
 
-export async function registerApp({ plan, prompter, scopes, debug, register = null }) {
-  const out = (text) => prompter.write(text);
+// canGoBack: ← while the code waits stops the registration (nothing is made
+// before the scan is confirmed) and rejects with GoBack.
+export async function registerApp({ plan, prompter, scopes, debug, register = null, canGoBack = false }) {
   const controller = new AbortController();
-  let waiting = null;
-  let last = '等待扫码';
-  const started = Date.now();
-  const manual = prompter.watchKey('m');
-  const tick = () => {
-    const seconds = Math.floor((Date.now() - started) / 1000);
-    out(`\r\x1b[2K  ${last} ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}（迟迟没有进展可以按 m 手动填写 App ID 和 Secret）`);
-  };
+  let scan = null;
+  let wantManual;
+  const manual = new Promise((resolve) => { wantManual = resolve; });
+  let wantBack;
+  const back = new Promise((resolve) => { wantBack = resolve; });
   const created = createApp({
     name: plan.displayName,
     description: 'Vika：把本机的 coding agent 接进飞书',
@@ -337,65 +429,143 @@ export async function registerApp({ plan, prompter, scopes, debug, register = nu
     signal: controller.signal,
     ...(register ? { register } : {}),
     onQRCode: ({ url, expiresIn }) => {
-      showQr(prompter.output, url, `第 1 次扫码：用飞书 App 扫码创建机器人应用（${Math.round(expiresIn / 60)} 分钟内有效）`);
-      if (prompter.tty) waiting = setInterval(tick, 1000);
+      scan?.stop();
+      scan = showScan(prompter, {
+        url,
+        where: '飞书',
+        title: `第 1 次扫码：用飞书 App 扫码，创建机器人应用（${Math.round(expiresIn / 60)} 分钟内有效）`,
+        stopKey: 'm',
+        stopLabel: '手动填 App ID',
+        onBack: canGoBack ? () => wantBack() : null,
+      });
+      scan.pressed.then((pressed) => { if (pressed) wantManual(); });
     },
     onStatus: (status) => {
-      if (debug) out(`\n  [registration] ${status}\n`);
-      if (status === 'domain_switched') out('\n  识别到国际版 Lark 租户\n');
-      last = status === 'slow_down' ? '平台要求放慢轮询' : status === 'polling' ? '等待扫码确认' : last;
+      if (debug) scan?.say(`[registration] ${status}`);
+      if (status === 'domain_switched') scan?.say('识别到国际版 Lark 租户');
+      if (status === 'polling') scan?.status('等待扫码确认');
+      if (status === 'slow_down') scan?.status('平台要求放慢轮询，继续等待');
     },
   });
   try {
-    const winner = await Promise.race([created.then((app) => ({ app })), manual.pressed.then((pressed) => ({ manual: pressed }))]);
-    if (winner?.app) return winner.app;
+    const winner = await Promise.race([
+      created.then((app) => ({ app })), manual.then(() => ({ manual: true })), back.then(() => ({ back: true })),
+    ]);
+    if (winner.app) return winner.app;
     controller.abort();
     created.catch(() => {});
-    if (waiting) { clearInterval(waiting); waiting = null; out('\n'); }
+    scan?.stop();
+    scan = null;
+    if (winner.back) throw new GoBack();
     return await manualApp(prompter);
   } finally {
-    if (waiting) { clearInterval(waiting); out('\n'); }
-    manual.stop();
+    scan?.stop();
   }
 }
 
-export async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug = false }) {
-  const out = (text) => prompter.write(text);
+// A step with a spinner: it ends in a tick, or a cross and the error.
+async function step(prompter, text, run, done = text) {
+  const spinning = prompter.spin(text);
+  try {
+    const result = await run();
+    spinning.succeed(typeof done === 'function' ? done(result) : done);
+    return result;
+  } catch (error) {
+    spinning.fail(text);
+    throw error;
+  }
+}
+
+export async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug = false, canGoBack = false }) {
   const scopes = larkScopes();
-  out('\n── 飞书 ──\n');
-  const app = await registerApp({ plan, prompter, scopes, debug });
-  out(`  已创建应用 ${app.appId}\n`);
-  const inspected = await inspectApp(app, { fetchImpl });
+  prompter.section('飞书');
+  // Only the first code can be gone back from: once it is confirmed the app exists.
+  const app = await registerApp({ plan, prompter, scopes, debug, canGoBack });
+  prompter.success(`已创建应用 ${app.appId}`);
+  const inspected = await step(prompter, '核对应用的权限和版本', () => inspectApp(app, { fetchImpl }), '应用信息已读取');
   const missing = missingScopes(scopes, inspected.granted);
-  if (!inspected.online) out('  ⚠ 应用还没有上线版本，可能在等管理员审核；审核通过后机器人才能收消息。\n');
+  if (!inspected.online) prompter.warn('应用还没有上线版本，可能在等管理员审核；审核通过后机器人才能收消息，不用重新 setup。');
   if (missing.tenant.length || missing.user.length) {
-    out(`  ⚠ 有 ${missing.tenant.length + missing.user.length} 个权限没开通，相关功能会不可用：${[...missing.tenant, ...missing.user].slice(0, 8).join('、')}${missing.tenant.length + missing.user.length > 8 ? ' 等' : ''}\n`);
+    prompter.warn(`有 ${missing.tenant.length + missing.user.length} 个权限没开通，相关功能会不可用：${[...missing.tenant, ...missing.user].slice(0, 8).join('、')}${missing.tenant.length + missing.user.length > 8 ? ' 等' : ''}`);
   } else {
-    out(`  权限核对通过：${scopes.tenant.length} 个机器人权限、${scopes.user.length} 个用户权限\n`);
+    prompter.success(`权限核对通过：${scopes.tenant.length} 个机器人权限、${scopes.user.length} 个用户权限`);
   }
   await larkCli.configureProfile({ profile, ...app });
   const login = await larkCli.beginUserLogin({ profile, scopes: scopes.user });
-  showQr(prompter.output, login.url, '第 2 次扫码：授权 Vika 以你的身份读消息（用于搜索和读历史）');
-  await larkCli.finishUserLogin({ profile, deviceCode: login.deviceCode });
+  const scan = showScan(prompter, {
+    url: login.url, where: '飞书', title: '第 2 次扫码：授权 Vika 以你的身份读消息（用于搜索和读历史）', label: '等待授权',
+  });
+  try {
+    await larkCli.finishUserLogin({ profile, deviceCode: login.deviceCode });
+  } finally {
+    scan.stop();
+  }
   const ownerOpenId = await larkCli.userOpenId({ profile });
   if (!ownerOpenId) throw new Error('lark-cli authorization finished without a user identity');
   if (app.ownerOpenId && ownerOpenId !== app.ownerOpenId) {
-    out('  ⚠ 两次扫码的不是同一个飞书账号；机器人会把第 2 次扫码的人当作主人。\n');
+    prompter.warn('两次扫码的不是同一个飞书账号；机器人会把第 2 次扫码的人当作主人。');
   }
-  out('  飞书已接好\n');
+  prompter.success('飞书已接好');
   return { profile, ownerOpenId };
 }
 
-export async function connectWeixin({ plan, prompter }) {
-  prompter.write('\n── 微信 ──\n');
+// canGoBack: ← while the code waits stops the login before anything is bound
+// and rejects with GoBack.
+export async function connectWeixin({ plan, prompter, canGoBack = false }) {
+  prompter.section('微信');
   fs.mkdirSync(plan.dataDir, { recursive: true, mode: 0o700 });
   const state = new WeixinState(plan.dataDir);
+  const controller = new AbortController();
+  let wantBack;
+  const back = new Promise((resolve) => { wantBack = resolve; });
+  let scan = null;
+  const login = loginWeixin({
+    state,
+    signal: controller.signal,
+    showQr: (value, { refreshed }) => {
+      scan?.stop();
+      scan = showScan(prompter, {
+        url: value,
+        where: '微信',
+        title: refreshed ? '二维码过期了，换了一张：用手机微信扫码' : '用手机微信扫码，并在手机上确认',
+        onBack: canGoBack ? () => wantBack() : null,
+      });
+    },
+    say: (text) => {
+      if (!scan) { prompter.info(text); return; }
+      scan.say(text);
+      if (/已扫码/.test(text)) scan.status('等待在手机上确认');
+    },
+    readVerifyCode: (question) => {
+      scan?.stop();
+      scan = null;
+      return prompter.text(question.replace(/：$/, ''));
+    },
+  });
   try {
-    await loginWeixin({ state, readVerifyCode: (question) => prompter.text(question.replace(/：$/, '')) });
+    if (await Promise.race([login.then(() => false), back.then(() => true)])) {
+      // Let the login see it is stopped before its state closes.
+      controller.abort();
+      await login.catch(() => {});
+      throw new GoBack();
+    }
   } finally {
+    scan?.stop();
     state.close();
   }
-  prompter.write('  微信已接好\n');
+  prompter.success('微信已接好');
+}
+
+// No runtime can run yet: the built-in Pi logs in to a model right here,
+// in Pi's own screen, and setup carries on when it quits.
+export async function loginPi({ prompter, env }) {
+  prompter.info('打开内置的 Pi：输入 /login 选模型提供方并登录，完成后输入 /quit 回到这里。');
+  prompter.input.pause?.();
+  await new Promise((resolve) => {
+    const child = spawn(process.execPath, [managedPiBin()], { stdio: 'inherit', env });
+    child.once('exit', resolve);
+    child.once('error', resolve);
+  });
 }
 
 export function greet({ larkCliBin, profile, userId, text }) {
@@ -416,43 +586,129 @@ function greeting({ name, newInstance, primary }) {
   return primary ? `${hello}以后我主动找你的消息（比如新邮件提醒、待你确认的邮件回复）会发到这里。` : hello;
 }
 
-export async function setupCommand({
+// What the machine offers, in one line, once the check is done.
+function foundLine(runtimes, ov) {
+  const ready = runtimes.filter((runtime) => runtime.available).map((runtime) => runtime.label);
+  const memory = ov?.usable ? 'OpenViking 可用' : ov ? 'OpenViking 暂不可用' : '没有 OpenViking';
+  return ready.length ? `找到 ${ready.join('、')} · ${memory}` : `还没有能用的 agent · ${memory}`;
+}
+
+// Until some runtime can run: say why each cannot, and offer to log the
+// built-in Pi in to a model here. Resolves with the runtimes, or null to stop.
+async function ensureRuntime({ prompter, env, detect, connect, live }, runtimes) {
+  let detected = runtimes;
+  while (!detected.some((runtime) => runtime.available)) {
+    prompter.warn('没有可用的 agent 运行时：');
+    const labelWidth = Math.max(...detected.map((runtime) => width(runtime.label)));
+    for (const runtime of detected) prompter.write(`      ${padEnd(runtime.label, labelWidth)}  ${runtime.note}\n`);
+    const later = `登录好其中一个后，重新运行 ${vikaCommand(env)} setup。`;
+    if (!prompter.tty || !connect.pi) {
+      prompter.info(later);
+      return null;
+    }
+    const next = await prompter.select('现在怎么办', [
+      { label: '用内置的 Pi，现在登录一个模型', value: 'pi', hint: '在 Pi 里输入 /login，登录后 /quit 回到这里' },
+      { label: '先退出，我去登录 Codex 或 Claude Code', value: 'quit' },
+    ], { back: false });
+    if (next === 'quit') {
+      prompter.info(later);
+      return null;
+    }
+    // Pi takes the whole screen while it runs.
+    live?.release();
+    await connect.pi({ prompter, env });
+    live?.resume();
+    prompter.redraw();
+    detected = await step(prompter, '再看一次有哪些 agent', () => detect.runtimes({ env }),
+      (found) => (found.some((runtime) => runtime.available) ? `找到 ${found.filter((runtime) => runtime.available).map((runtime) => runtime.label).join('、')}` : '还是没有能用的 agent'));
+  }
+  return detected;
+}
+
+// Label/value rows: a box on a colour terminal, indented lines otherwise.
+function table(prompter, title, rows) {
+  const keyWidth = Math.max(...rows.map(([key]) => width(key)));
+  if (prompter.fancy) {
+    const lines = rows.map(([key, value]) => `${prompter.s.gray(padEnd(key, keyWidth))}  ${key ? value : prompter.s.gray(value)}`);
+    prompter.write(`\n${box(lines, { output: prompter.output, env: prompter.env, title })}\n`);
+    return;
+  }
+  prompter.write(`\n${title}：\n${rows.map(([key, value]) => `  ${padEnd(key, keyWidth)}  ${value}`).join('\n')}\n`);
+}
+
+const SCANS = { lark: 2, weixin: 1 };
+
+// The boat sails above the whole setup on a colour terminal; whatever ends
+// the setup, the terminal gets its whole screen back.
+export async function setupCommand(options = {}) {
+  const { prompter, env = process.env, banner = openingBanner } = options;
+  const live = prompter.fancy ? await banner({ output: prompter.output, input: prompter.input, env, version: releaseInfo().version }) : null;
+  // What the first pass learned (the detected agents), kept when ← goes all
+  // the way back to 要做什么 and setup starts over.
+  const memo = {};
+  prompter.pageTop = () => live?.top() ?? null;
+  try {
+    for (;;) {
+      try {
+        return await setupFlow({ ...options, live, memo });
+      } catch (error) {
+        if (!(error instanceof StartOver)) throw error;
+      }
+    }
+  } finally {
+    prompter.navigable = false;
+    prompter.pageTop = null;
+    live?.release();
+  }
+}
+
+async function setupFlow({
   prompter,
   env = process.env,
   homeDir = os.homedir(),
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
-  connect = { lark: connectLark, weixin: connectWeixin, email: askEmail, greet },
-  control = { start: startCommand, restart: restartCommand },
+  connect = { lark: connectLark, weixin: connectWeixin, email: askEmail, greet, pi: loginPi },
+  control = { start: startCommand, restart: restartCommand, autostart: autostartCommand },
   allocate = allocatePort,
-} = {}) {
+  live = null,
+  memo = {},
+}) {
   const out = (text) => prompter.write(text);
-  out('Vika setup：添加或修改这台机器上的 agent 实例。\n\n');
+  const vika = vikaCommand(env);
+  if (!memo.detected) {
+    if (!prompter.fancy) out('Vika setup：添加或修改这台机器上的 agent 实例。\n\n');
+    memo.detected = await step(prompter, '看看这台机器上有哪些 agent', () => Promise.all([
+      detect.runtimes({ env }),
+      detect.openViking({ env, homeDir, fetchImpl }),
+    ]), ([found, memory]) => foundLine(found, memory));
+    if (prompter.tty) prompter.info('随时可以按 ← 回到上一步，→ 沿用当前的值往下走。');
+    memo.mark = prompter.mark();
+  } else {
+    prompter.rewind(memo.mark);
+  }
+  let [runtimes] = memo.detected;
+  const [, ov] = memo.detected;
   const { path: configPath, value: manifest } = readManifest(env);
-  const [runtimes, ov] = await Promise.all([
-    detect.runtimes({ env }),
-    detect.openViking({ env, homeDir, fetchImpl }),
-  ]);
+  // ← and → move between the questions, until the scans begin.
+  prompter.navigable = prompter.tty;
   const current = await chooseTarget(prompter, manifest);
-  if (!current && !runtimes.some((runtime) => runtime.available)) {
-    out('没有可用的 agent 运行时：\n');
-    for (const runtime of runtimes) out(`  ${runtime.label}：${runtime.note}\n`);
-    return 1;
+  if (!current) {
+    runtimes = await ensureRuntime({ prompter, env, detect, connect, live }, runtimes);
+    if (!runtimes) return 1;
+    memo.detected = [runtimes, ov];
   }
   const kept = keptRuntime(current, runtimes);
-  const ctx = { prompter, out, env, homeDir, runtimes, ov, current, connect, kept, menu: Boolean(current) };
-  const id = current?.id ?? await prompter.text('实例名称', {
-    initial: suggestInstanceId(manifest),
-    validate: (value) => instanceIdProblem(value, manifest),
-  });
-  const state = initialState({ id, env, homeDir, current, runtimes, kept });
+  const others = manifest?.agents?.length > 0;
+  const ctx = { prompter, out, env, homeDir, runtimes, ov, current, connect, kept, menu: Boolean(current), startOver: others };
+  const state = initialState({ id: current?.id ?? suggestInstanceId(manifest), env, homeDir, current, runtimes, kept });
   const port = current ? current.port : await allocate(manifest);
 
   // The instance as the manifest will hold it.
   const build = (emailAccounts = mailPlan(state).list) => {
     const agent = {
       ...(current ?? {}),
-      id,
+      id: state.id,
       displayName: state.displayName,
       channel: state.channel,
       connectors: state.connectors,
@@ -460,10 +716,10 @@ export async function setupCommand({
       workspace: state.workspace,
       model: state.runtime.model,
     };
-    if (state.connectors.includes('lark')) agent.profile = current?.profile ?? `vika-${id}`;
+    if (state.connectors.includes('lark')) agent.profile = current?.profile ?? `vika-${state.id}`;
     else delete agent.profile;
     const ovConfig = state.useOv === 'keep' ? current.ovConfig
-      : state.useOv ? path.join(vikaHome(env), 'ov', `${id}.json`) : null;
+      : state.useOv ? path.join(vikaHome(env), 'ov', `${state.id}.json`) : null;
     if (ovConfig) agent.ovConfig = ovConfig;
     else delete agent.ovConfig;
     if (emailAccounts.length) agent.emailAccounts = emailAccounts;
@@ -479,42 +735,103 @@ export async function setupCommand({
     try { validateManifest(configPath, manifestWith(agent)); return null; } catch (error) { return error.message; }
   };
 
-  if (current) {
-    const describe = () => describeChanges(current, build(), mailPlan(state), homeDir);
-    if (!await editInstance(ctx, state, { describe, check: () => problem(build()) })) return 0;
-    out(`\n将修改 ${current.displayName}（${current.id}）：\n${describe().map((change) => `  ${change}\n`).join('')}`);
-  } else {
-    for (const ask of [askName, askWorkspace, askRuntime, askIms, askChannel, askOv]) await ask(ctx, state);
-    // A stand-in mailbox until they are known; their names come from the addresses.
+  // The first instance is simply `primary`; a second one needs a name, and
+  // its directories follow the name until the workspace is changed.
+  const askId = async () => {
+    if (!others) return;
+    const before = state.id;
+    state.id = await prompter.text('实例名称（用在命令和目录里）', {
+      label: '实例名称', initial: state.id, validate: (value) => instanceIdProblem(value, manifest),
+    });
+    state.dataDir = path.join(vikaHome(env), 'data', state.id);
+    if (state.workspace === path.join(homeDir, 'vika-workspace', before)) state.workspace = path.join(homeDir, 'vika-workspace', state.id);
+  };
+  // The mailboxes once the rest is known: checked first with a stand-in,
+  // since their names come from the addresses.
+  const askMail = async () => {
     const wantsEmail = state.connectors.includes('email');
-    const early = problem(build(wantsEmail ? [{ id: 'email-check', config: emailAccountPath(env, id, 'check') }] : []));
+    const early = problem(build(wantsEmail ? [{ id: 'email-check', config: emailAccountPath(env, state.id, 'check') }] : []));
     if (early) throw new Error(early);
-    if (wantsEmail) await addMailboxes(ctx, state);
+    if (wantsEmail) await askMailboxes(ctx, state);
     const late = problem(build());
     if (late) throw new Error(late);
+  };
+  const confirmNew = async () => {
     const addresses = mailPlan(state).added;
-    out(`\n将添加实例 ${id}：${state.runtime.label}，${imList(state.connectors)}${addresses.length ? `（${addresses.join('、')}）` : ''}`
-      + `，主渠道${IM_LABELS[state.channel]}，${state.useOv ? '使用' : '不使用'} OpenViking\n`
-      + `  工作目录 ${state.workspace}\n  数据目录 ${state.dataDir}\n`);
-  }
-  const before = current ? connectorsOf(current) : [];
-  const newIms = ims(state).filter((im) => !before.includes(im));
-  if (!current && !await prompter.confirm(newIms.length ? '开始扫码？' : '保存并启动？')) return 1;
+    table(prompter, `将添加实例 ${state.id}`, [
+      ['机器人', `${state.displayName} · ${state.runtime.label}`],
+      ['消息渠道', ims(state).length > 1 ? `${imList(ims(state))}，主渠道：${IM_LABELS[state.channel]}` : imList(ims(state))],
+      ...(addresses.length ? [['邮箱', addresses.join('、')]] : []),
+      ['记忆', state.useOv ? 'OpenViking' : '不使用 OpenViking'],
+      ['工作目录', shortenHome(state.workspace, homeDir)],
+      ['数据目录', shortenHome(state.dataDir, homeDir)],
+    ]);
+    if (ims(state).length) prompter.info(`接下来扫码：${ims(state).map((im) => `${IM_LABELS[im]} ${SCANS[im]} 次`).join('，')}；扫完才保存配置`);
+    if (await prompter.confirm(ims(state).length ? '开始扫码？' : '保存并启动？')) return null;
+    prompter.info(`什么都没保存；准备好了再运行 ${vika} setup。`);
+    return DECLINED;
+  };
 
-  // The release's own lark-cli, unless the manifest or environment pins another.
-  const larkCliBin = state.connectors.includes('lark')
-    ? (env.LARK_CLI_BIN || manifest?.env?.LARK_CLI_BIN || resolveLarkCli(env))
-    : null;
-  if (newIms.includes('lark') && !larkCliBin) {
-    out('\n找不到 lark-cli：这个安装不完整，重新运行安装脚本。\n');
-    return 1;
+  const steps = current ? [] : [
+    { section: { title: '机器人', step: 1, total: 3 }, ask: askId }, { ask: askName }, { ask: askWorkspace }, { ask: askRuntime },
+    { section: { title: '消息渠道和记忆', step: 2, total: 3 }, ask: askIms }, { ask: askChannel }, { ask: askOv }, { ask: askMail },
+    { section: { title: '确认', step: 3, total: 3 }, ask: confirmNew },
+  ];
+  const run = {};
+  const page = {};
+  const original = current ? Object.fromEntries(SETTINGS.map(({ key, shown }) => [key, shown(state, ctx)])) : null;
+  let newIms;
+  let larkCliBin;
+  let agent;
+  let plan;
+  let lark = null;
+  // The questions, then the codes to scan. ← while a code waits to be
+  // scanned comes back to the questions, as nothing exists yet; once a scan
+  // is confirmed (a Feishu app made, a Weixin account bound) it cannot.
+  for (;;) {
+    prompter.navigable = prompter.tty;
+    if (current) {
+      const describe = () => describeChanges(current, build(), mailPlan(state), homeDir);
+      if (!await editInstance(ctx, state, { describe, check: () => problem(build()), before: original, page })) return 0;
+      out(`\n将修改 ${current.displayName}（${current.id}）：\n${describe().map((change) => `  ${change}\n`).join('')}`);
+      const added = ims(state).filter((im) => !connectorsOf(current).includes(im));
+      if (added.length) prompter.info(`接下来扫码：${added.map((im) => `${IM_LABELS[im]} ${SCANS[im]} 次`).join('，')}`);
+    } else if (await wizard(ctx, state, steps, run) === DECLINED) {
+      return 1;
+    }
+    prompter.navigable = false;
+    const before = current ? connectorsOf(current) : [];
+    newIms = ims(state).filter((im) => !before.includes(im));
+
+    // The release's own lark-cli, unless the manifest or environment pins another.
+    larkCliBin = state.connectors.includes('lark')
+      ? (env.LARK_CLI_BIN || manifest?.env?.LARK_CLI_BIN || resolveLarkCli(env))
+      : null;
+    if (newIms.includes('lark') && !larkCliBin) {
+      out('\n找不到 lark-cli：这个安装不完整，重新运行安装脚本。\n');
+      return 1;
+    }
+    agent = build();
+    plan = { id: state.id, displayName: state.displayName, dataDir: state.dataDir };
+    // A code to scan needs the whole screen; the boat comes back afterwards.
+    if (newIms.length) live?.release();
+    try {
+      lark = newIms.includes('lark')
+        ? await connect.lark({
+          plan, prompter, larkCli: new LarkCli(larkCliBin), fetchImpl, profile: agent.profile, debug: Boolean(env.VIKA_DEBUG), canGoBack: prompter.tty,
+        })
+        : null;
+      if (newIms.includes('weixin')) await connect.weixin({ plan, prompter, canGoBack: prompter.tty && !lark });
+      break;
+    } catch (error) {
+      if (!(error instanceof GoBack)) throw error;
+      live?.resume();
+      if (current) prompter.rewind(page.mark, { whole: true });
+      else returnToLast(prompter, steps, run);
+    }
   }
-  const agent = build();
-  const plan = { id, displayName: state.displayName, dataDir: state.dataDir };
-  const lark = newIms.includes('lark')
-    ? await connect.lark({ plan, prompter, larkCli: new LarkCli(larkCliBin), fetchImpl, profile: agent.profile, debug: Boolean(env.VIKA_DEBUG) })
-    : null;
-  if (newIms.includes('weixin')) await connect.weixin({ plan, prompter });
+  live?.resume();
+  const id = state.id;
   if (state.useOv === true) writeInstanceOvConfig({ detected: ov, instanceId: id, target: agent.ovConfig });
   const mail = mailPlan(state);
   for (const { config, account } of mail.write) writeEmailAccount(config, account);
@@ -522,31 +839,77 @@ export async function setupCommand({
   fs.mkdirSync(state.workspace, { recursive: true, mode: 0o700 });
   writeManifest(configPath, manifestWith(agent));
   for (const mailbox of mail.removed) fs.rmSync(mailbox.config, { force: true });
-  out(`\n已写入 ${configPath}\n`);
 
+  prompter.section(current ? '重启' : '启动');
+  prompter.success(`配置已写入 ${shortenHome(configPath, homeDir)}`);
+  // pm2's own progress lines stay out of the way; the spinners say it.
+  const quiet = { write() {} };
+  const verb = current ? '重启' : '启动';
   try {
-    await (current ? control.restart : control.start)(id, { env });
+    await step(prompter, `${verb} ${state.displayName}（${id}）`,
+      () => (current ? control.restart : control.start)(id, { env, stdout: quiet }), `${state.displayName}（${id}）在后台跑起来了`);
   } catch (error) {
-    out(`\n配置已保存，但${current ? '重启' : '启动'}没有完成：${error.message}\n修好后运行 vika ${current ? 'restart' : 'start'} ${id}\n`);
+    out(`\n配置已保存，但${verb}没有完成：${error.message}\n修好后运行 ${vika} ${current ? 'restart' : 'start'} ${id}\n`);
     return 1;
   }
   if (!current) {
     // The instance is up. The shared Web (it routes to every instance, so it
     // restarts to pick this one up) and the updater are helpers: report, go on.
-    for (const [action, target] of [['restart', 'web'], ['start', 'updater']]) {
-      await control[action](target, { env }).catch((error) => {
-        out(`  ⚠ vika-${target} 没有起来：${error.message}；之后运行 vika ${action} ${target}\n`);
-      });
+    for (const [action, target, label] of [['restart', 'web', `控制台 http://127.0.0.1:${WEB_PORT}`], ['start', 'updater', '自动升级服务']]) {
+      const spinning = prompter.spin(`启动${label}`);
+      await control[action](target, { env, stdout: quiet }).then(
+        () => spinning.succeed(label),
+        (error) => spinning.warn(`vika-${target} 没有起来：${error.message}；之后运行 ${vika} ${action} ${target}`),
+      );
     }
   }
+  let greeted = false;
   if (lark) {
     const text = greeting({ name: state.displayName, newInstance: !current, primary: state.channel === 'lark' });
-    await connect.greet({ larkCliBin, profile: lark.profile, userId: lark.ownerOpenId, text })
-      .catch((error) => out(`  飞书打招呼的消息没发出去：${error.message}\n`));
+    const spinning = prompter.spin('在飞书里跟你打个招呼');
+    await connect.greet({ larkCliBin, profile: lark.profile, userId: lark.ownerOpenId, text }).then(
+      () => { greeted = true; spinning.succeed('已在飞书私聊里跟你打了招呼'); },
+      (error) => spinning.warn(`飞书打招呼的消息没发出去：${error.message}`),
+    );
   }
-  out(`\n${state.displayName}（${id}）${current ? '已更新' : '已就绪'}。\n`);
-  if (newIms.includes('weixin')) out(`\n最后一步：${WEIXIN_FIRST_MESSAGE}\n`);
+  if (!current && prompter.tty && control.autostart && !autostartEnabled({ homeDir })) await offerAutostart({ prompter, env, homeDir, control, vika });
+
+  const next = [];
+  if (lark) next.push(['飞书', greeted ? '私聊里它已经跟你打了招呼，直接回它' : `在飞书里搜「${state.displayName}」，给它发消息`]);
+  if (newIms.includes('weixin')) next.push(['微信', '先给它发一句「你好」，它才能主动找你']);
+  if (!current) {
+    next.push(['控制台', `http://127.0.0.1:${WEB_PORT}  每一轮在做什么都在这里`]);
+    if (env.SSH_CONNECTION) next.push(['', `远程机器：本地 ssh -L ${WEB_PORT}:127.0.0.1:${WEB_PORT} 再打开`]);
+    next.push(['常用命令', 'vika status · vika logs · vika setup']);
+  }
+  const title = `${state.displayName}（${id}）${current ? '已更新' : '已就绪'}`;
+  if (prompter.fancy) {
+    table(prompter, title, next);
+  } else {
+    out(`\n${title}。\n${next.map(([key, value]) => `  ${key ? `${key}：` : ''}${value}\n`).join('')}`);
+  }
+  if (vika !== 'vika' && !current) prompter.info(`这个终端还找不到 vika：新开一个终端就行（安装时已加进 shell 配置），或先用 ${vika}`);
+  if (newIms.includes('weixin')) {
+    out(prompter.fancy ? `\n  ${prompter.s.yellow('▲')} ${prompter.s.bold('最后一步：')}${WEIXIN_FIRST_MESSAGE}\n` : `\n最后一步：${WEIXIN_FIRST_MESSAGE}\n`);
+  }
   return 0;
+}
+
+// Starting at login is one question at the end of a first setup. A machine
+// without a user service manager says so, and setup still succeeds.
+async function offerAutostart({ prompter, env, homeDir, control, vika }) {
+  if (!await prompter.confirm('开机后自动启动 Vika？', true)) {
+    prompter.info(`之后想开：${vika} autostart enable`);
+    return;
+  }
+  let said = '';
+  await control.autostart(['enable'], { env, homeDir, output: { write: (text) => { said += text; } } }).then(
+    () => {
+      prompter.success('开机自启已开启');
+      if (/loginctl/.test(said)) prompter.info('Linux 服务器上还要运行一次 loginctl enable-linger，否则退出登录后 Vika 会停。');
+    },
+    (error) => prompter.warn(`这台机器开不了开机自启：${String(error.message).split('\n')[0]}`),
+  );
 }
 
 // What a change to an instance does, one line each, for the confirmation.

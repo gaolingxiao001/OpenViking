@@ -7,7 +7,8 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Prompter } from '../src/prompt.mjs';
-import { larkScopes, setupCommand } from '../src/setup.mjs';
+import { larkScopes, registerApp, setupCommand } from '../src/setup.mjs';
+import { stripAnsi } from '../src/ui.mjs';
 
 const RUNTIMES = [
   { id: 'codex', label: 'Codex', model: 'codex:', bin: '/opt/codex/bin/codex', binEnv: 'CODEX_BIN', available: true, note: '已登录' },
@@ -52,8 +53,9 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
   fs.writeFileSync(ovSource, JSON.stringify({ url: 'https://ov.example', api_key: 'k' }));
   t.after(() => fs.rmSync(ovSource, { force: true }));
   const ov = { configPath: ovSource, url: 'https://ov.example', usable: true, user: 'amy', authMode: 'api_key', reason: null };
-  //            id  name    workspace  runtime IMs    channel OV   confirm
-  const h = harness(t, ['', '小V', '',       '1',    '1,2', '2',    '1', 'y'], { ov });
+  // The first instance is `primary` without asking.
+  //                   name  workspace  runtime IMs    channel OV   confirm
+  const h = harness(t, ['小V', '',       '1',    '1,2', '2',    '1', 'y'], { ov });
   assert.equal(await setupCommand(h.options), 0);
 
   const manifest = h.manifest();
@@ -84,14 +86,15 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
     ['greet', 'ou_owner'],
   ]);
   // Feishu gets a hello; Weixin delivers nothing until the owner writes, so the owner is told to.
-  assert.match(h.written(), /已就绪。\n\n最后一步：在微信里给机器人发一句话（比如「你好」）[\s\S]*都发不到微信。\n$/);
-  assert.match(h.written(), /主渠道微信/);
+  assert.match(h.written(), /已就绪。\n  飞书：私聊里它已经跟你打了招呼[\s\S]*控制台：http:\/\/127\.0\.0\.1:3737[\s\S]*\n最后一步：在微信里给机器人发一句话（比如「你好」）[\s\S]*都发不到微信。\n$/);
+  assert.match(h.written(), /消息渠道\s+飞书、微信，主渠道：微信/);
+  assert.match(h.written(), /接下来扫码：飞书 2 次，微信 1 次/);
 });
 
 test('a second instance keeps the shared env and the default instance', async (t) => {
-  const h = harness(t, ['', '', '', '3', '1', 'y']);
+  const h = harness(t, ['', '', '3', '1', 'y']);
   assert.equal(await setupCommand(h.options), 0);
-  //                        new
+  //                        new  id
   const second = harness(t, ['1', '', 'Second', '', '3', '1', 'y']);
   fs.mkdirSync(path.join(second.home, '.vika'), { recursive: true });
   fs.copyFileSync(path.join(h.home, '.vika', 'config.json'), path.join(second.home, '.vika', 'config.json'));
@@ -104,12 +107,12 @@ test('a second instance keeps the shared env and the default instance', async (t
 });
 
 test('declining before the scans writes nothing; a Weixin-only instance has no profile and no lark-cli need', async (t) => {
-  const declined = harness(t, ['', '', '', '1', '2', 'n']);
+  const declined = harness(t, ['', '', '1', '2', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
   assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'config.json')), false);
   assert.deepEqual(declined.calls, []);
 
-  const weixin = harness(t, ['wx', '', '', '1', '2', 'y']);
+  const weixin = harness(t, ['', '', '1', '2', 'y']);
   weixin.options.env.LARK_CLI_BIN = '';
   assert.equal(await setupCommand(weixin.options), 0);
   const [agent] = weixin.manifest().agents;
@@ -122,7 +125,7 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
 
 test('mailboxes come with an IM, are checked before the scans and saved with the manifest', async (t) => {
   //                          IMs: email alone, then Weixin + email; two mailboxes
-  const h = harness(t, ['', '', '', '1', '3', '2,3', 'y', 'n', 'y']);
+  const h = harness(t, ['', '', '1', '3', '2,3', 'y', 'n', 'y']);
   const accounts = ['liuweihan2000@gmail.com', '1845679308@qq.com'];
   const taken = [];
   h.options.connect.email = async ({ taken: given }) => {
@@ -139,10 +142,10 @@ test('mailboxes come with an IM, are checked before the scans and saved with the
   assert.deepEqual(taken, [[], ['liuweihan2000@gmail.com']]);
   assert.equal(JSON.parse(fs.readFileSync(file('email-qq'), 'utf8')).address, '1845679308@qq.com');
   assert.equal(fs.statSync(file('email-gmail')).mode & 0o777, 0o600);
-  assert.match(h.written(), /微信、邮箱（liuweihan2000@gmail\.com、1845679308@qq\.com）/);
+  assert.match(h.written(), /邮箱\s+liuweihan2000@gmail\.com、1845679308@qq\.com\n/);
   assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'email', 'weixin', 'start', 'restart', 'start']);
 
-  const declined = harness(t, ['', '', '', '1', '1,3', 'n', 'n']);
+  const declined = harness(t, ['', '', '1', '1,3', 'n', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
   assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'email')), false, 'nothing is saved before the scans');
 });
@@ -170,7 +173,7 @@ test('changing an instance lists every setting; only the ones opened change', as
   assert.match(h.written(), /4\) 接入的 IM\s+飞书、微信（已改）[\s\S]*5\) 主渠道\s+微信（已改）\n[\s\S]*8\) 保存（2 项改动）/);
   assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
   assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']]);
-  assert.match(h.written(), /ASD（asd）已更新。\n\n最后一步：在微信里给机器人发一句话/);
+  assert.match(h.written(), /ASD（asd）已更新。\n  微信：先给它发一句「你好」[\s\S]*\n最后一步：在微信里给机器人发一句话/);
 
   // Saving nothing, or leaving, writes and restarts nothing.
   for (const [answers, said] of [[['2', '8'], /没有改动/], [['2', '1', '新名字', '9'], /已放弃，没有保存任何改动/]]) {
@@ -227,16 +230,157 @@ test('setup stops early when no runtime can run, and reports a start failure aft
   assert.equal(await setupCommand(none.options), 1);
   assert.match(none.written(), /没有可用的 agent 运行时/);
 
-  const webDown = harness(t, ['', '', '', '1', '1', 'y']);
+  const webDown = harness(t, ['', '', '1', '1', 'y']);
   webDown.options.control.restart = async () => { throw new Error('port 3737 is in use'); };
   assert.equal(await setupCommand(webDown.options), 0);
   assert.match(webDown.written(), /vika-web 没有起来：port 3737 is in use/);
   assert.deepEqual(webDown.calls.map(([kind]) => kind), ['lark', 'start', 'start', 'greet']);
 
-  const failing = harness(t, ['', '', '', '1', '1', 'y'], { failStart: true });
+  const failing = harness(t, ['', '', '1', '1', 'y'], { failStart: true });
   assert.equal(await setupCommand(failing.options), 1);
   assert.equal(failing.manifest().agents.length, 1);
   assert.match(failing.written(), /配置已保存，但启动没有完成：pm2 is not installed/);
+});
+
+test('with no runtime on a terminal, setup offers to log the built-in Pi in to a model, then carries on', async (t) => {
+  const none = RUNTIMES.map((runtime) => ({ ...runtime, available: false }));
+  const h = harness(t, [], { runtimes: none });
+  const input = new PassThrough();
+  Object.assign(input, { isTTY: true, setRawMode() {} });
+  const output = new PassThrough();
+  let written = '';
+  output.on('data', (chunk) => { written += chunk; });
+  h.options.prompter = new Prompter({ input, output, env: {} });
+  let detections = 0;
+  h.options.detect.runtimes = async () => (detections++ === 0 ? none : RUNTIMES);
+  let launched = 0;
+  h.options.connect.pi = async () => { launched += 1; };
+  const answering = (async () => {
+    const until = async (text) => { while (!written.includes(text)) await new Promise((resolve) => setTimeout(resolve, 5)); };
+    await until('现在怎么办');
+    input.write('\r');
+    // Pi found a model: the questions go on, and stopping there saves nothing.
+    await until('机器人名字');
+    input.write('\x03');
+  })();
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await answering;
+  assert.deepEqual([launched, detections], [1, 2]);
+  assert.match(written, /没有可用的 agent 运行时[\s\S]*找到 Codex、Pi（内置）/);
+  assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+});
+
+// A terminal for setup: keys are typed one at a time, each once the screen
+// shows what it answers.
+function terminalHarness(t, options) {
+  const h = harness(t, [], options);
+  const input = new PassThrough();
+  Object.assign(input, { isTTY: true, setRawMode() {} });
+  const output = new PassThrough();
+  let written = '';
+  output.on('data', (chunk) => { written += chunk; });
+  h.options.prompter = new Prompter({ input, output, env: {} });
+  const seen = (text, from) => written.indexOf(text, from);
+  // [text to wait for, ...keys]; the wait starts after the last match.
+  h.drive = async (steps) => {
+    let from = 0;
+    for (const [text, ...keys] of steps) {
+      while (seen(text, from) < 0) await new Promise((resolve) => setTimeout(resolve, 2));
+      from = seen(text, from) + text.length;
+      for (const key of keys) {
+        input.write(key);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+  };
+  h.screen = () => written;
+  return h;
+}
+
+const LEFT = '\x1b[D';
+const RIGHT = '\x1b[C';
+const DOWN = '\x1b[B';
+
+test('← goes back a question with its answer kept, → takes the value shown, all the way to the confirmation', async (t) => {
+  const h = terminalHarness(t);
+  const driving = h.drive([
+    ['机器人名字', '小', 'V', '\r'],
+    ['工作目录', LEFT],
+    ['机器人名字', RIGHT],
+    ['工作目录', RIGHT],
+    ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', RIGHT],
+    ['开始扫码', LEFT],
+    // Back at the last question asked (OpenViking only informed), then forward again.
+    ['接入哪些 IM', RIGHT],
+    ['开始扫码', 'n', '\r'],
+  ]);
+  assert.equal(await setupCommand(h.options), 1);
+  await driving;
+  assert.match(h.screen(), /机器人名字（也是飞书应用名，@它时用这个名字） \(小V\)/, 'the earlier answer is the default');
+  assert.match(h.screen(), /── 确认 ──[\s\S]*── 消息渠道和记忆 ──[\s\S]*── 确认 ──/, 'a section is shown again on the way back into it');
+  assert.equal(h.calls.length, 0);
+  assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+});
+
+test('in the change list, ← leaves a setting as it was; ← on the list goes back to 要做什么', async (t) => {
+  const h = terminalHarness(t);
+  existing(h, {});
+  const driving = h.drive([
+    ['要做什么', DOWN, '\r'],
+    ['选一项回车修改', DOWN, DOWN, DOWN, '\r'],
+    ['接入哪些 IM', DOWN, ' ', LEFT],
+    ['选一项回车修改', LEFT],
+    ['要做什么', '\x03'],
+  ]);
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await driving;
+  assert.match(h.screen(), /4\) 接入的 IM|接入的 IM\s+飞书\n/);
+  assert.doesNotMatch(h.screen(), /（已改）/, 'nothing was changed');
+  assert.equal(h.screen().split('找到 Codex').length, 2, 'the machine is checked once');
+});
+
+test('on a colour terminal, going back and forth leaves only the current way on screen', async (t) => {
+  const h = terminalHarness(t);
+  existing(h, { connectors: ['lark', 'weixin'], channel: 'lark' });
+  const output = h.options.prompter.output;
+  Object.assign(output, { isTTY: true, columns: 100, rows: 50, getColorDepth: () => 24 });
+  const input = h.options.prompter.input;
+  h.options.prompter = new Prompter({ input, output, env: {} });
+  h.options.banner = async () => ({ release() {}, resume() {}, top: () => 18 });
+  // The same back and forth as: change → 接入的 IM → ← → ← → 新建 → 实例名称 ← → change.
+  const driving = h.drive([
+    ['要做什么', DOWN, '\r'],
+    ['选一项回车修改', DOWN, DOWN, DOWN, '\r'],
+    ['接入哪些 IM', LEFT],
+    ['选一项回车修改', LEFT],
+    ['要做什么', '\r'],
+    ['实例名称', LEFT],
+    ['要做什么', DOWN, '\r'],
+    ['选一项回车修改', '\x03'],
+  ]);
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await driving;
+  const record = stripAnsi(h.options.prompter.transcript.join(''));
+  assert.doesNotMatch(record, /↩|新建一个实例|接入哪些 IM|实例名称/);
+  assert.equal(record.match(/要做什么 · 修改 ASD（asd）/g).length, 1);
+});
+
+test('← while the Feishu code waits stops the registration and goes back; nothing is made', async () => {
+  const input = new PassThrough();
+  Object.assign(input, { isTTY: true, setRawMode() {} });
+  const output = new PassThrough();
+  output.resume();
+  const prompter = new Prompter({ input, output });
+  let aborted = false;
+  const register = (options) => new Promise((_resolve, reject) => {
+    options.onQRCodeReady({ url: 'https://open.feishu.cn/page/launcher?user_code=A', expireIn: 600 });
+    options.signal.addEventListener('abort', () => { aborted = true; reject({ code: 'abort', description: 'aborted' }); });
+  });
+  setTimeout(() => input.write('\x1b[D'), 20);
+  await assert.rejects(registerApp({ plan: { displayName: 'Vika' }, prompter, scopes: { tenant: [], user: [] }, register, canGoBack: true }),
+    { name: 'GoBack' });
+  assert.equal(aborted, true);
 });
 
 test('setup asks for the full permission.json scope set', () => {

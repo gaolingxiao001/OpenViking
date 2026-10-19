@@ -62,7 +62,7 @@ test('start runs the installed release and leaves online apps alone; nothing is 
     `start ${fs.realpathSync(path.join(path.dirname(f.options.releaseLink), 'releases', '0.4.0-test', 'ecosystem.config.cjs'))} --only vika-web --update-env`,
     `start ${fs.realpathSync(path.join(path.dirname(f.options.releaseLink), 'releases', '0.4.0-test', 'ecosystem.config.cjs'))} --only vika-updater --update-env`,
   ]);
-  assert.match(f.output(), /vika-alpha is already running/);
+  assert.match(f.output(), /vika-alpha 已经在运行/);
   assert.deepEqual(f.ready, ['http://127.0.0.1:3739/ready', 'http://127.0.0.1:3737/ready']);
 });
 
@@ -85,7 +85,7 @@ test('start explains when no release is installed', async (t) => {
 test('status lists every app with its pm2 state and readiness', async (t) => {
   const f = fixture(t, ['vika-alpha']);
   await statusCommand(f.options);
-  assert.match(f.output(), /vika-alpha\s+online\s+ready/);
-  assert.match(f.output(), /vika-beta\s+not started\s+-/);
-  assert.match(f.output(), /vika-updater\s+not started/);
+  assert.match(f.output(), /vika-alpha\s+运行中\s+就绪/);
+  assert.match(f.output(), /vika-beta\s+未启动\s+-/);
+  assert.match(f.output(), /vika-updater\s+未启动/);
 });

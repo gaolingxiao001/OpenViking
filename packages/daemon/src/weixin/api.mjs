@@ -127,7 +127,7 @@ export async function fetchLoginQr({ localTokens = [] } = {}) {
   return JSON.parse(text);
 }
 
-export async function pollLoginQr({ qrcode, verifyCode = null, apiBaseUrl = DEFAULT_WEIXIN_API_BASE_URL }) {
+export async function pollLoginQr({ qrcode, verifyCode = null, apiBaseUrl = DEFAULT_WEIXIN_API_BASE_URL, signal = null }) {
   let endpoint = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
   if (verifyCode) endpoint += `&verify_code=${encodeURIComponent(verifyCode)}`;
   try {
@@ -137,6 +137,7 @@ export async function pollLoginQr({ qrcode, verifyCode = null, apiBaseUrl = DEFA
       method: 'GET',
       authenticated: false,
       timeoutMs: 35_000,
+      signal,
     });
     return JSON.parse(text);
   } catch (error) {
