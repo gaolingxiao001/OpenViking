@@ -283,6 +283,9 @@ else
   CHANGED=1
 fi
 
+# --lang is kept, as `vika --lang` keeps it.
+if [ -n "$LANG_FLAG" ]; then printf '%s\n' "$LANG_FLAG" > "$VIKA_HOME/language"; fi
+
 mkdir -p "$VIKA_HOME/bin"
 cat > "$VIKA_HOME/bin/vika" <<'LAUNCHER'
 #!/bin/sh

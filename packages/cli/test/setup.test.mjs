@@ -489,9 +489,11 @@ test('setup asks for the full permission.json scope set', () => {
   assert.ok(scopes.tenant.length > 100 && scopes.user.length > 100);
 });
 
-test('the vika command prints usage, and upgrade lists the configured targets', () => {
+test('the vika command prints usage, and upgrade lists the configured targets', (t) => {
   const bin = fileURLToPath(new URL('../bin/vika.mjs', import.meta.url));
-  const env = { ...process.env, VIKA_LANG: 'zh' };
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-help-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const env = { ...process.env, HOME: home, VIKA_LANG: 'zh' };
   const help = spawnSync(process.execPath, [bin, 'help'], { encoding: 'utf8', env });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /vika <命令>[\s\S]*setup[\s\S]*upgrade/);
@@ -501,6 +503,12 @@ test('the vika command prints usage, and upgrade lists the configured targets', 
   const wrong = spawnSync(process.execPath, [bin, '--lang', 'fr', 'help'], { encoding: 'utf8', env });
   assert.equal(wrong.status, 2);
   assert.equal(wrong.stderr, '--lang 只能是 zh 或 en\n');
+  // --lang is kept; alone it only switches.
+  const { VIKA_LANG, ...plain } = env;
+  const switched = spawnSync(process.execPath, [bin, '--lang', 'en'], { encoding: 'utf8', env: plain });
+  assert.equal(switched.stdout, 'The interface language is now English\n');
+  assert.equal(fs.readFileSync(path.join(home, '.vika', 'language'), 'utf8'), 'en\n');
+  assert.match(spawnSync(process.execPath, [bin, 'help'], { encoding: 'utf8', env: plain }).stdout, /vika <command>/);
   const unknown = spawnSync(process.execPath, [bin, 'nope'], { encoding: 'utf8', env });
   assert.equal(unknown.status, 2);
   const upgrade = spawnSync(process.execPath, [bin, 'upgrade', 'sally', 'extra'], {

@@ -127,9 +127,9 @@ test('the installer speaks the language the vika command would: --lang or VIKA_L
   assert.equal(english.status, 0, english.stderr);
   assert.match(english.stderr, /^Installing Vika vika-0\.5\.0-[\s\S]*Verify +SHA-256 matches[\s\S]*next: run ~\/\.vika\/bin\/vika setup\n$/);
   assert.doesNotMatch(english.stderr, /[一-鿿]/);
-  const flagged = m.install('--lang', 'zh', '--file', m.archive('0.6.0'), { LANG: 'en_US.UTF-8' });
-  assert.match(flagged.stderr, /^安装 Vika vika-0\.6\.0-/);
-  fs.writeFileSync(path.join(m.vika, 'language'), 'en\n');
+  const flagged = m.install('--lang', 'en', '--file', m.archive('0.6.0'));
+  assert.match(flagged.stderr, /^Installing Vika vika-0\.6\.0-/);
+  assert.equal(fs.readFileSync(path.join(m.vika, 'language'), 'utf8'), 'en\n', '--lang is kept');
   const saved = m.install('--file', m.archive('0.6.0'), { LANG: 'zh_CN.UTF-8' });
   assert.match(saved.stderr, /Vika 0\.6\.0 is installed already/);
   const wrong = m.install('--lang', 'fr');

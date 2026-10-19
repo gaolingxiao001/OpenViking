@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import { isLanguage, languageChoice, setLanguage, t } from '../src/i18n.mjs';
+import { isLanguage, languageChoice, saveLanguage, setLanguage, t } from '../src/i18n.mjs';
 import { PALETTE, padEnd, styler, width } from '../src/ui.mjs';
 
 // The `vika` command. Each subcommand loads only what it needs, so `setup`
 // and `help` work before any manifest exists. --lang zh|en anywhere on the
-// line (but in `vika pi`, whose arguments are Pi's) picks the language.
+// line (but in `vika pi`, whose arguments are Pi's) picks the language and
+// keeps it for later commands; alone, it only does that.
 
 // [command, arguments, what it does], in groups.
 const commands = () => {
@@ -31,7 +32,7 @@ const commands = () => {
       ['pi', t('[参数...]', '[arguments...]'), t('打开内置的 Pi（例如用 /login 登录模型）', 'Open the built-in Pi (e.g. /login to a model)')],
     ]],
     [t('选项', 'Options'), [
-      ['--lang', '<zh|en>', t('界面语言；在 setup 里用会记住', 'Interface language; setup remembers it')],
+      ['--lang', '<zh|en>', t('切换界面语言，之后的命令都用它', 'Switch the interface language, for later commands too')],
     ]],
   ];
 };
@@ -178,7 +179,12 @@ try {
   if (lang !== null && !isLanguage(lang)) {
     process.stderr.write(t('--lang 只能是 zh 或 en\n', '--lang takes zh or en\n'));
     process.exitCode = 2;
+  } else if (lang !== null && args.length === 0) {
+    saveLanguage(lang);
+    process.stdout.write(t('界面语言已切换为中文\n', 'The interface language is now English\n'));
+    process.exitCode = 0;
   } else {
+    if (lang !== null) saveLanguage(lang);
     process.exitCode = await main(args, lang);
   }
 } catch (error) {
