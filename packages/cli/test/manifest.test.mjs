@@ -80,3 +80,14 @@ test('setup refuses to build on a manifest that does not load', (t) => {
   assert.throws(() => readManifest({ HOME: home }), /version must be 1/);
   assert.deepEqual(readManifest({ HOME: path.join(home, 'nobody') }).value, null);
 });
+
+test('Telegram can be primary or secondary; Ark and a stray Lark profile are rejected', (t) => {
+  const home = tempHome(t);
+  const filename = path.join(home, '.vika', 'config.json');
+  const wa = agent('wa', { channel: 'telegram', connectors: ['telegram'], profile: undefined, model: 'pi' });
+  assert.doesNotThrow(() => validateManifest(filename, withInstance(null, wa)));
+  assert.doesNotThrow(() => validateManifest(filename, withInstance(null, agent('wa', { connectors: ['lark', 'telegram'] }))));
+  assert.throws(() => validateManifest(filename, withInstance(null, { ...wa, profile: 'stray' })), /profile/);
+  assert.throws(() => validateManifest(filename, withInstance(null, { ...wa, model: 'ark',
+    volcSessionId: 'session-test', volcEnvironmentId: 'env-test' })), /telegram connector cannot use the ark runtime/);
+});

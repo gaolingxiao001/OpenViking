@@ -24,7 +24,7 @@ const WORDMARK = [
 ];
 
 const TAGLINE = '把本机的 coding agent 带上船';
-const SUBLINE = '飞书 · 微信 · 邮箱 · OpenViking';
+const SUBLINE = '飞书 · 微信 · Telegram · 邮箱';
 
 function put(cells, x, y, ch, rgb) {
   if (y < 0 || y >= cells.length || x < 0 || x >= cells[0].length) return;

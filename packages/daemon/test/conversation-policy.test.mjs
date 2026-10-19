@@ -19,6 +19,17 @@ function writePrompt(name, body) {
 const defaultSystemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 describe('conversation policy assemble', () => {
+  it('gives Telegram the supported tools and size limits in single and mixed connector sessions', () => {
+    const single = assembleConversationPolicy({ connectors: ['telegram', 'email'] });
+    assert.match(single, /# Telegram conversation policy/);
+    assert.match(single, /4096 characters/);
+    assert.match(single, /Core limit of 20 MiB/);
+    assert.match(single, /downloads are limited to 20 MB/);
+    assert.doesNotMatch(single, /lark-cli profile|voice transcript/);
+    const mixed = assembleConversationPolicy({ connectors: ['lark', 'telegram'], systemPromptPath: defaultSystemPromptPath });
+    assert.match(mixed, /source=telegram/);
+    assert.match(mixed, /cannot send to other contacts or groups/);
+  });
   it('does not tell the agent to suppress final assistant output', () => {
     const text = assembleConversationPolicy({
       systemPromptPath: defaultSystemPromptPath,

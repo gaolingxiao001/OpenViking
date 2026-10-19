@@ -26,7 +26,8 @@ The Core starts a Connector and calls these operations in order:
    Connector: `owner: { id, target }`, where `id` is how the owner appears as an
    event actor and `target` is the `message.send` input that reaches them in a
    direct chat (Lark: the profile's logged-in user, `{ user_id: "ou_..." }`;
-   Weixin: the account that scanned the login code, `{ chat_id }`). A mailbox
+   Weixin: the account that scanned the login code, `{ chat_id }`;
+   Telegram: the account verified by the one-time Start link, `{ chat_id }`). A mailbox
    reports none.
 3. `start`: begin receiving events.
 4. `action`: execute a typed external action.
@@ -106,8 +107,8 @@ should reuse `spec/check/discover/read` and `RECORD/SCHEMA/STATE` semantics.
 ```
 
 `connector` identifies the provider; `instance` identifies a configured source
-instance/account and is unique within a Core. Built-in Lark and Weixin currently
-use `instance=lark` and `instance=weixin`. The source process authenticates both
+instance/account and is unique within a Core. Built-in chat connectors currently
+use `instance=lark`, `instance=weixin`, or `instance=telegram`. The source process authenticates both
 identities; input cannot select another Connector's identity.
 
 `id` is required and stable across retries. The Core deduplicates on
@@ -151,8 +152,8 @@ markdown `content` body, through the same outbox as agent deliveries.
 Failure-notice muting uses the event scope, and its outbound history keeps the
 source, subject and action without inventing a chat.
 
-Lark's Connector decodes message, card-action, and meeting envelopes. Weixin's
-Connector produces canonical chat events directly. The Core validates and
+Lark's Connector decodes message, card-action, and meeting envelopes. Weixin and
+Telegram produce canonical chat events directly. The Core validates and
 consumes only the fields above, plus optional typed extension `data`. Provider
 raw envelopes are not required, forwarded to the runtime, or persisted. A
 `provider_event` diagnostic field is ignored. Protocol 0.1 is rejected.
@@ -193,7 +194,7 @@ reply. Specialized card and meeting handlers consume normalized extension data.
 
 The generic event contract does not provide an inbound ACK/replay guarantee.
 Connector cursor durability and Core acknowledgement are separate work; the
-current Weixin receive loop still checkpoints after emitting events to stdout.
+current Weixin and Telegram receive loops checkpoint after emitting events to stdout.
 
 ## Actions and the outbox
 
@@ -313,13 +314,13 @@ Results report the delivered `message_id` and, where known, `chat_id`,
 
 ## Current actions
 
-| Operation | Lark | Weixin | Email |
-| --- | --- | --- | --- |
-| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | — |
-| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | markdown (plain text); owner approval on a Lark card |
-| `message.react`, `message.retract` | yes | — | — |
-| `message.media` (query) | download by image/file key | downloaded inbound media | — |
-| `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — | — |
+| Operation | Lark | Weixin | Telegram | Email |
+| --- | --- | --- | --- | --- |
+| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | markdown (plain text), file; verified owner only | — |
+| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | as `message.send`, with quoted reply | markdown (plain text); owner approval on the primary IM |
+| `message.react`, `message.retract` | yes | — | — | — |
+| `message.media` (query) | download by image/file key | downloaded inbound media | lazy download by message ID | — |
+| `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — | — | — |
 
 The Email Connector watches one mailbox's `INBOX` over IMAP, opened read-only
 (`EXAMINE`, `BODY.PEEK[]`): it never marks, moves or deletes mail. It starts
@@ -333,3 +334,45 @@ is never resent.
 The Lark Connector also serves Core-internal operations that are not agent
 tools: `message.reaction.delete` (temporary working reactions), `card.update`,
 `chat.members.list`, `chat.get` and the meeting operations.
+
+## Telegram provider contract
+
+Telegram uses the official hosted [Bot API](https://core.telegram.org/bots/api),
+with a dedicated BotFather token per instance and `getUpdates` long polling.
+`getMe` verifies the bot, not the owner. Pairing requires a fresh private
+`/start <nonce>` from a random, three-minute deep link. Both the sender ID and
+private chat ID are pinned; groups, other senders and all Start commands are
+excluded from runtime input. `check` also refuses existing webhooks without
+deleting them. A local SQLite PID lease prevents setup and the worker from
+polling the same instance simultaneously; Telegram 409 conflicts fail the worker.
+
+Tokens, identity, update cursor and reply/media routes live in the connector's
+private SQLite database, never the manifest. IDs are validated safe integers
+and represented as strings. Event IDs are `<botId>:<updateId>`; message IDs are
+`tg:<botId>:<chatId>:<messageId>`, so bot changes and separate chats cannot collide.
+Media captions retain their media message type and cannot become slash commands.
+
+The next `getUpdates` call confirms updates below its offset. The worker writes
+its cursor after emitting a batch, including skipped update kinds. During
+reauthorization, the old owner's canonical events are staged in a private
+pending table before the login poll can confirm them; cancellation preserves
+the old credentials and staged events. On restart those events are emitted
+with stable IDs for Core deduplication. This staging is specific to pairing;
+it does not add a Core durable ACK or exactly-once guarantee. Telegram retains
+unreceived updates for at most 24 hours.
+
+Text is literal plain text, at most 4096 characters. JPEG/PNG files up to 10 MB
+use `sendPhoto`; larger images use `sendDocument`. The provider document limit
+is 50 MB, but the existing Core workspace-file limit remains 20 MiB. Downloads
+use `getFile`, preserve names/MIME from the inbound message, and enforce the
+hosted API's 20 MB limit on both metadata and streamed bytes. File paths cannot
+change the API host or traverse directories, redirects are disabled, and errors
+discard URLs/provider descriptions because Bot API URLs contain the token.
+
+Sends are serialized and paced; only explicit 429 responses with `retry_after`
+are retried, at most twice within the action deadline. Network failures, 5xx
+and invalid responses have uncertain outcomes and are not retried. The manifest
+does not declare idempotency, so the existing Core outbox also blocks uncertain
+resends. `pause` aborts only receiving so shutdown deliveries can finish; `stop`
+also cancels actions and releases the lease. The primary-channel notification
+and numbered mail approval paths use the existing Core authorization rules.
