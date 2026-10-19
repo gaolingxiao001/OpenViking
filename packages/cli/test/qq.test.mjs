@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { connectQQ } from '../src/qq.mjs';
 import { Prompter } from '../src/prompt.mjs';
+import { setLanguage } from '../src/i18n.mjs';
 import { QQState } from '../../daemon/src/qq/state.mjs';
 
 const SECRET = 'secret_that_must_never_be_logged';
@@ -25,7 +26,9 @@ function fixture(t, answers, { tty = false } = {}) {
 const provider = async (url) => Response.json(url.endsWith('/app/getAppAccessToken')
   ? { access_token: 'token', expires_in: '7200' } : { url: 'wss://api.sgroup.qq.com/' });
 
-test('QQ UI retries invalid credentials, hides AppSecret and commits only after private challenge proof', async (t) => {
+for (const language of ['zh', 'en']) test(`QQ UI retries invalid credentials, hides AppSecret and commits only after private challenge proof (${language})`, async (t) => {
+  setLanguage(language);
+  t.after(() => setLanguage('zh'));
   const f = fixture(t, ['123456', SECRET + '_INVALID', '1', '123456', SECRET]);
   f.options.fetchImpl = async (url, init) => {
     assert.equal(f.state.account().ownerId, 'OLD_OWNER');
@@ -41,7 +44,11 @@ test('QQ UI retries invalid credentials, hides AppSecret and commits only after 
   await connectQQ(f.options);
   assert.equal(f.state.account().appSecret, SECRET);
   assert.equal(f.state.account().ownerId, 'NEW_OWNER');
-  assert.match(f.text(), /100007[\s\S]*等待 QQ 私聊验证[\s\S]*QQ 已接好/);
+  if (language === 'zh') assert.match(f.text(), /100007[\s\S]*等待 QQ 私聊验证[\s\S]*QQ 已接好/);
+  else {
+    assert.match(f.text(), /100007[\s\S]*Waiting for QQ private-chat verification[\s\S]*QQ is connected/);
+    assert.doesNotMatch(f.text(), /[一-鿿]/);
+  }
   assert.ok(!f.text().includes(SECRET));
 });
 

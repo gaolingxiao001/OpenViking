@@ -10,9 +10,10 @@
 # release brings its own Node, pm2 and lark-cli, so nothing else on the
 # machine is used or changed.
 #
-# Options: --version <v> (default: latest), --file <archive>, --no-setup.
+# Options: --version <v> (default: latest), --file <archive>, --no-setup,
+# --lang <zh|en>.
 # Environment: VIKA_DOWNLOAD_BASE overrides where releases are downloaded from;
-# NO_COLOR turns the colours off.
+# VIKA_LANG picks the language; NO_COLOR turns the colours off.
 set -eu
 # Always ${NAME} before non-ASCII text: macOS /bin/sh (bash 3.2) counts
 # UTF-8 lead bytes as name characters, so "$VERSION（" names another variable.
@@ -22,6 +23,15 @@ VIKA_HOME="$HOME/.vika"
 VERSION="${VIKA_VERSION:-}"
 FILE=""
 RUN_SETUP=1
+LANG_FLAG=""
+
+# Chinese or English, as the vika command picks it (packages/cli/src/i18n.mjs):
+# VIKA_LANG or --lang, else what setup saved, else Chinese.
+# m <Chinese> <English> prints the one in use.
+UI_LANG=${VIKA_LANG:-}
+case "$UI_LANG" in zh|en) ;; *) UI_LANG=$(cat "$VIKA_HOME/language" 2>/dev/null || true) ;; esac
+case "$UI_LANG" in zh|en) ;; *) UI_LANG=zh ;; esac
+m() { if [ "$UI_LANG" = en ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 
 # Colour and motion only on a terminal; piped output stays plain lines.
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then FANCY=1; else FANCY=0; fi
@@ -40,7 +50,8 @@ say() { printf '%s\n' "$*" >&2; }
 ok() { if [ "$FANCY" = 1 ]; then say "  ${GREEN}✔${RESET} $*"; else say "$*"; fi; }
 note() { if [ "$FANCY" = 1 ]; then say "  ${GRAY}›${RESET} $*"; else say "$*"; fi; }
 die() {
-  if [ "$FANCY" = 1 ]; then say "  ${RED}✖${RESET} vika 安装失败：$*"; else say "vika 安装失败：$*"; fi
+  failed=$(m 'vika 安装失败：' 'vika install failed: ')
+  if [ "$FANCY" = 1 ]; then say "  ${RED}✖${RESET} ${failed}$*"; else say "${failed}$*"; fi
   exit 1
 }
 # ~ for the home directory, so paths stay short.
@@ -48,34 +59,38 @@ short() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' 
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) [ $# -ge 2 ] || die "--version 需要一个值"; VERSION="$2"; shift 2 ;;
-    --file) [ $# -ge 2 ] || die "--file 需要一个文件"; FILE="$2"; shift 2 ;;
+    --version) [ $# -ge 2 ] || die "$(m '--version 需要一个值' '--version needs a value')"; VERSION="$2"; shift 2 ;;
+    --file) [ $# -ge 2 ] || die "$(m '--file 需要一个文件' '--file needs a file')"; FILE="$2"; shift 2 ;;
     --no-setup) RUN_SETUP=0; shift ;;
-    *) die "不认识的参数 $1" ;;
+    --lang)
+      case "${2:-}" in zh|en) UI_LANG="$2"; LANG_FLAG="$2" ;; *) die "$(m '--lang 只能是 zh 或 en' '--lang takes zh or en')" ;; esac
+      shift 2
+      ;;
+    *) die "$(m "不认识的参数 $1" "unknown option $1")" ;;
   esac
 done
 
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
-  *) die "不支持 $(uname -s)；Windows 请在 WSL2 里安装" ;;
+  *) die "$(m "不支持 $(uname -s)；Windows 请在 WSL2 里安装" "$(uname -s) is not supported; on Windows, install inside WSL2")" ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64) arch=x64 ;;
   aarch64|arm64) arch=arm64 ;;
-  *) die "不支持 CPU 架构 $(uname -m)" ;;
+  *) die "$(m "不支持 CPU 架构 $(uname -m)" "the $(uname -m) CPU architecture is not supported")" ;;
 esac
 if [ "$os" = linux ]; then
   # The release's Node is linked against glibc; it does not start on musl (Alpine).
-  if (ldd --version 2>&1 || true) | grep -qi musl; then die "不支持 musl（Alpine 等）系统"; fi
+  if (ldd --version 2>&1 || true) | grep -qi musl; then die "$(m '不支持 musl（Alpine 等）系统' 'musl systems (Alpine and others) are not supported')"; fi
 fi
 PLATFORM="$os-$arch"
 
-command -v tar >/dev/null 2>&1 || die "需要 tar"
+command -v tar >/dev/null 2>&1 || die "$(m '需要 tar' 'tar is needed')"
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
-  else die "需要 sha256sum 或 shasum"; fi
+  else die "$(m '需要 sha256sum 或 shasum' 'sha256sum or shasum is needed')"; fi
 }
 # The test bucket is private; drop the access key once releases are public.
 curl_get() {
@@ -190,55 +205,55 @@ spin() { # label command...
 header() {
   if [ "$FANCY" = 1 ]; then
     say ""
-    say "  ${BOLD}${PINK}V${VIOLET}I${LILAC}K${SKY}A${RESET}  ${GRAY}安装 ${1} · ${PLATFORM}${RESET}"
+    say "  ${BOLD}${PINK}V${VIOLET}I${LILAC}K${SKY}A${RESET}  ${GRAY}$(m '安装' 'Installing') ${1} · ${PLATFORM}${RESET}"
     say ""
   else
-    say "安装 Vika ${1}（${PLATFORM}）"
+    say "$(m "安装 Vika ${1}（${PLATFORM}）" "Installing Vika ${1} (${PLATFORM})")"
   fi
 }
 
 if [ -n "$FILE" ]; then
-  [ -f "$FILE" ] || die "找不到 $FILE"
+  [ -f "$FILE" ] || die "$(m "找不到 $FILE" "$FILE is not there")"
   ARCHIVE="$FILE"
   header "$(basename "$FILE")"
   if [ -f "$FILE.sha256" ]; then EXPECTED=$(cut -d' ' -f1 < "$FILE.sha256"); else EXPECTED=""; fi
 else
-  command -v curl >/dev/null 2>&1 || die "需要 curl"
-  case "$BASE" in http://*|https://*) ;; *) die "没有下载地址：设置 VIKA_DOWNLOAD_BASE" ;; esac
+  command -v curl >/dev/null 2>&1 || die "$(m '需要 curl' 'curl is needed')"
+  case "$BASE" in http://*|https://*) ;; *) die "$(m '没有下载地址：设置 VIKA_DOWNLOAD_BASE' 'no download address: set VIKA_DOWNLOAD_BASE')" ;; esac
   if [ -z "$VERSION" ]; then
-    fetch "$BASE/latest" "$TMP/latest" || die "读不到最新版本：$BASE/latest"
+    fetch "$BASE/latest" "$TMP/latest" || die "$(m "读不到最新版本：${BASE}/latest" "cannot read the latest version: ${BASE}/latest")"
     VERSION=$(tr -d ' \r\n' < "$TMP/latest")
   fi
-  case "$VERSION" in ''|*[!0-9A-Za-z._-]*) die "版本号无效：$VERSION" ;; esac
+  case "$VERSION" in ''|*[!0-9A-Za-z._-]*) die "$(m "版本号无效：${VERSION}" "invalid version: ${VERSION}")" ;; esac
   NAME="vika-$VERSION-$PLATFORM.tar.gz"
   header "$VERSION"
-  fetch "$BASE/releases/$VERSION/$NAME.sha256" "$TMP/sha256" || die "这个版本没有 $PLATFORM 的安装包"
+  fetch "$BASE/releases/$VERSION/$NAME.sha256" "$TMP/sha256" || die "$(m "这个版本没有 ${PLATFORM} 的安装包" "this version has no package for ${PLATFORM}")"
   EXPECTED=$(cut -d' ' -f1 < "$TMP/sha256")
   STARTED=$(date +%s)
-  download "$BASE/releases/$VERSION/$NAME" "$TMP/$NAME" || die "下载失败：$NAME"
-  ok "下载  ${GRAY}$(mb "$(wc -c < "$TMP/$NAME" | tr -d ' ')") MB · $(($(date +%s) - STARTED))s${RESET}"
+  download "$BASE/releases/$VERSION/$NAME" "$TMP/$NAME" || die "$(m "下载失败：${NAME}" "download failed: ${NAME}")"
+  ok "$(m '下载' 'Download')  ${GRAY}$(mb "$(wc -c < "$TMP/$NAME" | tr -d ' ')") MB · $(($(date +%s) - STARTED))s${RESET}"
   ARCHIVE="$TMP/$NAME"
 fi
 if [ -n "$EXPECTED" ]; then
-  [ "$(sha256 "$ARCHIVE")" = "$EXPECTED" ] || die "安装包校验失败（SHA-256 不一致）"
-  ok "校验  ${GRAY}SHA-256 一致${RESET}"
+  [ "$(sha256 "$ARCHIVE")" = "$EXPECTED" ] || die "$(m '安装包校验失败（SHA-256 不一致）' 'the package failed verification (SHA-256 mismatch)')"
+  ok "$(m '校验' 'Verify  ')  ${GRAY}$(m 'SHA-256 一致' 'SHA-256 matches')${RESET}"
 else
-  note "注意：$FILE 旁边没有 .sha256，跳过校验"
+  note "$(m "注意：${FILE} 旁边没有 .sha256，跳过校验" "note: there is no .sha256 next to ${FILE}, so it is not verified")"
 fi
 
 mkdir -p "$VIKA_HOME/releases"
 # The updater takes the same lock while it upgrades.
-mkdir "$VIKA_HOME/deploy.lock" 2>/dev/null || die "另一个安装或升级正在进行（$VIKA_HOME/deploy.lock）"
+mkdir "$VIKA_HOME/deploy.lock" 2>/dev/null || die "$(m "另一个安装或升级正在进行（${VIKA_HOME}/deploy.lock）" "another install or upgrade is running (${VIKA_HOME}/deploy.lock)")"
 LOCK="$VIKA_HOME/deploy.lock"
 
 PENDING="$VIKA_HOME/releases/.pending-$$"
 rm -rf "$PENDING"
 mkdir "$PENDING"
-spin "解压" tar -xzf "$ARCHIVE" -C "$PENDING" || { rm -rf "$PENDING"; die "解压失败"; }
+spin "$(m '解压' 'Unpacking')" tar -xzf "$ARCHIVE" -C "$PENDING" || { rm -rf "$PENDING"; die "$(m '解压失败' 'unpacking failed')"; }
 DIR=$(ls "$PENDING")
 case "$DIR" in
   vika-*-"$PLATFORM") ;;
-  *) rm -rf "$PENDING"; die "安装包不是给 $PLATFORM 的：$DIR" ;;
+  *) rm -rf "$PENDING"; die "$(m "安装包不是给 ${PLATFORM} 的：${DIR}" "the package is not for ${PLATFORM}: ${DIR}")" ;;
 esac
 VERSION=${DIR#vika-}
 VERSION=${VERSION%-"$PLATFORM"}
@@ -246,9 +261,9 @@ VERSION=${VERSION%-"$PLATFORM"}
 # CPU mismatch surfaces here and the existing install is left untouched.
 if ! "$PENDING/$DIR/node/bin/node" "$PENDING/$DIR/packages/cli/bin/vika.mjs" --version >/dev/null 2>&1; then
   rm -rf "$PENDING"
-  die "这台机器运行不了这个版本（系统库太旧或 CPU 不匹配）"
+  die "$(m '这台机器运行不了这个版本（系统库太旧或 CPU 不匹配）' 'this machine cannot run this release (its system libraries are too old, or the CPU differs)')"
 fi
-ok "自检  ${GRAY}自带的 Node 能在这台机器上运行${RESET}"
+ok "$(m '自检' 'Check   ')  ${GRAY}$(m '自带的 Node 能在这台机器上运行' 'the bundled Node runs on this machine')${RESET}"
 
 # Physical paths: /home may be a symlink, and the updater links real paths.
 physical() { (cd "$1" 2>/dev/null && pwd -P) || true; }
@@ -256,7 +271,7 @@ TARGET="$VIKA_HOME/releases/$VERSION"
 PREVIOUS=$(physical "$VIKA_HOME/current")
 if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" = "$(physical "$TARGET")" ]; then
   rm -rf "$PENDING"
-  ok "已经是 Vika $VERSION"
+  ok "$(m "已经是 Vika ${VERSION}" "Vika ${VERSION} is installed already")"
   CHANGED=0
 else
   rm -rf "$TARGET"
@@ -264,9 +279,12 @@ else
   rmdir "$PENDING"
   [ -z "$PREVIOUS" ] || ln -sfn "$PREVIOUS" "$VIKA_HOME/rollback"
   ln -sfn "$(physical "$TARGET")" "$VIKA_HOME/current"
-  ok "安装  ${GRAY}Vika $VERSION → $(short "$TARGET")${RESET}"
+  ok "$(m '安装' 'Install ')  ${GRAY}Vika $VERSION → $(short "$TARGET")${RESET}"
   CHANGED=1
 fi
+
+# --lang is kept, as `vika --lang` keeps it.
+if [ -n "$LANG_FLAG" ]; then printf '%s\n' "$LANG_FLAG" > "$VIKA_HOME/language"; fi
 
 mkdir -p "$VIKA_HOME/bin"
 cat > "$VIKA_HOME/bin/vika" <<'LAUNCHER'
@@ -286,7 +304,7 @@ case ":$PATH:" in
     esac
     if ! grep -q '/.vika/bin' "$RC" 2>/dev/null; then
       printf '\n# vika\nexport PATH="$HOME/.vika/bin:$PATH"\n' >> "$RC"
-      ok "命令  ${GRAY}~/.vika/bin 已加进 $(short "$RC")，新开的终端里可以直接用 vika${RESET}"
+      ok "$(m '命令' 'Command ')  ${GRAY}$(m "~/.vika/bin 已加进 $(short "$RC")，新开的终端里可以直接用 vika" "~/.vika/bin is added to $(short "$RC"); new terminals know vika")${RESET}"
     fi
     ;;
 esac
@@ -301,7 +319,7 @@ if [ -n "${VIKA_TOS_ACCESS_KEY:-}" ]; then
       mv "$SECRETS.tmp" "$SECRETS"
     )
     chmod 600 "$SECRETS"
-    ok "密钥  ${GRAY}下载密钥已存进 ~/.vika/secrets.env，vika upgrade 会用到${RESET}"
+    ok "$(m '密钥' 'Key     ')  ${GRAY}$(m '下载密钥已存进 ~/.vika/secrets.env，vika upgrade 会用到' 'the download key is kept in ~/.vika/secrets.env for vika upgrade')${RESET}"
   fi
 fi
 
@@ -311,12 +329,13 @@ LOCK=""
 # however often the installer has run.
 if [ -f "${VIKA_CONFIG:-$VIKA_HOME/config.json}" ]; then
   if [ "$CHANGED" = 1 ] && [ -n "$PREVIOUS" ]; then
-    note "运行中的实例还在旧版本上：执行 ${BOLD}vika restart${RESET} 换到 $VERSION"
+    note "$(m "运行中的实例还在旧版本上：执行 ${BOLD}vika restart${RESET} 换到 ${VERSION}" "running instances are on the old release: ${BOLD}vika restart${RESET} moves them to ${VERSION}")"
   fi
 elif [ "$RUN_SETUP" = 1 ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
   cleanup
   trap - EXIT INT TERM
+  if [ -n "$LANG_FLAG" ]; then exec "$VIKA_HOME/bin/vika" setup --lang "$LANG_FLAG" </dev/tty; fi
   exec "$VIKA_HOME/bin/vika" setup </dev/tty
 else
-  note "下一步：运行 $(short "$VIKA_HOME/bin/vika") setup"
+  note "$(m '下一步：运行' 'next: run') $(short "$VIKA_HOME/bin/vika") setup"
 fi

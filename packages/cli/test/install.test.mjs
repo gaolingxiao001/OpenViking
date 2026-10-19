@@ -120,3 +120,19 @@ test('no variable runs into non-ASCII text, which macOS /bin/sh would read as pa
     .filter(([, line]) => !line.trimStart().startsWith('#') && /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]/.test(line));
   assert.deepEqual(offending, []);
 });
+
+test('the installer speaks the language the vika command would: --lang or VIKA_LANG, the saved one, then Chinese', (t) => {
+  const m = machine(t);
+  const english = m.install('--file', m.archive('0.5.0'), { LANG: 'en_US.UTF-8', VIKA_LANG: 'en' });
+  assert.equal(english.status, 0, english.stderr);
+  assert.match(english.stderr, /^Installing Vika vika-0\.5\.0-[\s\S]*Verify +SHA-256 matches[\s\S]*next: run ~\/\.vika\/bin\/vika setup\n$/);
+  assert.doesNotMatch(english.stderr, /[一-鿿]/);
+  const flagged = m.install('--lang', 'en', '--file', m.archive('0.6.0'));
+  assert.match(flagged.stderr, /^Installing Vika vika-0\.6\.0-/);
+  assert.equal(fs.readFileSync(path.join(m.vika, 'language'), 'utf8'), 'en\n', '--lang is kept');
+  const saved = m.install('--file', m.archive('0.6.0'), { LANG: 'zh_CN.UTF-8' });
+  assert.match(saved.stderr, /Vika 0\.6\.0 is installed already/);
+  const wrong = m.install('--lang', 'fr');
+  assert.notEqual(wrong.status, 0);
+  assert.match(wrong.stderr, /vika install failed: --lang takes zh or en/);
+});

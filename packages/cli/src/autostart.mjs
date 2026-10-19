@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { t } from './i18n.mjs';
 
 // `vika autostart enable|disable`: start Vika at login/boot without sudo.
 // Linux: a systemd user unit; macOS: a LaunchAgent. Both run `vika start`,
@@ -84,7 +85,7 @@ export async function autostartCommand([action, ...extra], {
     else await execFileImpl('systemctl', ['--user', 'disable', '--now', 'vika.service']).catch(() => {});
     fs.rmSync(file, { force: true });
     if (platform !== 'darwin') await execFileImpl('systemctl', ['--user', 'daemon-reload']).catch(() => {});
-    output.write('开机自启已关闭\n');
+    output.write(t('开机自启已关闭\n', 'Autostart is off\n'));
     return 0;
   }
   const pathValue = env.PATH || '/usr/bin:/bin';
@@ -94,13 +95,14 @@ export async function autostartCommand([action, ...extra], {
     fs.writeFileSync(file, launchAgent({ homeDir, pathValue }));
     await execFileImpl('launchctl', ['bootout', `gui/${uid}`, file]).catch(() => {});
     await execFileImpl('launchctl', ['bootstrap', `gui/${uid}`, file]);
-    output.write(`开机自启已开启（${file}）\n`);
+    output.write(t(`开机自启已开启（${file}）\n`, `Autostart is on (${file})\n`));
     return 0;
   }
   fs.writeFileSync(file, systemdUnit({ homeDir, pathValue }));
   await execFileImpl('systemctl', ['--user', 'daemon-reload']);
   await execFileImpl('systemctl', ['--user', 'enable', 'vika.service']);
-  output.write(`开机自启已开启（${file}）\n`);
-  output.write('服务器上还要执行一次 loginctl enable-linger，否则退出登录后 Vika 会停。\n');
+  output.write(t(`开机自启已开启（${file}）\n`, `Autostart is on (${file})\n`));
+  output.write(t('服务器上还要执行一次 loginctl enable-linger，否则退出登录后 Vika 会停。\n',
+    'On a server, also run loginctl enable-linger once, or Vika stops when you log out.\n'));
   return 0;
 }
