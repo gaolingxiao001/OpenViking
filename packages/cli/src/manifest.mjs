@@ -3,6 +3,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { list, t } from './i18n.mjs';
 
 // Setup edits ~/.vika/config.json as plain JSON, and only ever saves a file
 // that the daemon's own loader accepts.
@@ -43,9 +44,9 @@ export function readManifest(env = process.env) {
 }
 
 export function instanceIdProblem(id, manifest) {
-  if (!INSTANCE_ID.test(id)) return '只能用小写字母、数字和 -，以字母开头，最多 32 个字符';
-  if (RESERVED_INSTANCE_IDS.includes(id)) return `${RESERVED_INSTANCE_IDS.join('、')} 是保留名字`;
-  if (manifest?.agents?.some((agent) => agent.id === id)) return `已经有叫 ${id} 的实例`;
+  if (!INSTANCE_ID.test(id)) return t('只能用小写字母、数字和 -，以字母开头，最多 32 个字符', 'Lowercase letters, digits and -, starting with a letter, at most 32 characters');
+  if (RESERVED_INSTANCE_IDS.includes(id)) return t(`${list(RESERVED_INSTANCE_IDS)} 是保留名字`, `${list(RESERVED_INSTANCE_IDS)} are reserved`);
+  if (manifest?.agents?.some((agent) => agent.id === id)) return t(`已经有叫 ${id} 的实例`, `There is an instance named ${id} already`);
   return null;
 }
 

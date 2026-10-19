@@ -48,9 +48,11 @@ function sayLine(text) {
 }
 
 // readVerifyCode, showQr and say let `vika setup` ask and draw through its
-// own prompt: showQr(value, { refreshed }) gets each code to scan, say(text)
-// each status line. Once `signal` aborts, the login stops and binds nothing,
-// even if the scan is confirmed on the phone afterwards.
+// own prompt: showQr(value, { refreshed }) gets each code to scan, say(text,
+// { kind, accountId }) each status line. `kind` (scanned, already-bound,
+// connected) and an error's `code` let the caller say it in its own words.
+// Once `signal` aborts, the login stops and binds nothing, even if the scan
+// is confirmed on the phone afterwards.
 export async function loginWeixin({
   state, timeoutMs = LOGIN_TIMEOUT_MS, readVerifyCode = readLine, showQr = null, say = sayLine, signal = null,
 } = {}) {
@@ -80,18 +82,18 @@ export async function loginWeixin({
       continue;
     }
     if (status.status === 'scaned') {
-      if (!scanned) say('已扫码，请在手机上确认。');
+      if (!scanned) say('已扫码，请在手机上确认。', { kind: 'scanned' });
       scanned = true;
       await delay(1_000);
       continue;
     }
     if (status.status === 'need_verifycode') {
       verifyCode = await readVerifyCode('请输入微信显示的验证码：');
-      if (!/^\d{4,8}$/.test(verifyCode)) throw new Error('验证码格式无效');
+      if (!/^\d{4,8}$/.test(verifyCode)) throw loginError('验证码格式无效', 'weixin_bad_verify_code');
       continue;
     }
     if (status.status === 'verify_code_blocked') {
-      throw new Error('验证码错误次数过多，请稍后重新扫码');
+      throw loginError('验证码错误次数过多，请稍后重新扫码', 'weixin_verify_code_blocked');
     }
     if (status.status === 'scaned_but_redirect') {
       apiBaseUrl = redirectedBaseUrl(status.redirect_host) ?? apiBaseUrl;
@@ -106,8 +108,8 @@ export async function loginWeixin({
       continue;
     }
     if (status.status === 'binded_redirect') {
-      if (!existing?.token) throw new Error('微信端显示已绑定，但本地没有可用凭证');
-      say(`本地已有微信账号 ${existing.accountId} 的凭证，无需重复绑定。`);
+      if (!existing?.token) throw loginError('微信端显示已绑定，但本地没有可用凭证', 'weixin_bound_elsewhere');
+      say(`本地已有微信账号 ${existing.accountId} 的凭证，无需重复绑定。`, { kind: 'already-bound', accountId: existing.accountId });
       return existing;
     }
     if (status.status === 'confirmed') {
@@ -120,10 +122,14 @@ export async function loginWeixin({
         baseUrl: status.baseurl || apiBaseUrl,
         userId: status.ilink_user_id || null,
       });
-      say(`微信连接成功：${account.accountId}`);
+      say(`微信连接成功：${account.accountId}`, { kind: 'connected', accountId: account.accountId });
       return account;
     }
     throw new Error(`Unsupported Weixin login status: ${status.status ?? 'unknown'}`);
   }
-  throw new Error('微信扫码登录超时，请重新执行登录命令');
+  throw loginError('微信扫码登录超时，请重新执行登录命令', 'weixin_login_timeout');
+}
+
+function loginError(message, code) {
+  return Object.assign(new Error(message), { code });
 }

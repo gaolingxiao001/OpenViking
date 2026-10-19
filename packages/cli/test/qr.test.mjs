@@ -5,6 +5,7 @@ import { inflateSync, crc32 } from 'node:zlib';
 import test from 'node:test';
 import { qrMatrix, qrPng, terminalQr } from '../src/qr-code.mjs';
 import { showScan } from '../src/qr.mjs';
+import { setLanguage } from '../src/i18n.mjs';
 import { Prompter } from '../src/prompt.mjs';
 import { stripAnsi, width } from '../src/ui.mjs';
 
@@ -87,13 +88,13 @@ test('PNG chunks have valid checksums and lossless black/white pixels at an inte
   }
 });
 
-test('small VS Code terminals get a private image immediately, and resizing redraws the complete QR', (t) => {
+test('a code too big for the window says what it needs and where its private image is; resizing redraws it', (t) => {
   const s = screen();
   const scan = showScan(s.prompter, { url: FEISHU, title: '创建飞书', env: { TERM_PROGRAM: 'vscode' } });
   t.after(() => scan.stop());
   assert.equal(fs.statSync(scan.imagePath).mode & 0o777, 0o600);
   assert.equal(fs.statSync(scan.imagePath.slice(0, scan.imagePath.lastIndexOf('/'))).mode & 0o777, 0o700);
-  assert.match(s.text(), /二维码图片[\s\S]*scan\.png[\s\S]*终端二维码需要/);
+  assert.match(s.text(), /终端放不下这个二维码（要 \d+×\d+，现在 100×40）[\s\S]*也可以打开图片 \S+scan\.png/);
   assert.doesNotMatch(s.text(), /[▀▄█]/);
   Object.assign(s.output, { columns: 200, rows: 120 }); s.output.emit('resize');
   assert.match(s.text(), /\x1b\[0;48;2;255;255;255m/);
@@ -104,15 +105,31 @@ test('small VS Code terminals get a private image immediately, and resizing redr
   assert.equal(s.output.listenerCount('resize'), 0);
 });
 
-test('fallback text precedes the terminal code and a long status cannot wrap it offscreen', (t) => {
+test('a code that fits comes first, its short link under it, and a long status cannot wrap it offscreen', (t) => {
   const s = screen(80, 25, true);
   const scan = showScan(s.prompter, { url: TELEGRAM, title: 'Telegram', label: '等待'.repeat(100),
     env: { TERM_PROGRAM: 'vscode' }, onBack() {} });
   t.after(() => scan.stop());
   const text = s.text();
   const codeAt = text.indexOf('\x1b[0;48;2;255;255;255m');
-  assert.ok(codeAt > text.indexOf(TELEGRAM));
-  assert.ok(codeAt > text.indexOf(scan.imagePath));
+  assert.ok(codeAt >= 0 && codeAt < text.indexOf(TELEGRAM));
+  assert.ok(!text.includes(scan.imagePath), 'the image is a key away, not a path on screen');
   assert.ok(width(text.slice(text.lastIndexOf('\r\x1b[2K'))) < 80);
   assert.match(text.slice(codeAt), /\r\n/);
+});
+
+test('a link too long to print waits for l, and the page speaks the run\'s language', async (t) => {
+  setLanguage('en');
+  t.after(() => setLanguage('zh'));
+  const s = screen(200, 120, true);
+  const scan = showScan(s.prompter, { url: FEISHU, title: 'Create', where: 'Lark', env: {} });
+  t.after(() => scan.stop());
+  assert.ok(!s.text().includes(FEISHU));
+  assert.match(stripAnsi(s.text()), /Waiting for the scan 0:00 +│ l show link/);
+  s.input.write('l');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(stripAnsi(s.text()), new RegExp(`Can't scan it\\? Open in Lark: ${FEISHU.replace(/[?.]/g, '\\$&')}`));
+  const small = screen(100, 40);
+  showScan(small.prompter, { url: FEISHU, title: 'Create', env: {} }).stop();
+  assert.match(small.text(), /This code needs a \d+×\d+ terminal \(now 100×40\): shrink the font or enlarge the window/);
 });

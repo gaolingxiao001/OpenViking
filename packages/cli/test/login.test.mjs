@@ -49,7 +49,7 @@ test('login renews what an instance has; connecting a new IM is setup\'s', async
   assert.equal(await loginCommand(['weixin'], m.options), 0);
   assert.deepEqual(m.calls, [['weixin', 'haha']]);
   // A new login is a new conversation: the owner writes first again.
-  assert.match(m.written(), /最后一步：在微信里给机器人发一句话/);
+  assert.match(m.written(), /最后一步：在微信里先给机器人发一句话/);
   assert.equal(fs.readFileSync(path.join(m.home, '.vika', 'config.json'), 'utf8'), before, 'the manifest is untouched');
 
   await assert.rejects(loginCommand(['lark'], m.options), /还没有实例接飞书；要接入，运行 vika setup 修改实例/);

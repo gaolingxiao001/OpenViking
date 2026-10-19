@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { t } from './i18n.mjs';
 
 // OpenViking is optional in setup. Look where the OV installer and `ov` CLI
 // look: OPENVIKING_CLI_CONFIG_FILE, then ~/.openviking/ovcli.conf, then a
@@ -32,10 +33,10 @@ async function health(url, headers, fetchImpl) {
       headers, signal: AbortSignal.timeout(3_000), redirect: 'error',
     });
     const body = await response.json().catch(() => null);
-    if (!response.ok || body?.status !== 'ok') return { ok: false, reason: `健康检查返回 HTTP ${response.status}` };
+    if (!response.ok || body?.status !== 'ok') return { ok: false, reason: t(`健康检查返回 HTTP ${response.status}`, `its health check says HTTP ${response.status}`) };
     return { ok: true, authMode: body.auth_mode ?? null, user: body.user_id ?? null, version: body.version ?? null };
   } catch (error) {
-    return { ok: false, reason: error?.name === 'TimeoutError' ? '3 秒内没有响应' : '连不上' };
+    return { ok: false, reason: error?.name === 'TimeoutError' ? t('3 秒内没有响应', 'no answer within 3 seconds') : t('连不上', 'cannot connect') };
   }
 }
 
@@ -61,7 +62,8 @@ export async function detectOpenViking({ env = process.env, homeDir = os.homedir
   return {
     configPath: null, url: LOCAL_OV_URL, usable: local.authMode === 'dev',
     user: null, authMode: local.authMode,
-    reason: local.authMode === 'dev' ? null : '需要凭据：先用 OpenViking 的安装程序生成 ~/.openviking/ovcli.conf',
+    reason: local.authMode === 'dev' ? null : t('需要凭据：先用 OpenViking 的安装程序生成 ~/.openviking/ovcli.conf',
+      'it needs credentials: create ~/.openviking/ovcli.conf with the OpenViking installer'),
   };
 }
 

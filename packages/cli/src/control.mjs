@@ -16,6 +16,7 @@ import {
 } from '../../updater/src/pm2.mjs';
 import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '../../updater/src/targets.mjs';
 import { imList, loadInstances } from './instances.mjs';
+import { t } from './i18n.mjs';
 import { padEnd, spinner, styler } from './ui.mjs';
 
 // start / stop / restart / status / logs run the release already installed
@@ -114,7 +115,7 @@ async function step(context, label, done, run) {
     await run();
     spinning.succeed(done);
   } catch (error) {
-    spinning.fail(`${label}：没有成功`);
+    spinning.fail(t(`${label}：没有成功`, `${label}: failed`));
     throw error;
   }
 }
@@ -129,10 +130,10 @@ export async function startCommand(target, options) {
   for (const spec of apps) {
     const current = running.get(spec.app);
     if (current?.pm2_env?.status === 'online') {
-      context.stdout.write(`${s.gray('·')} ${spec.app} 已经在运行\n`);
+      context.stdout.write(`${s.gray('·')} ${t(`${spec.app} 已经在运行`, `${spec.app} is running already`)}\n`);
       continue;
     }
-    await step(context, `启动 ${spec.app}`, `${spec.app} 已就绪`, async () => {
+    await step(context, t(`启动 ${spec.app}`, `Starting ${spec.app}`), t(`${spec.app} 已就绪`, `${spec.app} is ready`), async () => {
       if (current) {
         await context.execFileImpl(context.pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appControlEnv(spec.app, context.pm2Env) });
       }
@@ -149,7 +150,7 @@ export async function restartCommand(target, options) {
   Object.assign(context, await installedRelease(context.releaseLink));
   const running = new Set((await pm2Processes(context)).map((processInfo) => processInfo?.name));
   for (const spec of apps) {
-    await step(context, `重启 ${spec.app}`, `${spec.app} 已就绪`, async () => {
+    await step(context, t(`重启 ${spec.app}`, `Restarting ${spec.app}`), t(`${spec.app} 已就绪`, `${spec.app} is ready`), async () => {
       if (running.has(spec.app)) {
         await context.execFileImpl(context.pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appControlEnv(spec.app, context.pm2Env) });
       }
@@ -166,7 +167,7 @@ export async function stopCommand(target, options) {
   const running = new Set((await pm2Processes(context)).map((processInfo) => processInfo?.name));
   for (const spec of apps) {
     if (!running.has(spec.app)) continue;
-    await step(context, `停止 ${spec.app}`, `${spec.app} 已停止`, () => context.execFileImpl(context.pm2Bin, ['stop', spec.app], { timeout: 30_000, env: context.pm2Env }));
+    await step(context, t(`停止 ${spec.app}`, `Stopping ${spec.app}`), t(`${spec.app} 已停止`, `${spec.app} is stopped`), () => context.execFileImpl(context.pm2Bin, ['stop', spec.app], { timeout: 30_000, env: context.pm2Env }));
   }
   await context.execFileImpl(context.pm2Bin, ['save'], { timeout: 30_000, env: context.pm2Env });
   return 0;
@@ -182,7 +183,10 @@ async function ready(spec, context) {
   }
 }
 
-const STATES = { online: '运行中', stopped: '已停止', stopping: '停止中', launching: '启动中', errored: '出错了', 'one-launch-status': '启动中' };
+const STATES = () => t(
+  { online: '运行中', stopped: '已停止', stopping: '停止中', launching: '启动中', errored: '出错了', 'one-launch-status': '启动中' },
+  { online: 'online', stopped: 'stopped', stopping: 'stopping', launching: 'starting', errored: 'errored', 'one-launch-status': 'starting' },
+);
 
 export async function statusCommand(options) {
   const context = defaults(options);
@@ -201,10 +205,10 @@ export async function statusCommand(options) {
   }
   const width = Math.max(...rows.map(({ app }) => app.length));
   for (const { app, status, readiness, im } of rows) {
-    const state = status ? STATES[status] ?? status : '未启动';
+    const state = status ? STATES()[status] ?? status : t('未启动', 'not started');
     const dot = readiness ? s.green('●') : status === 'online' ? s.yellow('●') : status === 'errored' ? s.red('●') : s.gray('○');
-    const answer = readiness === null ? '-' : readiness ? '就绪' : '未就绪';
-    const line = `${dot} ${padEnd(app, width)}  ${padEnd(state, 8)}  ${padEnd(answer, 6)}  ${s.gray(im)}`;
+    const answer = readiness === null ? '-' : readiness ? t('就绪', 'ready') : t('未就绪', 'not ready');
+    const line = `${dot} ${padEnd(app, width)}  ${padEnd(state, t(8, 11))}  ${padEnd(answer, t(6, 9))}  ${s.gray(im)}`;
     context.stdout.write(`${line.trimEnd()}\n`);
   }
   return 0;
