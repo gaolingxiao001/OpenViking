@@ -86,6 +86,14 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 机器人只和扫码的微信号单聊，其他发送者的消息直接忽略。一个微信号同时只能连一个机器人：给另一个实例扫码，这个实例的微信会报会话过期。扫码后要先给机器人发一句话，微信才会送达它主动发的消息；Vika 在收到你的第一句话之前不会尝试主动发微信，直接报错。会话过期（`ret=-14`）时只有微信 Connector 停下，飞书照常工作；Core 按 5 秒、15 秒、1 分钟、之后每 5 分钟的间隔重试。重新运行扫码命令即可，下一次重试会用上新登录，不需要重启实例。当前支持微信单聊文本、图片、文件和微信已有语音转写；不处理原始语音、视频或群聊。
 
+### QQ 机器人接入
+
+在包含 QQ 功能的 release 中运行 `vika setup`，勾选 QQ。先在腾讯 [QQ 机器人入口](https://q.qq.com/qqbot/openclaw/) 创建机器人并取得 AppID / AppSecret，开启单聊消息权限、用本人 QQ 添加机器人。向导会隐藏输入 AppSecret，再要求在机器人私聊中发送一次性 `vika-bind …` 验证码，三分钟内有效；验证成功后才保存。主机需能访问 `https://api.bot.qq.com`、腾讯 WebSocket 网关和附件 CDN，不需要公网监听端口。
+
+支持 owner 私聊的文本、图片、文件、引用回复与 slash 命令，也可以选为主渠道接收通知和编号邮件审批；主动通知取决于平台权限与配额。纯 QQ 实例不填 `profile`，支持 Codex、TraeX、Claude、Pi，暂不支持 Ark。每个实例使用独立机器人，凭证保存在 `<dataDir>/qq/state.sqlite3`，不写入 `config.json`。
+
+重新授权已接入的实例用 `vika login qq [实例]`：先停实例，验证新凭证和本人私聊，再恢复启动。取消或失败保留原账号。文件上限、被动回复限制与停机期间的消息边界见 [README 的 QQ 私聊](./README.md#qq-私聊)。此功能随 release 发布后安装器才会显示，工作区修改不会直接更新线上 `latest`。
+
 ### Telegram Bot 接入
 
 在包含 Telegram 功能的 release 中运行 `vika setup`，新建或修改实例，勾选 Telegram。先在官方 [@BotFather](https://t.me/BotFather) 用 `/newbot` 创建独立 Bot，再在安装向导的隐藏输入框粘贴 token。打开向导生成的链接或扫描二维码，在 Bot 私聊中点击 Start；绑定有效期三分钟，成功后才保存新凭证并启动实例。没有公网 Webhook 或手机号登录步骤，Vika 主机须能访问 `https://api.telegram.org`。
@@ -110,7 +118,7 @@ vika login telegram [实例]
 
 ## 用 vika setup 添加和修改实例
 
-发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置。机器上已经有实例时，它先问是新建一个实例还是修改某个已有实例。修改时列出这个实例的全部配置项和现在的值（机器人名字、工作目录、运行时、接入的 IM、主渠道、邮箱、OpenViking），用 ↑↓ 选一项、回车进去改，改完回到列表，改过的项标"（已改）"，没进去改的保持原样；实例名不能改。选"保存"后列出改动，只给新接的 IM 完成授权（Telegram 为 token + Start 绑定），然后写配置并重启这个实例；选"放弃修改"什么都不动。接入新的 IM、加减邮箱、切换主渠道都在这里做。
+发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置。机器上已经有实例时，它先问是新建一个实例还是修改某个已有实例。修改时列出这个实例的全部配置项和现在的值（机器人名字、工作目录、运行时、接入的 IM、主渠道、邮箱、OpenViking），用 ↑↓ 选一项、回车进去改，改完回到列表，改过的项标"（已改）"，没进去改的保持原样；实例名不能改。选"保存"后列出改动，只给新接的 IM 完成授权（Telegram 为 token + Start 绑定，QQ 为 AppID/AppSecret + 私聊验证码），然后写配置并重启这个实例；选"放弃修改"什么都不动。接入新的 IM、加减邮箱、切换主渠道都在这里做。
 
 帆船停在屏幕顶部，整个 setup 期间一直在动，问题在它下面滚动；扫码时它让出整屏，扫完再回来。窗口不到 30 行时先放一段完整动画，再换成顶部一条小帆船。`VIKA_NO_ANIMATION=1` 只画一帧。开头先检查本机有哪些 agent。问答阶段随时可以按 ←（或 Esc）回到上一步，之前的答案作为默认值；按 → 沿用当前的值往下走（文本框里只在还没输入时生效）。退回去的步骤会从屏幕上消失，屏幕上只留当前这条路。修改实例时，进入某一项后按 ← 回到配置列表、这一项不变；在列表上按 ← 回到「要做什么」。二维码在等你扫的时候也可以按 ← 回到确认页（或配置列表），这时什么都还没创建；一旦有一次扫码确认了（飞书应用已建好、微信或 Telegram 已绑定），就不能再返回。一个都不能用时，可以当场打开内置 Pi 输入 `/login` 登录模型，`/quit` 回来接着走；也可以先退出去登录 Codex 或 Claude Code。
 
@@ -124,11 +132,11 @@ vika login telegram [实例]
 vika start|stop|restart [实例|web|updater]   # 用本机已安装的 release，不拉代码
 vika status
 vika logs [实例]
-vika login lark|weixin|email|telegram [实例]         # 登录过期或改了密码后重新授权
+vika login lark|weixin|email|telegram|qq [实例]         # 登录过期或改了密码后重新授权
 vika pi                                     # 打开内置 Pi，例如 /login 配模型
 ```
 
-`vika login` 只给实例已经接入的 IM 重新授权：飞书重新扫码授权用户身份，微信重新扫码登录，Telegram 重新验证 token 与 Start 绑定，邮箱选一个换密码；只有一个实例时不用写实例名，多个时会列出接了这个 IM 的实例让你选。要接入新的 IM，运行 `vika setup` 修改实例。新接入飞书后，机器人会在飞书里先发一条自我介绍；微信要你先给机器人发一句话，它才能主动找你（每次重新扫码后都一样）。`vika` 不带参数会列出本机所有实例和它们接入的 IM。
+`vika login` 只给实例已经接入的 IM 重新授权：飞书重新扫码授权用户身份，微信重新扫码登录，Telegram 重新验证 token 与 Start 绑定，QQ 重新验证 AppID/AppSecret 与私聊验证码，邮箱选一个换密码；只有一个实例时不用写实例名，多个时会列出接了这个 IM 的实例让你选。要接入新的 IM，运行 `vika setup` 修改实例。新接入飞书后，机器人会在飞书里先发一条自我介绍；微信要你先给机器人发一句话，它才能主动找你（每次重新扫码后都一样）。`vika` 不带参数会列出本机所有实例和它们接入的 IM。
 
 ## 升级与回滚
 
@@ -177,4 +185,4 @@ VIKA_TOS_BUCKET=<桶> VIKA_TOS_ENDPOINT=<TOS 域名> VIKA_TOS_ACCESS_KEY=<桶密
 
 ## 多个 agent
 
-在 `config.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，用 OV 时还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark`、`weixin`、`telegram` 和 `email`（邮箱至少搭配一个聊天 IM）。省略两者时走飞书。最简单的是再运行一次 `vika setup`；手改 manifest 后执行 `vika start <新实例>` 和 `vika restart web`，updater 每次请求都重读 manifest，不用重启。
+在 `config.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，用 OV 时还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark`、`weixin`、`telegram`、`qq` 和 `email`（邮箱至少搭配一个聊天 IM）。省略两者时走飞书。最简单的是再运行一次 `vika setup`；手改 manifest 后执行 `vika start <新实例>` 和 `vika restart web`，updater 每次请求都重读 manifest，不用重启。

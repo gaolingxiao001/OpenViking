@@ -24,6 +24,7 @@ import { EmailCancelled, askEmail, emailAccountPath, emailInstanceId, mailboxesO
 import { GoBack } from './prompt.mjs';
 import { IM_LABELS, PRIMARY_MEANING, connectorsOf, imList } from './instances.mjs';
 import { connectTelegram } from './telegram.mjs';
+import { connectQQ } from './qq.mjs';
 
 // `vika setup`: add an instance, or change one. A new instance is asked
 // question by question; a change is a list of every setting with its current
@@ -58,6 +59,7 @@ const IM_CHOICES = [
   { label: '微信', value: 'weixin' },
   { label: '邮箱', value: 'email', hint: 'IMAP/SMTP；新邮件提醒和回信确认发到主渠道' },
   { label: 'Telegram', value: 'telegram', hint: '官方 Bot API；需要 @BotFather 创建 Bot 和 token' },
+  { label: 'QQ', value: 'qq', hint: '腾讯官方机器人；需要 AppID / AppSecret 和本人私聊验证码' },
 ];
 
 const ims = (state) => state.connectors.filter((connector) => connector !== 'email');
@@ -198,7 +200,7 @@ async function askIms(ctx, state) {
     connectors = await ctx.prompter.multiselect('接入哪些 IM', IM_CHOICES,
       { initial: IM_CHOICES.map(({ value }, index) => (state.connectors.includes(value) ? index : -1)).filter((index) => index >= 0) });
     if (connectors.some((connector) => connector !== 'email')) break;
-    ctx.prompter.warn('邮箱不能单独接：新邮件提醒和回信确认要发到飞书、微信或 Telegram，再选一个。');
+    ctx.prompter.warn('邮箱不能单独接：新邮件提醒和回信确认要发到飞书、微信、Telegram 或 QQ，再选一个。');
   }
   const hadEmail = state.connectors.includes('email');
   state.connectors = connectors;
@@ -642,10 +644,10 @@ const SCANS = { lark: 2, weixin: 1 };
 
 function connectionSteps(prompter, connectors, { saving = false } = {}) {
   if (!connectors.length) return;
-  const telegram = connectors.includes('telegram');
-  const steps = connectors.map((im) => im === 'telegram'
+  const credentials = connectors.some((im) => ['telegram', 'qq'].includes(im));
+  const steps = connectors.map((im) => im === 'qq' ? 'QQ AppID / AppSecret + 私聊验证码绑定' : im === 'telegram'
     ? 'Telegram Bot token + Start 绑定' : `${IM_LABELS[im]} ${SCANS[im]} 次`);
-  prompter.info(`接下来${telegram ? '接入' : '扫码'}：${steps.join('，')}${saving ? `；${telegram ? '全部验证成功' : '扫完'}才保存配置` : ''}`);
+  prompter.info(`接下来${credentials ? '接入' : '扫码'}：${steps.join('，')}${saving ? `；${credentials ? '全部验证成功' : '扫完'}才保存配置` : ''}`);
 }
 
 // The boat sails above the whole setup on a colour terminal; whatever ends
@@ -678,7 +680,7 @@ async function setupFlow({
   homeDir = os.homedir(),
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
-  connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, email: askEmail, greet, pi: loginPi },
+  connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, qq: connectQQ, email: askEmail, greet, pi: loginPi },
   control = { start: startCommand, restart: restartCommand, autostart: autostartCommand },
   allocate = allocatePort,
   live = null,
@@ -777,7 +779,7 @@ async function setupFlow({
       ['数据目录', shortenHome(state.dataDir, homeDir)],
     ]);
     connectionSteps(prompter, ims(state), { saving: true });
-    if (await prompter.confirm(ims(state).includes('telegram') ? '开始接入？' : ims(state).length ? '开始扫码？' : '保存并启动？')) return null;
+    if (await prompter.confirm(ims(state).some((im) => ['telegram', 'qq'].includes(im)) ? '开始接入？' : ims(state).length ? '开始扫码？' : '保存并启动？')) return null;
     prompter.info(`什么都没保存；准备好了再运行 ${vika} setup。`);
     return DECLINED;
   };
@@ -836,7 +838,11 @@ async function setupFlow({
         await connect.weixin({ plan, prompter, canGoBack: prompter.tty && !bound });
         bound = true;
       }
-      if (newIms.includes('telegram')) await connect.telegram({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
+      if (newIms.includes('telegram')) {
+        await connect.telegram({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
+        bound = true;
+      }
+      if (newIms.includes('qq')) await connect.qq({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
       break;
     } catch (error) {
       if (!(error instanceof GoBack)) throw error;
@@ -893,6 +899,7 @@ async function setupFlow({
   if (lark) next.push(['飞书', greeted ? '私聊里它已经跟你打了招呼，直接回它' : `在飞书里搜「${state.displayName}」，给它发消息`]);
   if (newIms.includes('weixin')) next.push(['微信', '先给它发一句「你好」，它才能主动找你']);
   if (newIms.includes('telegram')) next.push(['Telegram', '在刚绑定的 Bot 私聊中发一条任务']);
+  if (newIms.includes('qq')) next.push(['QQ', '在刚绑定的机器人私聊中发一条任务']);
   if (!current) {
     next.push(['控制台', `http://127.0.0.1:${WEB_PORT}  每一轮在做什么都在这里`]);
     if (env.SSH_CONNECTION) next.push(['', `远程机器：本地 ssh -L ${WEB_PORT}:127.0.0.1:${WEB_PORT} 再打开`]);
@@ -937,8 +944,8 @@ function describeChanges(before, after, mailboxes, homeDir) {
     changes.push(`工作目录：${shortenHome(before.workspace, homeDir)} → ${shortenHome(after.workspace, homeDir)}（模型会开一次新的会话）`);
   }
   if (before.model !== after.model) changes.push(`运行时：${before.model} → ${after.model}`);
-  for (const im of ['lark', 'weixin', 'telegram']) {
-    if (!was.includes(im) && after.connectors.includes(im)) changes.push(`接入${IM_LABELS[im]}（${im === 'telegram' ? '需要 Bot token 和 Start 绑定' : '需要扫码'}）`);
+  for (const im of ['lark', 'weixin', 'telegram', 'qq']) {
+    if (!was.includes(im) && after.connectors.includes(im)) changes.push(`接入${IM_LABELS[im]}（${im === 'qq' ? '需要 AppID / AppSecret 和私聊验证码' : im === 'telegram' ? '需要 Bot token 和 Start 绑定' : '需要扫码'}）`);
     if (was.includes(im) && !after.connectors.includes(im)) changes.push(`不再接${IM_LABELS[im]}`);
   }
   if ((before.channel ?? was[0]) !== after.channel) changes.push(`主渠道：${IM_LABELS[before.channel ?? was[0]]} → ${IM_LABELS[after.channel]}`);

@@ -24,6 +24,14 @@ afterEach(() => {
 });
 
 describe('configuration safety', { concurrency: false }, () => {
+  it('accepts QQ as the primary channel without putting credentials in config', () => {
+    setEnv('VIKA_CHANNEL', 'qq');
+    setEnv('VIKA_CONNECTORS_JSON', '["qq","telegram"]');
+    const config = getConfig();
+    assert.equal(config.channel, 'qq');
+    assert.deepEqual(config.connectors, ['qq', 'telegram']);
+    assert.equal(config.qqAppSecret, undefined);
+  });
   it('accepts Telegram as primary and alongside existing connectors without putting keys in config', () => {
     setEnv('VIKA_CHANNEL', 'telegram');
     setEnv('VIKA_CONNECTORS_JSON', '["telegram","weixin"]');

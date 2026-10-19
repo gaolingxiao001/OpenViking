@@ -9,8 +9,8 @@ import { PALETTE, padEnd, styler, width } from '../src/ui.mjs';
 // [command, arguments, what it does], in groups.
 const COMMANDS = [
   ['配置', [
-    ['setup', '', '添加或修改实例：接飞书、微信、邮箱、Telegram，设主渠道等'],
-    ['login', '<lark|weixin|email|telegram>', '登录过期或改了密码后重新授权；后面可加实例名'],
+    ['setup', '', '添加或修改实例：接飞书、微信、邮箱、Telegram、QQ，设主渠道等'],
+    ['login', '<lark|weixin|email|telegram|qq>', '登录过期或改了密码后重新授权；后面可加实例名'],
   ]],
   ['运行', [
     ['start', '[实例|web|updater]', '启动本机已安装的版本；不写实例时启动全部'],

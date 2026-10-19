@@ -1,5 +1,6 @@
 import { WEIXIN_CHANNEL_VERSION } from '../weixin/api.mjs';
 import { TELEGRAM_VERSION } from '../telegram/api.mjs';
+import { QQ_VERSION } from '../qq/api.mjs';
 import { connectorManifest } from './protocol.mjs';
 
 const EMPTY_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false });
@@ -12,6 +13,14 @@ const LARK_CONTENT = ['markdown', 'file', 'file_key', 'card'];
 const WEIXIN_CONTENT = ['markdown', 'file'];
 
 const MANIFESTS = Object.freeze({
+  qq: connectorManifest({
+    name: 'qq', version: QQ_VERSION, capabilities: ['events', 'actions'],
+    actions: {
+      'message.send': { content: ['markdown', 'file'] },
+      'message.reply': { content: ['markdown', 'file'] },
+    },
+    queries: ['message.media'], auth_schema: EMPTY_SCHEMA, config_schema: EMPTY_SCHEMA,
+  }),
   telegram: connectorManifest({
     name: 'telegram', version: TELEGRAM_VERSION, capabilities: ['events', 'actions'],
     actions: {

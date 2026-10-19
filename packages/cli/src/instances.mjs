@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { loadDeploymentManifest, resolveDeploymentManifestPath } = require('../../../deployment-config.cjs');
 
-export const IM_LABELS = Object.freeze({ lark: '飞书', weixin: '微信', email: '邮箱', telegram: 'Telegram' });
+export const IM_LABELS = Object.freeze({ lark: '飞书', weixin: '微信', email: '邮箱', telegram: 'Telegram', qq: 'QQ' });
 
 // The primary IM (`channel`) is where the bot reaches the owner unasked.
 export const PRIMARY_MEANING = '你没找机器人、它主动找你时（比如新邮件提醒、待你确认的邮件回复）发到这里';

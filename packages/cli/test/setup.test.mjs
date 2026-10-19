@@ -33,6 +33,7 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
     homeDir: home,
     detect: { runtimes: async () => runtimes, openViking: async () => ov },
     connect: {
+      qq: async ({ plan }) => { calls.push(['qq', plan.dataDir]); },
       telegram: async ({ plan }) => { calls.push(['telegram', plan.dataDir]); },
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
       weixin: async ({ plan }) => { calls.push(['weixin', plan.dataDir]); },
@@ -117,6 +118,30 @@ test('Telegram-only setup binds a private Start challenge and saves no token in 
   try { assert.equal(state.account().ownerId, '99'); } finally { state.close(); }
   assert.match(h.written(), /Telegram Bot token \+ Start 绑定/);
   assert.doesNotMatch(h.written(), /Telegram undefined|abcdefghijklmnopqrstuvwxyz/);
+});
+
+test('QQ-only setup needs no Lark profile, selects QQ as primary and binds before saving', async (t) => {
+  const h = harness(t, ['QQ Agent', '', '3', '5', 'y']);
+  h.options.connect.qq = async ({ plan }) => {
+    assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+    h.calls.push(['qq', plan.dataDir]);
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  const agent = h.manifest().agents[0];
+  assert.equal(agent.channel, 'qq'); assert.deepEqual(agent.connectors, ['qq']);
+  assert.equal(agent.profile, undefined);
+  assert.equal(h.calls[0][0], 'qq');
+  assert.match(h.written(), /QQ AppID \/ AppSecret \+ 私聊验证码绑定/);
+  assert.doesNotMatch(h.written(), /undefined 次/);
+});
+
+test('adding QQ to an existing instance binds only QQ and can choose it as primary', async (t) => {
+  const h = harness(t, ['2', '4', '1,5', '5', '2', '8']);
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'qq'], channel: 'qq' }]);
+  assert.deepEqual(h.calls, [['qq', before.dataDir], ['restart', 'asd']]);
+  assert.match(h.written(), /接入QQ（需要 AppID \/ AppSecret 和私聊验证码）/);
 });
 
 test('adding Telegram to an existing instance verifies only the new IM and can change the primary', async (t) => {

@@ -19,6 +19,16 @@ function writePrompt(name, body) {
 const defaultSystemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 describe('conversation policy assemble', () => {
+  it('gives QQ its owner routing, passive reply limits and proactive restrictions in single and mixed sessions', () => {
+    const single = assembleConversationPolicy({ connectors: ['qq', 'email'] });
+    assert.match(single, /# QQ conversation policy/);
+    assert.match(single, /4000 characters/);
+    assert.match(single, /four passive replies/);
+    assert.doesNotMatch(single, /lark-cli profile|voice transcript/);
+    const mixed = assembleConversationPolicy({ connectors: ['lark', 'telegram', 'qq'], systemPromptPath: defaultSystemPromptPath });
+    assert.match(mixed, /source=qq/); assert.match(mixed, /source=telegram/);
+    assert.match(mixed, /Never bypass a reply limit/);
+  });
   it('gives Telegram the supported tools and size limits in single and mixed connector sessions', () => {
     const single = assembleConversationPolicy({ connectors: ['telegram', 'email'] });
     assert.match(single, /# Telegram conversation policy/);

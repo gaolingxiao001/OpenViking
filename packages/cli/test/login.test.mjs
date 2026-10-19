@@ -91,7 +91,7 @@ test('usage, and nothing to renew before setup', async (t) => {
   const empty = machine(t, () => []);
   await assert.rejects(loginCommand(['weixin'], empty.options), /先运行 vika setup/);
   assert.equal(await loginCommand(['setup'], empty.options), 2);
-  assert.match(empty.written(), /用法：vika login <lark\|weixin\|email\|telegram> \[实例\]\n  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例/);
+  assert.match(empty.written(), /用法：vika login <lark\|weixin\|email\|telegram\|qq> \[实例\]\n  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例/);
 });
 
 test('Telegram login stops the poller before verification and restarts with the new key', async (t) => {
@@ -108,4 +108,13 @@ test('failed Telegram verification resumes the existing instance and reports the
   m.options.connect.telegram = async () => { throw new Error('invalid API key'); };
   await assert.rejects(loginCommand(['telegram'], m.options), /invalid API key/);
   assert.deepEqual(m.calls, [['stop', 'wa'], ['restart', 'wa']]);
+});
+
+for (const fail of [false, true]) test(`QQ login stops the receiver and restores the instance after verification (failure=${fail})`, async (t) => {
+  const m = machine(t, (home) => [agent(home, 'qq', { channel: 'qq', connectors: ['qq'], profile: undefined })]);
+  m.options.control.stop = async (id) => { m.calls.push(['stop', id]); };
+  m.options.connect.qq = async ({ plan }) => { m.calls.push(['qq', plan.id]); if (fail) throw new Error('cancelled'); };
+  if (fail) await assert.rejects(loginCommand(['qq'], m.options), /cancelled/);
+  else assert.equal(await loginCommand(['qq'], m.options), 0);
+  assert.deepEqual(m.calls, [['stop', 'qq'], ['qq', 'qq'], ['restart', 'qq']]);
 });

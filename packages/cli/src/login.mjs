@@ -1,6 +1,7 @@
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { restartCommand, stopCommand } from './control.mjs';
 import { connectTelegram } from './telegram.mjs';
+import { connectQQ } from './qq.mjs';
 import { askEmail, mailboxesOf, writeEmailAccount } from './email.mjs';
 import { IM_LABELS, chooseInstance, loadInstances } from './instances.mjs';
 import { LarkCli } from './lark-cli.mjs';
@@ -8,12 +9,12 @@ import { showScan } from './qr.mjs';
 import { which } from './runtimes.mjs';
 import { WEIXIN_FIRST_MESSAGE, connectWeixin, larkScopes } from './setup.mjs';
 
-// `vika login <lark|weixin|email|telegram> [instance]`: authorize again what an
+// `vika login <lark|weixin|email|telegram|qq> [instance]`: authorize again what an
 // instance already has, after a login expired or a password changed.
 // Connecting something new is `vika setup` (change the instance). The
 // instance may be left out when there is only one, and is chosen otherwise.
 
-const USAGE = '用法：vika login <lark|weixin|email|telegram> [实例]\n'
+const USAGE = '用法：vika login <lark|weixin|email|telegram|qq> [实例]\n'
   + '  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例。只有一个实例时可以不写实例名。\n';
 
 function larkCliBin(env, deployment) {
@@ -34,10 +35,10 @@ async function restart({ agent, prompter, env, control }) {
 export async function loginCommand([connector, requested, ...extra], {
   prompter,
   env = process.env,
-  connect = { weixin: connectWeixin, telegram: connectTelegram, email: askEmail },
+  connect = { weixin: connectWeixin, telegram: connectTelegram, qq: connectQQ, email: askEmail },
   control = { restart: restartCommand, stop: stopCommand },
 } = {}) {
-  if (!['lark', 'weixin', 'email', 'telegram'].includes(connector) || extra.length) {
+  if (!['lark', 'weixin', 'email', 'telegram', 'qq'].includes(connector) || extra.length) {
     prompter.write(USAGE);
     return 2;
   }
@@ -53,17 +54,17 @@ export async function loginCommand([connector, requested, ...extra], {
   if (having.agents.length === 0) throw new Error(`还没有实例接${label}；要接入，运行 vika setup 修改实例`);
   const agent = await chooseInstance({ deployment: having, requested, prompter, question: `重新授权哪个实例的${label}` });
 
-  if (connector === 'telegram') {
-    prompter.write('验证新密钥时会暂时停止这个实例，避免同时接收 Telegram 消息；完成后重新启动。\n');
+  if (['telegram', 'qq'].includes(connector)) {
+    prompter.write(`验证新密钥时会暂时停止这个实例，避免同时接收 ${label} 消息；完成后重新启动。\n`);
     await control.stop(agent.id, { env });
-    try { await connect.telegram({ plan: agent, prompter }); } catch (error) {
+    try { await connect[connector]({ plan: agent, prompter }); } catch (error) {
       await control.restart(agent.id, { env }).catch(() => {
         prompter.write(`实例没有恢复启动；请运行 vika restart ${agent.id}\n`);
       });
       throw error;
     }
     if (!await restart({ agent, prompter, env, control })) return 1;
-    prompter.write(`\n${agent.displayName}（${agent.id}）的 Telegram 已更新。\n`);
+    prompter.write(`\n${agent.displayName}（${agent.id}）的 ${label} 已更新。\n`);
     return 0;
   }
 
