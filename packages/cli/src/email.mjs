@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { verifyAccount } from '../../daemon/src/email/client.mjs';
+import { t } from './i18n.mjs';
 import { vikaHome } from './manifest.mjs';
 import { PromptAborted } from './prompt.mjs';
 
@@ -9,14 +10,23 @@ import { PromptAborted } from './prompt.mjs';
 // anything is saved. A known provider needs no server names. An instance may
 // watch several mailboxes; each is its own Connector instance, `email-<name>`.
 
-const NETEASE = { label: '网易邮箱', password: '授权码', where: '网页版邮箱 → 设置 → POP3/SMTP/IMAP，开启「IMAP/SMTP 服务」后生成' };
+// What to call each provider and its client password, and where to get one.
+const TEXT = {
+  gmail: () => ({ label: 'Gmail', password: t('应用专用密码', 'App password'),
+    where: t('在 https://myaccount.google.com/apppasswords 生成，要先开启两步验证',
+      'use an app password, made at https://myaccount.google.com/apppasswords once 2-Step Verification is on') }),
+  qq: () => ({ label: t('QQ 邮箱', 'QQ Mail'), password: t('授权码', 'Authorization code'),
+    where: t('网页版 QQ 邮箱的设置里开启「IMAP/SMTP 服务」后生成',
+      'use an authorization code, generated once IMAP/SMTP is turned on in the QQ Mail web settings') }),
+  netease: () => ({ label: t('网易邮箱', 'NetEase Mail'), password: t('授权码', 'Authorization code'),
+    where: t('网页版邮箱 → 设置 → POP3/SMTP/IMAP，开启「IMAP/SMTP 服务」后生成',
+      'use an authorization code: web mail → Settings → POP3/SMTP/IMAP, turn on IMAP/SMTP, then generate one') }),
+};
 
 const PROVIDERS = [
-  { domains: ['gmail.com', 'googlemail.com'], imap: 'imap.gmail.com', smtp: 'smtp.gmail.com',
-    label: 'Gmail', password: '应用专用密码', where: '在 https://myaccount.google.com/apppasswords 生成，要先开启两步验证' },
-  { domains: ['qq.com'], imap: 'imap.qq.com', smtp: 'smtp.qq.com',
-    label: 'QQ 邮箱', password: '授权码', where: '网页版 QQ 邮箱的设置里开启「IMAP/SMTP 服务」后生成' },
-  ...['163.com', '126.com', 'yeah.net'].map((domain) => ({ domains: [domain], imap: `imap.${domain}`, smtp: `smtp.${domain}`, ...NETEASE })),
+  { kind: 'gmail', domains: ['gmail.com', 'googlemail.com'], imap: 'imap.gmail.com', smtp: 'smtp.gmail.com' },
+  { kind: 'qq', domains: ['qq.com'], imap: 'imap.qq.com', smtp: 'smtp.qq.com' },
+  ...['163.com', '126.com', 'yeah.net'].map((domain) => ({ kind: 'netease', domains: [domain], imap: `imap.${domain}`, smtp: `smtp.${domain}` })),
 ];
 
 // The owner gave up on a mailbox: setup's menu goes back to its list, any
@@ -49,25 +59,28 @@ export function emailInstanceId(address, taken = []) {
 
 export function providerFor(address) {
   const domain = address.split('@')[1] ?? '';
-  return PROVIDERS.find((provider) => provider.domains.includes(domain)) ?? null;
+  const provider = PROVIDERS.find((candidate) => candidate.domains.includes(domain));
+  return provider ? { ...provider, ...TEXT[provider.kind]() } : null;
 }
 
 function addressProblem(value, taken) {
-  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) return '邮箱地址不对';
-  if (OAUTH_ONLY.includes(value.split('@')[1].toLowerCase())) return 'Outlook / Hotmail 只能用 OAuth 登录，暂时接不了，换一个邮箱';
-  if (taken.includes(value.toLowerCase())) return '这个邮箱已经接入了';
+  if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value)) return t('邮箱地址不对', 'That is not an email address');
+  if (OAUTH_ONLY.includes(value.split('@')[1].toLowerCase())) {
+    return t('Outlook / Hotmail 只能用 OAuth 登录，暂时接不了，换一个邮箱', 'Outlook / Hotmail only sign in with OAuth, which Vika cannot do yet; use another mailbox');
+  }
+  if (taken.includes(value.toLowerCase())) return t('这个邮箱已经接入了', 'This mailbox is connected already');
   return null;
 }
 
 function portProblem(value) {
   const port = Number(value);
-  return Number.isInteger(port) && port > 0 && port < 65_536 ? null : '端口是 1-65535 的整数';
+  return Number.isInteger(port) && port > 0 && port < 65_536 ? null : t('端口是 1-65535 的整数', 'A port is a whole number from 1 to 65535');
 }
 
 async function servers(prompter, domain, previous) {
   const ask = async (kind, host, port) => ({
-    host: await prompter.text(`${kind.toUpperCase()} 服务器`, { initial: host, validate: (value) => (value ? null : '不能为空') }),
-    port: Number(await prompter.text(`${kind.toUpperCase()} 端口`, { initial: String(port), validate: portProblem })),
+    host: await prompter.text(t(`${kind.toUpperCase()} 服务器`, `${kind.toUpperCase()} server`), { initial: host, validate: (value) => (value ? null : t('不能为空', 'Required')) }),
+    port: Number(await prompter.text(t(`${kind.toUpperCase()} 端口`, `${kind.toUpperCase()} port`), { initial: String(port), validate: portProblem })),
   });
   return {
     imap: await ask('imap', previous?.imap.host ?? `imap.${domain}`, previous?.imap.port ?? 993),
@@ -79,7 +92,10 @@ async function servers(prompter, domain, previous) {
 function explain(error, provider, password) {
   const message = String(error?.message ?? error);
   if (/IMAP LOGIN failed|SMTP AUTH/.test(message)) {
-    return `${message}\n  多半是密码不对（这次收到 ${password.length} 个字符）：这里要填${provider?.password ?? '邮箱给第三方客户端用的专用密码'}，不是网页登录密码。`;
+    return `${message}\n  ${t(
+      `多半是密码不对（这次收到 ${password.length} 个字符）：这里要填${provider?.password ?? '邮箱给第三方客户端用的专用密码'}，不是网页登录密码。`,
+      `Most likely the password is wrong (${password.length} characters came through): this takes ${provider ? `the ${provider.password.toLowerCase()}` : 'the password the mailbox gives to other mail apps'}, not your web login password.`,
+    )}`;
   }
   return message;
 }
@@ -89,30 +105,37 @@ function explain(error, provider, password) {
 // `taken` lists addresses the instance already watches.
 export async function askEmail({ prompter, previous = null, fixed = null, taken = [], verify = verifyAccount }) {
   const out = (text) => prompter.write(text);
-  out(fixed ? `\n── 邮箱 ${fixed.address} ──\n` : '\n── 邮箱 ──\n  只读收件箱（不会标已读、不移动、不删除）；回信先发到主渠道给你确认，你同意了才发出。\n');
+  out(fixed ? `\n── ${t('邮箱', 'Email')} ${fixed.address} ──\n` : t(
+    '\n── 邮箱 ──\n  只读收件箱（不会标已读、不移动、不删除）；回信先发到主渠道给你确认，你同意了才发出。\n',
+    '\n── Email ──\n  Vika only reads the inbox (never marks, moves or deletes); a reply goes to your primary channel and is sent once you OK it.\n',
+  ));
   let last = fixed ?? previous;
   for (;;) {
     const address = fixed?.address
-      ?? (await prompter.text('邮箱地址', { initial: last?.address ?? '', validate: (value) => addressProblem(value, taken) })).toLowerCase();
+      ?? (await prompter.text(t('邮箱地址', 'Email address'), { initial: last?.address ?? '', validate: (value) => addressProblem(value, taken) })).toLowerCase();
     const provider = providerFor(address);
     const known = provider ? { imap: { host: provider.imap, port: 993 }, smtp: { host: provider.smtp, port: 465 } } : null;
-    if (provider) out(`  ${provider.label}：密码处填${provider.password}，${provider.where}。\n`);
-    else if (!fixed) out('  不认识这个邮箱的服务器，需要手动填写；密码处填邮箱给第三方客户端用的专用密码（授权码），没有的话才是登录密码。\n');
+    if (provider) out(t(`  ${provider.label}：密码处填${provider.password}，${provider.where}。\n`, `  ${provider.label}: ${provider.where}.\n`));
+    else if (!fixed) {
+      out(t('  不认识这个邮箱的服务器，需要手动填写；密码处填邮箱给第三方客户端用的专用密码（授权码），没有的话才是登录密码。\n',
+        '  Unknown provider: enter its servers. For the password, use the one the mailbox gives to other mail apps, or the login password if it has none.\n'));
+    }
     const hosts = fixed ? { imap: fixed.imap, smtp: fixed.smtp }
       : known ?? await servers(prompter, address.split('@')[1], last?.address === address ? last : null);
     // A known provider's client password never has spaces; Gmail shows it in groups of four.
-    const typed = await prompter.secret(provider?.password ?? '密码');
+    const typed = await prompter.secret(provider?.password ?? t('密码', 'Password'));
     const password = provider ? typed.replace(/\s+/g, '') : typed;
     const account = { address, password, ...hosts };
-    out(`  正在登录 ${hosts.imap.host} 和 ${hosts.smtp.host}…\n`);
+    out(t(`  正在登录 ${hosts.imap.host} 和 ${hosts.smtp.host}…\n`, `  Logging in to ${hosts.imap.host} and ${hosts.smtp.host}…\n`));
     try {
       const { idle } = await verify({ ...account, user: address });
-      out(`  收信和发信都登录成功${idle ? '' : '（这个邮箱不推送新邮件，每分钟查一次）'}\n`);
+      out(t(`  收信和发信都登录成功${idle ? '' : '（这个邮箱不推送新邮件，每分钟查一次）'}\n`,
+        `  Receiving and sending both work${idle ? '' : ' (this mailbox does not push new mail, so Vika checks every minute)'}\n`));
       return account;
     } catch (error) {
-      out(`  登录失败：${explain(error, provider, password)}\n`);
+      out(`  ${t('登录失败：', 'Login failed: ')}${explain(error, provider, password)}\n`);
       last = account;
-      if (!await prompter.confirm('重新输入？')) throw new EmailCancelled();
+      if (!await prompter.confirm(t('重新输入？', 'Try again?'))) throw new EmailCancelled();
     }
   }
 }

@@ -1,3 +1,4 @@
+import { t } from './i18n.mjs';
 import { PromptAborted } from './prompt.mjs';
 import {
   HIDE_CURSOR, PALETTE, RESET, SHOW_CURSOR, bgCode, colorDepth, fgCode, mix, onInterrupt, scale, styler, width,
@@ -23,8 +24,9 @@ const WORDMARK = [
   '  ╚═══╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝',
 ];
 
-const TAGLINE = '把本机的 coding agent 带上船';
-const SUBLINE = '飞书 · 微信 · Telegram · 邮箱';
+// Beside the wordmark, short of an 80-column window's edge: at most 31 columns each.
+const tagline = () => t('把本机的 coding agent 带上船', 'Bring your coding agent aboard');
+const subline = () => t('飞书 · 微信 · Telegram · 邮箱', 'Lark · WeChat · Telegram · Mail');
 
 function put(cells, x, y, ch, rgb) {
   if (y < 0 || y >= cells.length || x < 0 || x >= cells[0].length) return;
@@ -209,12 +211,12 @@ function render(rows, depth) {
 // Rows of the banner as strings, coloured for `depth`.
 export function bannerLines(t, { depth = 24, version = '', columns = 80 } = {}) {
   const scene = sceneFrame(t);
-  const withWordmark = columns >= SCENE_WIDTH + 4 + width(WORDMARK[0]);
+  const versionLine = version ? `v${version}` : '';
+  const extra = Math.max(width(WORDMARK[0]), width(tagline()), width(subline()), width(versionLine)) + 2;
+  const withWordmark = columns > SCENE_WIDTH + extra;
   const rows = scene.map((row) => row.map((cell) => ({ ...cell })));
   if (withWordmark) {
     const x0 = SCENE_WIDTH + 2;
-    const versionLine = version ? `v${version}` : '';
-    const extra = Math.max(width(WORDMARK[0]), width(TAGLINE), width(SUBLINE), width(versionLine)) + 2;
     rows.forEach((row) => { for (let k = 0; k < extra; k += 1) row.push({ ch: ' ', rgb: null }); });
     WORDMARK.forEach((line, y) => {
       [...line].forEach((ch, x) => {
@@ -227,8 +229,8 @@ export function bannerLines(t, { depth = 24, version = '', columns = 80 } = {}) 
       });
     });
     const below = WORDMARK_TOP + WORDMARK.length + 1;
-    wide(rows, x0, below, TAGLINE, [235, 235, 245]);
-    wide(rows, x0, below + 1, SUBLINE, PALETTE.dim);
+    wide(rows, x0, below, tagline(), [235, 235, 245]);
+    wide(rows, x0, below + 1, subline(), PALETTE.dim);
     wide(rows, x0, below + 2, versionLine, scale(PALETTE.dim, 0.8));
   }
   return render(rows, depth);
@@ -359,7 +361,7 @@ export async function playBanner({
   const animate = depth >= 8 && columns >= SCENE_WIDTH && (output.rows ?? 24) > SCENE_HEIGHT + 2;
   if (!animate) {
     const s = styler(output, env);
-    output.write(`\n${s.bold(s.gradient('VIKA', PALETTE.sail))}  ${TAGLINE}${version ? s.gray(`  v${version}`) : ''}\n\n`);
+    output.write(`\n${s.bold(s.gradient('VIKA', PALETTE.sail))}  ${tagline()}${version ? s.gray(`  v${version}`) : ''}\n\n`);
     return;
   }
   const still = env.VIKA_NO_ANIMATION === '1' || env.CI;

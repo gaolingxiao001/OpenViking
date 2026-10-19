@@ -35,7 +35,7 @@ test('invalid token can be retried, hides credentials, and commits only after pr
   await connectTelegram(f.options);
   assert.equal(f.state.account().token, TOKEN);
   assert.equal(f.state.account().offset, 14);
-  assert.match(f.text(), /token 无效或已撤销[\s\S]*点击 Start[\s\S]*Telegram 已接好/);
+  assert.match(f.text(), /token 无效或已撤销[\s\S]*点 Start[\s\S]*Telegram 已接好/);
   assert.ok(!f.text().includes(TOKEN));
 });
 

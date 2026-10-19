@@ -1,4 +1,5 @@
 import readline from 'node:readline';
+import { list, t } from './i18n.mjs';
 import { SYMBOLS, padEnd, rowsOf, spinner, styler, width } from './ui.mjs';
 
 // Terminal questions for `vika setup`. On a TTY: arrow keys move, space ticks
@@ -12,6 +13,9 @@ import { SYMBOLS, padEnd, rowsOf, spinner, styler, width } from './ui.mjs';
 // both only act while nothing is typed, so typing is never interrupted.
 
 const ESC = '\x1b[';
+
+const NOTHING_TYPED = () => t('没有收到输入，再输一次（每个字符会显示成 *）', 'Nothing came through; type it again (each character shows as *)');
+const atLeast = (min) => t(`至少选 ${min} 项`, `Choose at least ${min}`);
 
 export class PromptAborted extends Error {
   constructor() {
@@ -238,15 +242,16 @@ export class Prompter {
       if (this.fancy) {
         const rows = rowsOf(`${prompt}${'*'.repeat([...buffer].length)}`, this.columns);
         if (value) {
-          this.fold(rows, question, this.s.gray(`${'•'.repeat(Math.min(12, [...value].length))}（${[...value].length} 个字符）`));
+          const count = [...value].length;
+          this.fold(rows, question, this.s.gray(`${'•'.repeat(Math.min(12, count))}${t(`（${count} 个字符）`, ` (${count} characters)`)}`));
           return value;
         }
         this.fold(rows, question, '');
-        this.write(`  ${this.s.yellow(SYMBOLS.warn)} 没有收到输入，再输一次（每个字符会显示成 *）\n`);
+        this.write(`  ${this.s.yellow(SYMBOLS.warn)} ${NOTHING_TYPED()}\n`);
         continue;
       }
       if (value) return value;
-      this.write('  没有收到输入，再输一次（每个字符会显示成 *）\n');
+      this.write(`  ${NOTHING_TYPED()}\n`);
     }
   }
 
@@ -294,10 +299,10 @@ export class Prompter {
       if (this.fancy) {
         const rows = rowsOf(`${prompt}${answer}`, this.columns);
         if (!problem) {
-          this.fold(rows, label, value || this.s.gray('（空）'));
+          this.fold(rows, label, value || this.s.gray(t('（空）', '(empty)')));
           return value;
         }
-        this.fold(rows, label, this.s.red(answer.trim() || '（空）'));
+        this.fold(rows, label, this.s.red(answer.trim() || t('（空）', '(empty)')));
         this.write(`  ${this.s.yellow(SYMBOLS.warn)} ${problem}\n`);
         continue;
       }
@@ -322,11 +327,11 @@ export class Prompter {
         this.abandon(error, rowsOf(prompt, this.columns), question);
         throw error;
       });
-      this.fold(rowsOf(prompt, this.columns), question, answer ? '是' : '否');
+      this.fold(rowsOf(prompt, this.columns), question, answer ? t('是', 'yes') : t('否', 'no'));
       return answer;
     }
     const answer = await this.text(`${question} ${initial ? '[Y/n]' : '[y/N]'}`, {
-      validate: (value) => (value === '' || /^(y|yes|n|no)$/i.test(value) ? null : '请输入 y 或 n'),
+      validate: (value) => (value === '' || /^(y|yes|n|no)$/i.test(value) ? null : t('请输入 y 或 n', 'Type y or n')),
     });
     return answer === '' ? initial : /^y/i.test(answer);
   }
@@ -351,7 +356,8 @@ export class Prompter {
     if (this.fancy) return this.pickDrawn(question, choices, { multiple, selected, min, enabled, initial, label, back });
 
     let cursor = enabled.includes(initial[0]) ? initial[0] : enabled[0];
-    const help = multiple ? '（↑↓ 移动，空格勾选，回车确认）' : '（↑↓ 移动，回车确认）';
+    const help = multiple ? t('（↑↓ 移动，空格勾选，回车确认）', ' (↑↓ move, space ticks, Enter confirms)')
+      : t('（↑↓ 移动，回车确认）', ' (↑↓ move, Enter confirms)');
     const lines = () => choices.map((choice, index) => {
       const pointer = index === cursor ? '❯' : ' ';
       const box = multiple ? (selected.has(index) ? '[x] ' : '[ ] ') : '';
@@ -379,7 +385,7 @@ export class Prompter {
         }
         if (key.name === 'return' || key.name === 'enter' || (key.name === 'right' && this.navigable)) {
           if (!multiple) return [choices[cursor].value];
-          if (selected.size < min) { redraw(`至少选 ${min} 项`); return undefined; }
+          if (selected.size < min) { redraw(atLeast(min)); return undefined; }
           return [...selected].sort((a, b) => a - b).map((index) => choices[index].value);
         }
         return undefined;
@@ -396,7 +402,10 @@ export class Prompter {
     let cursor = enabled.includes(initial[0]) ? initial[0] : enabled[0];
     let note = '';
     const labelWidth = Math.max(...choices.map((choice) => width(choice.label)));
-    const help = s.gray(`↑↓ 移动${multiple ? ' · 空格勾选' : ''} · 回车确认${this.navigable && back ? ' · ← 返回' : ''}`);
+    const help = s.gray(t(
+      `↑↓ 移动${multiple ? ' · 空格勾选' : ''} · 回车确认${this.navigable && back ? ' · ← 返回' : ''}`,
+      `↑↓ move${multiple ? ' · space ticks' : ''} · enter confirms${this.navigable && back ? ' · ← back' : ''}`,
+    ));
     const block = () => {
       const rows = choices.map((choice, index) => {
         const here = index === cursor;
@@ -434,7 +443,7 @@ export class Prompter {
         }
         if (key.name === 'return' || key.name === 'enter' || (key.name === 'right' && this.navigable)) {
           if (!multiple) return [cursor];
-          if (selected.size < min) { note = `至少选 ${min} 项`; redraw(); return undefined; }
+          if (selected.size < min) { note = atLeast(min); redraw(); return undefined; }
           return [...selected].sort((a, b) => a - b);
         }
         return undefined;
@@ -442,7 +451,7 @@ export class Prompter {
         this.abandon(error, rowsOf(drawn, this.columns), short, { below: true });
         throw error;
       });
-      this.fold(rowsOf(drawn, this.columns), short, values.map((index) => choices[index].label).join('、'), { below: true });
+      this.fold(rowsOf(drawn, this.columns), short, list(values.map((index) => choices[index].label)), { below: true });
       return values.map((index) => choices[index].value);
     } finally {
       this.draw(`${ESC}?25h`);
@@ -453,18 +462,18 @@ export class Prompter {
     this.write(`? ${question}\n`);
     choices.forEach((choice, index) => {
       const hint = choice.hint ? `  ${choice.hint}` : '';
-      this.write(`  ${index + 1}) ${choice.label}${hint}${choice.disabled ? '（不可选）' : ''}\n`);
+      this.write(`  ${index + 1}) ${choice.label}${hint}${choice.disabled ? t('（不可选）', ' (unavailable)') : ''}\n`);
     });
     const fallback = [...selected].map((index) => index + 1).join(',');
-    const answer = await this.text(multiple ? '输入编号，多个用逗号分隔' : '输入编号', {
+    const answer = await this.text(multiple ? t('输入编号，多个用逗号分隔', 'Numbers, separated by commas') : t('输入编号', 'Number'), {
       initial: fallback,
       validate: (value) => {
         const numbers = value.split(/[\s,，]+/).filter(Boolean).map(Number);
         if (numbers.some((number) => !Number.isInteger(number) || !choices[number - 1] || choices[number - 1].disabled)) {
-          return '编号无效';
+          return t('编号无效', 'No such choice');
         }
-        if (!multiple && numbers.length !== 1) return '只能选一项';
-        if (numbers.length < min) return `至少选 ${min} 项`;
+        if (!multiple && numbers.length !== 1) return t('只能选一项', 'Choose one');
+        if (numbers.length < min) return atLeast(min);
         return null;
       },
     });

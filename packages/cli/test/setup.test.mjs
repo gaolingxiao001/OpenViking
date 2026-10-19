@@ -29,7 +29,8 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
   const calls = [];
   const options = {
     prompter: new Prompter({ input, output }),
-    env: { HOME: home, PATH: '', LARK_CLI_BIN: '/opt/lark/bin/lark-cli' },
+    // A Chinese locale settles the language; the English run and the question have tests of their own.
+    env: { HOME: home, PATH: '', LARK_CLI_BIN: '/opt/lark/bin/lark-cli', LANG: 'zh_CN.UTF-8' },
     homeDir: home,
     detect: { runtimes: async () => runtimes, openViking: async () => ov },
     connect: {
@@ -40,7 +41,7 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
         calls.push(['email']);
         return { address: 'liuweihan2000@gmail.com', password: 'p', imap: { host: 'imap.gmail.com', port: 993 }, smtp: { host: 'smtp.gmail.com', port: 465 } };
       },
-      greet: async (message) => { calls.push(['greet', message.userId]); },
+      greet: async (message) => { calls.push(['greet', message.userId, message.text]); },
     },
     control: {
       start: async (target) => { calls.push(['start', target]); if (failStart) throw new Error('pm2 is not installed'); },
@@ -89,7 +90,8 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
     ['greet', 'ou_owner'],
   ]);
   // Feishu gets a hello; Weixin delivers nothing until the owner writes, so the owner is told to.
-  assert.match(h.written(), /已就绪。\n  飞书：私聊里它已经跟你打了招呼[\s\S]*控制台：http:\/\/127\.0\.0\.1:3737[\s\S]*\n最后一步：在微信里给机器人发一句话（比如「你好」）[\s\S]*都发不到微信。\n$/);
+  assert.match(h.written(), /已就绪。\n  飞书：私聊里它已经跟你打了招呼，直接回它\n  微信：先给它发一句「你好」，在那之前它没法主动找你\n  控制台：http:\/\/127\.0\.0\.1:3737/);
+  assert.doesNotMatch(h.written(), /最后一步/, 'said once, in the list of what to do next');
   assert.match(h.written(), /消息渠道\s+飞书、微信，主渠道：微信/);
   assert.match(h.written(), /接下来扫码：飞书 2 次，微信 1 次/);
 });
@@ -166,8 +168,9 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   const [agent] = weixin.manifest().agents;
   assert.equal(agent.profile, undefined);
   assert.equal(agent.channel, 'weixin');
-  assert.match(weixin.written(), /没有检测到 OpenViking/);
-  assert.match(weixin.written(), /主渠道是微信：你没找机器人、它主动找你时（比如新邮件提醒、待你确认的邮件回复）发到这里/);
+  // The machine check said there is no OpenViking, and one IM leaves nothing to choose: neither is said again.
+  assert.match(weixin.written(), /没有 OpenViking/);
+  assert.doesNotMatch(weixin.written(), /没有检测到 OpenViking|主渠道是/);
   assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
 });
 
@@ -221,7 +224,7 @@ test('changing an instance lists every setting; only the ones opened change', as
   assert.match(h.written(), /4\) 接入的 IM\s+飞书、微信（已改）[\s\S]*5\) 主渠道\s+微信（已改）\n[\s\S]*8\) 保存（2 项改动）/);
   assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
   assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']]);
-  assert.match(h.written(), /ASD（asd）已更新。\n  微信：先给它发一句「你好」[\s\S]*\n最后一步：在微信里给机器人发一句话/);
+  assert.match(h.written(), /ASD（asd）已更新。\n  微信：先给它发一句「你好」/);
 
   // Saving nothing, or leaving, writes and restarts nothing.
   for (const [answers, said] of [[['2', '8'], /没有改动/], [['2', '1', '新名字', '9'], /已放弃，没有保存任何改动/]]) {
@@ -241,7 +244,7 @@ test('dropping the primary IM moves the primary to what is left; a change the da
   assert.equal(await setupCommand(h.options), 0);
   const [after] = h.manifest().agents;
   assert.deepEqual([after.connectors, after.channel, after.profile], [['weixin'], 'weixin', undefined]);
-  assert.match(h.written(), /主渠道原来是飞书，它不再接入，改成微信。[\s\S]*不再接飞书\n  主渠道：飞书 → 微信/);
+  assert.match(h.written(), /主渠道原来是飞书，它不再接入，改成微信[\s\S]*不再接飞书\n  主渠道：飞书 → 微信/);
   assert.deepEqual(h.calls, [['restart', 'asd']]);
 
   //                     change IMs  +weixin save  (refused)  leave
@@ -381,11 +384,11 @@ test('back during Telegram verification cancels polling and returns an existing 
     });
   };
   const driving = h.drive([
-    ['要做什么', DOWN, '\r'], ['选一项回车修改', DOWN, DOWN, DOWN, '\r'],
+    ['要做什么', DOWN, '\r'], ['放弃修改', DOWN, DOWN, DOWN, '\r'],
     ['接入哪些 IM', DOWN, DOWN, DOWN, ' ', RIGHT],
-    ['选一项回车修改', DOWN, DOWN, DOWN, DOWN, '\r'],
-    ['Telegram Bot token', '123456:abcdefghijklmnopqrstuvwxyz_TEST', '\r'], ['在 Bot 私聊中点击 Start', LEFT],
-    ['选一项回车修改', '\x03'],
+    ['放弃修改', DOWN, DOWN, DOWN, DOWN, '\r'],
+    ['Telegram Bot token', '123456:abcdefghijklmnopqrstuvwxyz_TEST', '\r'], ['点 Start', LEFT],
+    ['放弃修改', '\x03'],
   ]);
   await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
   await driving;
@@ -424,9 +427,9 @@ test('in the change list, ← leaves a setting as it was; ← on the list goes b
   existing(h, {});
   const driving = h.drive([
     ['要做什么', DOWN, '\r'],
-    ['选一项回车修改', DOWN, DOWN, DOWN, '\r'],
+    ['放弃修改', DOWN, DOWN, DOWN, '\r'],
     ['接入哪些 IM', DOWN, ' ', LEFT],
-    ['选一项回车修改', LEFT],
+    ['放弃修改', LEFT],
     ['要做什么', '\x03'],
   ]);
   await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
@@ -447,13 +450,13 @@ test('on a colour terminal, going back and forth leaves only the current way on 
   // The same back and forth as: change → 接入的 IM → ← → ← → 新建 → 实例名称 ← → change.
   const driving = h.drive([
     ['要做什么', DOWN, '\r'],
-    ['选一项回车修改', DOWN, DOWN, DOWN, '\r'],
+    ['放弃修改', DOWN, DOWN, DOWN, '\r'],
     ['接入哪些 IM', LEFT],
-    ['选一项回车修改', LEFT],
+    ['放弃修改', LEFT],
     ['要做什么', '\r'],
     ['实例名称', LEFT],
     ['要做什么', DOWN, '\r'],
-    ['选一项回车修改', '\x03'],
+    ['放弃修改', '\x03'],
   ]);
   await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
   await driving;
@@ -486,12 +489,27 @@ test('setup asks for the full permission.json scope set', () => {
   assert.ok(scopes.tenant.length > 100 && scopes.user.length > 100);
 });
 
-test('the vika command prints usage, and upgrade lists the configured targets', () => {
+test('the vika command prints usage, and upgrade lists the configured targets', (t) => {
   const bin = fileURLToPath(new URL('../bin/vika.mjs', import.meta.url));
-  const help = spawnSync(process.execPath, [bin, 'help'], { encoding: 'utf8' });
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-help-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const env = { ...process.env, HOME: home, VIKA_LANG: 'zh' };
+  const help = spawnSync(process.execPath, [bin, 'help'], { encoding: 'utf8', env });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /vika <命令>[\s\S]*setup[\s\S]*upgrade/);
-  const unknown = spawnSync(process.execPath, [bin, 'nope'], { encoding: 'utf8' });
+  const english = spawnSync(process.execPath, [bin, '--lang', 'en', 'help'], { encoding: 'utf8', env });
+  assert.match(english.stdout, /vika <command>[\s\S]*setup[\s\S]*--lang <zh\|en>/);
+  assert.doesNotMatch(english.stdout, /[一-龥]/);
+  const wrong = spawnSync(process.execPath, [bin, '--lang', 'fr', 'help'], { encoding: 'utf8', env });
+  assert.equal(wrong.status, 2);
+  assert.equal(wrong.stderr, '--lang 只能是 zh 或 en\n');
+  // --lang is kept; alone it only switches.
+  const { VIKA_LANG, ...plain } = env;
+  const switched = spawnSync(process.execPath, [bin, '--lang', 'en'], { encoding: 'utf8', env: plain });
+  assert.equal(switched.stdout, 'The interface language is now English\n');
+  assert.equal(fs.readFileSync(path.join(home, '.vika', 'language'), 'utf8'), 'en\n');
+  assert.match(spawnSync(process.execPath, [bin, 'help'], { encoding: 'utf8', env: plain }).stdout, /vika <command>/);
+  const unknown = spawnSync(process.execPath, [bin, 'nope'], { encoding: 'utf8', env });
   assert.equal(unknown.status, 2);
   const upgrade = spawnSync(process.execPath, [bin, 'upgrade', 'sally', 'extra'], {
     encoding: 'utf8',
@@ -534,4 +552,68 @@ test('when the scan confirmation never arrives, m switches to typing the App ID 
   await typing;
   assert.equal(aborted, true, 'the abandoned registration stops polling');
   assert.deepEqual(app, { appId: 'cli_abc123', appSecret: 'the-secret', brand: 'feishu', ownerOpenId: null });
+});
+
+const ENGLISH_RUNTIMES = RUNTIMES.map((runtime) => ({ ...runtime, label: runtime.id === 'pi' ? 'Pi (built in)' : runtime.label, note: 'ok' }));
+
+test('in English, a first setup says it all in English, and the bot says hello in English', async (t) => {
+  //                   name   workspace  runtime IMs    channel confirm
+  const h = harness(t, ['Vee', '',       '1',    '1,2', '1',    'y'], { runtimes: ENGLISH_RUNTIMES });
+  h.options.env.VIKA_LANG = 'en';
+  assert.equal(await setupCommand(h.options), 0);
+  const text = h.written();
+  assert.doesNotMatch(text, /[一-鿿]/);
+  assert.match(text, /^Vika setup: add or change the agent instances on this machine\.\n\n  ✔ Found Codex, Pi \(built in\) · no OpenViking\n/);
+  assert.match(text, /Primary channel \(where the bot reaches you first, e\.g\. new-mail alerts\)/);
+  assert.match(text, /Next, scanning: Feishu\/Lark 2 scans, WeChat 1 scan; nothing is saved until the scans are done/);
+  assert.match(text, /Vee \(primary\) is ready\.\n  Feishu\/Lark: It said hello in your chat; just reply\n  WeChat: Say "hi" to it first/);
+  const [, , hello] = h.calls.find(([kind]) => kind === 'greet');
+  assert.match(hello, /^Hi, I'm Vee, now running on your computer\. .* When I need to reach you on my own/);
+  // VIKA_LANG is the owner's own choice, so later commands keep it.
+  assert.equal(fs.readFileSync(path.join(h.home, '.vika', 'language'), 'utf8'), 'en\n');
+});
+
+test('with a locale that is not Chinese, a terminal setup asks the language first, once, and keeps it', async (t) => {
+  const h = terminalHarness(t);
+  h.options.env.LANG = 'en_US.UTF-8';
+  // Chinese comes first; this owner takes it.
+  const driving = h.drive([['Language / 语言', '\r'], ['机器人名字', '\x03']]);
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await driving;
+  assert.match(h.screen(), /Language \/ 语言（↑↓ 移动，回车确认）\n\x1b\[\?25l❯ 中文\n {2}English/);
+  assert.ok(h.screen().indexOf('Language / 语言') < h.screen().indexOf('Vika setup：'), 'asked before anything else is said');
+  assert.equal(fs.readFileSync(path.join(h.home, '.vika', 'language'), 'utf8'), 'zh\n');
+
+  const again = terminalHarness(t);
+  again.options.env.LANG = 'en_US.UTF-8';
+  fs.mkdirSync(path.join(again.home, '.vika'), { recursive: true });
+  fs.writeFileSync(path.join(again.home, '.vika', 'language'), 'en\n');
+  const drivingAgain = again.drive([['Bot name', '\x03']]);
+  await assert.rejects(setupCommand(again.options), { name: 'PromptAborted' });
+  await drivingAgain;
+  assert.doesNotMatch(again.screen(), /Language/);
+
+  // Without a terminal nothing is asked or kept: Chinese it is.
+  const piped = harness(t, ['', '', '1', '1', 'n']);
+  piped.options.env.LANG = 'en_US.UTF-8';
+  assert.equal(await setupCommand(piped.options), 1);
+  assert.match(piped.written(), /什么都没保存；准备好了再运行 ~\/\.vika\/bin\/vika setup。/);
+  assert.equal(fs.existsSync(path.join(piped.home, '.vika', 'language')), false);
+});
+
+test('in English, changing an instance: the list, what a setting says, the changes and the result', async (t) => {
+  //                    change asd  OpenViking  IMs  lark+weixin  primary  weixin  save
+  const h = harness(t, ['2',        '7',        '4', '1,2',       '5',     '2',    '8'], { runtimes: ENGLISH_RUNTIMES });
+  h.options.env.VIKA_LANG = 'en';
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'weixin'], channel: 'weixin' }]);
+  const text = h.written();
+  assert.doesNotMatch(text, /[一-鿿]/);
+  assert.match(text, /1\) Bot name\s+ASD\n  2\) Workspace\s+~\/ws\n[\s\S]*7\) OpenViking\s+off\n  8\) Save\n  9\) Discard changes/);
+  // What a setting says shows above the list drawn after it.
+  assert.match(text, /No OpenViking found on this machine\n\? Change ASD \(asd\)/);
+  assert.match(text, /8\) Save \(2 changes\)/);
+  assert.match(text, /Changing ASD \(asd\):\n  Connect WeChat \(needs a scan\)\n  Primary channel: Feishu\/Lark → WeChat\n/);
+  assert.match(text, /ASD \(asd\) is updated\.\n  WeChat: Say "hi" to it first/);
 });
