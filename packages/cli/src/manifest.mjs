@@ -15,11 +15,18 @@ const {
   resolveDeploymentManifestPath,
 } = require('../../../deployment-config.cjs');
 
-const WEB_PORT = 3737;
+export const WEB_PORT = 3737;
 const FIRST_INSTANCE_PORT = 3738;
 
 export function vikaHome(env = process.env) {
   return path.join(env.HOME || os.homedir(), '.vika');
+}
+
+// How to call the vika command from here: by name once ~/.vika/bin is on
+// PATH, by its full path in the shell the installer ran from.
+export function vikaCommand(env = process.env) {
+  const bin = path.join(vikaHome(env), 'bin');
+  return String(env.PATH || '').split(path.delimiter).includes(bin) ? 'vika' : '~/.vika/bin/vika';
 }
 
 export function manifestPath(env = process.env) {

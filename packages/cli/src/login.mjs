@@ -3,7 +3,7 @@ import { restartCommand } from './control.mjs';
 import { askEmail, mailboxesOf, writeEmailAccount } from './email.mjs';
 import { IM_LABELS, chooseInstance, loadInstances } from './instances.mjs';
 import { LarkCli } from './lark-cli.mjs';
-import { showQr } from './qr.mjs';
+import { showScan } from './qr.mjs';
 import { which } from './runtimes.mjs';
 import { WEIXIN_FIRST_MESSAGE, connectWeixin, larkScopes } from './setup.mjs';
 
@@ -75,8 +75,14 @@ export async function loginCommand([connector, requested, ...extra], {
   if (!bin) throw new Error('找不到 lark-cli：这个安装不完整，重新运行安装脚本');
   const larkCli = new LarkCli(bin);
   const login = await larkCli.beginUserLogin({ profile: agent.profile, scopes: larkScopes().user });
-  showQr(prompter.output, login.url, `扫码重新授权 ${agent.displayName}（${agent.profile}）以你的身份读消息`);
-  await larkCli.finishUserLogin({ profile: agent.profile, deviceCode: login.deviceCode });
-  prompter.write(`${agent.profile} 已重新授权；运行中的实例会自动用上新的登录\n`);
+  const scan = showScan(prompter, {
+    url: login.url, where: '飞书', title: `扫码重新授权 ${agent.displayName}（${agent.profile}）以你的身份读消息`, label: '等待授权',
+  });
+  try {
+    await larkCli.finishUserLogin({ profile: agent.profile, deviceCode: login.deviceCode });
+  } finally {
+    scan.stop();
+  }
+  prompter.success(`${agent.profile} 已重新授权；运行中的实例会自动用上新的登录`);
   return 0;
 }

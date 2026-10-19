@@ -16,6 +16,7 @@ import {
 } from '../../updater/src/pm2.mjs';
 import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '../../updater/src/targets.mjs';
 import { imList, loadInstances } from './instances.mjs';
+import { padEnd, spinner, styler } from './ui.mjs';
 
 // start / stop / restart / status / logs run the release already installed
 // under ~/.vika/current. Nothing here fetches code or publishes a release.
@@ -106,23 +107,37 @@ async function startOne(spec, context) {
   await waitForUpdater(socketPath, readyOptions);
 }
 
+// One app's start, with a spinner on a terminal; the line says how it ended.
+async function step(context, label, done, run) {
+  const spinning = spinner(context.stdout, label, { env: context.env });
+  try {
+    await run();
+    spinning.succeed(done);
+  } catch (error) {
+    spinning.fail(`${label}：没有成功`);
+    throw error;
+  }
+}
+
 // Starts what is not running; an app that is online already is left alone.
 export async function startCommand(target, options) {
   const context = defaults(options);
   const apps = appsFor(target, loadTargets(context.env));
   Object.assign(context, await installedRelease(context.releaseLink));
   const running = new Map((await pm2Processes(context)).map((processInfo) => [processInfo?.name, processInfo]));
+  const s = styler(context.stdout, context.env);
   for (const spec of apps) {
     const current = running.get(spec.app);
     if (current?.pm2_env?.status === 'online') {
-      context.stdout.write(`${spec.app} is already running\n`);
+      context.stdout.write(`${s.gray('·')} ${spec.app} 已经在运行\n`);
       continue;
     }
-    if (current) {
-      await context.execFileImpl(context.pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appControlEnv(spec.app, context.pm2Env) });
-    }
-    await startOne(spec, context);
-    context.stdout.write(`${spec.app} is ready\n`);
+    await step(context, `启动 ${spec.app}`, `${spec.app} 已就绪`, async () => {
+      if (current) {
+        await context.execFileImpl(context.pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appControlEnv(spec.app, context.pm2Env) });
+      }
+      await startOne(spec, context);
+    });
   }
   await context.execFileImpl(context.pm2Bin, ['save'], { timeout: 30_000, env: context.pm2Env });
   return 0;
@@ -134,11 +149,12 @@ export async function restartCommand(target, options) {
   Object.assign(context, await installedRelease(context.releaseLink));
   const running = new Set((await pm2Processes(context)).map((processInfo) => processInfo?.name));
   for (const spec of apps) {
-    if (running.has(spec.app)) {
-      await context.execFileImpl(context.pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appControlEnv(spec.app, context.pm2Env) });
-    }
-    await startOne(spec, context);
-    context.stdout.write(`${spec.app} is ready\n`);
+    await step(context, `重启 ${spec.app}`, `${spec.app} 已就绪`, async () => {
+      if (running.has(spec.app)) {
+        await context.execFileImpl(context.pm2Bin, ['delete', spec.app], { timeout: 30_000, env: appControlEnv(spec.app, context.pm2Env) });
+      }
+      await startOne(spec, context);
+    });
   }
   await context.execFileImpl(context.pm2Bin, ['save'], { timeout: 30_000, env: context.pm2Env });
   return 0;
@@ -150,8 +166,7 @@ export async function stopCommand(target, options) {
   const running = new Set((await pm2Processes(context)).map((processInfo) => processInfo?.name));
   for (const spec of apps) {
     if (!running.has(spec.app)) continue;
-    await context.execFileImpl(context.pm2Bin, ['stop', spec.app], { timeout: 30_000, env: context.pm2Env });
-    context.stdout.write(`${spec.app} stopped\n`);
+    await step(context, `停止 ${spec.app}`, `${spec.app} 已停止`, () => context.execFileImpl(context.pm2Bin, ['stop', spec.app], { timeout: 30_000, env: context.pm2Env }));
   }
   await context.execFileImpl(context.pm2Bin, ['save'], { timeout: 30_000, env: context.pm2Env });
   return 0;
@@ -167,6 +182,8 @@ async function ready(spec, context) {
   }
 }
 
+const STATES = { online: '运行中', stopped: '已停止', stopping: '停止中', launching: '启动中', errored: '出错了', 'one-launch-status': '启动中' };
+
 export async function statusCommand(options) {
   const context = defaults(options);
   const apps = appsFor(undefined, loadTargets(context.env));
@@ -175,14 +192,20 @@ export async function statusCommand(options) {
   try {
     ims = new Map((loadInstances(context.env)?.agents ?? []).map((agent) => [`vika-${agent.id}`, imList(agent.connectors, agent.emailAccounts?.length)]));
   } catch {}
+  const s = styler(context.stdout, context.env);
   const rows = [];
   for (const spec of apps) {
-    const status = processes.get(spec.app)?.pm2_env?.status ?? 'not started';
-    rows.push([spec.app, status, status === 'online' ? (await ready(spec, context) ? 'ready' : 'not ready') : '-', ims.get(spec.app) ?? '']);
+    const status = processes.get(spec.app)?.pm2_env?.status ?? null;
+    const readiness = status === 'online' ? await ready(spec, context) : null;
+    rows.push({ app: spec.app, status, readiness, im: ims.get(spec.app) ?? '' });
   }
-  const width = Math.max(...rows.map(([app]) => app.length));
-  for (const [app, status, readiness, im] of rows) {
-    context.stdout.write(`${app.padEnd(width)}  ${status.padEnd(11)}  ${readiness.padEnd(9)}  ${im}`.trimEnd() + '\n');
+  const width = Math.max(...rows.map(({ app }) => app.length));
+  for (const { app, status, readiness, im } of rows) {
+    const state = status ? STATES[status] ?? status : '未启动';
+    const dot = readiness ? s.green('●') : status === 'online' ? s.yellow('●') : status === 'errored' ? s.red('●') : s.gray('○');
+    const answer = readiness === null ? '-' : readiness ? '就绪' : '未就绪';
+    const line = `${dot} ${padEnd(app, width)}  ${padEnd(state, 8)}  ${padEnd(answer, 6)}  ${s.gray(im)}`;
+    context.stdout.write(`${line.trimEnd()}\n`);
   }
   return 0;
 }

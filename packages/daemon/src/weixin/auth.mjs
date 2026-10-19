@@ -43,27 +43,44 @@ function redirectedBaseUrl(host) {
   return parsed.origin;
 }
 
-// readVerifyCode lets `vika setup` ask through its own prompt.
-export async function loginWeixin({ state, timeoutMs = LOGIN_TIMEOUT_MS, readVerifyCode = readLine } = {}) {
+function sayLine(text) {
+  process.stdout.write(`${text}\n`);
+}
+
+// readVerifyCode, showQr and say let `vika setup` ask and draw through its
+// own prompt: showQr(value, { refreshed }) gets each code to scan, say(text)
+// each status line. Once `signal` aborts, the login stops and binds nothing,
+// even if the scan is confirmed on the phone afterwards.
+export async function loginWeixin({
+  state, timeoutMs = LOGIN_TIMEOUT_MS, readVerifyCode = readLine, showQr = null, say = sayLine, signal = null,
+} = {}) {
+  const stopped = () => {
+    if (signal?.aborted) throw Object.assign(new Error('Weixin login cancelled'), { name: 'AbortError' });
+  };
+  const display = showQr ?? (async (value, { refreshed }) => {
+    say(refreshed ? '二维码已刷新，请重新扫码：' : '用手机微信扫描以下二维码并确认授权：');
+    await displayQr(value);
+  });
   const existing = state.account();
   let apiBaseUrl = existing?.baseUrl || DEFAULT_WEIXIN_API_BASE_URL;
   let qr = await fetchLoginQr({ localTokens: existing?.token ? [existing.token] : [] });
   if (!qr?.qrcode || !qr?.qrcode_img_content) throw new Error('Weixin QR endpoint returned no QR code');
-  process.stdout.write('用手机微信扫描以下二维码并确认授权：\n');
-  await displayQr(qr.qrcode_img_content);
+  await display(qr.qrcode_img_content, { refreshed: false });
 
   const deadline = Date.now() + timeoutMs;
   let scanned = false;
   let verifyCode = null;
   while (Date.now() < deadline) {
-    const status = await pollLoginQr({ qrcode: qr.qrcode, verifyCode, apiBaseUrl });
+    stopped();
+    const status = await pollLoginQr({ qrcode: qr.qrcode, verifyCode, apiBaseUrl, signal });
+    stopped();
     verifyCode = null;
     if (status.status === 'wait') {
       await delay(1_000);
       continue;
     }
     if (status.status === 'scaned') {
-      if (!scanned) process.stdout.write('已扫码，请在手机上确认。\n');
+      if (!scanned) say('已扫码，请在手机上确认。');
       scanned = true;
       await delay(1_000);
       continue;
@@ -85,13 +102,12 @@ export async function loginWeixin({ state, timeoutMs = LOGIN_TIMEOUT_MS, readVer
       qr = await fetchLoginQr({ localTokens: existing?.token ? [existing.token] : [] });
       if (!qr?.qrcode || !qr?.qrcode_img_content) throw new Error('Weixin QR refresh returned no QR code');
       scanned = false;
-      process.stdout.write('二维码已刷新，请重新扫码：\n');
-      await displayQr(qr.qrcode_img_content);
+      await display(qr.qrcode_img_content, { refreshed: true });
       continue;
     }
     if (status.status === 'binded_redirect') {
       if (!existing?.token) throw new Error('微信端显示已绑定，但本地没有可用凭证');
-      process.stdout.write(`本地已有微信账号 ${existing.accountId} 的凭证，无需重复绑定。\n`);
+      say(`本地已有微信账号 ${existing.accountId} 的凭证，无需重复绑定。`);
       return existing;
     }
     if (status.status === 'confirmed') {
@@ -104,7 +120,7 @@ export async function loginWeixin({ state, timeoutMs = LOGIN_TIMEOUT_MS, readVer
         baseUrl: status.baseurl || apiBaseUrl,
         userId: status.ilink_user_id || null,
       });
-      process.stdout.write(`微信连接成功：${account.accountId}\n`);
+      say(`微信连接成功：${account.accountId}`);
       return account;
     }
     throw new Error(`Unsupported Weixin login status: ${status.status ?? 'unknown'}`);

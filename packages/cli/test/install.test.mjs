@@ -32,10 +32,13 @@ function machine(t) {
     fs.writeFileSync(`${file}.sha256`, `${createHash('sha256').update(fs.readFileSync(file)).digest('hex')}  ${path.basename(file)}\n`);
     return file;
   };
-  const install = (...args) => spawnSync('sh', [INSTALLER, '--no-setup', ...args], {
-    encoding: 'utf8',
-    env: { HOME: home, SHELL: '/bin/bash', PATH: `${bin}:${process.env.PATH}` },
-  });
+  const install = (...args) => {
+    const env = typeof args.at(-1) === 'object' ? args.pop() : {};
+    return spawnSync('sh', [INSTALLER, '--no-setup', ...args], {
+      encoding: 'utf8',
+      env: { HOME: home, SHELL: '/bin/bash', PATH: `${bin}:${process.env.PATH}`, ...env },
+    });
+  };
   const vika = path.join(home, '.vika');
   return { root, home, vika, archive, install, pm2Calls: () => fs.existsSync(path.join(root, 'pm2-calls')) };
 }
@@ -50,16 +53,35 @@ test('installs a release under ~/.vika, adds the launcher and PATH, and never to
   assert.equal(fs.statSync(path.join(m.vika, 'bin', 'vika')).mode & 0o111, 0o111);
   assert.match(fs.readFileSync(path.join(m.home, '.bashrc'), 'utf8'), /export PATH="\$HOME\/\.vika\/bin:\$PATH"/);
   assert.equal(fs.existsSync(path.join(m.vika, 'deploy.lock')), false, 'the lock is released');
-  assert.match(first.stderr, /下一步：.*vika setup/);
+  assert.match(first.stderr, /下一步：运行 ~\/\.vika\/bin\/vika setup/);
+  // Without an instance, running the installer again still leads to setup.
+  const retried = m.install('--file', m.archive('0.5.0'));
+  assert.match(retried.stderr, /已经是 Vika 0\.5\.0[\s\S]*下一步：运行 ~\/\.vika\/bin\/vika setup/);
 
+  fs.writeFileSync(path.join(m.vika, 'config.json'), '{}');
   const second = m.install('--file', m.archive('0.6.0'));
   assert.equal(second.status, 0, second.stderr);
   assert.equal(fs.realpathSync(path.join(m.vika, 'rollback')), fs.realpathSync(path.join(m.vika, 'releases', '0.5.0')));
   assert.match(second.stderr, /vika restart/);
+  assert.doesNotMatch(second.stderr, /下一步/);
   const again = m.install('--file', m.archive('0.6.0'));
   assert.match(again.stderr, /已经是 Vika 0\.6\.0/);
+  assert.doesNotMatch(again.stderr, /vika restart|下一步/);
   assert.equal(fs.readFileSync(path.join(m.home, '.bashrc'), 'utf8').match(/\.vika\/bin/g).length, 1, 'PATH is added once');
   assert.equal(m.pm2Calls(), false);
+});
+
+test('keeps the download key for vika upgrade, private, and replaces it when it changes', (t) => {
+  const m = machine(t);
+  const archive = m.archive('0.5.0');
+  assert.equal(m.install('--file', archive).status, 0);
+  const secrets = path.join(m.vika, 'secrets.env');
+  assert.equal(fs.existsSync(secrets), false, 'no key, no file');
+  fs.writeFileSync(secrets, 'ARK_API_KEY=ark\n', { mode: 0o600 });
+  assert.equal(m.install('--file', archive, { VIKA_TOS_ACCESS_KEY: 'first' }).status, 0);
+  assert.equal(m.install('--file', archive, { VIKA_TOS_ACCESS_KEY: 'second' }).status, 0);
+  assert.equal(fs.readFileSync(secrets, 'utf8'), 'ARK_API_KEY=ark\nVIKA_TOS_ACCESS_KEY=second\n');
+  assert.equal(fs.statSync(secrets).mode & 0o777, 0o600);
 });
 
 test('refuses a corrupted archive, another platform, or a Node that cannot run here, leaving the install as it was', (t) => {

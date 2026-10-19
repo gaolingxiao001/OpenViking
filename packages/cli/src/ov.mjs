@@ -32,10 +32,10 @@ async function health(url, headers, fetchImpl) {
       headers, signal: AbortSignal.timeout(3_000), redirect: 'error',
     });
     const body = await response.json().catch(() => null);
-    if (!response.ok || body?.status !== 'ok') return { ok: false, reason: `HTTP ${response.status}` };
+    if (!response.ok || body?.status !== 'ok') return { ok: false, reason: `健康检查返回 HTTP ${response.status}` };
     return { ok: true, authMode: body.auth_mode ?? null, user: body.user_id ?? null, version: body.version ?? null };
   } catch (error) {
-    return { ok: false, reason: error?.name === 'TimeoutError' ? 'timed out' : 'unreachable' };
+    return { ok: false, reason: error?.name === 'TimeoutError' ? '3 秒内没有响应' : '连不上' };
   }
 }
 
@@ -61,7 +61,7 @@ export async function detectOpenViking({ env = process.env, homeDir = os.homedir
   return {
     configPath: null, url: LOCAL_OV_URL, usable: local.authMode === 'dev',
     user: null, authMode: local.authMode,
-    reason: local.authMode === 'dev' ? null : 'needs credentials; run the OpenViking installer to create ~/.openviking/ovcli.conf',
+    reason: local.authMode === 'dev' ? null : '需要凭据：先用 OpenViking 的安装程序生成 ~/.openviking/ovcli.conf',
   };
 }
 

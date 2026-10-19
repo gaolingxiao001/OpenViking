@@ -5,12 +5,14 @@
 #   sh scripts/install.sh --file dist/vika-<version>-<platform>.tar.gz   # a local build
 #
 # Installs the release for this machine under ~/.vika (releases/<version>,
-# the `current` link, bin/vika) and then runs `vika setup`. Needs only sh,
-# curl, tar and sha256sum or shasum: the release brings its own Node, pm2 and
-# lark-cli, so nothing else on the machine is used or changed.
+# the `current` link, bin/vika) and then runs `vika setup` when the machine
+# has no instance yet. Needs only sh, curl, tar and sha256sum or shasum: the
+# release brings its own Node, pm2 and lark-cli, so nothing else on the
+# machine is used or changed.
 #
 # Options: --version <v> (default: latest), --file <archive>, --no-setup.
-# Environment: VIKA_DOWNLOAD_BASE overrides where releases are downloaded from.
+# Environment: VIKA_DOWNLOAD_BASE overrides where releases are downloaded from;
+# NO_COLOR turns the colours off.
 set -eu
 # Always ${NAME} before non-ASCII text: macOS /bin/sh (bash 3.2) counts
 # UTF-8 lead bytes as name characters, so "$VERSION（" names another variable.
@@ -21,8 +23,28 @@ VERSION="${VIKA_VERSION:-}"
 FILE=""
 RUN_SETUP=1
 
+# Colour and motion only on a terminal; piped output stays plain lines.
+if [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then FANCY=1; else FANCY=0; fi
+ESC=$(printf '\033')
+if [ "$FANCY" = 1 ]; then
+  RESET="${ESC}[0m"; BOLD="${ESC}[1m"; DIM="${ESC}[2m"
+  PINK="${ESC}[38;5;213m"; VIOLET="${ESC}[38;5;177m"; LILAC="${ESC}[38;5;141m"; SKY="${ESC}[38;5;117m"
+  SEA="${ESC}[38;5;39m"; HULL="${ESC}[38;5;216m"; SKIN="${ESC}[38;5;223m"; GRAY="${ESC}[38;5;244m"
+  GREEN="${ESC}[38;5;114m"; YELLOW="${ESC}[38;5;221m"; RED="${ESC}[38;5;203m"
+else
+  RESET=""; BOLD=""; DIM=""; PINK=""; VIOLET=""; LILAC=""; SKY=""; SEA=""; HULL=""; SKIN=""; GRAY=""
+  GREEN=""; YELLOW=""; RED=""
+fi
+
 say() { printf '%s\n' "$*" >&2; }
-die() { say "vika 安装失败：$*"; exit 1; }
+ok() { if [ "$FANCY" = 1 ]; then say "  ${GREEN}✔${RESET} $*"; else say "$*"; fi; }
+note() { if [ "$FANCY" = 1 ]; then say "  ${GRAY}›${RESET} $*"; else say "$*"; fi; }
+die() {
+  if [ "$FANCY" = 1 ]; then say "  ${RED}✖${RESET} vika 安装失败：$*"; else say "vika 安装失败：$*"; fi
+  exit 1
+}
+# ~ for the home directory, so paths stay short.
+short() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -55,26 +77,130 @@ sha256() {
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
   else die "需要 sha256sum 或 shasum"; fi
 }
-fetch() {
-  # The test bucket is private; drop the access key once releases are public.
-  if [ -n "${VIKA_TOS_ACCESS_KEY:-}" ]; then
-    curl -fsSL --retry 3 -H "x-tos-access: $VIKA_TOS_ACCESS_KEY" -o "$2" "$1"
-  else
-    curl -fsSL --retry 3 -o "$2" "$1"
-  fi
+# The test bucket is private; drop the access key once releases are public.
+curl_get() {
+  if [ -n "${VIKA_TOS_ACCESS_KEY:-}" ]; then curl -H "x-tos-access: $VIKA_TOS_ACCESS_KEY" "$@"; else curl "$@"; fi
+}
+fetch() { curl_get -fsSL --retry 3 -o "$2" "$1"; }
+# The archive's size, for the progress bar; 0 when the server does not say.
+size_of() {
+  curl_get -fsSIL "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" { size = $2 } END { print size + 0 }'
 }
 
 TMP=$(mktemp -d)
 LOCK=""
+BUSY=""
 cleanup() {
+  [ -z "$BUSY" ] || kill "$BUSY" 2>/dev/null || true
+  [ "$FANCY" = 0 ] || printf '%s[?25h' "$ESC" >&2
   rm -rf "$TMP"
   [ -z "$LOCK" ] || rmdir "$LOCK" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT TERM
+
+mb() { printf '%d.%d' $(($1 / 1048576)) $(($1 % 1048576 * 10 / 1048576)); }
+
+# A run of sea, moving with the tick: the water the boat has crossed.
+waves() {
+  n=0
+  run=""
+  while [ "$n" -lt "$1" ]; do
+    case $(((n + $2) % 5)) in 1) run="$run-" ;; 3) run="$run." ;; *) run="$run~" ;; esac
+    n=$((n + 1))
+  done
+  printf '%s' "$run"
+}
+gap() { printf "%$1s" ''; }
+dots() {
+  n=0
+  run=""
+  while [ "$n" -lt "$1" ]; do run="${run}·"; n=$((n + 1)); done
+  printf '%s' "$run"
+}
+
+# The download as a boat crossing the sea: three lines redrawn in place.
+LANE=36
+sail() { # bytes total tick first
+  if [ "$2" -gt 0 ]; then
+    at=$(($1 * LANE / $2))
+    [ "$at" -le "$LANE" ] || at=$LANE
+    pct=$(($1 * 100 / $2))
+    [ "$pct" -le 100 ] || pct=100
+    status="${BOLD}${pct}%${RESET}  ${GRAY}$(mb "$1") / $(mb "$2") MB${RESET}"
+  else
+    at=$(($3 % LANE))
+    status="${GRAY}$(mb "$1") MB${RESET}"
+  fi
+  if [ $(($3 / 3 % 2)) = 0 ]; then arm='o'; else arm='\o'; fi
+  [ "$4" = 1 ] || printf '%s[3A' "$ESC" >&2
+  printf '\r%s[2K  %s%s|\\%s\n' "$ESC" "$(gap $((at + 2)))" "$PINK" "$RESET" >&2
+  printf '\r%s[2K  %s%s%s%s|%s_\\%s\n' "$ESC" "$(gap $((at + 2 - ${#arm})))" "$SKIN" "$arm" "$VIOLET" "$LILAC" "$RESET" >&2
+  printf '\r%s[2K  %s%s%s\\____/%s%s%s  %s\n' "$ESC" "$SEA" "$(waves "$at" "$3")" "$HULL" "$GRAY" "$(dots $((LANE - at)))" "$RESET" "$status" >&2
+}
+
+# Downloads $1 to $2, drawing the boat while it runs.
+download() {
+  if [ "$FANCY" = 0 ]; then fetch "$1" "$2"; return; fi
+  total=$(size_of "$1")
+  fetch "$1" "$2" &
+  BUSY=$!
+  tick=0
+  printf '%s[?25l' "$ESC" >&2
+  sail 0 "$total" 0 1
+  while kill -0 "$BUSY" 2>/dev/null; do
+    sleep 0.1
+    tick=$((tick + 1))
+    got=0
+    [ ! -f "$2" ] || got=$(wc -c < "$2" | tr -d ' ')
+    sail "$got" "$total" "$tick" 0
+  done
+  status=0
+  wait "$BUSY" || status=$?
+  BUSY=""
+  printf '%s[3A\r%s[J%s[?25h' "$ESC" "$ESC" "$ESC" >&2
+  return "$status"
+}
+
+# Runs a command in the background with a spinner; its status is returned.
+spin() { # label command...
+  label=$1
+  shift
+  if [ "$FANCY" = 0 ]; then "$@"; return; fi
+  "$@" &
+  BUSY=$!
+  i=0
+  printf '%s[?25l' "$ESC" >&2
+  while kill -0 "$BUSY" 2>/dev/null; do
+    case $((i % 10)) in
+      0) f='⠋' ;; 1) f='⠙' ;; 2) f='⠹' ;; 3) f='⠸' ;; 4) f='⠼' ;;
+      5) f='⠴' ;; 6) f='⠦' ;; 7) f='⠧' ;; 8) f='⠇' ;; *) f='⠏' ;;
+    esac
+    printf '\r%s[2K  %s%s%s %s' "$ESC" "$VIOLET" "$f" "$RESET" "$label" >&2
+    i=$((i + 1))
+    sleep 0.1
+  done
+  status=0
+  wait "$BUSY" || status=$?
+  BUSY=""
+  printf '\r%s[2K%s[?25h' "$ESC" "$ESC" >&2
+  return "$status"
+}
+
+header() {
+  if [ "$FANCY" = 1 ]; then
+    say ""
+    say "  ${BOLD}${PINK}V${VIOLET}I${LILAC}K${SKY}A${RESET}  ${GRAY}安装 ${1} · ${PLATFORM}${RESET}"
+    say ""
+  else
+    say "安装 Vika ${1}（${PLATFORM}）"
+  fi
+}
 
 if [ -n "$FILE" ]; then
   [ -f "$FILE" ] || die "找不到 $FILE"
   ARCHIVE="$FILE"
+  header "$(basename "$FILE")"
   if [ -f "$FILE.sha256" ]; then EXPECTED=$(cut -d' ' -f1 < "$FILE.sha256"); else EXPECTED=""; fi
 else
   command -v curl >/dev/null 2>&1 || die "需要 curl"
@@ -85,16 +211,19 @@ else
   fi
   case "$VERSION" in ''|*[!0-9A-Za-z._-]*) die "版本号无效：$VERSION" ;; esac
   NAME="vika-$VERSION-$PLATFORM.tar.gz"
-  say "下载 Vika ${VERSION}（${PLATFORM}）..."
+  header "$VERSION"
   fetch "$BASE/releases/$VERSION/$NAME.sha256" "$TMP/sha256" || die "这个版本没有 $PLATFORM 的安装包"
   EXPECTED=$(cut -d' ' -f1 < "$TMP/sha256")
-  fetch "$BASE/releases/$VERSION/$NAME" "$TMP/$NAME" || die "下载失败：$NAME"
+  STARTED=$(date +%s)
+  download "$BASE/releases/$VERSION/$NAME" "$TMP/$NAME" || die "下载失败：$NAME"
+  ok "下载  ${GRAY}$(mb "$(wc -c < "$TMP/$NAME" | tr -d ' ')") MB · $(($(date +%s) - STARTED))s${RESET}"
   ARCHIVE="$TMP/$NAME"
 fi
 if [ -n "$EXPECTED" ]; then
   [ "$(sha256 "$ARCHIVE")" = "$EXPECTED" ] || die "安装包校验失败（SHA-256 不一致）"
+  ok "校验  ${GRAY}SHA-256 一致${RESET}"
 else
-  say "注意：$FILE 旁边没有 .sha256，跳过校验"
+  note "注意：$FILE 旁边没有 .sha256，跳过校验"
 fi
 
 mkdir -p "$VIKA_HOME/releases"
@@ -105,7 +234,7 @@ LOCK="$VIKA_HOME/deploy.lock"
 PENDING="$VIKA_HOME/releases/.pending-$$"
 rm -rf "$PENDING"
 mkdir "$PENDING"
-tar -xzf "$ARCHIVE" -C "$PENDING" || { rm -rf "$PENDING"; die "解压失败"; }
+spin "解压" tar -xzf "$ARCHIVE" -C "$PENDING" || { rm -rf "$PENDING"; die "解压失败"; }
 DIR=$(ls "$PENDING")
 case "$DIR" in
   vika-*-"$PLATFORM") ;;
@@ -119,6 +248,7 @@ if ! "$PENDING/$DIR/node/bin/node" "$PENDING/$DIR/packages/cli/bin/vika.mjs" --v
   rm -rf "$PENDING"
   die "这台机器运行不了这个版本（系统库太旧或 CPU 不匹配）"
 fi
+ok "自检  ${GRAY}自带的 Node 能在这台机器上运行${RESET}"
 
 # Physical paths: /home may be a symlink, and the updater links real paths.
 physical() { (cd "$1" 2>/dev/null && pwd -P) || true; }
@@ -126,14 +256,16 @@ TARGET="$VIKA_HOME/releases/$VERSION"
 PREVIOUS=$(physical "$VIKA_HOME/current")
 if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" = "$(physical "$TARGET")" ]; then
   rm -rf "$PENDING"
-  say "已经是 Vika $VERSION"
+  ok "已经是 Vika $VERSION"
+  CHANGED=0
 else
   rm -rf "$TARGET"
   mv "$PENDING/$DIR" "$TARGET"
   rmdir "$PENDING"
   [ -z "$PREVIOUS" ] || ln -sfn "$PREVIOUS" "$VIKA_HOME/rollback"
   ln -sfn "$(physical "$TARGET")" "$VIKA_HOME/current"
-  say "已安装 Vika $VERSION 到 $TARGET"
+  ok "安装  ${GRAY}Vika $VERSION → $(short "$TARGET")${RESET}"
+  CHANGED=1
 fi
 
 mkdir -p "$VIKA_HOME/bin"
@@ -154,20 +286,37 @@ case ":$PATH:" in
     esac
     if ! grep -q '/.vika/bin' "$RC" 2>/dev/null; then
       printf '\n# vika\nexport PATH="$HOME/.vika/bin:$PATH"\n' >> "$RC"
-      say "已把 ~/.vika/bin 加进 ${RC}；新开的终端里可以直接用 vika"
+      ok "命令  ${GRAY}~/.vika/bin 已加进 $(short "$RC")，新开的终端里可以直接用 vika${RESET}"
     fi
     ;;
 esac
 
+# The key a private test bucket was read with, for `vika upgrade` later.
+if [ -n "${VIKA_TOS_ACCESS_KEY:-}" ]; then
+  SECRETS="$VIKA_HOME/secrets.env"
+  if ! grep -qx "VIKA_TOS_ACCESS_KEY=$VIKA_TOS_ACCESS_KEY" "$SECRETS" 2>/dev/null; then
+    (
+      umask 077
+      { grep -v '^VIKA_TOS_ACCESS_KEY=' "$SECRETS" 2>/dev/null || true; printf 'VIKA_TOS_ACCESS_KEY=%s\n' "$VIKA_TOS_ACCESS_KEY"; } > "$SECRETS.tmp"
+      mv "$SECRETS.tmp" "$SECRETS"
+    )
+    chmod 600 "$SECRETS"
+    ok "密钥  ${GRAY}下载密钥已存进 ~/.vika/secrets.env，vika upgrade 会用到${RESET}"
+  fi
+fi
+
 rmdir "$LOCK" 2>/dev/null || true
 LOCK=""
-if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$(physical "$TARGET")" ]; then
-  say "运行中的实例还在旧版本上：执行 vika restart 换到 $VERSION"
-elif [ -z "$PREVIOUS" ] && [ "$RUN_SETUP" = 1 ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
-  say ""
+# Instances live in the config; without one this machine still needs setup,
+# however often the installer has run.
+if [ -f "${VIKA_CONFIG:-$VIKA_HOME/config.json}" ]; then
+  if [ "$CHANGED" = 1 ] && [ -n "$PREVIOUS" ]; then
+    note "运行中的实例还在旧版本上：执行 ${BOLD}vika restart${RESET} 换到 $VERSION"
+  fi
+elif [ "$RUN_SETUP" = 1 ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
   cleanup
   trap - EXIT INT TERM
   exec "$VIKA_HOME/bin/vika" setup </dev/tty
-elif [ -z "$PREVIOUS" ]; then
-  say "下一步：$VIKA_HOME/bin/vika setup"
+else
+  note "下一步：运行 $(short "$VIKA_HOME/bin/vika") setup"
 fi
