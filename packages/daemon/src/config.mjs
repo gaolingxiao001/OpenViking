@@ -116,10 +116,10 @@ export function getConfig() {
   );
   const host = process.env.VIKA_HOST || '127.0.0.1';
   assertLoopbackHost(host);
-  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin']);
+  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin', 'telegram']);
   const configuredConnectors = jsonStringArrayEnv('VIKA_CONNECTORS_JSON');
   const connectors = configuredConnectors.length > 0 ? [...new Set(configuredConnectors)] : [channel];
-  if (connectors.some((connector) => !['lark', 'weixin', 'email'].includes(connector))) {
+  if (connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram'].includes(connector))) {
     throw new Error('VIKA_CONNECTORS_JSON contains an unsupported connector');
   }
   if (!connectors.includes(channel)) {

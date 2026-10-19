@@ -24,6 +24,14 @@ afterEach(() => {
 });
 
 describe('configuration safety', { concurrency: false }, () => {
+  it('accepts Telegram as primary and alongside existing connectors without putting keys in config', () => {
+    setEnv('VIKA_CHANNEL', 'telegram');
+    setEnv('VIKA_CONNECTORS_JSON', '["telegram","weixin"]');
+    const config = getConfig();
+    assert.equal(config.channel, 'telegram');
+    assert.deepEqual(config.connectors, ['telegram', 'weixin']);
+    assert.equal(config.telegramToken, undefined);
+  });
   it('keeps meeting audio entirely disabled unless explicitly configured', () => {
     setEnv('VIKA_MEETING_AUDIO_ENABLED', 'false');
     setEnv('VIKA_MEETING_AUDIO_TARGET_CHAT_ID', undefined);

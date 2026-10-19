@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import { PALETTE, padEnd, styler } from '../src/ui.mjs';
+import { PALETTE, padEnd, styler, width } from '../src/ui.mjs';
 
 // The `vika` command. Each subcommand loads only what it needs, so `setup`
 // and `help` work before any manifest exists.
@@ -9,8 +9,8 @@ import { PALETTE, padEnd, styler } from '../src/ui.mjs';
 // [command, arguments, what it does], in groups.
 const COMMANDS = [
   ['配置', [
-    ['setup', '', '添加或修改实例：接飞书、微信、邮箱，设主渠道等'],
-    ['login', '<lark|weixin|email>', '登录过期或改了密码后重新授权；后面可加实例名'],
+    ['setup', '', '添加或修改实例：接飞书、微信、邮箱、Telegram，设主渠道等'],
+    ['login', '<lark|weixin|email|telegram>', '登录过期或改了密码后重新授权；后面可加实例名'],
   ]],
   ['运行', [
     ['start', '[实例|web|updater]', '启动本机已安装的版本；不写实例时启动全部'],
@@ -26,9 +26,12 @@ const COMMANDS = [
   ]],
 ];
 
+const COMMAND_WIDTH = Math.max(...COMMANDS.flatMap(([, rows]) => rows)
+  .map(([name, args]) => width(`${name} ${args}`.trim()))) + 2;
+
 const USAGE = `用法：vika <命令>
 
-${COMMANDS.flatMap(([, rows]) => rows).map(([name, args, text]) => `  ${padEnd(`${name} ${args}`.trim(), 28)}${text}`).join('\n')}
+${COMMANDS.flatMap(([, rows]) => rows).map(([name, args, text]) => `  ${padEnd(`${name} ${args}`.trim(), COMMAND_WIDTH)}${text}`).join('\n')}
 `;
 
 async function usage(stream) {
@@ -42,7 +45,7 @@ async function usage(stream) {
   for (const [group, rows] of COMMANDS) {
     lines.push('', `  ${s.violet(group)}`);
     for (const [name, args, text] of rows) {
-      lines.push(`    ${padEnd(`${s.accent(name)} ${s.gray(args)}`, 28)}${text}`);
+      lines.push(`    ${padEnd(`${s.accent(name)} ${s.gray(args)}`, COMMAND_WIDTH)}${text}`);
     }
   }
   stream.write(`${lines.join('\n')}\n`);

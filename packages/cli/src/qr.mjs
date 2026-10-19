@@ -1,18 +1,16 @@
 import { spawn } from 'node:child_process';
-import qrcode from 'qrcode-terminal';
-import { PALETTE, SYMBOLS, mix, width } from './ui.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PALETTE, SYMBOLS, colorDepth, mix, stripAnsi, width } from './ui.mjs';
+import { qrMatrix, qrPng, terminalQr } from './qr-code.mjs';
 
-// A code to scan, with the link as a fallback. Feishu's app-creation link
-// carries the whole permission set (~1700 characters), which makes a code
-// 139 columns by 71 rows: on a smaller terminal it would wrap and could not
-// be scanned, so it is drawn only once the window is big enough, and drawn
-// again by itself when the window is resized. A waiting line under it shows
-// the time and the keys that work meanwhile.
+// Feishu's permission-bearing link may be too large for a terminal. Always
+// provide a private PNG that VS Code can preview, as well as a compact code
+// when it fits. Print long links first so they cannot scroll the code away.
 
 export function qrLines(url) {
-  let text = '';
-  qrcode.generate(url, { small: true }, (code) => { text = code; });
-  return text.replace(/\n+$/, '').split('\n');
+  return terminalQr(qrMatrix(url));
 }
 
 // The program that opens a link on this machine's desktop; none on a server.
@@ -35,21 +33,51 @@ export function openUrl(url, { env = process.env, platform = process.platform } 
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+function oneLine(text, columns) {
+  if (width(text) < columns) return text;
+  let result = '';
+  for (const character of stripAnsi(text)) {
+    if (width(result + character) >= columns - 2) break;
+    result += character;
+  }
+  return `${result}…`;
+}
+
 // prompter: the setup Prompter. where: what to open the link in (飞书 / 微信).
 // stopKey: a key that ends the wait (resolves `pressed` with true); `keys`
 // are more keys with their labels and actions, e.g. { o: ['浏览器打开', fn] };
 // onBack, when given, runs on ← or Esc (going back while nothing is made yet).
-// Returns { pressed, status(label), say(text), stop() }.
+// Returns { imagePath, pressed, status(label), say(text), stop() }.
 export function showScan(prompter, {
   url, title, where = '飞书', label = '等待扫码', stopKey = null, stopLabel = '', keys = {}, onBack = null, env = process.env,
 }) {
   const { output, s } = prompter;
-  const lines = qrLines(url);
+  const matrix = qrMatrix(url);
+  const lines = terminalQr(matrix, s.enabled ? colorDepth(output, env) : 1);
   const qrWidth = Math.max(...lines.map((line) => width(line)));
-  const needRows = lines.length + 4;
-  const fits = () => !output.isTTY || ((output.columns ?? 0) >= qrWidth && (output.rows ?? 0) >= needRows);
+  const needRows = lines.length + 2;
+  const fits = () => !output.isTTY || ((output.columns ?? 0) > qrWidth && (output.rows ?? 0) >= needRows);
+  let imageDirectory, imagePath;
+  const cleanupImage = () => {
+    try { if (imageDirectory) fs.rmSync(imageDirectory, { recursive: true, force: true }); } catch { /* Best effort on exit. */ }
+  };
+  try {
+    imageDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-qr-'));
+    imagePath = path.join(imageDirectory, 'scan.png');
+    fs.writeFileSync(imagePath, qrPng(matrix), { mode: 0o600, flag: 'wx' });
+    process.on('exit', cleanupImage);
+  } catch { cleanupImage(); imageDirectory = null; imagePath = null; }
   const canOpen = Boolean(opener(env));
-  const actions = { ...(canOpen ? { o: ['浏览器打开', () => { if (openUrl(url, { env })) say('已在浏览器打开，按页面提示确认'); }] } : {}), ...keys };
+  const imageOpener = env.TERM_PROGRAM === 'vscode' || env.VSCODE_IPC_HOOK_CLI ? 'code' : opener(env);
+  const actions = {
+    ...(canOpen ? { o: ['浏览器打开', () => { if (openUrl(url, { env })) say('已在浏览器打开，按页面提示确认'); }] } : {}),
+    ...(imagePath && imageOpener ? { i: ['查看二维码图片', () => {
+      try {
+        spawn(imageOpener, imageOpener === 'code' ? ['--reuse-window', imagePath] : [imagePath],
+          { detached: true, stdio: 'ignore', env }).on('error', () => say('未能自动打开，请点击上方图片路径')).unref();
+      } catch { say('未能自动打开，请点击上方图片路径'); }
+    }] } : {}), ...keys,
+  };
 
   let ticker = null;
   let frame = 0;
@@ -65,7 +93,7 @@ export function showScan(prompter, {
     const keysText = hints.map((hint) => `${s.bold(hint.split(' ')[0])} ${hint.split(' ').slice(1).join(' ')}`).join(s.gray(' · '));
     return `  ${glyph} ${current} ${s.gray(clock)}${hints.length ? `   ${s.gray('│')} ${keysText}` : ''}`;
   };
-  const draw = () => { output.write(`\r\x1b[2K${line()}`); frame += 1; };
+  const draw = () => { output.write(`\r\x1b[2K${oneLine(line(), output.columns || 80)}`); frame += 1; };
   const print = (text) => {
     if (ticker) output.write('\r\x1b[2K');
     output.write(text);
@@ -76,25 +104,29 @@ export function showScan(prompter, {
   }
 
   const head = prompter.fancy ? `\n  ${s.accent('▣')} ${s.bold(title)}\n` : `\n${title}\n`;
-  const code = `${lines.join('\n')}\n`;
+  const code = `${lines.join('\r\n')}\r\n`;
   let shown = fits();
   output.write(head);
+  const link = `扫不出来的话，在${where}里打开这个链接${canOpen ? '，或按 o 用浏览器打开' : ''}：`;
+  output.write(prompter.fancy ? `  ${s.gray(link)}\n  ${s.underline(s.accent(url))}\n\n` : `${link}\n${url}\n\n`);
+  if (imagePath) output.write(`二维码图片（VS Code 中按 Ctrl/⌘ 点击路径查看，扫码结束后自动删除）：\n${imagePath}\n\n`);
+  const warning = () => {
+    const size = `${output.columns ?? '?'}×${output.rows ?? '?'}`;
+    return `终端二维码需要 ${qrWidth + 1}×${needRows}，现在是 ${size}；${imagePath ? '请打开上方二维码图片，或' : ''}缩小字体/拉大窗口，二维码会自动重绘\n`;
+  };
   if (shown) {
     output.write(code);
   } else {
-    const size = `${output.columns ?? '?'}×${output.rows ?? '?'}`;
-    const ask = `这个二维码要 ${qrWidth}×${needRows} 的终端，现在是 ${size}：缩小字体（⌘- 或 Ctrl -）或拉大窗口，二维码会自动出现`;
-    output.write(prompter.fancy ? `  ${s.yellow(SYMBOLS.warn)} ${ask}\n` : `  ${ask}\n`);
+    output.write(warning());
   }
-  const link = `扫不出来的话，在${where}里打开这个链接${canOpen ? '，或按 o 用浏览器打开' : ''}：`;
-  output.write(prompter.fancy ? `  ${s.gray(link)}\n  ${s.underline(s.accent(url))}\n\n` : `${link}\n${url}\n\n`);
 
   const onResize = () => {
-    if (shown || !fits()) return;
-    shown = true;
-    print(`${head}${code}`);
+    const next = fits();
+    if (next) print(code);
+    else if (shown) print(warning());
+    shown = next;
   };
-  if (!shown) output.on?.('resize', onResize);
+  output.on?.('resize', onResize);
 
   let watch = { pressed: new Promise(() => {}), stop() {} };
   if (prompter.tty) {
@@ -103,6 +135,7 @@ export function showScan(prompter, {
     ticker = setInterval(draw, prompter.fancy ? 90 : 1000);
   }
   return {
+    imagePath,
     pressed: watch.pressed,
     status(next) { current = next; if (ticker) draw(); },
     say,
@@ -110,6 +143,8 @@ export function showScan(prompter, {
       if (ticker) { clearInterval(ticker); ticker = null; output.write('\r\x1b[2K'); }
       output.off?.('resize', onResize);
       watch.stop();
+      process.off('exit', cleanupImage);
+      cleanupImage();
     },
   };
 }

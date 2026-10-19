@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { Prompter } from '../src/prompt.mjs';
 import { larkScopes, registerApp, setupCommand } from '../src/setup.mjs';
 import { stripAnsi } from '../src/ui.mjs';
+import { connectTelegram } from '../src/telegram.mjs';
+import { TelegramState } from '../../daemon/src/telegram/state.mjs';
 
 const RUNTIMES = [
   { id: 'codex', label: 'Codex', model: 'codex:', bin: '/opt/codex/bin/codex', binEnv: 'CODEX_BIN', available: true, note: '已登录' },
@@ -31,6 +33,7 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
     homeDir: home,
     detect: { runtimes: async () => runtimes, openViking: async () => ov },
     connect: {
+      telegram: async ({ plan }) => { calls.push(['telegram', plan.dataDir]); },
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
       weixin: async ({ plan }) => { calls.push(['weixin', plan.dataDir]); },
       email: async () => {
@@ -89,6 +92,51 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
   assert.match(h.written(), /已就绪。\n  飞书：私聊里它已经跟你打了招呼[\s\S]*控制台：http:\/\/127\.0\.0\.1:3737[\s\S]*\n最后一步：在微信里给机器人发一句话（比如「你好」）[\s\S]*都发不到微信。\n$/);
   assert.match(h.written(), /消息渠道\s+飞书、微信，主渠道：微信/);
   assert.match(h.written(), /接下来扫码：飞书 2 次，微信 1 次/);
+});
+
+test('Telegram-only setup binds a private Start challenge and saves no token in the manifest', async (t) => {
+  const token = '123456:abcdefghijklmnopqrstuvwxyz_TEST';
+  const h = harness(t, ['TG Agent', '', '3', '4', 'y', token]);
+  h.options.connect.telegram = connectTelegram;
+  h.options.fetchImpl = async (url, init) => {
+    const method = url.split('/').at(-1);
+    if (method === 'getMe') return Response.json({ ok: true, result: { id: 123456, is_bot: true, username: 'vika_test_bot' } });
+    if (method === 'getWebhookInfo') return Response.json({ ok: true, result: { url: '' } });
+    assert.equal(method, 'getUpdates');
+    const nonce = h.written().match(/https:\/\/t\.me\/vika_test_bot\?start=([A-Za-z0-9_-]+)/)[1];
+    return Response.json({ ok: true, result: [{ update_id: 1, message: { message_id: 1,
+      date: Math.floor(Date.now() / 1000), from: { id: 99, is_bot: false }, chat: { id: 99, type: 'private' }, text: `/start ${nonce}` } }] });
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  const agent = h.manifest().agents[0];
+  assert.equal(agent.channel, 'telegram');
+  assert.deepEqual(agent.connectors, ['telegram']);
+  assert.equal(agent.profile, undefined);
+  assert.doesNotMatch(JSON.stringify(h.manifest()), /abcdefghijklmnopqrstuvwxyz/);
+  const state = new TelegramState(agent.dataDir);
+  try { assert.equal(state.account().ownerId, '99'); } finally { state.close(); }
+  assert.match(h.written(), /Telegram Bot token \+ Start 绑定/);
+  assert.doesNotMatch(h.written(), /Telegram undefined|abcdefghijklmnopqrstuvwxyz/);
+});
+
+test('adding Telegram to an existing instance verifies only the new IM and can change the primary', async (t) => {
+  const h = harness(t, ['2', '4', '1,4', '5', '2', '8']);
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'telegram'], channel: 'telegram' }]);
+  assert.deepEqual(h.calls, [['telegram', before.dataDir], ['restart', 'asd']]);
+  assert.match(h.written(), /接入Telegram（需要 Bot token 和 Start 绑定）/);
+  assert.match(h.written(), /接下来接入：Telegram Bot token \+ Start 绑定/);
+  assert.doesNotMatch(h.written(), /undefined 次|接下来扫码/);
+});
+
+test('mixed Telegram setup describes each authorization method and keeps email available', async (t) => {
+  const h = harness(t, ['', '', '3', '1,2,3,4', '3', 'n', 'y']);
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents[0].connectors, ['lark', 'weixin', 'telegram', 'email']);
+  assert.equal(h.manifest().agents[0].channel, 'telegram');
+  assert.match(h.written(), /接下来接入：飞书 2 次，微信 1 次，Telegram Bot token \+ Start 绑定/);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['email', 'lark', 'weixin', 'telegram', 'start', 'restart', 'start', 'greet']);
 });
 
 test('a second instance keeps the shared env and the default instance', async (t) => {
@@ -285,7 +333,11 @@ function terminalHarness(t, options) {
   h.drive = async (steps) => {
     let from = 0;
     for (const [text, ...keys] of steps) {
-      while (seen(text, from) < 0) await new Promise((resolve) => setTimeout(resolve, 2));
+      const deadline = Date.now() + 5000;
+      while (seen(text, from) < 0) {
+        if (Date.now() >= deadline) throw new Error(`setup did not show ${text}: ${stripAnsi(written.slice(-2500))}`);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
       from = seen(text, from) + text.length;
       for (const key of keys) {
         input.write(key);
@@ -300,6 +352,50 @@ function terminalHarness(t, options) {
 const LEFT = '\x1b[D';
 const RIGHT = '\x1b[C';
 const DOWN = '\x1b[B';
+
+test('back from Telegram key entry returns to setup confirmation without saving or starting', async (t) => {
+  const h = terminalHarness(t);
+  h.options.connect.telegram = connectTelegram;
+  const driving = h.drive([
+    ['机器人名字', RIGHT], ['工作目录', RIGHT], ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', ' ', DOWN, DOWN, DOWN, ' ', RIGHT],
+    ['开始接入', '\r'], ['Telegram Bot token', LEFT], ['开始接入', 'n', '\r'],
+  ]);
+  assert.equal(await setupCommand(h.options), 1);
+  await driving;
+  assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+  assert.equal(fs.existsSync(path.join(h.home, '.vika', 'data', 'primary', 'telegram')), false);
+  assert.deepEqual(h.calls, []);
+});
+
+test('back during Telegram verification cancels polling and returns an existing instance to its settings', async (t) => {
+  const h = terminalHarness(t);
+  const before = existing(h, {});
+  h.options.connect.telegram = connectTelegram;
+  let aborted = false;
+  h.options.fetchImpl = async (url, { signal }) => {
+    if (url.endsWith('/getMe')) return Response.json({ ok: true, result: { id: 123456, is_bot: true, username: 'vika_test_bot' } });
+    if (url.endsWith('/getWebhookInfo')) return Response.json({ ok: true, result: { url: '' } });
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true });
+    });
+  };
+  const driving = h.drive([
+    ['要做什么', DOWN, '\r'], ['选一项回车修改', DOWN, DOWN, DOWN, '\r'],
+    ['接入哪些 IM', DOWN, DOWN, DOWN, ' ', RIGHT],
+    ['选一项回车修改', DOWN, DOWN, DOWN, DOWN, '\r'],
+    ['Telegram Bot token', '123456:abcdefghijklmnopqrstuvwxyz_TEST', '\r'], ['在 Bot 私聊中点击 Start', LEFT],
+    ['选一项回车修改', '\x03'],
+  ]);
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await driving;
+  assert.equal(aborted, true);
+  assert.deepEqual(h.manifest().agents, [before]);
+  assert.deepEqual(h.calls, []);
+  const state = new TelegramState(before.dataDir);
+  try { assert.equal(state.account(), null); state.acquire(); } finally { state.close(); }
+  assert.doesNotMatch(h.screen(), /123456:abcdefghijklmnopqrstuvwxyz_TEST/);
+});
 
 test('← goes back a question with its answer kept, → takes the value shown, all the way to the confirmation', async (t) => {
   const h = terminalHarness(t);

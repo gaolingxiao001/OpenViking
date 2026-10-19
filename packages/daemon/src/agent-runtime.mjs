@@ -116,6 +116,9 @@ export class AgentRuntime {
   // Volc's tool executor is the remote Environment Worker, which only has the
   // Lark CLI path; it cannot reach the daemon's agent tools.
   _assertConnectorSupport(runtime) {
+    if (runtime === 'volc' && this.config.connectors.includes('telegram')) {
+      throw new Error('Telegram is not supported on the Volc runtime');
+    }
     if (runtime === 'volc' && this.config.connectors.includes('weixin')) {
       throw new Error('Weixin is not supported on the Volc runtime');
     }
