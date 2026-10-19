@@ -9,9 +9,9 @@ import {
 // frame rate.
 
 const SCENE_WIDTH = 46;
-const SCENE_HEIGHT = 16;
+const SCENE_HEIGHT = 17;
 // The wordmark's first row, so it sits beside the sails.
-const WORDMARK_TOP = 3;
+const WORDMARK_TOP = 4;
 
 // "ANSI Shadow" letters.
 const WORDMARK = [
@@ -71,7 +71,7 @@ function sprite(pixels, x, y, rows, colors) {
   rows.forEach((row, dy) => [...row].forEach((key, dx) => { if (colors[key]) dot(pixels, x + dx, y + dy, colors[key]); }));
 }
 
-const STARS = [[2, 3], [8, 9], [14, 2], [33, 1], [44, 10], [42, 16], [3, 15], [18, 6], [36, 8], [45, 3], [10, 19], [40, 21]];
+const STARS = [[2, 3], [8, 10], [14, 2], [33, 1], [44, 11], [42, 17], [3, 16], [18, 6], [36, 9], [45, 4], [10, 20], [40, 22]];
 const MOON = ['.mmm.', 'mm...', 'm....', 'mm...', '.mmm.'];
 const GULL = [['g...g', '.g.g.', '..g..'], ['.....', 'gg.gg', '..g..']];
 
@@ -82,7 +82,7 @@ function sky(pixels, t) {
   });
   sprite(pixels, 38, 1, MOON, { m: COLORS.moon });
   const gullX = Math.round(((t * 5 + 30) % 64) - 8);
-  sprite(pixels, gullX, 6 + Math.round(Math.sin(t * 1.3) * 1.5), GULL[Math.floor(t * 5) % 2], { g: COLORS.gull });
+  sprite(pixels, gullX, 7 + Math.round(Math.sin(t * 1.3) * 1.5), GULL[Math.floor(t * 5) % 2], { g: COLORS.gull });
 }
 
 // Sail cloth: the gradient flows slowly, the belly is lit, seams run across,
@@ -96,75 +96,184 @@ function cloth(x, y, t, across, offset) {
 }
 
 const MAST_X = 24;
+const STERN_X = 8;
+const BOW_X = 43;
+// Where the hull meets calm water: its row in the boat's own drawing, and
+// the row of calm water in the scene.
+const WATERLINE = 27;
+const SEA_LEVEL = 27.4;
 
-function boat(pixels, t, bob) {
-  const deck = 22 + bob;
+// The boat at rest, in its own frame; the scene tilts and lifts it with the
+// sea (see place).
+function boat(pixels, t) {
+  const deck = 23;
   // Mast and a flag that flutters.
-  for (let y = 1 + bob; y < deck; y += 1) dot(pixels, MAST_X, y, COLORS.mast);
+  for (let y = 2; y < deck; y += 1) dot(pixels, MAST_X, y, COLORS.mast);
   const flag = Math.floor(t * 6) % 3;
-  sprite(pixels, MAST_X + 1, bob, [['ppp', 'pp.'], ['pp.', 'ppp'], ['ppp', '.pp']][flag], { p: PALETTE.pink });
+  sprite(pixels, MAST_X + 1, 1, [['ppp', 'pp.'], ['pp.', 'ppp'], ['ppp', '.pp']][flag], { p: PALETTE.pink });
 
   // Mainsail, aft of the mast: tall and narrow, its leech breathing in and
   // out with the wind.
   const billow = Math.sin(t * 1.6) * 0.7;
-  for (let y = 2 + bob; y <= 19 + bob; y += 1) {
-    const f = Math.pow((y - 2 - bob) / 17, 0.85);
+  for (let y = 3; y <= 20; y += 1) {
+    const f = Math.pow((y - 3) / 17, 0.85);
     const reach = Math.max(0, Math.round((10 + billow) * f));
     for (let x = MAST_X - 1 - reach; x < MAST_X; x += 1) {
       const across = (MAST_X - x) / Math.max(1, reach + 1);
       dot(pixels, x, y, cloth(x, y, t, across, 0));
     }
   }
-  for (let x = MAST_X - 12; x <= MAST_X; x += 1) dot(pixels, x, 20 + bob, COLORS.boom);
+  for (let x = MAST_X - 12; x <= MAST_X; x += 1) dot(pixels, x, 21, COLORS.boom);
 
   // Jib, forward of the mast, up the forestay; the stay runs on to the bow.
-  const stay = (y) => MAST_X + 1 + Math.round((y - 3 - bob) * 17 / 19);
-  for (let y = 4 + bob; y <= 19 + bob; y += 1) {
+  const stay = (y) => MAST_X + 1 + Math.round((y - 4) * 17 / 19);
+  for (let y = 5; y <= 20; y += 1) {
     const luff = stay(y);
     for (let x = MAST_X + 2; x <= luff; x += 1) {
       const across = (x - MAST_X - 1) / Math.max(1, luff - MAST_X);
       dot(pixels, x, y, cloth(x, y, t, across, 0.35));
     }
   }
-  for (let y = 20 + bob; y < deck; y += 1) dot(pixels, stay(y), y, COLORS.rope);
+  for (let y = 21; y < deck; y += 1) dot(pixels, stay(y), y, COLORS.rope);
 
   // Hull, stern to a raked bow: cream rail, deep indigo topsides lit toward
-  // the bow with three portholes, a thin peach boot stripe, coral bottom.
-  const lit = (x) => mix([COLORS.hull, COLORS.hullLit], (x - 8) / 34);
+  // the bow with three portholes, a thin peach boot stripe just above the
+  // water, coral bottom below it.
+  const lit = (x) => mix([COLORS.hull, COLORS.hullLit], (x - STERN_X) / 34);
   const rows = [
-    [8, 42, () => COLORS.rail],
-    [8, 41, lit],
-    [9, 40, lit],
-    [10, 38, () => COLORS.stripe],
-    [12, 36, () => COLORS.keel],
-    [15, 32, () => scale(COLORS.keel, 0.78)],
+    [STERN_X, BOW_X - 1, () => COLORS.rail],
+    [STERN_X, BOW_X - 2, lit],
+    [STERN_X + 1, BOW_X - 3, lit],
+    [STERN_X + 2, BOW_X - 5, () => COLORS.stripe],
+    [STERN_X + 4, BOW_X - 7, () => COLORS.keel],
+    [STERN_X + 7, BOW_X - 11, () => scale(COLORS.keel, 0.78)],
   ];
   rows.forEach(([left, right, color], dy) => {
     for (let x = left; x <= right; x += 1) dot(pixels, x, deck + dy, color(x));
   });
   for (const x of [25, 29, 33]) dot(pixels, x, deck + 1, COLORS.porthole);
   // The sheer: the rail lifts a little at the stern and more at the bow.
-  for (const [x, dy] of [[8, -1], [40, -1], [41, -1], [42, -1], [43, -2]]) dot(pixels, x, deck + dy, COLORS.rail);
+  for (const [x, dy] of [[STERN_X, -1], [BOW_X - 3, -1], [BOW_X - 2, -1], [BOW_X - 1, -1], [BOW_X, -2]]) dot(pixels, x, deck + dy, COLORS.rail);
 }
 
-function sea(pixels, t) {
-  const surface = (x) => Math.floor(27.3 + 0.8 * Math.sin((x + t * 5) * 0.42) + 0.4 * Math.sin((x * 1.7 - t * 3.1) * 0.5 + 1.3));
+// The swell the boat rides, as a rise above calm water in pixels: a long
+// wave, about three hull lengths, so the water along the hull is close to a
+// slope the boat can lie on, and a low shorter one; both run aft as the boat
+// sails on. Ripples only texture the open water: next to the hull the
+// surface is the swell alone, so the waterline runs clean.
+function swell(x, t) {
+  return 1.45 * Math.sin((x + t * 20) * 0.06) + 0.3 * Math.sin((x + t * 9) * 0.21 + 1.7);
+}
+
+function ripple(x, t) {
+  const open = Math.min(1, Math.max(0, (STERN_X - 1 - x) / 4, (x - BOW_X - 1) / 4));
+  return open * 0.45 * Math.sin((x * 1.7 - t * 3.1) * 0.5 + 1.3);
+}
+
+// How the boat lies on the swell: the line that best fits the water along
+// the hull sets the pitch (bow up as a crest reaches it, bow down as the
+// crest runs aft) and how high it rides. A boat answers the sea a moment
+// late, and a little less than fully.
+export function pose(t) {
+  const lag = t - 0.12;
+  const xs = [];
+  for (let x = STERN_X; x <= BOW_X; x += 3) xs.push(x);
+  const mean = xs.reduce((sum, x) => sum + x, 0) / xs.length;
+  const level = xs.reduce((sum, x) => sum + swell(x, lag), 0) / xs.length;
+  const slope = xs.reduce((sum, x) => sum + (x - mean) * (swell(x, lag) - level), 0)
+    / xs.reduce((sum, x) => sum + (x - mean) ** 2, 0);
+  return { angle: Math.atan(slope) * 0.9, rise: (level + slope * (MAST_X - mean)) * 0.9 };
+}
+
+// The boat's drawing, turned by the pitch about where its waterline meets
+// the mast and lifted with the sea; nearest pixel, so lines stay crisp.
+// Returns where the boat landed, for the water in front of it.
+function place(pixels, drawing, { angle, rise }) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const pivot = SEA_LEVEL - rise;
+  const placed = canvas();
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      const dx = x - MAST_X;
+      const dy = y - pivot;
+      const color = drawing[Math.round(WATERLINE + sin * dx + cos * dy)]?.[Math.round(MAST_X + cos * dx - sin * dy)];
+      if (color) {
+        pixels[y][x] = color;
+        placed[y][x] = color;
+      }
+    }
+  }
+  return placed;
+}
+
+// Where a point of the boat's drawing lands in the scene.
+function landing({ angle, rise }, x, y) {
+  const u = x - MAST_X;
+  const v = y - WATERLINE;
+  return [MAST_X + u * Math.cos(angle) + v * Math.sin(angle), SEA_LEVEL - rise - u * Math.sin(angle) + v * Math.cos(angle)];
+}
+
+const flicker = (x, t, rate = 7) => 0.5 + 0.5 * Math.sin(x * 2.7 + Math.floor(t * rate) * 1.9);
+
+// The water behind the boat: the surface seen receding, a band a little
+// paler and dimmer than the water in front, which the hull stands in front of.
+function farSea(pixels, t, surface) {
   for (let x = 0; x < W; x += 1) {
-    const top = surface(x);
-    const crest = top <= surface(x - 1) && top <= surface(x + 1);
+    const near = Math.round(surface(x));
+    const far = Math.round(surface(x) - 1.7 - 0.45 * Math.sin((x + t * 2.4) * 0.33 + 0.8));
+    for (let y = far; y < near; y += 1) {
+      const edge = y === far;
+      dot(pixels, x, y, scale(edge ? mix([COLORS.crest, COLORS.foam], 0.2) : mix([COLORS.shallow, COLORS.crest], 0.4), 0.8));
+    }
+  }
+}
+
+// The water in front: it covers the hull below the waterline, where the hull
+// shows through faintly and fades with depth; the hull shades the water
+// under it; foam rims the hull where it cuts the surface, sprays at the bow
+// when it comes down, and trails off the stern.
+function nearSea(pixels, t, surface, placed, boatPose) {
+  const bounds = { stern: landing(boatPose, STERN_X, WATERLINE)[0], bow: landing(boatPose, BOW_X, WATERLINE)[0] };
+  for (let x = 0; x < W; x += 1) {
+    const level = surface(x);
+    const top = Math.round(level);
+    const crest = level <= surface(x - 1) && level <= surface(x + 1);
+    const shaded = placed.some((row, y) => y >= top - 1 && row[x]);
     for (let y = top; y < H; y += 1) {
       const depth = (y - top) / Math.max(1, H - top);
-      let water = mix([COLORS.shallow, COLORS.deep], depth * 1.2);
-      water = scale(water, 0.92 + 0.08 * Math.sin(x * 0.3 + t * 2 + y));
-      if (y === top) water = crest ? COLORS.foam : COLORS.crest;
-      // Moonlight glints on the water, here and gone.
-      else if (y <= top + 2 && Math.sin(x * 12.9898 + y * 78.233 + Math.floor(t * 5) * 3.7) > 0.93) water = mix([water, COLORS.foam], 0.6);
+      let water = mix([COLORS.shallow, COLORS.deep], depth * 1.15);
+      water = scale(water, (0.93 + 0.07 * Math.sin(x * 0.3 + t * 2 + y)) * (shaded && y > top ? 0.8 : 1));
+      const hull = placed[y]?.[x];
+      if (y === top) {
+        // The surface runs on in front of the hull, catching a little of its
+        // colour, with flecks of foam; foam gathers at bow and stern.
+        const cut = hull || placed[y - 1]?.[x];
+        const end = cut && (x < bounds.stern + 3 || x > bounds.bow - 3);
+        if (!cut) water = crest ? COLORS.foam : COLORS.crest;
+        else if (end || flicker(x, t, 5) > 0.82) water = mix([COLORS.crest, COLORS.foam], 0.55);
+        else water = mix([COLORS.crest, cut], 0.3);
+      } else if (hull) {
+        water = mix([water, hull], [0, 0.4, 0.22, 0.1][Math.min(3, y - top)]);
+      } else if (y <= top + 2 && Math.sin(x * 12.9898 + y * 78.233 + Math.floor(t * 5) * 3.7) > 0.93) {
+        water = mix([water, COLORS.foam], 0.6);
+      }
       dot(pixels, x, y, water);
     }
   }
-  // Wake off the stern and spray at the bow.
-  for (let x = 2; x < 8; x += 1) if ((Math.floor(t * 8) + x) % 3) dot(pixels, x, surface(x), COLORS.foam);
-  if (Math.floor(t * 4) % 2) dot(pixels, 44, surface(44) - 1, COLORS.foam);
+  // Wake off the stern, drifting aft.
+  const [sternX] = landing(boatPose, STERN_X, WATERLINE);
+  for (let k = 1; k <= 6; k += 1) {
+    const x = Math.round(sternX) - k;
+    if (flicker(x + Math.floor(t * 6), t, 5) > 0.35 + k * 0.08) dot(pixels, x, Math.round(surface(x)), COLORS.foam);
+  }
+  // Spray at the bow, more as it comes down into the sea.
+  const [bowX] = landing(boatPose, BOW_X, WATERLINE);
+  const falling = pose(t - 0.15).angle - boatPose.angle;
+  const x = Math.round(bowX) + 1;
+  dot(pixels, x, Math.round(surface(x)), COLORS.foam);
+  if (falling > 0.004 || flicker(x, t, 4) > 0.7) dot(pixels, x + 1, Math.round(surface(x + 1)) - 1, mix([COLORS.foam, COLORS.crest], 0.3));
+  if (falling > 0.012) dot(pixels, x, Math.round(surface(x)) - 2, mix([COLORS.foam, COLORS.crest], 0.5));
 }
 
 // Cells for pixels: two per cell, as '▀' with a background, or '▄' / '█'
@@ -183,9 +292,13 @@ function toCells(pixels) {
 export function sceneFrame(t) {
   const pixels = canvas();
   sky(pixels, t);
-  // The boat rises and dips with the swell, half a row at a time.
-  boat(pixels, t, Math.sin(t * 2.2) > 0 ? 0 : 1);
-  sea(pixels, t);
+  const surface = (x) => SEA_LEVEL - swell(x, t) - ripple(x, t);
+  farSea(pixels, t, surface);
+  const drawing = canvas();
+  boat(drawing, t);
+  const boatPose = pose(t);
+  const placed = place(pixels, drawing, boatPose);
+  nearSea(pixels, t, surface, placed, boatPose);
   return toCells(pixels);
 }
 

@@ -39,12 +39,22 @@ test('a box lines up its borders whatever the text is', () => {
 test('every banner frame fits the terminal; a narrow one drops the wordmark', () => {
   for (const t of [0, 0.37, 1.2, 2.9, 7.5]) {
     const wide = bannerLines(t, { depth: 24, version: '0.4.0-cdb22789fc75', columns: 100 });
-    assert.equal(wide.length, 16);
+    assert.equal(wide.length, 17);
     assert.ok(wide.every((line) => width(line) <= 100), `t=${t}`);
     assert.ok(wide.some((line) => stripAnsi(line).includes('██╗   ██╗██╗██╗')));
     const narrow = bannerLines(t, { depth: 8, columns: 60 });
     assert.ok(narrow.every((line) => width(line) <= 46) && !narrow.some((line) => line.includes('██╗')));
   }
+});
+
+test('the boat rides the swell: it pitches both ways and rises and falls, never far', async () => {
+  const { pose } = await import('../src/banner.mjs');
+  const poses = Array.from({ length: 120 }, (_, index) => pose(index / 12));
+  const degrees = poses.map(({ angle }) => (angle * 180) / Math.PI);
+  assert.ok(Math.min(...degrees) < -3 && Math.max(...degrees) > 3, 'bow down and bow up');
+  assert.ok(degrees.every((angle) => Math.abs(angle) < 6), 'a gentle sea');
+  const rises = poses.map(({ rise }) => rise);
+  assert.ok(Math.min(...rises) < -0.7 && Math.max(...rises) > 0.7 && rises.every((rise) => Math.abs(rise) < 2));
 });
 
 test('the banner is one plain title line on a terminal that is too small or has no colour', async () => {
@@ -61,7 +71,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 test('on a tall window the boat stays at the top and keeps sailing until released', async () => {
   const { output, written } = screen({ columns: 100, rows: 40 });
   const banner = await openingBanner({ output, input: new PassThrough(), env: {}, version: '1.0.0' });
-  assert.match(written(), /\x1b\[18;40r\x1b\[18;1H/, 'questions scroll below the 16-row scene');
+  assert.match(written(), /\x1b\[19;40r\x1b\[19;1H/, 'questions scroll below the 17-row scene');
   await pause(200);
   const frames = written().split('\x1b7').length - 1;
   assert.ok(frames >= 2, `redrawn while waiting (${frames} frames)`);
@@ -71,7 +81,7 @@ test('on a tall window the boat stays at the top and keeps sailing until release
   await pause(150);
   assert.equal(written().length, after, 'no frames after release');
   banner.resume();
-  assert.match(written().slice(after), /\x1b\[18;40r/);
+  assert.match(written().slice(after), /\x1b\[19;40r/);
   banner.release();
   banner.release();
   assert.equal(process.listenerCount('SIGINT'), 0);
