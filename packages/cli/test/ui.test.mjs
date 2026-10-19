@@ -73,7 +73,8 @@ function emulator(rows, columns) {
       if (command === 'A') { row -= Number(a || 1); continue; }
       if (command === 'G') { column = Number(a || 1) - 1; continue; }
       if (command) continue;
-      if (token.endsWith('m') && token.startsWith('\x1b[')) { sgr = token; continue; }
+      // Reset restores the same default colours as an untouched cell.
+      if (token.endsWith('m') && token.startsWith('\x1b[')) { sgr = token === '\x1b[0m' ? '' : token; continue; }
       if (save === '7') { saved = [row, column]; continue; }
       if (save === '8') { [row, column] = saved; continue; }
       if (token === '\n') { row += 1; column = 0; continue; }
