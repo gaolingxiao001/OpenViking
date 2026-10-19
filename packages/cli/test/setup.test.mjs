@@ -565,14 +565,14 @@ test('in English, a first setup says it all in English, and the bot says hello i
   assert.equal(fs.readFileSync(path.join(h.home, '.vika', 'language'), 'utf8'), 'en\n');
 });
 
-test('with a locale that settles nothing, a terminal setup asks the language first, once, and keeps it', async (t) => {
+test('with a locale that is not Chinese, a terminal setup asks the language first, once, and keeps it', async (t) => {
   const h = terminalHarness(t);
   h.options.env.LANG = 'en_US.UTF-8';
-  // English comes first for en_US; this owner reads Chinese.
-  const driving = h.drive([['Language / 语言', '\x1b[A', '\r'], ['机器人名字', '\x03']]);
+  // Chinese comes first; this owner takes it.
+  const driving = h.drive([['Language / 语言', '\r'], ['机器人名字', '\x03']]);
   await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
   await driving;
-  assert.match(h.screen(), /Language \/ 语言 \(↑↓ move, Enter confirms\)\n\x1b\[\?25l {2}中文\n❯ English/);
+  assert.match(h.screen(), /Language \/ 语言（↑↓ 移动，回车确认）\n\x1b\[\?25l❯ 中文\n {2}English/);
   assert.ok(h.screen().indexOf('Language / 语言') < h.screen().indexOf('Vika setup：'), 'asked before anything else is said');
   assert.equal(fs.readFileSync(path.join(h.home, '.vika', 'language'), 'utf8'), 'zh\n');
 
@@ -585,11 +585,11 @@ test('with a locale that settles nothing, a terminal setup asks the language fir
   await drivingAgain;
   assert.doesNotMatch(again.screen(), /Language/);
 
-  // Without a terminal nothing is asked or kept: the locale's language it is.
-  const piped = harness(t, ['', '', '1', '1', 'n'], { runtimes: ENGLISH_RUNTIMES });
+  // Without a terminal nothing is asked or kept: Chinese it is.
+  const piped = harness(t, ['', '', '1', '1', 'n']);
   piped.options.env.LANG = 'en_US.UTF-8';
   assert.equal(await setupCommand(piped.options), 1);
-  assert.match(piped.written(), /Nothing was saved; run ~\/\.vika\/bin\/vika setup when you are ready\./);
+  assert.match(piped.written(), /什么都没保存；准备好了再运行 ~\/\.vika\/bin\/vika setup。/);
   assert.equal(fs.existsSync(path.join(piped.home, '.vika', 'language')), false);
 });
 

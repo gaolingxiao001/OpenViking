@@ -26,19 +26,11 @@ RUN_SETUP=1
 LANG_FLAG=""
 
 # Chinese or English, as the vika command picks it (packages/cli/src/i18n.mjs):
-# VIKA_LANG or --lang, else what setup saved, else the locale, Chinese when
-# the locale names no language. m <Chinese> <English> prints the one in use.
+# VIKA_LANG or --lang, else what setup saved, else Chinese.
+# m <Chinese> <English> prints the one in use.
 UI_LANG=${VIKA_LANG:-}
 case "$UI_LANG" in zh|en) ;; *) UI_LANG=$(cat "$VIKA_HOME/language" 2>/dev/null || true) ;; esac
-case "$UI_LANG" in
-  zh|en) ;;
-  *)
-    case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
-      zh*|''|C|C.*|C@*|POSIX|POSIX.*) UI_LANG=zh ;;
-      *) UI_LANG=en ;;
-    esac
-    ;;
-esac
+case "$UI_LANG" in zh|en) ;; *) UI_LANG=zh ;; esac
 m() { if [ "$UI_LANG" = en ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 
 # Colour and motion only on a terminal; piped output stays plain lines.

@@ -721,8 +721,9 @@ function connectionSteps(prompter, connectors, { saving = false } = {}) {
 }
 
 // The language comes first, before the boat even, as everything after it
-// is said in it. It is asked on a terminal when nothing settles it (see
-// i18n.mjs), and kept for later commands when the owner chose it here.
+// is said in it. Chinese unless chosen; on a terminal whose locale is not
+// Chinese it is asked (see i18n.mjs), and kept for later commands when the
+// owner chose it here.
 async function chooseLanguage({ prompter, env, flag }) {
   const choice = languageChoice({ env, flag });
   setLanguage(choice.language);

@@ -5,9 +5,9 @@ import path from 'node:path';
 // The vika command speaks Chinese or English, one language for the whole
 // run; `t` picks between the two texts, written side by side where they are
 // used. The language is --lang or VIKA_LANG when given, else the one setup
-// saved in ~/.vika/language, else the locale's. Only a Chinese locale
-// settles it: servers often say en_US or C whatever their user reads, so on
-// a terminal setup asks once instead, with the locale's language first.
+// saved in ~/.vika/language, else Chinese. A Chinese locale leaves nothing
+// to ask; any other (servers often say en_US or C whatever their user
+// reads) has setup ask once on a terminal, Chinese first.
 
 export const LANGUAGES = Object.freeze({ zh: '中文', en: 'English' });
 
@@ -72,6 +72,5 @@ export function languageChoice({ env = process.env, flag = null } = {}) {
   if (explicit) return { language: explicit, settled: true, explicit: true };
   const saved = savedLanguage(env);
   if (saved) return { language: saved, settled: true, explicit: false };
-  const locale = localeLanguage(env);
-  return { language: locale ?? 'zh', settled: locale === 'zh', explicit: false };
+  return { language: 'zh', settled: localeLanguage(env) === 'zh', explicit: false };
 }

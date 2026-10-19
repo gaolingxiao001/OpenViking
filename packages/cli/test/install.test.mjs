@@ -121,9 +121,9 @@ test('no variable runs into non-ASCII text, which macOS /bin/sh would read as pa
   assert.deepEqual(offending, []);
 });
 
-test('the installer speaks the language the vika command would: --lang, the saved one, then the locale', (t) => {
+test('the installer speaks the language the vika command would: --lang or VIKA_LANG, the saved one, then Chinese', (t) => {
   const m = machine(t);
-  const english = m.install('--file', m.archive('0.5.0'), { LANG: 'en_US.UTF-8' });
+  const english = m.install('--file', m.archive('0.5.0'), { LANG: 'en_US.UTF-8', VIKA_LANG: 'en' });
   assert.equal(english.status, 0, english.stderr);
   assert.match(english.stderr, /^Installing Vika vika-0\.5\.0-[\s\S]*Verify +SHA-256 matches[\s\S]*next: run ~\/\.vika\/bin\/vika setup\n$/);
   assert.doesNotMatch(english.stderr, /[一-鿿]/);

@@ -13,12 +13,12 @@ test('only a Chinese locale settles the language; a locale naming no language sa
   for (const locale of ['', 'C', 'C.UTF-8', 'POSIX']) assert.equal(localeLanguage({ LANG: locale }), null, locale);
 });
 
-test('--lang beats VIKA_LANG, which beats the saved language, which beats the locale', (t) => {
+test('--lang beats VIKA_LANG, which beats the saved language, which beats Chinese; the locale only settles asking', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-lang-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const env = { HOME: home, LANG: 'en_US.UTF-8' };
-  // A server's en_US says little about who reads it: English first, but asked.
-  assert.deepEqual(languageChoice({ env }), { language: 'en', settled: false, explicit: false });
+  // A server's en_US says little about who reads it: Chinese, but asked.
+  assert.deepEqual(languageChoice({ env }), { language: 'zh', settled: false, explicit: false });
   assert.deepEqual(languageChoice({ env: { HOME: home } }), { language: 'zh', settled: false, explicit: false });
   assert.deepEqual(languageChoice({ env: { HOME: home, LANG: 'zh_CN.UTF-8' } }), { language: 'zh', settled: true, explicit: false });
   saveLanguage('zh', env);
