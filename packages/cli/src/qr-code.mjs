@@ -19,20 +19,31 @@ export function qrMatrix(text) {
         ? code.isDark(y - QUIET, x - QUIET) : false));
 }
 
+// A terminal fills a cell's background edge to edge, but draws a glyph only as
+// big as the font or renderer makes it: line height, letter spacing and
+// font-drawn block characters leave seams around it (VS Code with or without
+// GPU, macOS Terminal). Seams through dark modules cut the finder patterns
+// apart and WeChat cannot scan the code; seams through light ones it ignores.
+// So dark modules are always background, and only light modules are glyphs.
+// One character carries two vertically adjacent modules. With colour, a cell
+// of two light modules is a white space and every other cell is black, its
+// light half a white half block; without, the terminal is assumed dark.
 export function terminalQr(matrix, depth = 1) {
   const color = depth >= 4;
-  const ink = depth >= 24 ? '\x1b[0;38;2;0;0;0;48;2;255;255;255m'
-    : depth >= 8 ? '\x1b[0;38;5;16;48;5;231m' : '\x1b[0;30;107m';
+  const [paper, ink] = depth >= 24 ? ['48;2;255;255;255', '48;2;0;0;0;38;2;255;255;255']
+    : depth >= 8 ? ['48;5;231', '48;5;16;38;5;231'] : ['107', '40;97'];
   const lines = [];
   for (let y = 0; y < matrix.length; y += 2) {
-    let line = '';
+    let line = '', style = null;
     for (let x = 0; x < matrix.length; x += 1) {
       const top = matrix[y][x], bottom = matrix[y + 1]?.[x] ?? false;
-      // One character carries two vertically adjacent modules, with no gaps.
-      line += color ? (top ? (bottom ? '█' : '▀') : (bottom ? '▄' : ' '))
-        : (top ? (bottom ? ' ' : '▄') : (bottom ? '▀' : '█'));
+      const light = top ? (bottom ? ' ' : '▄') : (bottom ? '▀' : '█');
+      if (!color) { line += light; continue; }
+      const next = top || bottom ? ink : paper;
+      if (next !== style) { line += `\x1b[0;${next}m`; style = next; }
+      line += next === paper ? ' ' : light;
     }
-    lines.push(color ? `${ink}${line}\x1b[0m` : line);
+    lines.push(color ? `${line}\x1b[0m` : line);
   }
   return lines;
 }

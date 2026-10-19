@@ -129,10 +129,10 @@ test('a code too big for the window waits for the window to grow, then draws its
   const scan = showScan(prompter, { url, title: '第 1 次扫码', env: {} });
   assert.match(stripAnsi(written()), /终端二维码需要 \d+×\d+，现在是 100×40/);
   assert.match(stripAnsi(written()), /二维码图片[\s\S]*scan\.png/);
-  assert.doesNotMatch(written(), /█/);
+  assert.doesNotMatch(written(), /[▀▄█]/);
   Object.assign(output, { columns: 200, rows: 120 });
   output.emit('resize');
-  assert.match(written(), /█/);
+  assert.match(written(), /[▀▄█]/);
   scan.stop();
   assert.equal(output.listenerCount('resize'), 0);
 });

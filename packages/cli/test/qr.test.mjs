@@ -20,18 +20,39 @@ function screen(columns = 100, rows = 40, interactive = false) {
   return { output, input, text: () => text, prompter: new Prompter({ input, output, env: {} }) };
 }
 
+// [top, bottom] dark per cell. A glyph only ever draws light modules; with
+// colour, a white-background cell is all light, a black one is dark where no
+// glyph covers it.
+const PAPER = new Set(['48;2;255;255;255', '48;5;231', '107']);
+const INK = new Set(['48;2;0;0;0;38;2;255;255;255', '48;5;16;38;5;231', '40;97']);
+const GLYPH = { ' ': [true, true], '▀': [false, true], '▄': [true, false], '█': [false, false] };
+
+function cells(line) {
+  const result = [];
+  let style = null;
+  for (const [, sgr, ch] of line.matchAll(/\x1b\[0;([0-9;]+)m|\x1b\[0m|(.)/gu)) {
+    if (sgr) style = sgr;
+    else if (ch) result.push({ style, ch });
+  }
+  return result;
+}
+
 test('terminal QR preserves every module in half-height cells with four white modules of quiet space', () => {
   for (const url of [TELEGRAM, FEISHU]) {
     const matrix = qrMatrix(url);
-    for (const depth of [1, 8, 24]) {
+    for (const depth of [1, 4, 8, 24]) {
       const lines = terminalQr(matrix, depth);
       assert.equal(lines.length, Math.ceil(matrix.length / 2));
       assert.ok(lines.every((line) => width(line) === matrix.length));
       if (depth >= 4) assert.ok(lines.every((line) => line.startsWith('\x1b[0;') && line.endsWith('\x1b[0m')));
-      const halves = depth >= 4 ? { ' ': [false, false], '▀': [true, false], '▄': [false, true], '█': [true, true] }
-        : { ' ': [true, true], '▀': [false, true], '▄': [true, false], '█': [false, false] };
       const decoded = lines.flatMap((line) => {
-        const pixels = [...stripAnsi(line)].map((ch) => halves[ch]);
+        const pixels = cells(line).map(({ style, ch }) => {
+          if (depth < 4) return GLYPH[ch];
+          if (PAPER.has(style)) { assert.equal(ch, ' '); return [false, false]; }
+          assert.ok(INK.has(style), style);
+          assert.notEqual(ch, '█', 'a cell with a dark module is black, not a white glyph');
+          return GLYPH[ch];
+        });
         return [pixels.map(([top]) => top), pixels.map(([, bottom]) => bottom)];
       }).slice(0, matrix.length);
       assert.deepEqual(decoded, matrix);
@@ -75,7 +96,7 @@ test('small VS Code terminals get a private image immediately, and resizing redr
   assert.match(s.text(), /二维码图片[\s\S]*scan\.png[\s\S]*终端二维码需要/);
   assert.doesNotMatch(s.text(), /[▀▄█]/);
   Object.assign(s.output, { columns: 200, rows: 120 }); s.output.emit('resize');
-  assert.match(s.text(), /\x1b\[0;38;2;0;0;0;48;2;255;255;255m/);
+  assert.match(s.text(), /\x1b\[0;48;2;255;255;255m/);
   const first = s.text(); s.output.emit('resize');
   assert.ok(s.text().length > first.length, 'redraw even after a QR was already shown');
   scan.stop();
@@ -89,7 +110,7 @@ test('fallback text precedes the terminal code and a long status cannot wrap it 
     env: { TERM_PROGRAM: 'vscode' }, onBack() {} });
   t.after(() => scan.stop());
   const text = s.text();
-  const codeAt = text.indexOf('\x1b[0;38;2;0;0;0;48;2;255;255;255m');
+  const codeAt = text.indexOf('\x1b[0;48;2;255;255;255m');
   assert.ok(codeAt > text.indexOf(TELEGRAM));
   assert.ok(codeAt > text.indexOf(scan.imagePath));
   assert.ok(width(text.slice(text.lastIndexOf('\r\x1b[2K'))) < 80);
