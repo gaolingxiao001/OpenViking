@@ -1,6 +1,6 @@
 import { PromptAborted } from './prompt.mjs';
 import {
-  HIDE_CURSOR, PALETTE, RESET, SHOW_CURSOR, bgCode, colorDepth, fgCode, mix, onInterrupt, scale, styler, width,
+  HIDE_CURSOR, PALETTE, RESET, SHOW_CURSOR, ansi256, colorDepth, mix, onInterrupt, scale, styler, width,
 } from './ui.mjs';
 
 // The Vika banner: pixel art of a tall-rigged sailboat (OpenViking's sail)
@@ -243,7 +243,8 @@ function nearSea(pixels, t, surface, placed, boatPose) {
     for (let y = top; y < H; y += 1) {
       const depth = (y - top) / Math.max(1, H - top);
       let water = mix([COLORS.shallow, COLORS.deep], depth * 1.15);
-      water = scale(water, (0.93 + 0.07 * Math.sin(x * 0.3 + t * 2 + y)) * (shaded && y > top ? 0.8 : 1));
+      // The water's light shifts a few times a second, not every frame.
+      water = scale(water, (0.93 + 0.07 * Math.sin(x * 0.3 + Math.floor(t * 4) / 2 + y)) * (shaded && y > top ? 0.8 : 1));
       const hull = placed[y]?.[x];
       if (y === top) {
         // The surface runs on in front of the hull, catching a little of its
@@ -276,15 +277,17 @@ function nearSea(pixels, t, surface, placed, boatPose) {
   if (falling > 0.012) dot(pixels, x, Math.round(surface(x)) - 2, mix([COLORS.foam, COLORS.crest], 0.5));
 }
 
-// Cells for pixels: two per cell, as '▀' with a background, or '▄' / '█'
-// when only one half or both halves share a colour.
+// Cells for pixels: two per cell, as '▀' over a background, '▄' or '▀'
+// alone when one half is empty, and a space on a background when both
+// halves share a colour: a background fills the whole cell, where a '█'
+// glyph can leave a thin dark gap between rows in some fonts.
 function toCells(pixels) {
   return Array.from({ length: pixels.length / 2 }, (_, row) => pixels[row * 2].map((top, x) => {
     const bottom = pixels[row * 2 + 1][x];
     if (!top && !bottom) return { ch: ' ', rgb: null, bg: null };
     if (!top) return { ch: '▄', rgb: bottom, bg: null };
     if (!bottom) return { ch: '▀', rgb: top, bg: null };
-    if (top.join() === bottom.join()) return { ch: '█', rgb: top, bg: null };
+    if (top.join() === bottom.join()) return { ch: ' ', rgb: null, bg: top };
     return { ch: '▀', rgb: top, bg: bottom };
   }));
 }
@@ -302,33 +305,85 @@ export function sceneFrame(t) {
   return toCells(pixels);
 }
 
-// Cell rows as strings, a colour change only where the colour changes.
-function render(rows, depth) {
-  return rows.map((row) => {
-    let line = '';
-    let open = '';
-    for (const cell of row) {
-      const code = `${cell.rgb ? fgCode(cell.rgb, depth) : ''}${cell.bg ? bgCode(cell.bg, depth) : ''}`;
-      if (code !== open) {
-        line += `${open ? RESET : ''}${code}`;
-        open = code;
-      }
-      line += cell.ch;
+// A cell's colours as one SGR sequence. Channels are rounded to steps of 8,
+// too fine to see, so a slow fade leaves most cells unchanged between frames.
+function codeOf(cell, depth) {
+  if (cell.code !== undefined) return cell.code;
+  const part = (rgb, base) => (depth >= 24
+    ? `;${base};2;${rgb.map((channel) => Math.min(248, Math.round(channel / 8) * 8)).join(';')}`
+    : `;${base};5;${ansi256(rgb)}`);
+  cell.code = `\x1b[0${cell.rgb ? part(cell.rgb, 38) : ''}${cell.bg ? part(cell.bg, 48) : ''}m`;
+  return cell.code;
+}
+
+// A run of cells as text, a colour change only where the colour changes.
+function paintRun(cells, depth) {
+  let text = '';
+  let open = null;
+  for (const cell of cells) {
+    const code = codeOf(cell, depth);
+    if (code !== open) {
+      text += code;
+      open = code;
     }
-    return `${line}${open ? RESET : ''}`.replace(/\s+$/, '');
-  });
+    text += cell.ch;
+  }
+  return `${text}${RESET}`;
+}
+
+// Cell rows as strings, for a frame drawn whole.
+function render(rows, depth) {
+  return rows.map((row) => paintRun(row, depth).replace(/(\x1b\[0m )+\x1b\[0m$/, RESET));
+}
+
+// Draws frame after frame over the last one, writing only the runs of cells
+// that changed (runs a few cells apart are joined, as a jump costs about as
+// much). Nothing is cleared first, so no row is ever blank on screen
+// between frames, and a frame stays small enough for the terminal to take
+// in one go: redrawing everything each time showed as rolling bands, like
+// the scan lines of an old monitor. `to(row, column)` moves the cursor.
+function painter(depth, to, first = null) {
+  let last = first;
+  return (rows) => {
+    let text = '';
+    rows.forEach((row, r) => {
+      const before = last?.[r];
+      const same = (c) => Boolean(before?.[c]) && before[c].ch === row[c].ch && codeOf(before[c], depth) === codeOf(row[c], depth);
+      let c = 0;
+      while (c < row.length) {
+        if (same(c)) { c += 1; continue; }
+        // The second half of a wide character is drawn with its first half.
+        const start = row[c].ch === '' && c > 0 ? c - 1 : c;
+        let end = c;
+        for (let k = c + 1, gap = 0; k < row.length && gap <= 3; k += 1) {
+          if (same(k)) gap += 1;
+          else { gap = 0; end = k; }
+        }
+        text += `${to(r, start)}${paintRun(row.slice(start, end + 1), depth)}`;
+        c = end + 1;
+      }
+    });
+    last = rows;
+    return text;
+  };
 }
 
 // Rows of the banner as strings, coloured for `depth`.
 export function bannerLines(t, { depth = 24, version = '', columns = 80 } = {}) {
+  return render(bannerCells(t, { version, columns }), depth);
+}
+
+// The banner's cells: the scene, and the wordmark beside it when it fits.
+// Every row stops short of the last column: a cell written there makes some
+// terminals wrap, which would push the rest of the frame down a row.
+function bannerCells(t, { version = '', columns = 80 } = {}) {
   const scene = sceneFrame(t);
-  const withWordmark = columns >= SCENE_WIDTH + 4 + width(WORDMARK[0]);
+  const x0 = SCENE_WIDTH + 2;
+  const versionLine = version ? `v${version}` : '';
+  const text = Math.max(width(WORDMARK[0]), width(TAGLINE), width(SUBLINE), width(versionLine));
   const rows = scene.map((row) => row.map((cell) => ({ ...cell })));
-  if (withWordmark) {
-    const x0 = SCENE_WIDTH + 2;
-    const versionLine = version ? `v${version}` : '';
-    const extra = Math.max(width(WORDMARK[0]), width(TAGLINE), width(SUBLINE), width(versionLine)) + 2;
-    rows.forEach((row) => { for (let k = 0; k < extra; k += 1) row.push({ ch: ' ', rgb: null }); });
+  if (columns > x0 + text) {
+    rows.forEach((row) => { for (let k = SCENE_WIDTH; k < x0 + text; k += 1) row.push({ ch: ' ', rgb: null, bg: null }); });
     WORDMARK.forEach((line, y) => {
       [...line].forEach((ch, x) => {
         if (ch === ' ') return;
@@ -336,7 +391,7 @@ export function bannerLines(t, { depth = 24, version = '', columns = 80 } = {}) 
         const sweep = Math.max(0, 1 - Math.abs(x - ((t * 14) % 60 - 10)) / 6);
         const base = mix(PALETTE.sail, x / 28 + y * 0.03 + t * 0.08, { cycle: true });
         const lit = mix([base, [255, 255, 255]], sweep * 0.6);
-        rows[y + WORDMARK_TOP][x0 + x] = { ch, rgb: ch === '█' ? lit : scale(base, 0.62) };
+        rows[y + WORDMARK_TOP][x0 + x] = ch === '█' ? { ch: ' ', rgb: null, bg: lit } : { ch, rgb: scale(base, 0.62), bg: null };
       });
     });
     const below = WORDMARK_TOP + WORDMARK.length + 1;
@@ -344,17 +399,24 @@ export function bannerLines(t, { depth = 24, version = '', columns = 80 } = {}) 
     wide(rows, x0, below + 1, SUBLINE, PALETTE.dim);
     wide(rows, x0, below + 2, versionLine, scale(PALETTE.dim, 0.8));
   }
-  return render(rows, depth);
+  return rows;
 }
 
 export const BANNER_ROWS = SCENE_HEIGHT;
+
+// For tests: the painter that draws only what changed, and the banner's cells.
+export const painting = { painter, bannerCells, render };
 
 // The small header for a short window: VIKA, and a little boat sailing the
 // width of a two-row strip of sea, over and over.
 const MINI_BOAT = ['...sm....', '..ssmj...', '.sssmjj..', 'hhhhhhhhh'];
 
 export function miniLines(t, { depth = 24, columns = 80 } = {}) {
-  const strip = Math.max(20, Math.min(columns, 72) - 7);
+  return render(miniCells(t, { columns }), depth);
+}
+
+function miniCells(t, { columns = 80 } = {}) {
+  const strip = Math.max(20, Math.min(columns, 72) - 8);
   const pixels = canvas(strip, 4);
   [[3, 0], [17, 1], [30, 0], [44, 1], [58, 0]].forEach(([x, y], index) => {
     if (x < strip && Math.sin(t * (1.2 + index * 0.4) + index) > -0.2) dot(pixels, x, y, scale(COLORS.star, 0.7));
@@ -376,7 +438,7 @@ export function miniLines(t, { depth = 24, columns = 80 } = {}) {
   const sweep = (x) => Math.max(0, 1 - Math.abs(x - ((t * 3) % 8 - 2)) / 1.5);
   const label = [...'VIKA'].map((ch, x) => ({ ch, rgb: mix([mix(PALETTE.sail, x / 4 + t * 0.08, { cycle: true }), [255, 255, 255]], sweep(x) * 0.6), bg: null }));
   const blank = (n) => Array.from({ length: n }, () => ({ ch: ' ', rgb: null, bg: null }));
-  return render([[...blank(1), ...label, ...blank(2), ...rows[0]], [...blank(7), ...rows[1]]], depth);
+  return [[...blank(1), ...label, ...blank(2), ...rows[0]], [...blank(7), ...rows[1]]];
 }
 
 // The rows a pinned header leaves for setup's questions at the least: the
@@ -387,13 +449,15 @@ const MIN_QUESTION_ROWS = 13;
 // while everything else scrolls in a region below it. Each frame saves the
 // cursor, draws above the region and puts the cursor back, so the questions
 // never notice. What was on screen goes to the scrollback first.
-function pinHeader({ output, frame, fps = 14 }) {
+function pinHeader({ output, frame, depth, fps = 14 }) {
   const rows = output.rows;
   const started = Date.now();
   const first = frame(0);
   const below = first.length + 2;
-  const draw = (lines) => {
-    output.write(`\x1b[?2026h\x1b7${lines.map((line, index) => `\x1b[${index + 1};1H\x1b[2K${line}`).join('')}\x1b8\x1b[?2026l`);
+  const paint = painter(depth, (row, column) => `\x1b[${row + 1};${column + 1}H`);
+  const draw = (cells) => {
+    const text = paint(cells);
+    if (text) output.write(`\x1b[?2026h\x1b7${text}\x1b8\x1b[?2026l`);
   };
   output.write(`${'\n'.repeat(rows)}\x1b[H`);
   draw(first);
@@ -428,7 +492,7 @@ export async function openingBanner({ output = process.stdout, input = process.s
   const idle = { release() {}, resume() {}, top: () => null };
   const depth = colorDepth(output, env);
   const still = env.VIKA_NO_ANIMATION === '1' || Boolean(env.CI);
-  if (depth < 8 || still || (output.columns ?? 0) < SCENE_WIDTH || (output.rows ?? 0) <= SCENE_HEIGHT + 2) {
+  if (depth < 8 || still || (output.columns ?? 0) <= SCENE_WIDTH || (output.rows ?? 0) <= SCENE_HEIGHT + 2) {
     await playBanner({ output, input, env, version });
     return idle;
   }
@@ -445,10 +509,10 @@ export async function openingBanner({ output = process.stdout, input = process.s
     },
     resume() {
       if (pinned?.released) pinned = null;
-      if (pinned || (output.columns ?? 0) < SCENE_WIDTH) return;
+      if (pinned || (output.columns ?? 0) <= SCENE_WIDTH) return;
       const columns = output.columns;
-      if (fits(SCENE_HEIGHT)) pinned = pinHeader({ output, frame: (t) => bannerLines(t, { depth, version, columns }) });
-      else if (fits(2)) pinned = pinHeader({ output, frame: (t) => miniLines(t, { depth, columns }) });
+      if (fits(SCENE_HEIGHT)) pinned = pinHeader({ output, depth, frame: (t) => bannerCells(t, { version, columns }) });
+      else if (fits(2)) pinned = pinHeader({ output, depth, frame: (t) => miniCells(t, { columns }) });
     },
   };
   handle.resume();
@@ -469,22 +533,27 @@ export async function playBanner({
 } = {}) {
   const depth = colorDepth(output, env);
   const columns = output.columns ?? 80;
-  const animate = depth >= 8 && columns >= SCENE_WIDTH && (output.rows ?? 24) > SCENE_HEIGHT + 2;
+  const animate = depth >= 8 && columns > SCENE_WIDTH && (output.rows ?? 24) > SCENE_HEIGHT + 2;
   if (!animate) {
     const s = styler(output, env);
     output.write(`\n${s.bold(s.gradient('VIKA', PALETTE.sail))}  ${TAGLINE}${version ? s.gray(`  v${version}`) : ''}\n\n`);
     return;
   }
   const still = env.VIKA_NO_ANIMATION === '1' || env.CI;
-  const draw = (t, first = false) => {
-    const lines = bannerLines(t, { depth, version, columns });
-    output.write(`${first ? '' : `\x1b[${lines.length}A`}${lines.map((line) => `\x1b[2K${line}`).join('\n')}\n`);
+  const cellsAt = (t) => bannerCells(t, { version, columns });
+  const first = cellsAt(0);
+  // The first frame is drawn whole and the cursor saved just below it; each
+  // later frame goes up from there to the cells that changed.
+  const paint = painter(depth, (row, column) => `\x1b8\x1b[${first.length - row}A\x1b[${column + 1}G`, first);
+  const draw = (t) => {
+    const text = paint(cellsAt(t));
+    if (text) output.write(`\x1b[?2026h${text}\x1b8\x1b[?2026l`);
   };
   output.write(`\n${HIDE_CURSOR}`);
   const restore = () => output.write(SHOW_CURSOR);
   process.once('exit', restore);
   try {
-    draw(0, true);
+    output.write(`${render(first, depth).join('\n')}\n\x1b7`);
     if (still) return;
     let stop = false;
     let interrupted = false;
