@@ -18,6 +18,7 @@
     "VIKA_MAX_EVENT_BYTES": "1000000",
     "VIKA_MAX_EVENT_AGE_MS": "86400000",
     "VIKA_IDLE_REACTION_AFTER_MS": "600000",
+    "VIKA_DECISION_NUDGE": "true",
     "VIKA_OV_IDENTITY": "false",
     "VIKA_RETENTION_MS": "7776000000",
     "VIKA_CODEX_EFFORT": "medium",
@@ -42,6 +43,7 @@
       "workspace": "/Users/you/Documents/work/primary-workspace",
       "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
       "ovAutoRecall": false,
+      "explicitSilence": false,
       "model": "ark",
       "volcSessionId": "sesn-your-self-hosted-seed",
       "volcEnvironmentId": "env-your-self-hosted-environment",
@@ -62,6 +64,7 @@
       "workspace": "/Users/you/Documents/work/research-workspace",
       "ovConfig": "/Users/you/.openviking/ovcli.conf.research",
       "ovAutoRecall": false,
+      "explicitSilence": false,
       "model": "gpt-5.6-sol"
     }
   ]

@@ -539,3 +539,33 @@ describe('Store', () => {
     );
   });
 });
+
+describe('decision ledger', () => {
+  it('adds the table to an existing database, lets a delivery override silence, and prunes old decisions', (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-decisions-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const file = path.join(directory, 'state.sqlite3');
+    // A database from before the ledger existed.
+    const old = new Store(file, quietLogger);
+    old.ingest(event('kept'));
+    old.db.exec('DROP TABLE decisions');
+    old.close();
+
+    const store = new Store(file, quietLogger);
+    t.after(() => store.close());
+    const row = store.db.prepare("SELECT * FROM connector_events WHERE event_id = 'evt-kept'").get();
+    assert.equal(store.recordDecision({ row, outcome: 'silent', tool: 'stay_silent', reason: 'r' }, 1_000).created, true);
+    assert.equal(store.recordDecision({ row, outcome: 'silent', tool: 'stay_silent' }, 1_000).created, false);
+    assert.equal(store.coveringDecision(row.scope_key, row.seq), 'silent');
+    assert.equal(store.coveringDecision(row.scope_key, row.seq + 1), null);
+    const upgraded = store.recordDecision({ row, outcome: 'delivered', tool: 'send_message' }, 2_000);
+    assert.deepEqual([upgraded.created, upgraded.previous, upgraded.row.outcome], [true, 'silent', 'delivered']);
+    assert.equal(store.recordDecision({ row, outcome: 'silent', tool: 'stay_silent' }, 3_000).created, false);
+    assert.equal(store.coveringDecision(row.scope_key, row.seq), 'delivered');
+    assert.deepEqual(store.eventStatus('evt-kept').map(({ status }) => status), ['DONE']);
+
+    assert.equal(store.prune(1_000, 2_500).decisions, 0);
+    assert.equal(store.prune(1_000, 3_500).decisions, 1);
+    assert.equal(store.decisionFor('lark', 'evt-kept'), null);
+  });
+});

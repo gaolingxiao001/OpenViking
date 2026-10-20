@@ -173,7 +173,8 @@ Bot token、owner/chat ID、接收游标及回复路由保存在 `<dataDir>/tele
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
 - 图片、文件和音视频会以受限资源引用进入 Agent；Codex/TraeX/Claude/Pi 可用 `get_message_media` 按消息中的 image_key/file_key（微信、Telegram 按消息 ID）取回本地文件，图片通过 MCP 工具结果直接交给模型，内容本身不会直接塞进入站 prompt。Self-hosted Ark 不继承 daemon 的 Agent 工具，只有 Worker 环境另行提供等价本地能力时才能读取。未知消息类型不会触发回复。
 - 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。prompt 和代码更新通过当前实例自己的 `vika upgrade <instance-id>` 发布。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。会话变更类命令会先中断旧 turn。用 `/model traex` 切到 TraeX（`/model trae:<model>` 指定 TraeX 模型），用 `/model pi` 切到 Pi（`/model pi:provider/id` 指定模型），用 `/model ark` 切到火山方舟，用 `/model sonnet`、`opus`、`haiku` 或 `fable` 切到 Claude；其他名称按当前动态 runtime 解析，不在动态 runtime 上时按 Codex 模型处理，例如 `/model gpt-5.6-sol`。跨 runtime 是全局 hard switch：旧 native session 退役，目标 runtime 在第一条真实消息里接上 OV archive overview + live messages。Codex/TraeX/Claude/Pi 支持 daemon 侧 `/effort`；Ark 的 model/effort 由远端 Agent 配置管理。
-- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/TraeX/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的 Worker/CLI 路径不使用 daemon 的临时 reaction helper，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。Core 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `VIKA_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
+- 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/TraeX/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的 Worker/CLI 路径不使用 daemon 的临时 reaction helper，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默（包括开启显式不回复后调用 `stay_silent`）也不会消费 idle 窗口。Core 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `VIKA_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
+- 显式不回复按实例可选，**默认关闭**：`config.json` 里该实例的 `agents[].explicitSilence` 设为 `true` 才开启（daemon 进程里对应 `VIKA_EXPLICIT_SILENCE`），重启实例生效。关闭时行为与没有这个功能时完全一样：不提供 `stay_silent`，不写 `decisions` 表，不做回合结束检查和提醒，prompt 文本与 policyHash 不变，已存的 native thread 照常 resume。开关一旦改变，该实例的 policyHash 就会变，已存的 native thread 不再 resume。开启后，每条入站的决定都留一条记录（SQLite `decisions` 表）：最终投递记为 `delivered`，Codex/TraeX/Claude/Pi 决定不回复时调用 `stay_silent` 记为 `silent`（Activity「选择不回复」，可带只留在本机的简短原因）。`stay_silent` 不发消息、不写 outbox/journal/OV、不动 idle 窗口，只清掉同 chat/thread 的临时 `OnIt`；同一 chat/thread 的多条新消息对最新一条 `event=` 表态一次即可。成功结束的一轮里，私聊、卡片回答或引用 bot 的群消息既没投递也没 `stay_silent` 时，daemon 把那一行带 `undecided=1` 再给模型一次（不带 seq，只提醒一次），并记 `agent.decision_missing`（「本轮未表态」）；普通群消息和邮件只计数。manifest `env` 里 `VIKA_DECISION_NUDGE=false` 关闭这次提醒（省一轮），只在开启显式不回复时有意义。同一轮对同一条输入调用 `stay_silent` 3 次，或一轮里超过 40 次调用没有记下新的决定（重复、无需决定、被拒），daemon 中断这一轮（`agent.decision_loop`）；对不同输入的新决定再多也不算。Ark 没有 Core 工具，不记录也不提醒。
 
 - 某一轮模型调用失败时，daemon 会程序化地引用回复一条失败提示（含真实报错），消息不会无声消失。
 
@@ -280,9 +281,9 @@ Agent 工具只有一份定义与实现，在 Core 的 `ActionService`。Codex/T
 ## 飞书端验收
 
 1. 私聊发一个明确任务，应执行并回复。
-2. 私聊只发“收到，谢谢”，应保持静默。
+2. 私聊只发“收到，谢谢”，应保持静默；开启显式不回复的实例在 Codex/TraeX/Claude/Pi 下，Activity 有一条「选择不回复」（`decisions` 表 `silent`），没有「本轮未表态」。
 3. 群里不 `@` 发一个尚未解决的问题；Agent 有增量价值时回复。
-4. 群里发闲聊或人与人的对话，应保持静默。
+4. 群里发闲聊或人与人的对话，应保持静默；开启显式不回复的实例在 Codex/TraeX/Claude/Pi 下同样记一条「选择不回复」。
 5. Codex/TraeX 空闲时，在同一群聊或话题里快速连发一条任务和一条纠正（间隔小于 400ms）；两条应进入同一个 `turn/start`，最终回复采用纠正后的要求。
 6. Codex/TraeX/Claude 思考时立即补一句纠正；该补充会 steer 进同一轮。Ark 下同样操作时，旧草稿会被 freshness fence 抑制，补充消息在下一轮得到回复。
 7. 私聊要求 Agent 向另一个已加入群发送测试消息；Agent 应先解析群名，再通过专用工具发送，并在当前私聊确认结果。

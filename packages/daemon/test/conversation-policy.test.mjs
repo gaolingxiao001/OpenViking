@@ -4,9 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { CodexAgent } from '../src/codex.mjs';
 import {
+  STAY_SILENT_PROMPT_EDITS,
   assembleConversationPolicy,
   assembleVolcConversationPolicy,
+  assembleVolcSelfHostedConversationPolicy,
+  renderBasePrompt,
 } from '../src/conversation-policy.mjs';
 
 function writePrompt(name, body) {
@@ -123,6 +127,8 @@ describe('conversation policy assemble', () => {
       assert.doesNotMatch(text, /mention=me\|other\|mixed/);
       assert.match(text, /## Persona and voice/);
       assert.match(text, /CANONICAL_PERSONA_MARKER/);
+      assert.match(text, /otherwise deliver nothing/);
+      assert.doesNotMatch(text, /stay_silent/);
       assert.doesNotMatch(text, /irrelevant filler/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
@@ -167,5 +173,67 @@ describe('conversation policy assemble', () => {
     });
     assert.match(text, /Chat input format/);
     assert.doesNotMatch(text, /## Persona and voice/);
+    assert.doesNotMatch(text, /stay_silent/);
+    // Volc with the real prompt file: persona only, never the Core tool.
+    assert.doesNotMatch(assembleVolcConversationPolicy({ systemPromptPath: defaultSystemPromptPath }), /stay_silent/);
+    assert.doesNotMatch(assembleVolcSelfHostedConversationPolicy({ systemPromptPath: defaultSystemPromptPath }), /stay_silent/);
+  });
+});
+
+describe('explicit silence is opt-in per instance', () => {
+  const base = { systemPromptPath: defaultSystemPromptPath, workspace: '/srv/vika/workspace', agentName: 'Tester' };
+  const sessions = [['lark'], ['lark', 'weixin', 'telegram', 'email'], ['weixin'], ['telegram', 'email']]
+    .map((connectors) => ({ ...base, connectors }));
+  const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
+  const codexHash = (config) => new CodexAgent(config, {
+    getCognitionState: () => ({ runtime: 'codex', epoch: 1, authorityToken: 'token' }), getSetting: () => null,
+  }, quiet).policyHash;
+
+  it('assembles the same policy text and policyHash as before the tool when the switch is off', () => {
+    for (const config of sessions) {
+      const off = assembleConversationPolicy({ ...config, explicitSilence: false });
+      // Off is the default: a config without the switch is the old config.
+      assert.equal(off, assembleConversationPolicy(config));
+      assert.equal(codexHash({ ...config, explicitSilence: false }), codexHash(config));
+      assert.notEqual(codexHash({ ...config, explicitSilence: true }), codexHash(config));
+      assert.doesNotMatch(off, /stay_silent|undecided/);
+      assert.doesNotMatch(off, /needs no decision|needs no answer and no decision/);
+      if (config.connectors.includes('email')) assert.match(off, /It is your record of that reply and needs no answer\.$/m);
+      assert.match(off, /Notify only when the owner should know now; otherwise deliver nothing\./);
+    }
+    // The bundled system prompt goes in exactly as written.
+    const lark = assembleConversationPolicy(sessions[0]);
+    assert.ok(lark.startsWith(`${renderBasePrompt(sessions[0]).trim()}\n\n`));
+    assert.match(lark, /If no delivery is needed, do not call a Lark delivery tool for that message\./);
+    const weixin = assembleConversationPolicy(sessions[2]);
+    assert.match(weixin, /If no reply is needed, call no delivery tool; this does not suppress the runtime final answer\./);
+  });
+
+  it('defines stay silent as calling stay_silent when the switch is on', () => {
+    const prompt = fs.readFileSync(defaultSystemPromptPath, 'utf8');
+    for (const [from, to] of STAY_SILENT_PROMPT_EDITS) {
+      assert.equal(prompt.split(from).length, 2, `edit anchor occurs once: ${from.slice(0, 40)}`);
+      assert.ok(assembleConversationPolicy({ ...base, explicitSilence: true }).includes(to.trim()));
+    }
+    const lark = assembleConversationPolicy({ ...base, explicitSilence: true });
+    assert.match(lark, /stay silent: call `stay_silent` once/);
+    assert.match(lark, /undecided=1/);
+    assert.doesNotMatch(lark, /do not call a Lark delivery tool|End the turn and wait/);
+    assert.doesNotMatch(lark, /DELIVERED|NO_DELIVERY|do nothing and end the turn/);
+
+    const single = assembleConversationPolicy({ connectors: ['telegram', 'email'], explicitSilence: true });
+    assert.match(single, /call `stay_silent` once with the message's event=/);
+    assert.match(single, /needs no answer and no decision/);
+    assert.doesNotMatch(single, /DELIVERED|NO_DELIVERY|do nothing and end the turn/);
+
+    const weixin = assembleConversationPolicy({ ...base, connectors: ['weixin'], explicitSilence: true });
+    assert.match(weixin, /call `stay_silent` once with the message's event=/);
+    assert.match(weixin, /otherwise call `stay_silent` with its event=/);
+
+    // Volc has no Core tools, whatever the switch says.
+    for (const assemble of [assembleVolcConversationPolicy, assembleVolcSelfHostedConversationPolicy]) {
+      assert.equal(assemble({ ...base, explicitSilence: true }), assemble(base));
+      assert.doesNotMatch(assemble({ ...base, explicitSilence: true }), /stay_silent/);
+    }
   });
 });

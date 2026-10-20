@@ -145,7 +145,10 @@ Chat events additionally carry optional structured fields:
 A missing reply route means no automatic reply target exists; it does not mean
 that processing failed. A subject or actor id is never inferred to be a send
 target. Notifications to a different Connector need a configured or explicitly
-authorized destination. Choosing silence is independent of having a reply route.
+authorized destination. Choosing silence is independent of having a reply route:
+on a Core instance with explicit silence on, any accepted event, chat or not,
+may be answered with the `stay_silent` agent tool, which records the decision
+and sends nothing (see the decision ledger below).
 A reply route may also belong to a non-chat event (for example `issue.comment`);
 the Core invokes that action on the event's instance with `input` plus a
 markdown `content` body, through the same outbox as agent deliveries.
@@ -249,6 +252,34 @@ and the scope of the event it first resolved. The Connector defines what one
 subject is, for example whether the occurrences of a recurring calendar event
 share a subject (so a new occurrence makes the previous reminder stale) or each
 have their own.
+
+Explicit silence is opt-in per Core instance and off by default (manifest
+`agents[].explicitSilence`, `VIKA_EXPLICIT_SILENCE` in the daemon). With it off
+the Core offers no `stay_silent`, keeps no decision ledger and runs no turn-end
+check; the policy text is the same as without the feature. With it on, every
+model decision on an accepted event ends in one row of the Core
+`decisions` table, keyed `(instance, event_id)` with the event's `seq` and
+`scope_key`: `delivered` once a final delivery on that `decision_id` is
+reserved (also when the send then fails or turns uncertain, and for an approval
+draft or a dry run; a temporary `OnIt` and `retract_message` are not
+decisions), or `silent` from `stay_silent`. A delivery replaces an earlier
+silence; silence never replaces a delivery. One decision on the newest event of
+a scope covers the earlier ones there. `stay_silent` takes `decision_id` (and
+`decision_instance`) like a delivery and an optional private `reason`, but
+applies no freshness fence and no `authorize` rule: silence on a superseded
+event is recorded (flagged superseded) instead of refused, a repeat is a no-op,
+and an event the daemon handled itself (`RULE_IGNORED`, such as an approval
+reply) needs no decision. Silence is not an outbound side effect: no outbox or
+journal row, no OpenViking history, no idle-liveness touch, no Connector call;
+only the temporary `OnIt` of a fresh decision is removed. At the end of each
+successful turn of a Core-tool runtime (not Volc) the Core checks the seqs the
+turn consumed: a direct chat, a card answer or a group quote of the bot left
+without a decision gets one reminder line (same `event=`, `undecided=1`, no
+seq; `VIKA_DECISION_NUDGE=false` turns it off) and an `agent.decision_missing`
+activity; ambient group messages and non-chat events are only counted. A turn
+that calls `stay_silent` on one input three times, or makes more than 40 calls
+that record nothing new (repeats, events that need no decision, refusals), is
+interrupted; new decisions on distinct events never count toward that limit.
 
 Who a decision may reach is decided in one Core function, so routing rules
 (a source that may also post to a group, say) can be added there later. Today
