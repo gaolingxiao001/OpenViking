@@ -369,6 +369,18 @@ test('adding Telegram to an existing instance verifies only the new IM and can c
   assert.doesNotMatch(h.written(), /undefined 次|接下来扫码/);
 });
 
+test('adding Slack to an existing instance pastes tokens for the new IM only and can make it primary', async (t) => {
+  const h = harness(t, ['2', '4', '1,5', '5', '2', '8']);
+  const before = existing(h, {});
+  h.options.connect.slack = async ({ plan }) => { h.calls.push(['slack', plan.dataDir]); };
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'slack'], channel: 'slack' }]);
+  assert.deepEqual(h.calls, [['slack', before.dataDir], ['restart', 'asd']]);
+  assert.match(h.written(), /接入Slack（需要建 App、两个 token 和私聊口令绑定）/);
+  assert.match(h.written(), /接下来接入：Slack 建 App \+ 两个 token \+ 私聊口令绑定/);
+  assert.match(h.written(), /\/invite/);
+});
+
 test('mixed Telegram setup describes each authorization method and keeps email available', async (t) => {
   const h = harness(t, ['', '', '3', '1,2,3,4', '3', 'n', 'y']);
   assert.equal(await setupCommand(h.options), 0);

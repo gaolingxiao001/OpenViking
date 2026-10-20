@@ -92,7 +92,7 @@ test('usage, and nothing to renew before setup', async (t) => {
   const empty = machine(t, () => []);
   await assert.rejects(loginCommand(['weixin'], empty.options), /先运行 vika setup/);
   assert.equal(await loginCommand(['setup'], empty.options), 2);
-  assert.match(empty.written(), /用法：vika login <lark\|weixin\|email\|telegram> \[实例\]\n  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例/);
+  assert.match(empty.written(), /用法：vika login <lark\|weixin\|email\|telegram\|slack> \[实例\]\n  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例/);
 });
 
 test('Telegram login stops the poller before verification and restarts with the new key', async (t) => {
@@ -101,6 +101,14 @@ test('Telegram login stops the poller before verification and restarts with the 
   m.options.connect.telegram = async ({ plan }) => { m.calls.push(['telegram', plan.id]); };
   assert.equal(await loginCommand(['telegram'], m.options), 0);
   assert.deepEqual(m.calls, [['stop', 'wa'], ['telegram', 'wa'], ['restart', 'wa']]);
+});
+
+test('Slack login stops the receiver before verification and restarts with the new tokens', async (t) => {
+  const m = machine(t, (home) => [agent(home, 'sl', { channel: 'slack', connectors: ['slack'], profile: undefined })]);
+  m.options.control.stop = async (id) => { m.calls.push(['stop', id]); };
+  m.options.connect.slack = async ({ plan }) => { m.calls.push(['slack', plan.id]); };
+  assert.equal(await loginCommand(['slack'], m.options), 0);
+  assert.deepEqual(m.calls, [['stop', 'sl'], ['slack', 'sl'], ['restart', 'sl']]);
 });
 
 test('failed Telegram verification resumes the existing instance and reports the failure', async (t) => {

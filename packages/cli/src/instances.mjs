@@ -14,6 +14,7 @@ export const IM_LABELS = Object.freeze({
   get weixin() { return t('微信', 'WeChat'); },
   get email() { return t('邮箱', 'Email'); },
   telegram: 'Telegram',
+  slack: 'Slack',
 });
 
 // The primary IM (`channel`) is where the bot reaches the owner unasked.

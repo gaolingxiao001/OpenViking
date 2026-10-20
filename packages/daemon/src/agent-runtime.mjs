@@ -119,6 +119,9 @@ export class AgentRuntime {
     if (runtime === 'volc' && this.config.connectors.includes('telegram')) {
       throw new Error('Telegram is not supported on the Volc runtime');
     }
+    if (runtime === 'volc' && this.config.connectors.includes('slack')) {
+      throw new Error('Slack is not supported on the Volc runtime');
+    }
     if (runtime === 'volc' && this.config.connectors.includes('weixin')) {
       throw new Error('Weixin is not supported on the Volc runtime');
     }

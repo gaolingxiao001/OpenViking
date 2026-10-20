@@ -10,7 +10,7 @@ import { meetingContextLines } from '../meeting/index.mjs';
 import { OVUnavailableError } from '../ov-connection.mjs';
 import { OVSessionClient } from '../ov-session-context.mjs';
 import { opaqueRef, safeError } from '../logger.mjs';
-import { readMetadataTag } from '../runtime-input.mjs';
+import { BOT_SENDERS, readMetadataTag } from '../runtime-input.mjs';
 import {
   APPROVAL_SECONDS, approvalCard, approvalMessage, approvalNote, approvalQuestion, approvalStatusText, approvedText,
   parseApprovalReply, settledApprovalCard,
@@ -19,6 +19,9 @@ import { resolveContent } from './content.mjs';
 import { TOOLS, publicTool, validateInput } from './tools.mjs';
 
 const NO_ACTION = 'No action was taken.';
+// Replies to bot messages in one chat/thread with no person writing there,
+// after which the safety fuse holds further ones (VIKA_BOT_REPLY_FUSE).
+const BOT_REPLY_FUSE = 20;
 
 const HANDLERS = {
   send_message: 'sendMessage',
@@ -236,6 +239,39 @@ export class ActionService {
     }
   }
 
+  // A safety fuse, not a rule the agent works by: whether to answer a bot is
+  // the model's call. Bots that keep answering each other would hold the one
+  // runtime every chat shares, so with no person writing in a chat/thread,
+  // text replies to bot messages there stop at the fuse (0 turns it off) until
+  // a person writes. Reactions and notices to the owner cannot loop there.
+  assertNoBotLoop(fence, action, scope, caller) {
+    const fuse = this.config.botReplyFuse ?? BOT_REPLY_FUSE;
+    if (!fuse || !BOT_SENDERS.has(fence.sender_type) || !['message.send', 'message.reply'].includes(action)
+      || !fence.conv_key || scope.convKey !== fence.conv_key) return;
+    const { person, answered } = this.store.botMessagesAnswered(fence.scope_key, fence.seq);
+    if (answered < fuse) return;
+    caller.trace.botReplies = answered;
+    this.tellOwnerOfFuse(fence, person, answered);
+    throw blocked('bot_loop', `Delivery blocked: you have answered ${answered} bot messages in this chat/thread with no person writing there since. Stop answering bots here until a person writes; the owner has been told. ${NO_ACTION}`);
+  }
+
+  // The owner hears once per run of bot messages: the key names the person's
+  // message the run follows, so a later run is told again.
+  tellOwnerOfFuse(fence, person, answered) {
+    const connector = this.config.channel;
+    const owner = connector ? this.connectors.owner?.(connector) : null;
+    if (!owner) return;
+    const where = `${fence.connector_instance} 的会话 ${fence.chat_id}${fence.thread_id ? `（线程 ${fence.thread_id}）` : ''}`;
+    const text = `${where}里我已经回应了 ${answered} 条 bot 消息，期间一直没有人说话。我先停下，不再回应那里的 bot；有人在那里说一句话就会恢复。`;
+    this.deliver({
+      caller: { trace: { purpose: 'bot-fuse' } }, connector, action: 'message.send',
+      input: { ...owner.target, content: { type: 'markdown', text } },
+      key: actionKey('daemon', 'bot-fuse', fence.scope_key, person), summary: text, scope: {},
+    }).catch((error) => {
+      if (error.code !== 'in_progress') this.logger.warn('bot_fuse_notice_failed', { error: safeError(error) });
+    });
+  }
+
   // Attribution is separate from freshness: a response may fulfill an earlier
   // input in the decision's scope, never a newer one. response_to_id resolves on
   // the decision's instance; an implicit target (the message replied or reacted
@@ -302,7 +338,7 @@ export class ActionService {
     caller.trace.contentType = content.type;
     try {
       if (!spec.content?.includes(content.type)) throw blocked('unsupported', `${connector} cannot send ${content.type} messages. ${NO_ACTION}`);
-      const mentions = await this.mentions(input, spec, chatId);
+      const mentions = await this.mentions(input, spec, chatId, connector);
       if (mentions.length > 0) {
         content.payload.mentions = mentions;
         content.canonical = [...content.canonical, mentions];
@@ -320,13 +356,16 @@ export class ActionService {
     }
   }
 
-  async mentions(input, spec, chatId) {
+  async mentions(input, spec, chatId, connector) {
     const ids = input.mention_user_ids ?? [];
     const names = input.mention_names ?? [];
     if (ids.length === 0 && names.length === 0) return [];
     if (!spec.mentions) throw blocked('unsupported', `mentions are not supported on this connector. ${NO_ACTION}`);
     const mentions = new Map(ids.map((id) => [id, { id }]));
-    if (names.length > 0) {
+    if (names.length > 0 && this.manifest(connector)?.name !== 'lark') {
+      // The Connector resolves a name against the people it showed the model there.
+      for (const name of names) mentions.set(`name:${name}`, { name });
+    } else if (names.length > 0) {
       if (!chatId || !this.roster) {
         throw blocked('invalid_mentions', 'mention_names could not be resolved: the target chat is unknown; use mention_user_ids with full ou_ IDs from trusted metadata');
       }
@@ -344,7 +383,10 @@ export class ActionService {
     // before the reservation, with no await in between.
     if (caller.authority) {
       this.assertAuthority(caller.authority);
-      if (fence) this.assertFresh(fence, caller);
+      if (fence) {
+        this.assertFresh(fence, caller);
+        this.assertNoBotLoop(fence, action, scope, caller);
+      }
     }
     if (this.config.dryRun) return { dry_run: true };
     // A Connector that is down and restarting gets no reservation: nothing was

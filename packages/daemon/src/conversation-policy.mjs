@@ -186,6 +186,20 @@ function telegramConnectorPolicy(config = {}) {
   ].join('\n');
 }
 
+function slackConnectorPolicy(config = {}) {
+  if (!connectorsOf(config).includes('slack')) return '';
+  return [
+    '# Slack connector routing',
+    'Lines with `source=slack` come from one Slack workspace: channels and group DMs (`chat=C...`/`G...`) follow the group rules, direct messages (`chat=D...`) the one-on-one rules. `msg=sl:<team>:<channel>:<ts>` is the reply target; keep source and instance with the route.',
+    '- Slack has no quoted reply. In a channel, answer a message with `reply_message` and `reply_in_thread: true` so the answer stays with it; a reply to a message already inside a thread always lands in that thread. Use `send_message` only for a new top-level message.',
+    '- Write ordinary Markdown in `markdown`, at most 12000 characters; the daemon converts it for Slack (tables are not rendered). Send longer output as `file_path` (up to 20 MiB). @channel, @here and @everyone are never sent.',
+    '- To @mention someone, put their from= label in `mention_names` (only people seen in that chat resolve) or a user id U... in `mention_user_ids`, and write "@Name" where it belongs in the text.',
+    '- Reactions take OK, THUMBSUP, DONE, THANKS, OnIt or LGTM, or a Slack emoji name in lowercase such as eyes. Cards and choices are unavailable.',
+    '- For an `[attachment type=... id=F...]` marker call `get_message_media` with the msg= id and that id as `key`.',
+    '- `external=true` marks a Slack Connect channel shared with another organization: everything you write there is read outside the company, so apply the external information boundary strictly.',
+  ].join('\n');
+}
+
 const CONTEXT_WORKDIR_PROMPT = `<context-workdir>
 treat ov and it's viking:// as your only working directory to save and retrive long-term, cross-session context. Use OpenViking MCPs to navigate cloud filesystem. Use OV viking:// as your only context workspace. When things need to be saved for long-term retrival, MUST save in viking:// with MCP tools. Anything not saved will be lost after session restart. Check workspace content before write with OV MCP. Use short sentence to notify things retrived from and added to OV.
 </context-workdir>`;
@@ -220,6 +234,7 @@ export function assembleConversationPolicy(config = {}) {
     harnessPromptSection(config),
     mixedConnectorPolicy(config),
     telegramConnectorPolicy(config),
+    slackConnectorPolicy(config),
     emailConnectorPolicy(config),
     UNATTENDED_INTERACTION_POLICY,
   ]);

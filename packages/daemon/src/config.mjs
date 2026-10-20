@@ -116,10 +116,10 @@ export function getConfig() {
   );
   const host = process.env.VIKA_HOST || '127.0.0.1';
   assertLoopbackHost(host);
-  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin', 'telegram']);
+  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin', 'telegram', 'slack']);
   const configuredConnectors = jsonStringArrayEnv('VIKA_CONNECTORS_JSON');
   const connectors = configuredConnectors.length > 0 ? [...new Set(configuredConnectors)] : [channel];
-  if (connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram'].includes(connector))) {
+  if (connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram', 'slack'].includes(connector))) {
     throw new Error('VIKA_CONNECTORS_JSON contains an unsupported connector');
   }
   if (!connectors.includes(channel)) {
@@ -253,6 +253,9 @@ export function getConfig() {
       max: 604_800_000,
     }),
     historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
+    // Replies to bot messages in one chat/thread with no person writing there
+    // before the safety fuse holds further ones; 0 turns the fuse off.
+    botReplyFuse: intEnv('VIKA_BOT_REPLY_FUSE', 20, { min: 0, max: 1_000 }),
     cognitionMaxChars: intEnv('VIKA_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
     retentionMs: intEnv('VIKA_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
     dryRun: boolEnv('VIKA_DRY_RUN', false),

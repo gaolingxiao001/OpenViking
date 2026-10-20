@@ -1547,6 +1547,36 @@ export class Store {
     return newer?.seq == null ? null : number(newer.seq);
   }
 
+  // The last message a person wrote in this chat/thread, up to `seq`; 0 if none.
+  lastPersonSeq(scopeKey, seq = Number.MAX_SAFE_INTEGER) {
+    return number(this.db.prepare(`
+      SELECT COALESCE(MAX(seq), 0) AS seq FROM connector_events
+      WHERE scope_key = ? AND status = 'DONE' AND seq <= ? AND (sender_type IS NULL OR sender_type NOT IN ('bot', 'app'))
+    `).get(scopeKey, seq).seq);
+  }
+
+  // How many bot messages in this chat/thread, other than `seq`, the agent has
+  // answered there with text since a person last wrote in it.
+  botMessagesAnswered(scopeKey, seq) {
+    const person = this.lastPersonSeq(scopeKey);
+    const answered = number(this.db.prepare(`
+      SELECT COUNT(DISTINCT e.seq) AS count FROM outbox o JOIN connector_events e ON e.seq = o.inbound_seq
+      WHERE e.scope_key = ? AND e.seq > ? AND e.seq <> ? AND e.sender_type IN ('bot', 'app')
+        AND o.conv_key = e.conv_key AND o.caller = 'agent' AND o.action IN ('message.send', 'message.reply')
+        AND o.status IN ('PENDING', 'SENT', 'UNCERTAIN')
+    `).get(scopeKey, person, seq).count);
+    return { person, answered };
+  }
+
+  // Bot messages in this chat/thread since a person last wrote there, up to and
+  // including `seq`.
+  botsSincePerson(scopeKey, seq) {
+    return number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM connector_events
+      WHERE scope_key = ? AND status = 'DONE' AND seq > ? AND seq <= ? AND sender_type IN ('bot', 'app')
+    `).get(scopeKey, this.lastPersonSeq(scopeKey, seq), seq).count);
+  }
+
   // Which connector a message or chat id belongs to, as far as this daemon has
   // seen it: an authenticated inbound or one of its own deliveries.
   connectorForMessage(messageId) {

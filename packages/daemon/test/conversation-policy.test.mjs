@@ -30,6 +30,15 @@ describe('conversation policy assemble', () => {
     assert.match(mixed, /source=telegram/);
     assert.match(mixed, /cannot send to other contacts or groups/);
   });
+  it('gives Slack the group rules, thread replies, bot and external markers', () => {
+    const slack = assembleConversationPolicy({ connectors: ['slack'], systemPromptPath: defaultSystemPromptPath });
+    assert.match(slack, /# Slack connector routing/);
+    assert.match(slack, /reply_in_thread: true/);
+    assert.match(slack, /at most 12000 characters/);
+    assert.match(slack, /external=true/);
+    assert.match(slack, /`sender=bot`/);
+    assert.doesNotMatch(assembleConversationPolicy({ connectors: ['lark'], systemPromptPath: defaultSystemPromptPath }), /Slack connector routing/);
+  });
   it('does not tell the agent to suppress final assistant output', () => {
     const text = assembleConversationPolicy({
       systemPromptPath: defaultSystemPromptPath,

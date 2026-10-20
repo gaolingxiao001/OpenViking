@@ -47,6 +47,8 @@ function childConfig(config, instance) {
     profile: config.profile,
     larkCliBin: config.larkCliBin,
     weixinLongPollTimeoutMs: config.weixinLongPollTimeoutMs,
+    // Slack shows a mention of the bot as this name, the one the prompt knows.
+    agentName: instance.type === 'slack' ? config.agentName ?? null : null,
     emailConfigFile: instance.emailConfigFile ?? null,
     // A mailbox stores each mail in OV before reporting it.
     openVikingConfigPath: instance.type === 'email' ? config.openVikingConfigPath || null : null,

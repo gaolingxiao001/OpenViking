@@ -215,16 +215,16 @@ function parseAgent(value, index) {
       manifestString(connector, `${label}.connectors[${connectorIndex}]`, { maxLength: 64 })
     )))];
     if (connectors.length !== value.connectors.length
-      || connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram'].includes(connector))) {
-      throw new Error(`${label}.connectors must contain unique lark, weixin, email or telegram values`);
+      || connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram', 'slack'].includes(connector))) {
+      throw new Error(`${label}.connectors must contain unique lark, weixin, email, telegram or slack values`);
     }
   }
   // The primary IM: where notices to the owner go. A mailbox is never one.
   const channel = value.channel === undefined
     ? (connectors?.find((connector) => connector !== 'email') ?? 'lark')
     : manifestString(value.channel, `${label}.channel`);
-  if (!['lark', 'weixin', 'telegram'].includes(channel)) {
-    throw new Error(`${label}.channel must be lark, weixin or telegram`);
+  if (!['lark', 'weixin', 'telegram', 'slack'].includes(channel)) {
+    throw new Error(`${label}.channel must be lark, weixin, telegram or slack`);
   }
   connectors ??= [channel];
   if (!connectors.includes(channel)) {
@@ -243,6 +243,9 @@ function parseAgent(value, index) {
   }
   if (connectors.includes('telegram') && model === 'ark') {
     throw new Error(`${label} using the telegram connector cannot use the ark runtime`);
+  }
+  if (connectors.includes('slack') && model === 'ark') {
+    throw new Error(`${label} using the slack connector cannot use the ark runtime`);
   }
   if (connectors.includes('weixin') && model === 'ark') {
     throw new Error(`${label} using the weixin connector cannot use the ark runtime`);
