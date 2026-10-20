@@ -56,6 +56,7 @@ describe('module boundaries', () => {
           dataDir: '/Users/test/.vika/data/beta',
           workspace: '/Users/test/Documents/work/beta-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.beta',
+          ovAutoRecall: true,
           model: 'ark',
           volcSessionId: 'sesn-beta-self-hosted',
           volcEnvironmentId: 'env-beta-self-hosted',
@@ -105,6 +106,9 @@ describe('module boundaries', () => {
     assert.equal(alpha.env.VIKA_AGENT_NAME, 'Alpha');
     assert.equal(alpha.env.VIKA_UPGRADE_TARGET, 'alpha');
     assert.equal(alpha.env.OPENVIKING_CLI_CONFIG_FILE, '/Users/test/.openviking/ovcli.conf.alpha');
+    assert.equal(alpha.env.OPENVIKING_AUTO_RECALL, '0');
+    assert.equal(beta.env.OPENVIKING_AUTO_RECALL, '1');
+    assert.equal(beta.env.OPENVIKING_RECALL_PEER_SCOPE, 'actor');
     assert.equal(alpha.env.VIKA_CODEX_MODEL, undefined);
     assert.equal(alpha.env.VIKA_MODEL, 'gpt-5.6-sol');
     assert.equal(alpha.env.VIKA_MEETING_AUDIO_ENABLED, 'true');

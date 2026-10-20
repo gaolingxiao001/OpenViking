@@ -41,6 +41,7 @@
       "dataDir": "/Users/you/.vika/data/primary",
       "workspace": "/Users/you/Documents/work/primary-workspace",
       "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
+      "ovAutoRecall": false,
       "model": "ark",
       "volcSessionId": "sesn-your-self-hosted-seed",
       "volcEnvironmentId": "env-your-self-hosted-environment",
@@ -60,6 +61,7 @@
       "dataDir": "/Users/you/.vika/data/research",
       "workspace": "/Users/you/Documents/work/research-workspace",
       "ovConfig": "/Users/you/.openviking/ovcli.conf.research",
+      "ovAutoRecall": false,
       "model": "gpt-5.6-sol"
     }
   ]

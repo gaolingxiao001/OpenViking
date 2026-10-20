@@ -11,6 +11,8 @@ import { larkScopes, registerApp, setupCommand } from '../src/setup.mjs';
 import { stripAnsi } from '../src/ui.mjs';
 import { connectTelegram } from '../src/telegram.mjs';
 import { TelegramState } from '../../daemon/src/telegram/state.mjs';
+import { configureOpenViking } from '../src/ov-setup.mjs';
+import { detectOpenViking, savedOVConfigPath } from '../src/ov.mjs';
 
 const RUNTIMES = [
   { id: 'codex', label: 'Codex', model: 'codex:', bin: '/opt/codex/bin/codex', binEnv: 'CODEX_BIN', available: true, note: '已登录' },
@@ -18,7 +20,7 @@ const RUNTIMES = [
   { id: 'pi', label: 'Pi（内置）', model: 'pi', bin: null, binEnv: null, available: true, note: 'ok' },
 ];
 
-function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false } = {}) {
+function harness(t, answers, { ov = { configPath: null, url: 'http://127.0.0.1:1933', usable: true }, runtimes = RUNTIMES, failStart = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-setup-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const input = new PassThrough();
@@ -33,6 +35,12 @@ function harness(t, answers, { ov = null, runtimes = RUNTIMES, failStart = false
     env: { HOME: home, PATH: '', LARK_CLI_BIN: '/opt/lark/bin/lark-cli', LANG: 'zh_CN.UTF-8' },
     homeDir: home,
     detect: { runtimes: async () => runtimes, openViking: async () => ov },
+    // Most tests focus on IM/navigation. The actual OV form is exercised below
+    // and in ov-setup.test.mjs, independently of these canned IM answers.
+    configureOV: async ({ preferredConfigPath, detect, ...options }) => {
+      const detected = await detect({ ...options, configPath: preferredConfigPath });
+      return preferredConfigPath ? { ...detected, configPath: preferredConfigPath } : detected;
+    },
     connect: {
       telegram: async ({ plan }) => { calls.push(['telegram', plan.dataDir]); },
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
@@ -58,8 +66,8 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
   t.after(() => fs.rmSync(ovSource, { force: true }));
   const ov = { configPath: ovSource, url: 'https://ov.example', usable: true, user: 'amy', authMode: 'api_key', reason: null };
   // The first instance is `primary` without asking.
-  //                   name  workspace  runtime IMs    channel OV   confirm
-  const h = harness(t, ['小V', '',       '1',    '1,2', '2',    '1', 'y'], { ov });
+  //                   name  workspace  runtime IMs    channel confirm
+  const h = harness(t, ['小V', '',       '1',    '1,2', '2',    'y'], { ov });
   assert.equal(await setupCommand(h.options), 0);
 
   const manifest = h.manifest();
@@ -76,6 +84,7 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
     dataDir: path.join(h.home, '.vika', 'data', 'primary'),
     workspace: path.join(h.home, 'vika-workspace', 'primary'),
     ovConfig: path.join(h.home, '.vika', 'ov', 'primary.json'),
+    ovAutoRecall: false,
     model: 'codex:',
   }]);
   assert.equal(JSON.parse(fs.readFileSync(manifest.agents[0].ovConfig, 'utf8')).actor_peer_id, 'primary');
@@ -94,6 +103,234 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
   assert.doesNotMatch(h.written(), /最后一步/, 'said once, in the list of what to do next');
   assert.match(h.written(), /消息渠道\s+飞书、微信，主渠道：微信/);
   assert.match(h.written(), /接下来扫码：飞书 2 次，微信 1 次/);
+});
+
+test('without a usable OV, a new instance goes no further than the OV form', async (t) => {
+  //                   local default, manual, file, detect again, exit
+  const h = harness(t, ['5']);
+  h.options.configureOV = configureOpenViking;
+  h.options.detect.openViking = detectOpenViking;
+  h.options.fetchImpl = async () => { throw new Error('offline'); };
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  assert.match(h.written(), /用本机默认地址（不带凭据）\s+http:\/\/127\.0\.0\.1:1933 · OpenViking 服务不可用/);
+  assert.doesNotMatch(h.written(), /机器人名字/);
+  assert.deepEqual(h.calls, []);
+  assert.equal(fs.existsSync(path.join(h.home, '.vika')), false);
+});
+
+test('the real OV form accepts remote credentials before any IM questions or authorization', async (t) => {
+  const h = harness(t, ['2', 'https://memory.example:9443', '1', 'private-key', 'team', 'owner', '',
+    'Vika', '', '1', '2', 'y']);
+  h.options.configureOV = configureOpenViking;
+  h.options.detect.openViking = detectOpenViking;
+  h.options.fetchImpl = async (url, init) => {
+    if (!url.startsWith('https://memory.example:9443')) throw new Error('offline');
+    assert.equal(init.headers['X-API-Key'], 'private-key');
+    return Response.json({ status: 'ok', auth_mode: 'api_key', result: [] });
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  const [agent] = h.manifest().agents;
+  assert.deepEqual(JSON.parse(fs.readFileSync(agent.ovConfig, 'utf8')), {
+    url: 'https://memory.example:9443', api_key: 'private-key', account: 'team', user: 'owner', actor_peer_id: 'primary',
+  });
+  assert.ok(h.written().indexOf('OpenViking 连接已验证') < h.written().indexOf('接入哪些 IM'));
+  assert.doesNotMatch(h.written(), /private-key/);
+  // Typed once: the next instance is offered it.
+  assert.deepEqual(JSON.parse(fs.readFileSync(savedOVConfigPath(h.home), 'utf8')), {
+    url: 'https://memory.example:9443', api_key: 'private-key', account: 'team', user: 'owner',
+  });
+});
+
+test('editing the OV connection preserves the actor and old file; Save applies it and Discard removes the pending copy', async (t) => {
+  for (const save of [true, false]) {
+    const h = harness(t, ['2', '7', '3', 'https://memory.example:9443', '1', 'new-key', '', '', '', save ? '8' : '9']);
+    const before = existing(h, { ovAutoRecall: true });
+    fs.mkdirSync(path.dirname(before.ovConfig), { recursive: true });
+    const original = JSON.stringify({ url: 'https://old.example', api_key: 'old-key', actor_peer_id: 'original-actor' });
+    fs.writeFileSync(before.ovConfig, original);
+    h.options.configureOV = configureOpenViking;
+    h.options.detect.openViking = detectOpenViking;
+    h.options.fetchImpl = async (url) => {
+      if (url.startsWith('http://127.0.0.1:1933')) throw new Error('offline');
+      return Response.json({ status: 'ok', auth_mode: 'api_key', result: [] });
+    };
+    await setupCommand(h.options);
+    assert.ok(h.written().indexOf('7) OpenViking') < h.written().indexOf('选择 OpenViking 连接'));
+    assert.match(h.written(), /OpenViking\s+.*（已改）/);
+    assert.equal(fs.readFileSync(before.ovConfig, 'utf8'), original);
+    if (save) {
+      const [after] = h.manifest().agents;
+      assert.notEqual(after.ovConfig, before.ovConfig);
+      const config = JSON.parse(fs.readFileSync(after.ovConfig, 'utf8'));
+      assert.equal(config.actor_peer_id, 'original-actor');
+      assert.equal(config.url, 'https://memory.example:9443');
+      assert.equal(config.api_key, 'new-key');
+      assert.equal(after.ovAutoRecall, true);
+      assert.deepEqual(h.calls, [['restart', 'asd']]);
+      assert.equal(JSON.parse(fs.readFileSync(savedOVConfigPath(h.home), 'utf8')).url, 'https://memory.example:9443');
+    } else {
+      assert.deepEqual(h.manifest().agents, [before]);
+      assert.deepEqual(fs.readdirSync(path.dirname(before.ovConfig)), ['asd.json']);
+      assert.deepEqual(h.calls, []);
+      assert.equal(fs.existsSync(savedOVConfigPath(h.home)), false);
+    }
+    assert.doesNotMatch(h.written(), /old-key|new-key/);
+  }
+});
+
+test('adding an instance offers shared OV connections only and writes its own actor', async (t) => {
+  const h = harness(t, ['1', '1', 'fresh', 'Fresh', '', '1', '2', 'y']);
+  const before = existing(h);
+  fs.mkdirSync(path.dirname(before.ovConfig), { recursive: true });
+  const original = JSON.stringify({ url: 'https://other-instance.example', actor_peer_id: 'other-actor' });
+  fs.writeFileSync(before.ovConfig, original);
+  fs.mkdirSync(path.join(h.home, '.openviking'));
+  const sharedPath = path.join(h.home, '.openviking', 'ovcli.conf');
+  const shared = { url: 'http://127.0.0.1:1933', account: 'team', user: 'owner', actor_peer_id: 'cli-actor' };
+  fs.writeFileSync(sharedPath, JSON.stringify(shared));
+  h.options.configureOV = configureOpenViking;
+  h.options.detect.openViking = detectOpenViking;
+  h.options.allocate = async () => 3739;
+  const checked = [];
+  h.options.fetchImpl = async (url, init) => {
+    checked.push({ url, headers: init.headers });
+    const valid = url.startsWith(shared.url) && init.headers['X-OpenViking-Account'] === 'team'
+      && init.headers['X-OpenViking-User'] === 'owner';
+    return Response.json({ status: valid ? 'ok' : 'error', auth_mode: 'trusted', result: [] }, { status: valid ? 200 : 400 });
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  assert.ok(checked.every(({ url, headers }) => url.startsWith(shared.url)
+    && headers['X-OpenViking-Account'] === 'team' && headers['X-OpenViking-User'] === 'owner'));
+  const [unchanged, fresh] = h.manifest().agents;
+  assert.deepEqual(unchanged, before);
+  assert.equal(fresh.id, 'fresh');
+  assert.notEqual(fresh.ovConfig, sharedPath);
+  assert.notEqual(fresh.ovConfig, before.ovConfig);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.ovConfig, 'utf8')), { ...shared, actor_peer_id: 'fresh' });
+  assert.equal(fs.readFileSync(before.ovConfig, 'utf8'), original);
+  assert.deepEqual(JSON.parse(fs.readFileSync(sharedPath, 'utf8')), shared);
+  assert.equal(fs.existsSync(savedOVConfigPath(h.home)), false, 'ovcli.conf is found anyway; no copy to go stale');
+  assert.doesNotMatch(h.written(), /实例 asd:|本机默认地址|other-instance\.example|HTTP 400/);
+});
+
+test('setup prepares and checks the instance OV identity before IM selection, email credentials or scans', async (t) => {
+  const h = harness(t, ['', '', '1', '1,2,3,4', '1', 'n', 'y']);
+  const checked = [];
+  h.options.detect.openViking = async ({ configPath }) => {
+    if (configPath) {
+      assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).actor_peer_id, 'primary');
+      checked.push(configPath);
+    }
+    return { configPath: null, url: 'http://127.0.0.1:1933', usable: true };
+  };
+  for (const kind of ['email', 'lark', 'weixin', 'telegram']) {
+    const connect = h.options.connect[kind];
+    h.options.connect[kind] = async (...args) => {
+      assert.ok(checked.length >= 2, `${kind} must follow the instance check and a fresh pre-authorization check`);
+      assert.ok(fs.existsSync(checked[0]), 'the verified config already exists during IM setup');
+      return connect(...args);
+    };
+  }
+  await setupCommand(h.options);
+  const output = h.written();
+  assert.ok(output.indexOf('OpenViking 已就绪，接下来接入 IM') < output.indexOf('接入哪些 IM'));
+  assert.ok(checked.every((file) => file === h.manifest().agents[0].ovConfig));
+  assert.deepEqual(h.calls.filter(([kind]) => ['email', 'lark', 'weixin', 'telegram'].includes(kind)).map(([kind]) => kind),
+    ['email', 'lark', 'weixin', 'telegram']);
+});
+
+test('an unusable generated OV identity fails before IM selection and removes the new config', async (t) => {
+  const h = harness(t, ['', '', '1']);
+  h.options.detect.openViking = async ({ configPath }) => ({
+    configPath: null, url: 'http://127.0.0.1:1933', usable: !configPath, reason: 'actor denied',
+  });
+  await assert.rejects(setupCommand(h.options), /OpenViking.*primary.*actor denied/);
+  assert.doesNotMatch(h.written(), /接入哪些 IM/);
+  assert.deepEqual(h.calls, []);
+  assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+  assert.deepEqual(fs.readdirSync(path.join(h.home, '.vika', 'ov')), []);
+});
+
+test('an unwritable OV config fails before IM selection without touching existing files', async (t) => {
+  const h = harness(t, ['', '', '1']);
+  fs.mkdirSync(path.join(h.home, '.vika'), { recursive: true });
+  const blocked = path.join(h.home, '.vika', 'ov');
+  fs.writeFileSync(blocked, 'existing file');
+  await assert.rejects(setupCommand(h.options), /EEXIST|ENOTDIR/);
+  assert.equal(fs.readFileSync(blocked, 'utf8'), 'existing file');
+  assert.doesNotMatch(h.written(), /接入哪些 IM/);
+  assert.deepEqual(h.calls, []);
+});
+
+test('OV going down while answers are collected blocks scans and email credential prompts', async (t) => {
+  for (const answers of [['', '', '1', '1', 'y'], ['', '', '1', '1,3']]) {
+    const h = harness(t, answers);
+    let checks = 0;
+    h.options.detect.openViking = async () => ({
+      configPath: null, url: 'http://127.0.0.1:1933', usable: ++checks <= 2, reason: 'went offline',
+    });
+    await assert.rejects(setupCommand(h.options), /OpenViking.*went offline/);
+    assert.deepEqual(h.calls, []);
+    assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+    assert.deepEqual(fs.readdirSync(path.join(h.home, '.vika', 'ov')), []);
+  }
+});
+
+test('editing ordinary settings never probes OV or opens its form and preserves the identity and recall setting', async (t) => {
+  const h = harness(t, ['2', '1', 'Renamed', '8']);
+  const before = existing(h, { ovAutoRecall: true });
+  const checked = [];
+  h.options.configureOV = configureOpenViking;
+  h.options.detect.openViking = async ({ configPath }) => {
+    checked.push(configPath);
+    return { usable: false, reason: 'offline' };
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(checked, []);
+  assert.doesNotMatch(h.written(), /选择 OpenViking 连接|OpenViking 暂不可用/);
+  assert.deepEqual(h.manifest().agents, [{ ...before, displayName: 'Renamed' }]);
+});
+
+test('returning from OV configuration keeps other unsaved settings and the original OV config', async (t) => {
+  const h = harness(t, ['2', '1', 'Renamed', '7', '6', '8']);
+  const before = existing(h);
+  fs.mkdirSync(path.dirname(before.ovConfig), { recursive: true });
+  const original = JSON.stringify({ url: 'https://old.example', actor_peer_id: 'original-actor' });
+  fs.writeFileSync(before.ovConfig, original);
+  h.options.configureOV = configureOpenViking;
+  h.options.detect.openViking = detectOpenViking;
+  h.options.fetchImpl = async () => { throw new Error('offline'); };
+  assert.equal(await setupCommand(h.options), 0);
+  assert.match(h.written(), /返回实例设置/);
+  assert.deepEqual(h.manifest().agents, [{ ...before, displayName: 'Renamed' }]);
+  assert.equal(fs.readFileSync(before.ovConfig, 'utf8'), original);
+  assert.deepEqual(fs.readdirSync(path.dirname(before.ovConfig)), ['asd.json']);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
+});
+
+test('reopening OV edits the pending connection, preserves the actor, and discarding removes every temporary config', async (t) => {
+  const h = harness(t, ['2', '7', '7', '9']);
+  const before = existing(h);
+  fs.mkdirSync(path.dirname(before.ovConfig), { recursive: true });
+  const original = JSON.stringify({ url: 'https://old.example', actor_peer_id: 'original-actor' });
+  fs.writeFileSync(before.ovConfig, original);
+  let previous = before.ovConfig;
+  let edits = 0;
+  h.options.configureOV = async ({ preferredConfigPath, canGoBack }) => {
+    assert.equal(canGoBack, true);
+    if (edits) {
+      assert.notEqual(preferredConfigPath, previous);
+      assert.equal(JSON.parse(fs.readFileSync(preferredConfigPath)).url, 'https://edit-1.example');
+      assert.equal(JSON.parse(fs.readFileSync(preferredConfigPath)).actor_peer_id, 'original-actor');
+    }
+    previous = preferredConfigPath;
+    return { usable: true, config: { url: `https://edit-${++edits}.example`, actor_peer_id: 'foreign-actor' } };
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  assert.equal(edits, 2);
+  assert.equal(fs.readFileSync(before.ovConfig, 'utf8'), original);
+  assert.deepEqual(fs.readdirSync(path.dirname(before.ovConfig)), ['asd.json']);
+  assert.deepEqual(h.manifest().agents, [before]);
 });
 
 test('Telegram-only setup binds a private Start challenge and saves no token in the manifest', async (t) => {
@@ -160,6 +397,7 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   const declined = harness(t, ['', '', '1', '2', 'n']);
   assert.equal(await setupCommand(declined.options), 1);
   assert.equal(fs.existsSync(path.join(declined.home, '.vika', 'config.json')), false);
+  assert.deepEqual(fs.readdirSync(path.join(declined.home, '.vika', 'ov')), []);
   assert.deepEqual(declined.calls, []);
 
   const weixin = harness(t, ['', '', '1', '2', 'y']);
@@ -168,8 +406,8 @@ test('declining before the scans writes nothing; a Weixin-only instance has no p
   const [agent] = weixin.manifest().agents;
   assert.equal(agent.profile, undefined);
   assert.equal(agent.channel, 'weixin');
-  // The machine check said there is no OpenViking, and one IM leaves nothing to choose: neither is said again.
-  assert.match(weixin.written(), /没有 OpenViking/);
+  // OV is required and one IM leaves no primary-channel choice.
+  assert.match(weixin.written(), /OpenViking 已就绪/);
   assert.doesNotMatch(weixin.written(), /没有检测到 OpenViking|主渠道是/);
   assert.deepEqual(weixin.calls.map(([kind]) => kind), ['weixin', 'start', 'restart', 'start']);
 });
@@ -205,7 +443,7 @@ test('mailboxes come with an IM, are checked before the scans and saved with the
 function existing(h, agent) {
   fs.mkdirSync(path.join(h.home, '.vika'), { recursive: true });
   const full = { id: 'asd', displayName: 'ASD', channel: 'lark', connectors: ['lark'], profile: 'vika-asd', port: 3738,
-    dataDir: path.join(h.home, '.vika', 'data', 'asd'), workspace: path.join(h.home, 'ws'), model: 'codex:', ...agent };
+    dataDir: path.join(h.home, '.vika', 'data', 'asd'), workspace: path.join(h.home, 'ws'), ovConfig: path.join(h.home, '.vika', 'ov', 'asd.json'), ovAutoRecall: false, model: 'codex:', ...agent };
   fs.writeFileSync(path.join(h.home, '.vika', 'config.json'),
     JSON.stringify({ version: 1, defaultInstance: full.id, env: {}, agents: [full] }));
   return full;
@@ -220,7 +458,7 @@ test('changing an instance lists every setting; only the ones opened change', as
   const [after] = h.manifest().agents;
   assert.deepEqual(after, { ...before, connectors: ['lark', 'weixin'], channel: 'weixin' });
   // The list shows every value; what was changed is marked.
-  assert.match(h.written(), /1\) 机器人名字\s+ASD\n  2\) 工作目录\s+~\/ws\n  3\) Agent 运行时\s+Codex\n  4\) 接入的 IM\s+飞书\n  5\) 主渠道\s+飞书\n  6\) 邮箱\s+没有接\n  7\) OpenViking\s+不用\n  8\) 保存\n  9\) 放弃修改/);
+  assert.match(h.written(), /1\) 机器人名字\s+ASD\n  2\) 工作目录\s+~\/ws\n  3\) Agent 运行时\s+Codex\n  4\) 接入的 IM\s+飞书\n  5\) 主渠道\s+飞书\n  6\) 邮箱\s+没有接\n  7\) OpenViking\s+~\/\.vika\/ov\/asd\.json\n  8\) 保存\n  9\) 放弃修改/);
   assert.match(h.written(), /4\) 接入的 IM\s+飞书、微信（已改）[\s\S]*5\) 主渠道\s+微信（已改）\n[\s\S]*8\) 保存（2 项改动）/);
   assert.match(h.written(), /将修改 ASD（asd）：\n  接入微信（需要扫码）\n  主渠道：飞书 → 微信\n/);
   assert.deepEqual(h.calls.map((call) => call.slice(0, 2)), [['weixin', before.dataDir], ['restart', 'asd']]);
@@ -368,6 +606,7 @@ test('back from Telegram key entry returns to setup confirmation without saving 
   await driving;
   assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
   assert.equal(fs.existsSync(path.join(h.home, '.vika', 'data', 'primary', 'telegram')), false);
+  assert.deepEqual(fs.readdirSync(path.join(h.home, '.vika', 'ov')), []);
   assert.deepEqual(h.calls, []);
 });
 
@@ -410,16 +649,74 @@ test('← goes back a question with its answer kept, → takes the value shown, 
     ['Agent 运行时', RIGHT],
     ['接入哪些 IM', RIGHT],
     ['开始扫码', LEFT],
-    // Back at the last question asked (OpenViking only informed), then forward again.
+    // Back at the last question asked, then forward again.
     ['接入哪些 IM', RIGHT],
     ['开始扫码', 'n', '\r'],
   ]);
   assert.equal(await setupCommand(h.options), 1);
   await driving;
   assert.match(h.screen(), /机器人名字（也是飞书应用名，@它时用这个名字） \(小V\)/, 'the earlier answer is the default');
-  assert.match(h.screen(), /── 确认 ──[\s\S]*── 消息渠道和记忆 ──[\s\S]*── 确认 ──/, 'a section is shown again on the way back into it');
+  assert.match(h.screen(), /── 确认 ──[\s\S]*── 消息渠道 ──[\s\S]*── 确认 ──/, 'a section is shown again on the way back into it');
   assert.equal(h.calls.length, 0);
   assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+});
+
+test('a new instance\'s OV menu is a step like the others: ← leaves it, ← comes back to it, and a new choice rewrites the identity', async (t) => {
+  const h = terminalHarness(t);
+  const before = existing(h, {});
+  fs.mkdirSync(path.join(h.home, '.openviking'));
+  fs.writeFileSync(path.join(h.home, '.openviking', 'ovcli.conf'), JSON.stringify({ url: 'https://first.example', api_key: 'one' }));
+  const saved = JSON.stringify({ url: 'https://second.example', api_key: 'two' });
+  fs.writeFileSync(savedOVConfigPath(h.home), saved);
+  h.options.configureOV = configureOpenViking;
+  h.options.detect.openViking = detectOpenViking;
+  h.options.allocate = async () => 3739;
+  h.options.fetchImpl = async (url) => {
+    if (url.startsWith('http://127.0.0.1:1933')) throw new Error('offline');
+    return Response.json({ status: 'ok', auth_mode: 'api_key', result: { initialized: true } });
+  };
+  const driving = h.drive([
+    ['要做什么', '\r'],
+    ['选择 OpenViking 连接', LEFT],
+    ['要做什么', '\r'],
+    // The connection typed in setup last time is listed first.
+    ['选择 OpenViking 连接', '\r'],
+    ['实例名称', 'fresh', '\r'], ['机器人名字', 'Fresh', '\r'], ['工作目录', '\r'], ['Agent 运行时', '\r'],
+    // The instance's OV identity is written by now; all the way back to the menu.
+    ['接入哪些 IM', LEFT], ['Agent 运行时', LEFT], ['工作目录', LEFT], ['机器人名字', LEFT], ['实例名称', LEFT],
+    ['选择 OpenViking 连接', DOWN, '\r'],
+    ['实例名称', RIGHT], ['机器人名字', RIGHT], ['工作目录', RIGHT], ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', '\r'], ['开始扫码', '\r'],
+  ]);
+  assert.equal(await setupCommand(h.options), 0);
+  await driving;
+  const [unchanged, fresh] = h.manifest().agents;
+  assert.deepEqual(unchanged, before);
+  assert.deepEqual(fs.readdirSync(path.join(h.home, '.vika', 'ov')), ['fresh.json']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fresh.ovConfig, 'utf8')), { url: 'https://first.example', api_key: 'one', actor_peer_id: 'fresh' });
+  assert.equal(fs.readFileSync(savedOVConfigPath(h.home), 'utf8'), saved, 'the CLI config is found anyway; nothing to save');
+});
+
+test('changing the instance name on the way back replaces the pending OV identity and cancellation cleans it up', async (t) => {
+  const h = terminalHarness(t);
+  existing(h, {});
+  const actors = [];
+  h.options.detect.openViking = async ({ configPath }) => {
+    if (configPath) actors.push(JSON.parse(fs.readFileSync(configPath, 'utf8')).actor_peer_id);
+    return { configPath: null, url: 'http://127.0.0.1:1933', usable: true };
+  };
+  const driving = h.drive([
+    ['要做什么', '\r'], ['实例名称', RIGHT], ['机器人名字', RIGHT], ['工作目录', RIGHT], ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', LEFT], ['Agent 运行时', LEFT], ['工作目录', LEFT], ['机器人名字', LEFT],
+    ['实例名称', 'renamed', '\r'], ['机器人名字', RIGHT], ['工作目录', RIGHT], ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', '\x03'],
+  ]);
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await driving;
+  assert.deepEqual(actors, ['agent2', 'renamed']);
+  assert.deepEqual(fs.readdirSync(path.join(h.home, '.vika', 'ov')), []);
+  assert.deepEqual(h.manifest().agents.map(({ id }) => id), ['asd']);
+  assert.deepEqual(h.calls, []);
 });
 
 test('in the change list, ← leaves a setting as it was; ← on the list goes back to 要做什么', async (t) => {
@@ -563,9 +860,9 @@ test('in English, a first setup says it all in English, and the bot says hello i
   assert.equal(await setupCommand(h.options), 0);
   const text = h.written();
   assert.doesNotMatch(text, /[一-鿿]/);
-  assert.match(text, /^Vika setup: add or change the agent instances on this machine\.\n\n  ✔ Found Codex, Pi \(built in\) · no OpenViking\n/);
+  assert.match(text, /^Vika setup: add or change the agent instances on this machine\.\n\n  ✔ Found Codex, Pi \(built in\)\n/);
   assert.match(text, /Primary channel \(where the bot reaches you first, e\.g\. new-mail alerts\)/);
-  assert.match(text, /Next, scanning: Feishu\/Lark 2 scans, WeChat 1 scan; nothing is saved until the scans are done/);
+  assert.match(text, /Next, scanning: Feishu\/Lark 2 scans, WeChat 1 scan; the instance is saved after the scans are done/);
   assert.match(text, /Vee \(primary\) is ready\.\n  Feishu\/Lark: It said hello in your chat; just reply\n  WeChat: Say "hi" to it first/);
   const [, , hello] = h.calls.find(([kind]) => kind === 'greet');
   assert.match(hello, /^Hi, I'm Vee, now running on your computer\. .* When I need to reach you on my own/);
@@ -602,17 +899,17 @@ test('with a locale that is not Chinese, a terminal setup asks the language firs
 });
 
 test('in English, changing an instance: the list, what a setting says, the changes and the result', async (t) => {
-  //                    change asd  OpenViking  IMs  lark+weixin  primary  weixin  save
-  const h = harness(t, ['2',        '7',        '4', '1,2',       '5',     '2',    '8'], { runtimes: ENGLISH_RUNTIMES });
+  //                    change asd  IMs  lark+weixin  primary  weixin  save
+  const h = harness(t, ['2', '4', '1,2', '5', '2', '8'], { runtimes: ENGLISH_RUNTIMES });
   h.options.env.VIKA_LANG = 'en';
   const before = existing(h, {});
   assert.equal(await setupCommand(h.options), 0);
   assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'weixin'], channel: 'weixin' }]);
   const text = h.written();
   assert.doesNotMatch(text, /[一-鿿]/);
-  assert.match(text, /1\) Bot name\s+ASD\n  2\) Workspace\s+~\/ws\n[\s\S]*7\) OpenViking\s+off\n  8\) Save\n  9\) Discard changes/);
+  assert.match(text, /1\) Bot name\s+ASD\n  2\) Workspace\s+~\/ws\n[\s\S]*  8\) Save\n  9\) Discard changes/);
   // What a setting says shows above the list drawn after it.
-  assert.match(text, /No OpenViking found on this machine\n\? Change ASD \(asd\)/);
+  assert.doesNotMatch(text, /No OpenViking found|Stop using it/);
   assert.match(text, /8\) Save \(2 changes\)/);
   assert.match(text, /Changing ASD \(asd\):\n  Connect WeChat \(needs a scan\)\n  Primary channel: Feishu\/Lark → WeChat\n/);
   assert.match(text, /ASD \(asd\) is updated\.\n  WeChat: Say "hi" to it first/);

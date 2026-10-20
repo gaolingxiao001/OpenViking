@@ -9,10 +9,11 @@ import { managedPiBin } from '../../daemon/src/pi-runtime.mjs';
 import { LarkCli } from './lark-cli.mjs';
 import { createApp, inspectApp, missingScopes } from './lark-app.mjs';
 import {
-  WEB_PORT, allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand, vikaHome,
+  WEB_PORT, allocatePort, availableInstanceOvConfig, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand, vikaHome,
   withChangedInstance, withInstance, writeManifest,
 } from './manifest.mjs';
 import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
+import { configureOpenViking, prepareInstanceOpenViking, saveOVConnection } from './ov-setup.mjs';
 import { detectRuntimes, which } from './runtimes.mjs';
 import { showScan } from './qr.mjs';
 import { restartCommand, startCommand } from './control.mjs';
@@ -30,9 +31,9 @@ import { connectTelegram } from './telegram.mjs';
 // question by question; a change is a list of every setting with its current
 // value, where the owner opens the ones to change and saves. Then the QR scans
 // (only for a newly connected IM), then the manifest is written and the
-// instance (re)started. Nothing is saved until all scans succeed, so an
-// aborted setup leaves things as they were. It is also the one place that
-// connects an IM; `vika login` only renews.
+// instance (re)started. A new instance's OV config is prepared and checked
+// before IM setup, then removed on cancellation until its manifest is saved.
+// It is also the one place that connects an IM; `vika login` only renews.
 
 const PERMISSIONS = new URL('../../../permission.json', import.meta.url);
 
@@ -108,7 +109,7 @@ function initialState({ id, env, homeDir, current, runtimes, kept }) {
     runtime: kept ?? runtimes.find((runtime) => runtime.available && (!current || runtime.model === current.model)),
     connectors,
     channel: current?.channel ?? connectors[0],
-    useOv: current?.ovConfig ? 'keep' : false,
+    ovConfig: current?.ovConfig,
     mail: { kept: current ? mailboxesOf(current) : [], added: [], updated: new Map(), removed: [] },
   };
 }
@@ -183,8 +184,9 @@ function dropMailboxes(state) {
 }
 
 // One more mailbox. In the change menu, giving up on it goes back to the list.
-async function addMailbox({ prompter, env, connect, menu }, state) {
+async function addMailbox({ prompter, env, connect, menu, checkOV }, state) {
   let account;
+  await checkOV();
   try {
     account = await connect.email({ prompter, taken: mailboxList(state).map(addressOf) });
   } catch (error) {
@@ -240,29 +242,6 @@ async function askChannel(ctx, state) {
   }
 }
 
-// 'keep' leaves the instance's OpenViking config as it is.
-// Nothing to ask without a usable OpenViking: the machine check said so
-// already, and the change list says why.
-async function askOv(ctx, state) {
-  const { prompter, ov, current } = ctx;
-  const question = t('OpenViking（跨会话记忆）', 'OpenViking (memory across sessions)');
-  if (current?.ovConfig) {
-    state.useOv = await prompter.select(question, [
-      { label: t('继续使用', 'Keep using it'), value: 'keep' },
-      { label: t('不用了', 'Stop using it'), value: false },
-    ], { initial: state.useOv ? 0 : 1 });
-  } else if (ov?.usable) {
-    state.useOv = await prompter.select(question, [
-      { label: t('使用本机检测到的 OpenViking', 'Use the OpenViking found on this machine'), value: true, hint: `${ov.url}${ov.user ? `  user=${ov.user}` : ''}` },
-      { label: current ? t('不用', 'No') : t('跳过', 'Skip'), value: false },
-    ], { initial: !current || state.useOv ? 0 : 1 });
-  } else if (ov) {
-    note(ctx, t(`OpenViking（${ov.url}）用不了：${ov.reason}`, `OpenViking (${ov.url}) is unusable: ${ov.reason}`));
-  } else if (ctx.menu) {
-    note(ctx, t('这台机器上没有检测到 OpenViking', 'No OpenViking found on this machine'));
-  }
-}
-
 // The instance's mailboxes, from a menu until done; none yet means adding.
 async function askMailboxes(ctx, state) {
   if (mailboxList(state).length === 0) {
@@ -281,6 +260,7 @@ async function askMailboxes(ctx, state) {
     if (choice.kind === 'done') break;
     if (choice.kind === 'add') await addMailbox(ctx, state);
     if (choice.kind === 'update') {
+      await ctx.checkOV();
       try {
         const account = await ctx.connect.email({ prompter: ctx.prompter, fixed: choice.mailbox.account,
           taken: mailboxList(state).filter((mailbox) => mailbox !== choice.mailbox).map(addressOf) });
@@ -313,7 +293,8 @@ const SETTINGS = [
   { key: 'channel', label: () => t('主渠道', 'Primary channel'), ask: askChannel, shown: (state) => IM_LABELS[state.channel] },
   { key: 'mailboxes', label: () => t('邮箱', 'Mailboxes'), ask: askMailboxes,
     shown: (state) => (mailboxList(state).length ? list(mailboxList(state).map(addressOf)) : t('没有接', 'none')) },
-  { key: 'ov', label: () => 'OpenViking', ask: askOv, shown: (state) => (state.useOv ? t('使用', 'on') : t('不用', 'off')) },
+  { key: 'ovConfig', label: () => 'OpenViking', ask: (ctx) => ctx.editOV(),
+    shown: (state, { homeDir }) => shortenHome(state.ovConfig, homeDir) },
 ];
 
 const mailChanged = (state) => state.mail.added.length + state.mail.updated.size + state.mail.removed.length > 0;
@@ -655,10 +636,9 @@ function greeting({ name, newInstance, primary }) {
 const found = (labels) => t(`找到 ${list(labels)}`, `Found ${list(labels)}`);
 
 // What the machine offers, in one line, once the check is done.
-function foundLine(runtimes, ov) {
+function foundLine(runtimes) {
   const ready = runtimes.filter((runtime) => runtime.available).map((runtime) => runtime.label);
-  const memory = ov?.usable ? t('OpenViking 可用', 'OpenViking ready') : ov ? t('OpenViking 暂不可用', 'OpenViking unavailable') : t('没有 OpenViking', 'no OpenViking');
-  return ready.length ? `${found(ready)} · ${memory}` : `${t('还没有能用的 agent', 'No usable agent yet')} · ${memory}`;
+  return ready.length ? found(ready) : t('还没有能用的 agent', 'No usable agent yet');
 }
 
 // Until some runtime can run: say why each cannot, and offer to log the
@@ -715,8 +695,8 @@ function connectionSteps(prompter, connectors, { saving = false } = {}) {
     ? t('Telegram Bot token + Start 绑定', 'Telegram bot token + Start')
     : t(`${IM_LABELS[im]} ${SCANS[im]} 次`, `${IM_LABELS[im]} ${SCANS[im]} ${SCANS[im] === 1 ? 'scan' : 'scans'}`)));
   prompter.info(t(
-    `接下来${telegram ? '接入' : '扫码'}：${steps.join('，')}${saving ? `；${telegram ? '全部验证成功' : '扫完'}才保存配置` : ''}`,
-    `Next, ${telegram ? 'connecting' : 'scanning'}: ${steps.join(', ')}${saving ? `; nothing is saved until ${telegram ? 'all of it checks out' : 'the scans are done'}` : ''}`,
+    `接下来${telegram ? '接入' : '扫码'}：${steps.join('，')}${saving ? `；${telegram ? '全部验证成功' : '扫完'}才保存实例` : ''}`,
+    `Next, ${telegram ? 'connecting' : 'scanning'}: ${steps.join(', ')}${saving ? `; the instance is saved after ${telegram ? 'all of it checks out' : 'the scans are done'}` : ''}`,
   ));
 }
 
@@ -747,10 +727,13 @@ export async function setupCommand(options = {}) {
   prompter.pageTop = () => live?.top() ?? null;
   try {
     for (;;) {
+      const pendingOV = new Set();
       try {
-        return await setupFlow({ ...options, live, memo });
+        return await setupFlow({ ...options, live, memo, pendingOV });
       } catch (error) {
         if (!(error instanceof StartOver)) throw error;
+      } finally {
+        for (const file of pendingOV) fs.rmSync(file, { force: true });
       }
     }
   } finally {
@@ -766,26 +749,28 @@ async function setupFlow({
   homeDir = os.homedir(),
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
+  configureOV = configureOpenViking,
   connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, email: askEmail, greet, pi: loginPi },
   control = { start: startCommand, restart: restartCommand, autostart: autostartCommand },
   allocate = allocatePort,
   live = null,
   memo = {},
+  pendingOV = new Set(),
 }) {
   const out = (text) => prompter.write(text);
   const vika = vikaCommand(env);
-  if (!memo.detected) {
+  if (!memo.runtimes) {
     if (!prompter.fancy) out(t('Vika setup：添加或修改这台机器上的 agent 实例。\n\n', 'Vika setup: add or change the agent instances on this machine.\n\n'));
-    memo.detected = await step(prompter, t('看看这台机器上有哪些 agent', 'Looking for agents on this machine'), () => Promise.all([
-      detect.runtimes({ env }),
-      detect.openViking({ env, homeDir, fetchImpl }),
-    ]), ([runtimesFound, memory]) => foundLine(runtimesFound, memory));
+    memo.runtimes = await step(prompter, t('看看这台机器上有哪些 agent', 'Looking for agents on this machine'),
+      () => detect.runtimes({ env }), foundLine);
     memo.mark = prompter.mark();
   } else {
     prompter.rewind(memo.mark);
   }
-  let [runtimes] = memo.detected;
-  const [, ov] = memo.detected;
+  let runtimes = memo.runtimes;
+  // The connection this run chose (a new instance's, or a changed one), kept
+  // for the next instance once the manifest is saved.
+  let ov = null;
   const { path: configPath, value: manifest } = readManifest(env);
   // ← and → move between the questions, until the scans begin.
   prompter.navigable = prompter.tty;
@@ -793,13 +778,62 @@ async function setupFlow({
   if (!current) {
     runtimes = await ensureRuntime({ prompter, env, detect, connect, live }, runtimes);
     if (!runtimes) return 1;
-    memo.detected = [runtimes, ov];
+    memo.runtimes = runtimes;
   }
   const kept = keptRuntime(current, runtimes);
   const others = manifest?.agents?.length > 0;
-  const ctx = { prompter, out, env, homeDir, runtimes, ov, current, connect, kept, menu: Boolean(current), startOver: others, notes: [] };
+  const ctx = { prompter, out, env, homeDir, runtimes, current, connect, kept, menu: Boolean(current), startOver: others, notes: [] };
   const state = initialState({ id: current?.id ?? suggestInstanceId(manifest), env, homeDir, current, runtimes, kept });
   const port = current ? current.port : await allocate(manifest);
+  ctx.editOV = async () => {
+    const detected = await configureOV({ prompter, env, homeDir, fetchImpl, detect: detect.openViking,
+      preferredConfigPath: state.ovConfig, title: `OpenViking · ${current.id}`, canGoBack: true,
+      leaveTo: t('返回实例设置', 'Back to instance settings') });
+    const pending = new Set();
+    try {
+      const target = await prepareInstanceOpenViking({
+        agent: { ...current, ovConfig: state.ovConfig }, detected, pending, env, homeDir, fetchImpl,
+        detect: detect.openViking, reserved: new Set(manifest.agents.map(({ ovConfig }) => ovConfig)),
+      });
+      if (target !== state.ovConfig && pendingOV.has(state.ovConfig)) {
+        fs.rmSync(state.ovConfig, { force: true });
+        pendingOV.delete(state.ovConfig);
+      }
+      for (const file of pending) pendingOV.add(file);
+      pending.clear();
+      if (target !== state.ovConfig) ov = detected;
+      state.ovConfig = target;
+    } finally {
+      for (const file of pending) fs.rmSync(file, { force: true });
+    }
+  };
+  // The instance's own OV config, written for this name and this connection;
+  // going back to change either writes it again.
+  let prepared = null;
+  const checkOV = async () => {
+    const checked = await detect.openViking({ env, homeDir, fetchImpl, configPath: state.ovConfig });
+    if (!checked?.usable) {
+      throw new Error(t(`OpenViking（${state.id}）不可用：${checked?.reason ?? '检查失败'}。请恢复服务后再接入 IM。`,
+        `OpenViking (${state.id}) is unavailable: ${checked?.reason ?? 'check failed'}. Restore the service before connecting IMs.`));
+    }
+    return checked;
+  };
+  ctx.checkOV = checkOV;
+  const prepareOV = () => step(prompter, t('准备并验证实例的 OpenViking 配置', 'Preparing and checking this instance’s OpenViking config'), async () => {
+    if (prepared?.id !== state.id || prepared?.ov !== ov) {
+      for (const file of pendingOV) fs.rmSync(file, { force: true });
+      pendingOV.clear();
+      state.ovConfig = availableInstanceOvConfig(env, state.id, new Set(manifest?.agents.map(({ ovConfig }) => ovConfig)));
+      writeInstanceOvConfig({ detected: ov, instanceId: state.id, target: state.ovConfig, exclusive: true });
+      pendingOV.add(state.ovConfig);
+      prepared = { id: state.id, ov };
+    }
+    await checkOV();
+  }, t('OpenViking 已就绪，接下来接入 IM', 'OpenViking is ready; next, connect your IMs'));
+  // The section heading comes from the wizard; ← goes back to 要做什么, if there was a choice.
+  const chooseOV = async () => {
+    ov = await configureOV({ prompter, env, homeDir, fetchImpl, detect: detect.openViking, title: null, canGoBack: others, previous: ov });
+  };
 
   // The instance as the manifest will hold it.
   const build = (emailAccounts = mailPlan(state).list) => {
@@ -815,10 +849,8 @@ async function setupFlow({
     };
     if (state.connectors.includes('lark')) agent.profile = current?.profile ?? `vika-${state.id}`;
     else delete agent.profile;
-    const ovConfig = state.useOv === 'keep' ? current.ovConfig
-      : state.useOv ? path.join(vikaHome(env), 'ov', `${state.id}.json`) : null;
-    if (ovConfig) agent.ovConfig = ovConfig;
-    else delete agent.ovConfig;
+    agent.ovConfig = state.ovConfig;
+    agent.ovAutoRecall = current?.ovAutoRecall ?? false;
     if (emailAccounts.length) agent.emailAccounts = emailAccounts;
     else delete agent.emailAccounts;
     return agent;
@@ -862,7 +894,7 @@ async function setupFlow({
       [t('机器人', 'Bot'), `${state.displayName} · ${state.runtime.label}`],
       [t('消息渠道', 'Channels'), channels],
       ...(addresses.length ? [[t('邮箱', 'Email'), list(addresses)]] : []),
-      [t('记忆', 'Memory'), state.useOv ? 'OpenViking' : t('不使用 OpenViking', 'no OpenViking')],
+      [t('记忆', 'Memory'), 'OpenViking'],
       [t('工作目录', 'Workspace'), shortenHome(state.workspace, homeDir)],
       [t('数据目录', 'Data'), shortenHome(state.dataDir, homeDir)],
     ]);
@@ -875,9 +907,11 @@ async function setupFlow({
   };
 
   const steps = current ? [] : [
-    { section: { title: t('机器人', 'Bot'), step: 1, total: 3 }, ask: askId }, { ask: askName }, { ask: askWorkspace }, { ask: askRuntime },
-    { section: { title: t('消息渠道和记忆', 'Channels and memory'), step: 2, total: 3 }, ask: askIms }, { ask: askChannel }, { ask: askOv }, { ask: askMail },
-    { section: { title: t('确认', 'Confirm'), step: 3, total: 3 }, ask: confirmNew },
+    { section: { title: t('OpenViking 记忆', 'OpenViking memory'), step: 1, total: 4 }, ask: chooseOV },
+    { section: { title: t('机器人', 'Bot'), step: 2, total: 4 }, ask: askId }, { ask: askName }, { ask: askWorkspace }, { ask: askRuntime },
+    { ask: prepareOV },
+    { section: { title: t('消息渠道', 'Channels'), step: 3, total: 4 }, ask: askIms }, { ask: askChannel }, { ask: askMail },
+    { section: { title: t('确认', 'Confirm'), step: 4, total: 4 }, ask: confirmNew },
   ];
   const run = {};
   const page = {};
@@ -888,8 +922,8 @@ async function setupFlow({
   let plan;
   let lark = null;
   // The questions, then the codes to scan. ← while a code waits to be
-  // scanned comes back to the questions, as nothing exists yet; once a scan
-  // is confirmed (a Feishu app made, a Weixin account bound) it cannot.
+  // scanned comes back to the questions; its pending OV config can still be
+  // removed. Once a scan is confirmed (an app made, an account bound) it cannot.
   for (;;) {
     prompter.navigable = prompter.tty;
     if (current) {
@@ -915,6 +949,9 @@ async function setupFlow({
     }
     agent = build();
     plan = { id: state.id, displayName: state.displayName, dataDir: state.dataDir };
+    // Answers and mailbox setup can take a while: check again before the
+    // first QR scan or bot token, using the actual instance identity.
+    if (newIms.length) await checkOV();
     // A code to scan needs the whole screen; the boat comes back afterwards.
     if (newIms.length) live?.release();
     try {
@@ -939,12 +976,13 @@ async function setupFlow({
   }
   live?.resume();
   const id = state.id;
-  if (state.useOv === true) writeInstanceOvConfig({ detected: ov, instanceId: id, target: agent.ovConfig });
   const mail = mailPlan(state);
   for (const { config, account } of mail.write) writeEmailAccount(config, account);
 
   fs.mkdirSync(state.workspace, { recursive: true, mode: 0o700 });
   writeManifest(configPath, manifestWith(agent));
+  pendingOV.delete(agent.ovConfig);
+  if (ov && agent.ovConfig !== current?.ovConfig) saveOVConnection(ov, { env, homeDir });
   for (const mailbox of mail.removed) fs.rmSync(mailbox.config, { force: true });
 
   prompter.section(current ? t('重启', 'Restart') : t('启动', 'Start'));
@@ -1041,6 +1079,7 @@ async function offerAutostart({ prompter, env, homeDir, control, vika }) {
 function describeChanges(before, after, mailboxes, homeDir) {
   const changes = [];
   const was = connectorsOf(before);
+  if (before.ovConfig !== after.ovConfig) changes.push(t('更新 OpenViking 连接', 'Update the OpenViking connection'));
   if (before.displayName !== after.displayName) changes.push(`${t('机器人名字：', 'Bot name: ')}${before.displayName} → ${after.displayName}`);
   if (before.workspace !== after.workspace) {
     const move = `${shortenHome(before.workspace, homeDir)} → ${shortenHome(after.workspace, homeDir)}`;
@@ -1061,9 +1100,6 @@ function describeChanges(before, after, mailboxes, homeDir) {
   for (const address of mailboxes.updated) changes.push(t(`更新邮箱 ${address} 的密码`, `New password for ${address}`));
   for (const mailbox of mailboxes.removed) {
     changes.push(t(`移除邮箱 ${addressOf(mailbox)}（删掉保存的密码）`, `Remove mailbox ${addressOf(mailbox)} (its saved password is deleted)`));
-  }
-  if (Boolean(before.ovConfig) !== Boolean(after.ovConfig)) {
-    changes.push(after.ovConfig ? t('开始使用 OpenViking', 'Start using OpenViking') : t('不再使用 OpenViking', 'Stop using OpenViking'));
   }
   return changes;
 }

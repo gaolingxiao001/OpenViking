@@ -328,10 +328,9 @@ test('connects mailboxes only together with the email connector, each account fi
 });
 
 
-test('an instance runs without OpenViking, and without a profile when it has no lark connector', () => {
+test('OV recall is opt-in per instance, with actor scope and no Lark profile for Weixin', () => {
   const manifest = validManifest();
-  delete manifest.agents[1].ovConfig;
-  delete manifest.agents[2].ovConfig;
+  manifest.agents[1].ovAutoRecall = true;
   manifest.agents[2].channel = 'weixin';
   manifest.agents[2].connectors = ['weixin'];
   delete manifest.agents[2].profile;
@@ -343,14 +342,16 @@ test('an instance runs without OpenViking, and without a profile when it has no 
       LARKSUITE_CLI_PROFILE: 'stale',
     };
     const deployment = loadDeploymentManifest(env);
-    assert.equal(selectDeploymentAgent(deployment, 'beta').ovConfig, null);
+    assert.equal(selectDeploymentAgent(deployment, 'alpha').ovAutoRecall, false);
     applyDeploymentAgentEnv(env, deployment, 'alpha');
     assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/srv/vika/ov/alpha.json');
     assert.equal(env.OPENVIKING_MEMORY_ENABLED, '1');
-    // Without OV the user's own memory plugins are switched off for this instance.
+    assert.equal(env.OPENVIKING_AUTO_RECALL, '0');
     applyDeploymentAgentEnv(env, deployment, 'beta');
-    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, undefined);
-    assert.equal(env.OPENVIKING_MEMORY_ENABLED, '0');
+    assert.equal(env.OPENVIKING_CLI_CONFIG_FILE, '/srv/vika/ov/beta.json');
+    assert.equal(env.OPENVIKING_MEMORY_ENABLED, '1');
+    assert.equal(env.OPENVIKING_AUTO_RECALL, '1');
+    assert.equal(env.OPENVIKING_RECALL_PEER_SCOPE, 'actor');
     assert.equal(env.LARKSUITE_CLI_PROFILE, 'cli_beta');
     applyDeploymentAgentEnv(env, deployment, 'gamma');
     assert.equal(selectDeploymentAgent(deployment, 'gamma').profile, null);
@@ -361,6 +362,16 @@ test('an instance runs without OpenViking, and without a profile when it has no 
 
 test('rejects unknown and missing manifest fields instead of guessing', () => {
   const cases = [
+    {
+      name: 'OV configuration is required',
+      mutate: (manifest) => { delete manifest.agents[0].ovConfig; },
+      error: /agents\[0\]\.ovConfig is required/,
+    },
+    {
+      name: 'recall must be a JSON boolean',
+      mutate: (manifest) => { manifest.agents[0].ovAutoRecall = 'true'; },
+      error: /agents\[0\]\.ovAutoRecall must be a boolean/,
+    },
     {
       name: 'unknown top-level field',
       mutate: (manifest) => { manifest.instances = []; },

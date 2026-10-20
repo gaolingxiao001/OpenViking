@@ -1,8 +1,7 @@
 import fs from 'node:fs';
 
-// OpenViking stays outside the daemon process except for an opt-in start-time
-// identity read over OV HTTP. Agents still reach the rest through skill and
-// MCP tools.
+// OV identity is an opt-in startup read. Session transport lives in
+// ov-session-context; agents use skill/MCP tools for other memory operations.
 
 export function isOpenVikingEnvKey(name) {
   return typeof name === 'string' && name.startsWith('OPENVIKING_');

@@ -203,12 +203,12 @@ export async function executeCommand(command, runtime) {
     if (applied?.runtimeChanged) {
       return {
         ok: true,
-        text: `已切到 ${displayTarget}。历史对话会接上；隐藏思考和未落盘的工具过程不会继承`,
+        text: `已切到 ${displayTarget}。会尝试从 OV 接上历史对话；隐藏思考和未落盘的工具过程不会继承`,
       };
     }
     return {
       ok: true,
-      text: `已切到 ${displayTarget}，已开启新会话${applied?.threadId ? `：${applied.threadId}` : ""}。会从 OV 接上历史上下文`,
+      text: `已切到 ${displayTarget}，已开启新会话${applied?.threadId ? `：${applied.threadId}` : ""}。会尝试从 OV 接上历史上下文`,
     };
   }
 

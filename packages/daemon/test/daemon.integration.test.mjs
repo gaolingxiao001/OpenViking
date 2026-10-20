@@ -7,8 +7,45 @@ import { createLogger } from '../src/logger.mjs';
 import { PersonalAgentDaemon } from '../src/daemon.mjs';
 import { Harness } from '../src/harness.mjs';
 import { startMockEnv, textMessage } from './mock-env.mjs';
+import { OVUnavailableError } from '../src/ov-connection.mjs';
 
 describe('daemon event path (mock env)', { concurrency: false }, () => {
+  it('starts without history when OV is not reachable yet, and says so in the activity', async () => {
+    const env = await startMockEnv({ ovCheck: async () => { throw new OVUnavailableError('OpenViking request failed or timed out'); } });
+    try {
+      assert.equal(env.daemon.ready, true);
+      const [degraded] = env.daemon.store.listActivities().activities.filter(({ kind }) => kind === 'system.ov_unavailable');
+      assert.equal(degraded.status, 'DEGRADED');
+      env.receive(textMessage({ messageId: 'om-ov-down', text: 'hello' }));
+      await env.waitForCodexInput(/om-ov-down/);
+    } finally { await env.stop(); }
+  });
+
+  it('refuses to start when OV rejects the instance\'s credentials, as no restart fixes that', async () => {
+    await assert.rejects(startMockEnv({ ovCheck: async () => { throw new OVUnavailableError('OpenViking request failed (HTTP 401)', 401); } }),
+      /HTTP 401/);
+  });
+
+  it('continues delivering after an OV outage and runtime rotation, with no stale history or failure notice', async () => {
+    const env = await startMockEnv();
+    try {
+      env.receive(textMessage({ messageId: 'om-before-outage', text: 'old context marker' }));
+      await env.waitForCodexInput(/om-before-outage/);
+      await env.daemon.agentRuntime.whenIdle();
+      const context = env.daemon.ovContext.client.context;
+      env.daemon.ovContext.client.context = async () => { throw new OVUnavailableError('offline'); };
+      await env.daemon.agentRuntime.transition({ kind: 'new-session' });
+      env.receive(textMessage({ messageId: 'om-during-outage', text: 'new question marker' }));
+      await env.waitForCodexInput(/om-during-outage/);
+      const input = env.codexInput().find((entry) => entry.text.includes('om-during-outage'));
+      assert.doesNotMatch(input.text, /old context marker|daemon OpenViking context/);
+      assert.equal(env.daemon.ready, true);
+      assert.deepEqual(env.replies(), []);
+      env.daemon.ovContext.client.context = context;
+      await env.daemon.ovContext.checkpoint(env.daemon.store.getCognitionState().epoch);
+    } finally { await env.stop(); }
+  });
+
   it('persists a raw event and steers the formatted line into the codex app-server', async () => {
     const env = await startMockEnv();
     try {
@@ -172,21 +209,6 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
       assert.match(instructions, /OpenViking identity/);
       assert.match(instructions, /zircon-e2e-7742/);
       assert.match(instructions, /viking:\/\/user\/e2e-user\/identity\.md/);
-    } finally {
-      await env.stop();
-    }
-  });
-
-  it('runs an instance with no OpenViking: no OV prompt, no OV tool, messages still flow', async () => {
-    const env = await startMockEnv({ openViking: false });
-    try {
-      assert.equal(env.daemon.ovContext, null);
-      assert.ok(!env.daemon.actions.tools().some((tool) => tool.name === 'read_openviking_session_context'));
-      const instructions = env.codexSpawnArgs()[0].find((argument) => argument.startsWith('developer_instructions='));
-      assert.doesNotMatch(instructions, /## OpenViking memory|<context-workdir>/);
-      env.receive(textMessage({ messageId: 'om-no-ov', text: 'hello' }));
-      await env.waitForCodexInput(/om-no-ov/);
-      assert.equal(env.daemon.store.stats().inbound.DONE, 1);
     } finally {
       await env.stop();
     }

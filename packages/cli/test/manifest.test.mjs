@@ -17,6 +17,7 @@ function agent(id, overrides = {}) {
     port: 3738,
     dataDir: `/srv/vika/data/${id}`,
     workspace: `/srv/vika/workspace/${id}`,
+    ovConfig: `/srv/vika/ov/${id}.json`,
     model: 'codex:',
     ...overrides,
   };

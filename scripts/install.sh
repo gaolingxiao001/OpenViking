@@ -265,6 +265,19 @@ if ! "$PENDING/$DIR/node/bin/node" "$PENDING/$DIR/packages/cli/bin/vika.mjs" --v
 fi
 ok "$(m '自检' 'Check   ')  ${GRAY}$(m '自带的 Node 能在这台机器上运行' 'the bundled Node runs on this machine')${RESET}"
 
+CONFIG_FILE="${VIKA_CONFIG:-$VIKA_HOME/config.json}"
+if [ ! -f "$CONFIG_FILE" ] && [ "$RUN_SETUP" = 1 ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then SETUP_NEXT=1; else SETUP_NEXT=0; fi
+# Setup, when it runs next, asks for OpenViking itself. Otherwise nobody is
+# asked: each instance's own connection, or for a first install the default
+# one, must work before the release is switched.
+if [ "$SETUP_NEXT" = 0 ]; then
+  if ! VIKA_LANG="$UI_LANG" "$PENDING/$DIR/node/bin/node" "$PENDING/$DIR/packages/cli/src/check-ov.mjs"; then
+    rm -rf "$PENDING"
+    die "$(m 'OpenViking 检查未通过，未切换安装版本' 'OpenViking check failed; the installed release was not changed')"
+  fi
+  ok "$(m 'OpenViking 已就绪' 'OpenViking is ready')"
+fi
+
 # Physical paths: /home may be a symlink, and the updater links real paths.
 physical() { (cd "$1" 2>/dev/null && pwd -P) || true; }
 TARGET="$VIKA_HOME/releases/$VERSION"
@@ -327,11 +340,11 @@ rmdir "$LOCK" 2>/dev/null || true
 LOCK=""
 # Instances live in the config; without one this machine still needs setup,
 # however often the installer has run.
-if [ -f "${VIKA_CONFIG:-$VIKA_HOME/config.json}" ]; then
+if [ -f "$CONFIG_FILE" ]; then
   if [ "$CHANGED" = 1 ] && [ -n "$PREVIOUS" ]; then
     note "$(m "运行中的实例还在旧版本上：执行 ${BOLD}vika restart${RESET} 换到 ${VERSION}" "running instances are on the old release: ${BOLD}vika restart${RESET} moves them to ${VERSION}")"
   fi
-elif [ "$RUN_SETUP" = 1 ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
+elif [ "$SETUP_NEXT" = 1 ]; then
   cleanup
   trap - EXIT INT TERM
   if [ -n "$LANG_FLAG" ]; then exec "$VIKA_HOME/bin/vika" setup --lang "$LANG_FLAG" </dev/tty; fi

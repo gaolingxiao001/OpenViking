@@ -93,11 +93,6 @@ describe('conversation policy assemble', () => {
       });
       assert.match(withAudio, /meeting-audio plugin/);
 
-      // Without OpenViking configured, no OV section reaches the prompt.
-      const withoutOV = assembleConversationPolicy({ ...files, openVikingConfigPath: '', agentName: '斯斯', profile: 'cli_alpha' });
-      assert.match(withoutOV, /base 斯斯/);
-      assert.match(withoutOV, /profile=cli_alpha/);
-      assert.doesNotMatch(withoutOV, /ov via skill and MCP|<context-workdir>/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

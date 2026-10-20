@@ -274,8 +274,7 @@ export class ClaudeAgent {
         '--output-format', 'stream-json',
         '--input-format', 'stream-json',
         // No --strict-mcp-config: user-scope skill/MCP servers (OpenViking via
-        // OPENVIKING_* env) load alongside personal_agent. The daemon does not
-        // own an OV client.
+        // OPENVIKING_* env) load alongside personal_agent.
         '--mcp-config', mcpConfigPath,
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
         '--append-system-prompt', this.developerInstructionsText,

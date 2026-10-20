@@ -5,6 +5,22 @@ session (including a hard runtime switch) receives OpenViking's cumulative archi
 overview and live messages on the first real inbound turn. There is no SQLite
 history fallback and no local summary generator.
 
+OpenViking is required. Installation and setup verify it with public health plus
+a protected `GET /api/v1/system/status`, which passes the same identity check as
+the session API at a cost that does not grow with the user's sessions. At daemon startup a config or credential
+OV rejects (4xx) stops the daemon; an OV that cannot be reached yet only records
+`system.ov_unavailable`, so boot order or a blip during a restart cannot use up
+pm2's restarts. Remote request failures may omit history for a fresh native
+session without stopping message delivery or sending a failure notice to chat.
+Cached history is discarded on that failure; transport cursors and uncertain
+writes remain durable and the idle checkpoint retries. Recovery does not inject
+history into an already-running native transcript. Archive integrity failures
+remain blocking.
+
+`agents[].ovAutoRecall` defaults to `false`. When enabled it sets the runtime
+plugin's auto-recall switch with `peer_scope=actor`; it does not control this
+session transport, auto-capture, or commit-on-compact.
+
 Each cognition epoch owns a stable, private-to-this-daemon OV session. Switching
 providers keeps that session; `/new` starts a new epoch. Existing local ledger rows
 are uploaded on first use, in sequence. Only observable inbound Connector events,
