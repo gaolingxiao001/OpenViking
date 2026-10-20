@@ -285,8 +285,12 @@ export function parseMail(raw, { maxTextChars = MAX_TEXT_CHARS } = {}) {
   text = text.replace(/\r\n/g, '\n').trim();
   const partTooLong = (plain ?? html)?.data.length > MAX_PART_BYTES;
   if (text.length > maxTextChars || partTooLong) text = `${text.slice(0, maxTextChars)}\n[truncated]`;
+  // `inline` marks an image the body shows (a logo, a signature) rather than a
+  // file someone attached.
   const attachments = parts.filter(isAttachment).map((part) => ({
-    name: part.filename || part.type, type: part.type, size: part.data.length,
+    name: part.filename || part.type, filename: part.filename, type: part.type, charset: part.charset,
+    size: part.data.length, data: part.data,
+    inline: part.type.startsWith('image/') && (part.disposition === 'inline' || !part.filename),
   }));
   const date = Date.parse(header(headers, 'date'));
   const precedence = header(headers, 'precedence').toLowerCase();

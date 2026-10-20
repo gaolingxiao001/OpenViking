@@ -176,9 +176,15 @@ carries `event=`. A non-chat event that can itself be answered (a mail) carries
 its reply target as `msg=` as well:
 
 ```text
-[source=email instance=email-gmail kind=email.received msg=mail:3f2a9c1b:1:18475 event=imap:3f2a9c1b:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ body
+[source=email instance=email-gmail kind=email.received msg=mail:3f2a9c1b:1:18475 event=imap:3f2a9c1b:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ [mail stored: viking://user/…/resources/emails/3f2a9c1b-1-18475/body.md; the first 500 of its 4210 characters are below] ⏎ [attachment 01 report.pdf (application/pdf, 1.2 MB): viking://…/attachments/01-report.pdf] ⏎ start of the body…
 ```
- An optional `instance=` is included when it differs from
+The email Connector stores each mail in the owner's private OpenViking area
+before it reports it, so a mail line carries links and the start of the text;
+the extension field `data.archive` records where, and the Core's `read_email`
+tool reads it back. This is the email Connector's own use of OpenViking, not
+the future `sync` capability.
+
+An optional `instance=` is included when it differs from
 `source=`. Tag values percent-encode whitespace, brackets and `%`, so an id
 copied from a tag decodes back to the exact id. Untrusted content is
 collapsed onto one physical line. Journal-to-OpenViking synchronization uses the

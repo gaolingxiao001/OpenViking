@@ -33,17 +33,32 @@ export class OVConnection {
     for (const [key, header] of [['account', 'X-OpenViking-Account'], ['user', 'X-OpenViking-User'], ['agent', 'X-OpenViking-Agent']]) {
       if (config[key]) this.headers[header] = config[key];
     }
+    // Names the owner's private area (viking://user/<user>/...).
+    this.user = String(config.user ?? '').trim();
     this.fetch = fetchImpl;
     this.timeoutMs = timeoutMs;
   }
 
-  async json(route, body) {
+  async json(route, body, { timeoutMs = this.timeoutMs } = {}) {
+    return this.send(route, {
+      method: body === undefined ? 'GET' : 'POST', headers: this.headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }, timeoutMs);
+  }
+
+  // One file as multipart form data, for temp_upload.
+  async upload(route, { data, name, type }, { timeoutMs = this.timeoutMs } = {}) {
+    const form = new FormData();
+    form.append('file', new Blob([data], { type: type || 'application/octet-stream' }), name);
+    const { 'Content-Type': _json, ...headers } = this.headers;
+    return this.send(route, { method: 'POST', headers, body: form }, timeoutMs);
+  }
+
+  async send(route, init, timeoutMs) {
     let response;
     try {
       response = await this.fetch(`${this.url}${route}`, {
-        method: body === undefined ? 'GET' : 'POST', headers: this.headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(this.timeoutMs), redirect: 'error',
+        ...init, signal: AbortSignal.timeout(timeoutMs), redirect: 'error',
       });
       const text = await response.text();
       if (text.length > 8_000_000) throw new Error();

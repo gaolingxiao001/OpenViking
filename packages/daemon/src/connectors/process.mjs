@@ -48,6 +48,8 @@ function childConfig(config, instance) {
     larkCliBin: config.larkCliBin,
     weixinLongPollTimeoutMs: config.weixinLongPollTimeoutMs,
     emailConfigFile: instance.emailConfigFile ?? null,
+    // A mailbox stores each mail in OV before reporting it.
+    openVikingConfigPath: instance.type === 'email' ? config.openVikingConfigPath || null : null,
     retentionMs: config.retentionMs,
     maxEventBytes: config.maxEventBytes,
     sendTimeoutMs: config.sendTimeoutMs,
