@@ -25,7 +25,13 @@ curl -fsSL <下载地址>/install.sh | sh
 ## 准备
 
 - 一个 coding agent：Codex、Claude Code 或 TraeX 先装好并登录；不装也行，Vika 自带 Pi，用的是你 `~/.pi/agent` 里的模型配置，没配过就运行 `vika pi` 后 `/login`。
-- OpenViking（可选），用来保存跨会话上下文。setup 会检测本机的 OV；不用则该实例没有跨会话记忆，切换 runtime 时开空会话，并会关掉用户全局装的 OV 记忆插件（`OPENVIKING_MEMORY_ENABLED=0`）。
+- OpenViking（必需），用来保存跨会话上下文。`vika setup` 会列出已检测的连接、来源与检查结果，无论是否可用，都提供「手动填写／修改地址和凭据」「指定 OV 配置文件」「重新检测」和「退出」。可填写本机或远端 URL、自定义端口、API Key（隐藏输入）以及可选的 Account / User / Agent。验证失败留在配置界面重试，通过后才继续接入 IM。在终端里首次安装时，安装脚本装完直接进入 setup，OV 就在那里配置。
+
+检测来源包括正在修改的实例的 `ovConfig`、`OPENVIKING_CLI_CONFIG_FILE`、Vika 保存的连接 `~/.vika/ov-connection.json`、`~/.openviking/ovcli.conf` 和默认本机地址 `http://127.0.0.1:1933`，不会扫描其他端口。手动导入的文件保持原样；setup 保存实例后，把手动填写或导入的连接以 0600 权限保存在 Vika 目录，供之后新建实例使用，本来就会被检测到的配置文件不复制。
+
+安装脚本从不提问。除了紧接着进入 setup 的首次安装，都会在切换版本前检查 OV：已有实例按各自的 `ovConfig` 检查；`--no-setup` 或无终端的首次安装按环境变量指定文件、Vika 已保存连接、OpenViking CLI 配置、本机默认地址依次选择，无配置时仅接受本机默认端口的 dev-mode OV。检查不过就不切换版本。daemon 启动时 OV 拒绝配置或凭据会退出；只是暂时连不上（比如开机时 OV 还没起来）则记一条 activity、先不带历史启动，恢复后自动同步。
+
+修改已有实例的 OV 连接时，会保留其原有记忆身份和召回设置，创建新的配置副本；setup 选「保存」才更新 manifest，选「放弃」清理副本。
 - 会议 ASR 是可选功能，需要 Python 3.10+，依赖见 `meeting-asr/requirements.txt`。
 
 Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [config.example.json](./config.example.json)。
@@ -61,7 +67,7 @@ cd vika
 npm run setup          # 按 lockfile 装依赖，取回固定版本的 lark-cli，检查托管 Pi
 npm test && npm run check
 mkdir -p ~/.vika && cp config.example.json ~/.vika/config.json
-# 编辑 config.json：至少填 profile（飞书实例）、dataDir、workspace、model；要用 OV 再填 ovConfig
+# 编辑 config.json：至少填 profile（飞书实例）、dataDir、workspace、model、ovConfig；ovAutoRecall 默认 false
 npm run start:daemon
 ```
 
@@ -77,7 +83,7 @@ vika restart
 
 ### 微信扫码与单聊链路
 
-给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`（用 OV 时再加独立的 `ovConfig`）。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。
+给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`、`ovConfig`。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。
 
 ```bash
 vika login weixin weixin
@@ -112,12 +118,12 @@ vika login telegram [实例]
 
 ## 用 vika setup 添加和修改实例
 
-发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置。机器上已经有实例时，它先问是新建一个实例还是修改某个已有实例。修改时列出这个实例的全部配置项和现在的值（机器人名字、工作目录、运行时、接入的 IM、主渠道、邮箱、OpenViking），用 ↑↓ 选一项、回车进去改，改完回到列表，改过的项标"（已改）"，没进去改的保持原样；实例名不能改。选"保存"后列出改动，只给新接的 IM 完成授权（Telegram 为 token + Start 绑定），然后写配置并重启这个实例；选"放弃修改"什么都不动。接入新的 IM、加减邮箱、切换主渠道都在这里做。
+发布过 release（见下一节）之后，`vika setup` 能代替手写 `config.json` 和在开放平台手工配置。机器上已经有实例时，它先问是新建一个实例还是修改某个已有实例。修改时列出这个实例的全部配置项和现在的值（机器人名字、工作目录、运行时、接入的 IM、主渠道、邮箱），用 ↑↓ 选一项、回车进去改，改完回到列表，改过的项标"（已改）"，没进去改的保持原样；实例名不能改。选"保存"后列出改动，只给新接的 IM 完成授权（Telegram 为 token + Start 绑定），然后写配置并重启这个实例；选"放弃修改"什么都不动。接入新的 IM、加减邮箱、切换主渠道都在这里做。
 
-帆船停在屏幕顶部，整个 setup 期间一直在动，问题在它下面滚动；扫码时它让出整屏，扫完再回来。窗口不到 30 行时先放一段完整动画，再换成顶部一条小帆船。`VIKA_NO_ANIMATION=1` 只画一帧。最先定界面语言，默认中文：locale 是中文就不问；否则（服务器上常见的 `en_US`、`C`，不代表用的人读什么）在终端里先问一次 Language / 语言，预选中文，答案存进 `~/.vika/language`，之后的 setup、login、status 等都用它，不再问；`vika --lang zh|en` 随时换。然后检查本机有哪些 agent。问答阶段随时可以按 ←（或 Esc）回到上一步，之前的答案作为默认值；按 → 沿用当前的值往下走（文本框里只在还没输入时生效）。退回去的步骤会从屏幕上消失，屏幕上只留当前这条路。修改实例时，进入某一项后按 ← 回到配置列表、这一项不变；在列表上按 ← 回到「要做什么」。二维码在等你扫的时候也可以按 ← 回到确认页（或配置列表），这时什么都还没创建；一旦有一次扫码确认了（飞书应用已建好、微信或 Telegram 已绑定），就不能再返回。一个都不能用时，可以当场打开内置 Pi 输入 `/login` 登录模型，`/quit` 回来接着走；也可以先退出去登录 Codex 或 Claude Code。
+帆船停在屏幕顶部，整个 setup 期间一直在动，问题在它下面滚动；扫码时它让出整屏，扫完再回来。窗口不到 30 行时先放一段完整动画，再换成顶部一条小帆船。`VIKA_NO_ANIMATION=1` 只画一帧。最先定界面语言，默认中文：locale 是中文就不问；否则（服务器上常见的 `en_US`、`C`，不代表用的人读什么）在终端里先问一次 Language / 语言，预选中文，答案存进 `~/.vika/language`，之后的 setup、login、status 等都用它，不再问；`vika --lang zh|en` 随时换。然后检查本机有哪些 agent。问答阶段随时可以按 ←（或 Esc）回到上一步，之前的答案作为默认值；按 → 沿用当前的值往下走（文本框里只在还没输入时生效）。退回去的步骤会从屏幕上消失，屏幕上只留当前这条路。修改实例时，进入某一项后按 ← 回到配置列表、这一项不变；在列表上按 ← 回到「要做什么」。二维码在等你扫的时候也可以按 ← 回到确认页（或配置列表），新实例的临时 OV 配置会在取消时清理；一旦有一次扫码确认了（飞书应用已建好、微信或 Telegram 已绑定），就不能再返回。一个都不能用时，可以当场打开内置 Pi 输入 `/login` 登录模型，`/quit` 回来接着走；也可以先退出去登录 Codex 或 Claude Code。
 
-1. 第一个实例直接叫 `primary`，第二个起才问实例名。依次问机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）、接哪些 IM（飞书、微信、Telegram、邮箱多选；邮箱不能单独选），主渠道（选了多个聊天 IM 时让你选，只选一个时就是它；机器人主动找你的消息，比如新邮件提醒、待你确认的邮件回复，都发到主渠道），以及要不要用本机检测到的 OpenViking。选了邮箱就接着问邮箱地址和专用密码，当场登录 IMAP 和 SMTP 验证，可以连续接几个；Gmail、QQ、163/126/yeah.net 不用填服务器。
-2. 飞书扫两次码：第一次创建机器人应用，按 `permission.json` 申请完整权限、订阅长连接事件和卡片回调，平台自动发版；第二次授权 owner 的用户身份。微信扫一次码；Telegram 输入 Bot token 后打开一次性链接点击 Start。所有问题问完才开始接入；全部验证成功后才写配置。扫码页先画二维码，码下面一行是备用链接，可以发到对应 IM 里打开；飞书第一次的链接带着全部权限、有一千多个字符，按 `l` 才显示。飞书第一次的码也大，终端放不下时提示所需尺寸，并给出二维码图片的路径（图片不受终端字体、行距和字符渲染影响，扫码结束后自动删除），拉大窗口或缩小字体后自动重绘。VS Code 终端里按 `i` 打开图片，有桌面的机器上按 `o` 用浏览器打开链接。有颜色的终端用黑白配色和完整留白，黑块用背景色画，终端字符之间的缝不会把黑块切开。
+1. 第一个实例直接叫 `primary`，第二个起才问实例名。先列出已知 OV 连接并提供手动配置入口，连接验证通过后，依次问机器人名字、工作目录、运行时（只列出已安装并登录的 Codex / Claude Code，以及内置 Pi）。随后生成选定连接的实例专属配置，再用该身份检查服务和凭据；配置写入或检查失败会立即退出，不进入 IM 选择。通过后才问接哪些 IM（飞书、微信、Telegram、邮箱多选；邮箱不能单独选），主渠道（选了多个聊天 IM 时让你选，只选一个时就是它；机器人主动找你的消息，比如新邮件提醒、待你确认的邮件回复，都发到主渠道）。OpenViking 不提供跳过选项。开始扫码、输入 Bot token 或邮箱凭据之前，还会复查实例的 OV 连接；取消或失败时清理尚未保存到 manifest 的新 OV 配置。选了邮箱就接着问邮箱地址和专用密码，当场登录 IMAP 和 SMTP 验证，可以连续接几个；Gmail、QQ、163/126/yeah.net 不用填服务器。
+2. 飞书扫两次码：第一次创建机器人应用，按 `permission.json` 申请完整权限、订阅长连接事件和卡片回调，平台自动发版；第二次授权 owner 的用户身份。微信扫一次码；Telegram 输入 Bot token 后打开一次性链接点击 Start。所有问题问完才开始接入聊天 IM；全部验证成功后才写入实例 manifest。扫码页先画二维码，码下面一行是备用链接，可以发到对应 IM 里打开；飞书第一次的链接带着全部权限、有一千多个字符，按 `l` 才显示。飞书第一次的码也大，终端放不下时提示所需尺寸，并给出二维码图片的路径（图片不受终端字体、行距和字符渲染影响，扫码结束后自动删除），拉大窗口或缩小字体后自动重绘。VS Code 终端里按 `i` 打开图片，有桌面的机器上按 `o` 用浏览器打开链接。有颜色的终端用黑白配色和完整留白，黑块用背景色画，终端字符之间的缝不会把黑块切开。
 3. 写入 `~/.vika/config.json`，启动这个实例、重启共享 Web、确保 updater 在跑，然后机器人在飞书私聊里打个招呼。最后问要不要开机自启，并列出接下来做什么（找机器人说话、控制台地址、常用命令）。
 
 其他命令：
@@ -179,4 +185,6 @@ VIKA_TOS_BUCKET=<桶> VIKA_TOS_ENDPOINT=<TOS 域名> VIKA_TOS_ACCESS_KEY=<桶密
 
 ## 多个 agent
 
-在 `config.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，用 OV 时还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark`、`weixin`、`telegram` 和 `email`（邮箱至少搭配一个聊天 IM）。省略两者时走飞书。最简单的是再运行一次 `vika setup`；手改 manifest 后执行 `vika start <新实例>` 和 `vika restart web`，updater 每次请求都重读 manifest，不用重启。
+在 `config.json` 的 `agents` 增加 agent。每个 agent 都要使用独立的 id、端口、dataDir、workspace，飞书实例还要独立的 profile，还要独立的 OV 配置；它们共享 release、Web 与 updater。`channel` 保留单 Connector 兼容行为；可选 `connectors` 数组允许一个 Core 同时启动 `lark`、`weixin`、`telegram` 和 `email`（邮箱至少搭配一个聊天 IM）。省略两者时走飞书。最简单的是再运行一次 `vika setup`；手改 manifest 后执行 `vika start <新实例>` 和 `vika restart web`，updater 每次请求都重读 manifest，不用重启。
+
+自动召回按实例设置：在 `config.json` 的 `agents[]` 中填写 `"ovAutoRecall": true`，重启实例后生效，缺省为 `false`。开启时固定 `OPENVIKING_RECALL_PEER_SCOPE=actor`；不会关闭自动捕获或会话历史同步。运行中 OV 不可用时继续收发消息，新会话允许暂时跳过 OV 历史，后台同步会重试。

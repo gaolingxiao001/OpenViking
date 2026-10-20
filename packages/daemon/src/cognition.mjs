@@ -56,9 +56,7 @@ function assertBounded(text, maxChars) {
 // assembled OV context; no SQL journal/history fallback, including on failure.
 export function cognitionHistoryPrefix(store, epoch, throughSeq = 0, maxChars = 120_000, afterSeq = 0) {
   if (afterSeq > 0) return { throughSeq, text: '' };
-  // An instance without OpenViking has no history to hand over.
-  if (!store.getOVContext) return { throughSeq, text: '' };
-  const context = store.getOVContext(epoch);
+  const context = store.getOVContext?.(epoch);
   if (!context) {
     if (throughSeq === 0) return { throughSeq, text: '' };
     throw new CognitionLimitError('OpenViking context is not prepared; journal replay is disabled');

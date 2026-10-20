@@ -41,7 +41,7 @@
 
 3. 按新规则改 `~/.vika/config.json`：
    - 没有 `lark` Connector 的实例（例如纯微信）删掉 `profile`，否则启动会报 `profile is only used by the lark connector`。
-   - `ovConfig` 现在可选；不用 OV 的实例可以删掉。
+   - `ovConfig` 必填；安装及启动前必须有可用的 OV。`ovAutoRecall` 默认 `false`，可按实例设为 `true`，召回范围固定为 `actor`。
    - `emailConfig` 换成了邮箱列表 `emailAccounts`：`"emailConfig": "<账号文件>"` 改成 `"emailAccounts": [{ "id": "email-gmail", "config": "<账号文件>" }]`，`id` 是 `email-` 加小写字母、数字和 `-`。
 
 4. 每个实例的数据库改名，连同 SQLite 的 `-wal`、`-shm` 文件：

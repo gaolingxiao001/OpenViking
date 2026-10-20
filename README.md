@@ -31,7 +31,7 @@ Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `c
 
 ### 微信单聊 MVP
 
-可以在 `config.json` 中增加一个微信实例。`channel` 是兼容字段；`connectors` 声明该 Core 启动的 Connector。`profile` 是飞书 Connector 的 lark-cli profile，纯微信实例不填（填了会被拒绝）；`ovConfig` 可选：
+可以在 `config.json` 中增加一个微信实例。`channel` 是兼容字段；`connectors` 声明该 Core 启动的 Connector。`profile` 是飞书 Connector 的 lark-cli profile，纯微信实例不填（填了会被拒绝）；`ovConfig` 必填，`ovAutoRecall` 默认为 `false`：
 
 ```json
 {
@@ -221,6 +221,12 @@ vika upgrade all
 `vika-updater` 监听权限为 `0600` 的本机 Unix socket，不开放 TCP 端口，也不读取 Agent 的源码 checkout。它只接受 manifest 中的 agent id 和 `all`，每次请求都重读 manifest；请求不能传版本、路径、下载地址或 shell。它只装下载地址上 `latest` 指向的已发布版本：核对 SHA-256、用安装包自带的 Node 冒烟检查后才原子切换 `current`，随后从同一份 ecosystem config 滚动目标 daemon，`all` 还会滚动共享 Web，最后从新版本重启自己。相同版本的第二次请求直接复用。整个过程和安装脚本共用同一把 deploy lock。
 
 ### 可横向扩展的多 Agent 部署
+
+OpenViking 是 Vika 的必需组件：setup 新建实例时，会在接入 IM 前列出已检测连接，并始终提供手动填写地址与凭据、导入配置文件的入口，支持远端和自定义端口；验证通过才继续。setup 修改已有实例时，直接进入实例设置菜单，选择与其他配置项并列的 `OpenViking` 才打开连接配置；修改保留原 actor，选择「保存」后生效，返回菜单或放弃修改不覆盖原配置。安装脚本不提问：终端里的首次安装直接进入 setup 配置 OV；其余安装（已有实例、`--no-setup` 或无终端）要求 OV 已经可用，否则不切换版本。daemon 启动时 OV 拒绝配置或凭据会退出；只是暂时连不上则先不带历史启动，恢复后自动同步。每个实例必须提供独立的 `ovConfig`。配置中的 `agents[].ovAutoRecall` 是布尔值，默认 `false`；改为 `true` 后启用 runtime OV 插件的自动召回，固定使用 `actor` 范围。自动 capture、compact 时 commit、daemon session 历史同步不受该开关影响。修改后重启实例生效，runtime 需已加载最新 OV 插件。
+
+新建实例的连接列表来自环境变量指定的配置、Vika 保存的连接和 OpenViking CLI 配置，不列出其他实例的配置；修改实例时额外提供该实例当前的配置。选定连接后，新实例会生成自己的配置文件，`actor_peer_id` 固定为新实例 ID。已有配置指向本机默认地址时，不再重复进行无身份探测。Trusted 模式需要填写 Account 和 User；缺少这些字段会提示服务已启动但需要配置身份，补齐后通过身份检查才能继续。
+
+运行中 OV 请求失败不会退出 daemon，也不主动向聊天发送故障通知。新原生会话可跳过 OV 历史继续处理消息；本地同步账本保留，后台恢复后重试。已有会话不会在恢复后突然补入历史；下次新会话可再次读取 OV。归档完整性错误仍会阻止不完整的历史交接，不回退到 SQLite 回放。
 
 每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 JSON manifest，完整格式见 [`config.example.json`](./config.example.json)。顶层只接受 `version`、`defaultInstance`、`env`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`，可用 `channel` 选择 `lark` 或 `weixin`，省略时默认 `lark`。
 

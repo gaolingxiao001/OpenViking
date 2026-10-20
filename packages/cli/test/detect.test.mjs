@@ -16,9 +16,9 @@ function healthServer(responses) {
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push({ url, headers: init.headers });
-    const answer = responses[url];
+    const answer = responses[url] ?? (url.endsWith('/api/v1/system/status') ? { status: 'ok', result: { initialized: true } } : null);
     if (!answer) throw new TypeError('fetch failed');
-    return { ok: true, status: 200, json: async () => answer };
+    return Response.json(answer);
   };
   return { calls, fetchImpl };
 }
@@ -27,7 +27,7 @@ test('OpenViking: the user config wins, its credentials prove who the user is', 
   const home = tempDir(t, 'vika-ov-');
   fs.mkdirSync(path.join(home, '.openviking'));
   fs.writeFileSync(path.join(home, '.openviking', 'ovcli.conf'), JSON.stringify({
-    url: 'https://ov.example', api_key: 'key-1', account: 'acme', plugin: { recall: true }, agent_id: 'legacy',
+    url: 'https://ov.example', api_key: 'key-1', account: 'acme', plugin: { recall: true }, agent_id: 'legacy', actor_peer_id: 'source-actor',
   }));
   const { calls, fetchImpl } = healthServer({
     'https://ov.example/health': { status: 'ok', auth_mode: 'api_key', user_id: 'amy', version: '0.4' },
@@ -46,6 +46,7 @@ test('OpenViking: the user config wins, its credentials prove who the user is', 
     url: 'https://ov.example', api_key: 'key-1', account: 'acme', plugin: { recall: true }, actor_peer_id: 'primary',
   });
   assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(detected.configPath, 'utf8')).actor_peer_id, 'source-actor');
 });
 
 test('OpenViking: a config whose server is down is reported, not offered', async (t) => {
@@ -54,7 +55,7 @@ test('OpenViking: a config whose server is down is reported, not offered', async
   fs.writeFileSync(config, JSON.stringify({ url: 'https://down.example' }));
   const detected = await detectOpenViking({ env: { OPENVIKING_CLI_CONFIG_FILE: config }, homeDir: home, fetchImpl: healthServer({}).fetchImpl });
   assert.equal(detected.usable, false);
-  assert.equal(detected.reason, '连不上');
+  assert.match(detected.reason, /服务不可用/);
 });
 
 test('OpenViking: without a config only a dev-mode local server is usable', async (t) => {
@@ -71,8 +72,68 @@ test('OpenViking: without a config only a dev-mode local server is usable', asyn
     [`${LOCAL_OV_URL}/health`]: { status: 'ok', auth_mode: 'trusted' },
   }).fetchImpl });
   assert.equal(trusted.usable, false);
-  assert.match(trusted.reason, /需要凭据/);
-  assert.equal(await detectOpenViking({ env: {}, homeDir: home, fetchImpl: healthServer({}).fetchImpl }), null);
+  assert.match(trusted.reason, /凭据/);
+  assert.equal((await detectOpenViking({ env: {}, homeDir: home, fetchImpl: healthServer({}).fetchImpl })).usable, false);
+});
+
+test('OpenViking: public health never substitutes for a protected credential check', async (t) => {
+  const home = tempDir(t, 'vika-ov-auth-');
+  const configPath = path.join(home, 'instance.json');
+  fs.writeFileSync(configPath, JSON.stringify({ url: 'https://ov.example', api_key: 'secret' }));
+  const calls = [];
+  const detected = await detectOpenViking({ homeDir: home, env: {}, configPath, fetchImpl: async (url, init) => {
+    calls.push(url);
+    assert.equal(init.headers['X-API-Key'], 'secret');
+    return url.endsWith('/health')
+      ? Response.json({ status: 'ok', auth_mode: 'api_key' })
+      : Response.json({ status: 'error', message: 'secret remote details' }, { status: 401 });
+  } });
+  assert.equal(detected.usable, false);
+  assert.match(detected.reason, /服务已启动.*HTTP 401/);
+  assert.deepEqual(calls, ['https://ov.example/health', 'https://ov.example/api/v1/system/status']);
+  assert.doesNotMatch(detected.reason, /secret/);
+});
+
+test('OpenViking: the identity check costs one status call, names the user, and waits out a server still starting', async (t) => {
+  const home = tempDir(t, 'vika-ov-status-');
+  const config = { url: 'https://ov.example', api_key: 'secret' };
+  for (const [initialized, usable] of [[true, true], [false, false]]) {
+    const calls = [];
+    const detected = await detectOpenViking({ homeDir: home, env: {}, config, fetchImpl: async (url) => {
+      calls.push(url);
+      return url.endsWith('/health')
+        ? Response.json({ status: 'ok', auth_mode: 'api_key' })
+        : Response.json({ status: 'ok', result: { initialized, user: 'amy' } });
+    } });
+    assert.deepEqual(calls, ['https://ov.example/health', 'https://ov.example/api/v1/system/status']);
+    assert.equal(detected.usable, usable);
+    if (usable) assert.equal(detected.user, 'amy');
+    else assert.match(detected.reason, /还在初始化/);
+  }
+});
+
+test('OpenViking: a running Trusted server without Account or User requires configuration', async (t) => {
+  const home = tempDir(t, 'vika-ov-trusted-');
+  for (const identity of [{}, { account: 'team' }, { user: 'owner' }]) {
+    const result = await detectOpenViking({ env: {}, homeDir: home, config: { url: LOCAL_OV_URL, ...identity },
+      fetchImpl: async (url) => url.endsWith('/health')
+        ? Response.json({ status: 'ok', auth_mode: 'trusted' })
+        : Response.json({ status: 'error', message: 'private server details' }, { status: 400 }),
+    });
+    assert.equal(result.usable, false);
+    assert.equal(result.authMode, 'trusted');
+    assert.match(result.reason, /服务已启动.*Account.*User/);
+    assert.doesNotMatch(result.reason, /服务不可用|private server details/);
+  }
+});
+
+test('OpenViking: a missing explicit config never falls back to the default identity', async (t) => {
+  const home = tempDir(t, 'vika-ov-missing-');
+  let calls = 0;
+  const detected = await detectOpenViking({ env: {}, homeDir: home, configPath: path.join(home, 'missing'),
+    fetchImpl: async () => { calls++; return Response.json({ status: 'ok' }); } });
+  assert.equal(detected.usable, false);
+  assert.equal(calls, 0);
 });
 
 test('runtimes: installed and logged-in CLIs are offered, the rest say what is missing', async (t) => {

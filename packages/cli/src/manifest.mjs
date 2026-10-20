@@ -43,6 +43,15 @@ export function readManifest(env = process.env) {
   return { path: filePath, value: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
 }
 
+export function availableInstanceOvConfig(env, id, reserved = new Set()) {
+  const base = path.join(vikaHome(env), 'ov', id);
+  let target = `${base}.json`;
+  for (let suffix = 2; reserved.has(target) || fs.existsSync(target); suffix += 1) {
+    target = `${base}-${suffix}.json`;
+  }
+  return target;
+}
+
 export function instanceIdProblem(id, manifest) {
   if (!INSTANCE_ID.test(id)) return t('只能用小写字母、数字和 -，以字母开头，最多 32 个字符', 'Lowercase letters, digits and -, starting with a letter, at most 32 characters');
   if (RESERVED_INSTANCE_IDS.includes(id)) return t(`${list(RESERVED_INSTANCE_IDS)} 是保留名字`, `${list(RESERVED_INSTANCE_IDS)} are reserved`);

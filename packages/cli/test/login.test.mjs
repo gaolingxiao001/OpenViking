@@ -11,6 +11,7 @@ function agent(home, id, overrides = {}) {
   return {
     id, displayName: id.toUpperCase(), channel: 'lark', connectors: ['lark'], profile: `vika-${id}`,
     port: 3738, dataDir: path.join(home, '.vika', 'data', id), workspace: path.join(home, 'ws', id), model: 'codex:',
+    ovConfig: path.join(home, '.vika', 'ov', `${id}.json`),
     ...overrides,
   };
 }
