@@ -184,10 +184,12 @@ export function normalizeLarkMessage(input, instance = 'lark') {
   const chatId = valueOrNull(message.chat_id ?? input.chat_id);
   const chatType = valueOrNull(message.chat_type ?? input.chat_type) ?? 'unknown';
   const messageType = valueOrNull(message.message_type ?? input.message_type) ?? 'unknown';
-  const senderId = valueOrNull(
-    sender.sender_id?.open_id ?? sender.sender_id?.user_id ?? input.sender_id,
-  );
   const senderType = valueOrNull(sender.sender_type ?? input.sender_type);
+  // Another bot's message (with the include_bot permission) may carry no
+  // user id; it still needs an actor, so the Core knows a bot wrote it.
+  const senderId = valueOrNull(
+    sender.sender_id?.open_id ?? sender.sender_id?.user_id ?? sender.sender_id?.app_id ?? input.sender_id,
+  ) ?? (['app', 'bot'].includes(senderType) ? 'bot' : null);
   const rootId = valueOrNull(message.root_id ?? input.root_id);
   const parentId = valueOrNull(message.parent_id ?? input.parent_id);
   const threadId = valueOrNull(message.thread_id ?? input.thread_id);

@@ -82,6 +82,16 @@ test('setup refuses to build on a manifest that does not load', (t) => {
   assert.deepEqual(readManifest({ HOME: path.join(home, 'nobody') }).value, null);
 });
 
+test('Slack can be primary or secondary; Ark is rejected', (t) => {
+  const home = tempHome(t);
+  const filename = path.join(home, '.vika', 'config.json');
+  const sl = agent('sl', { channel: 'slack', connectors: ['slack'], profile: undefined, model: 'pi' });
+  assert.doesNotThrow(() => validateManifest(filename, withInstance(null, sl)));
+  assert.doesNotThrow(() => validateManifest(filename, withInstance(null, agent('sl', { connectors: ['lark', 'slack', 'telegram'] }))));
+  assert.throws(() => validateManifest(filename, withInstance(null, { ...sl, model: 'ark',
+    volcSessionId: 'session-test', volcEnvironmentId: 'env-test' })), /slack connector cannot use the ark runtime/);
+});
+
 test('Telegram can be primary or secondary; Ark and a stray Lark profile are rejected', (t) => {
   const home = tempHome(t);
   const filename = path.join(home, '.vika', 'config.json');

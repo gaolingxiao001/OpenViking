@@ -1,6 +1,6 @@
 # Vika
 
-把你本机上的 coding agent 接进飞书、微信和 Telegram，也可以接收邮箱事件。Core 维护一个共享的 Agent session 和 OpenViking 空间；每个消息源由独立 Connector 子进程接入。
+把你本机上的 coding agent 接进飞书、微信、Telegram 和 Slack，也可以接收邮箱事件。Core 维护一个共享的 Agent session 和 OpenViking 空间；每个消息源由独立 Connector 子进程接入。
 
 适合想把 Codex、TraeX、Claude、Pi 或方舟 Agent 变成长期协作者的人。上下文沉淀在 OpenViking，不用每次重新解释项目背景；代码、凭据和本地工具依然留在自己的机器上。
 
@@ -21,13 +21,13 @@
 
 ## 架构，够用就行
 
-Core 根据 manifest 启动 Connector 子进程。飞书 Connector 通过 `lark-cli` 长连接收消息；微信 Connector 通过腾讯 `openclaw-weixin` 的 iLink HTTP 协议长轮询。Telegram Connector 通过官方 Bot API 的 `getUpdates` 长轮询。它们输出统一的 `EVENT` 信封，并进入同一个 `AgentRuntime`。每个 Connector 单独失败、单独重连：微信登录过期这类问题只让微信停下，飞书和 runtime 照常运行。出站方向，所有 runtime 都调用同一套 Agent 工具（`send_message`、`reply_message` 等）：Codex/TraeX/Claude/Pi 均经同一个 MCP 适配器，只负责把调用转发给 Core 的本机 socket。Core 统一校验运行权、新鲜度、路由与内容，写入唯一的 `outbox` 表后再由对应 Connector 执行；daemon 自己的失败通知和 slash 命令回复走同一条路径。协议和生命周期见 [Connector protocol 0.2](docs/connector-protocol.md)。
+Core 根据 manifest 启动 Connector 子进程。飞书 Connector 通过 `lark-cli` 长连接收消息；微信 Connector 通过腾讯 `openclaw-weixin` 的 iLink HTTP 协议长轮询。Telegram Connector 通过官方 Bot API 的 `getUpdates` 长轮询。Slack Connector 通过 Socket Mode 的 WebSocket 长连接。它们输出统一的 `EVENT` 信封，并进入同一个 `AgentRuntime`。每个 Connector 单独失败、单独重连：微信登录过期这类问题只让微信停下，飞书和 runtime 照常运行。出站方向，所有 runtime 都调用同一套 Agent 工具（`send_message`、`reply_message` 等）：Codex/TraeX/Claude/Pi 均经同一个 MCP 适配器，只负责把调用转发给 Core 的本机 socket。Core 统一校验运行权、新鲜度、路由与内容，写入唯一的 `outbox` 表后再由对应 Connector 执行；daemon 自己的失败通知和 slash 命令回复走同一条路径。协议和生命周期见 [Connector protocol 0.2](docs/connector-protocol.md)。
 
-Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `connector_events`，按来源实例和事件 ID 去重；聊天、消息和回复路由字段可选。GitHub issue、Calendar 提醒等可以使用 `kind`、`subject`、标题与正文进入 runtime，无须包装成飞书消息。内置 Connector 为飞书、微信、Telegram 和邮箱（IMAP/SMTP）；新增来源需实现 Connector。非聊天事件只能经 `notify_owner` 通知 owner（你本人）：Agent 不选目的地，Core 发到主渠道（`channel`）上你的私聊。主渠道就是机器人主动找你时用的 IM：你没先找它、它直接找你的消息（新邮件提醒、待你确认的邮件回复等）都发到这里；你在哪个 IM 里找它，它就在哪里回你。owner 身份由 Connector 自检时给出：飞书是该 profile 用 lark-cli 做 user 登录的账号，微信是扫码登录的账号，Telegram 是通过一次性 Start 链接验证的账号。协议已更新为 0.2，本次为未上线产品的直接 schema 变更，使用新的数据目录，不迁移旧 `inbound` 表。
+Core 的入站模型同时支持聊天与非聊天事件：所有来源写入 `connector_events`，按来源实例和事件 ID 去重；聊天、消息和回复路由字段可选。GitHub issue、Calendar 提醒等可以使用 `kind`、`subject`、标题与正文进入 runtime，无须包装成飞书消息。内置 Connector 为飞书、微信、Telegram、Slack 和邮箱（IMAP/SMTP）；新增来源需实现 Connector。非聊天事件只能经 `notify_owner` 通知 owner（你本人）：Agent 不选目的地，Core 发到主渠道（`channel`）上你的私聊。主渠道就是机器人主动找你时用的 IM：你没先找它、它直接找你的消息（新邮件提醒、待你确认的邮件回复等）都发到这里；你在哪个 IM 里找它，它就在哪里回你。owner 身份由 Connector 自检时给出：飞书是该 profile 用 lark-cli 做 user 登录的账号，微信是扫码登录的账号，Telegram 是通过一次性 Start 链接验证的账号，Slack 是在私聊里给机器人发一次性口令的账号。协议已更新为 0.2，本次为未上线产品的直接 schema 变更，使用新的数据目录，不迁移旧 `inbound` 表。
 
 ## 安装
 
-一条命令：`curl -fsSL <下载地址>/install.sh | sh`，装好后 `vika setup` 接飞书、微信、Telegram 或邮箱；界面有中文和英文（`--lang zh|en`）。机器上不需要 Node。细节看 [install.md](./install.md)：依赖、setup、升级回滚、开机自启、多 agent 和发布新版本。
+一条命令：`curl -fsSL <下载地址>/install.sh | sh`，装好后 `vika setup` 接飞书、微信、Telegram、Slack 或邮箱；界面有中文和英文（`--lang zh|en`）。机器上不需要 Node。细节看 [install.md](./install.md)：依赖、setup、升级回滚、开机自启、多 agent 和发布新版本。
 
 ### 微信单聊 MVP
 
@@ -87,6 +87,21 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 纯 Telegram 实例使用 `"channel": "telegram"`、`"connectors": ["telegram"]`，不填 `profile`；混合实例可用 `"connectors": ["lark", "telegram", "email"]`，有飞书时仍须配置 `profile`。Codex、TraeX、Claude、Pi 均可用，方舟 Self-hosted Ark 暂不支持。
 
 Bot token、owner/chat ID、接收游标及回复路由保存在 `<dataDir>/telegram/state.sqlite3`（0600，父目录 0700），token 不写入 manifest 或日志；媒体保存在 `<dataDir>/telegram/media` 并随保留周期清理。Telegram 最多保存 24 小时的待接收更新；当前接收仍使用 protocol 0.2 的 stdout 投递与游标机制，没有新增 Core 持久化 ACK 保证。发送只对明确的 `429 retry_after` 做有限重试，网络中断等结果不明的发送不会自动重发。
+
+### Slack
+
+使用你自己工作区里的内部 Slack App，通过 [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode) 收消息，不需要公网回调地址。运行 Vika 的机器需要能通过 HTTPS/WSS 访问 `slack.com`。每个 Vika 实例用一个独立的 App：Slack 会把事件随机分给同一个 App 的所有连接，两个程序共用一个 App 会各丢一部分消息，Vika 发现时会停下并提示。
+
+1. 运行 `vika setup`，新建或修改实例，勾选 Slack。
+2. 打开终端里给出的链接，选择工作区，用预填的配置创建 App（链接打不开时，在 [api.slack.com/apps](https://api.slack.com/apps) 选 Create New App → From a manifest，粘贴 `<dataDir>/slack/app-manifest.json`）。工作区开启了应用审批时，安装要等管理员批准。
+3. 点 **Install to Workspace**，在 OAuth & Permissions 复制 Bot User OAuth Token（`xoxb-`）；在 Basic Information → App-Level Tokens 生成一个带 `connections:write` 的 token（`xapp-`）。两个 token 都在终端的隐藏输入框粘贴。
+4. 终端显示一个一次性口令（`vika-xxxxxxxx`），在 Slack 里私聊这个机器人发送它，5 分钟内完成绑定；发送口令的人就是 owner。之后要换 token 或换 owner，用 `vika login slack [实例]`，验证期间实例暂停，期间别人发给机器人的消息会在恢复后补上。
+
+和飞书一样，工作区里任何人都可以私聊机器人；频道要先用 `/invite @机器人` 把它拉进去才会收到消息，群里不用 @ 它，是否回复由 Agent 判断。和其他公司共享的 Slack Connect 频道照常接收，消息行会标上 `external=true`，按外部群的信息边界处理。其他 App 发的消息（GitHub、告警、其他 AI 机器人）也会交给 Agent，行内标 `sender=bot` 和 `bots_since_human=N`（自上一条真人消息以来这里有几条 bot 消息）。要不要回、和别的机器人协作几轮，都由 Agent 按「有必要才说话」判断，不需要 @。只有失控时才有一根保险丝：同一个频道或线程里一直没有真人说话、Agent 已经回应了 20 条 bot 消息，再回就会被拦下，并私聊通知你一次；有人在那里说一句话就恢复。阈值用 `VIKA_BOT_REPLY_FUSE` 调，设为 `0` 关闭。飞书也是同一套规则。
+
+Slack 没有引用回复：Agent 在频道里回某条消息时会回到它的线程里，线程里的消息自然也回到线程。Agent 写的 Markdown 发送前转成 Slack 的格式，单条最多 12000 字符，更长的发文件；`@channel`/`@here` 不会被发出。支持文本、文件（工作区文件最多 20 MiB，入站文件按需下载）、@提及、reaction 和撤回；暂不支持按钮卡片、读聊天历史和搜索，邮件审批用编号消息（「发送 N」）。Slack 会把 `/` 开头的消息当成 Slack 命令拦下，要用 `/new`、`/model` 这些命令时前面加一个空格，发 ` /new`。
+
+纯 Slack 实例使用 `"channel": "slack"`、`"connectors": ["slack"]`，不填 `profile`；Codex、TraeX、Claude、Pi 均可用，方舟 Self-hosted Ark 暂不支持。两个 token、owner、回复路由、显示名缓存和待处理消息保存在 `<dataDir>/slack/state.sqlite3`（0600，父目录 0700），token 不写入 manifest 或日志。收到的消息先存进这个库再向 Slack 确认，所以 Connector 重启不会丢掉已确认的消息；daemon 整体停机期间 Slack 只短暂重试，停得久了会漏消息。Slack 没有幂等键，结果不明的发送不会自动重发。
 
 ### 邮箱
 
@@ -159,7 +174,7 @@ Bot token、owner/chat ID、接收游标及回复路由保存在 `<dataDir>/tele
 
 ## 文档附件与交互卡片
 
-`send_message` / `reply_message` 的正文可选择 `markdown`、`file_path`、`file_key`、`card` 或 `choices`，每次只选一种（微信、Telegram 只支持 `markdown` 与 `file_path`）。文件相对于 Agent workspace，最多 20 MiB，图片按图片发送；自定义卡片支持 inline Card 1.0/2.0，最多 30 KiB。话题内的文件和卡片使用 reply + `reply_in_thread: true`。
+`send_message` / `reply_message` 的正文可选择 `markdown`、`file_path`、`file_key`、`card` 或 `choices`，每次只选一种（微信、Telegram、Slack 只支持 `markdown` 与 `file_path`）。文件相对于 Agent workspace，最多 20 MiB，图片按图片发送；自定义卡片支持 inline Card 1.0/2.0，最多 30 KiB。话题内的文件和卡片使用 reply + `reply_in_thread: true`。
 
 `choices` 生成带按钮的单选问题，发送立即返回；用户点击后，daemon 校验答题人、有效期与重复提交，将答案作为新输入交给 Agent，并尽力更新原卡片。问题状态与话题路由持久化到 SQLite。普通卡片消息也会进入 Agent，正文缺失时显示 `[card]`。完整参数、限制和调用示例见 [消息格式指南](packages/daemon/agent/lark-message-formats.md)。这些出站参数对所有 runtime 一致；只有经 Agent 工具发出的卡片才有回调登记。
 
@@ -171,7 +186,7 @@ Bot token、owner/chat ID、接收游标及回复路由保存在 `<dataDir>/tele
 - 所有聊天共享一个全局 runtime/session，不同 chat 的消息会交错进入同一上下文，用每行的 `chat=` 标签区分归属。
 - 群聊的 400ms 从首条待处理消息开始计算，后续补充不会重置时间。不同 chat/thread 各自排队，先到期的先开 turn。Codex/TraeX/Claude/Pi 已有 turn 时使用即时 steer；Ark 的后续消息进入下一 turn。
 - 明确问题、任务、纠正和有效续聊通常会回复；“收到”“谢谢”、闲聊、状态播报、人与人之间的对话、已经有人答好的问题通常保持静默。
-- 图片、文件和音视频会以受限资源引用进入 Agent；Codex/TraeX/Claude/Pi 可用 `get_message_media` 按消息中的 image_key/file_key（微信、Telegram 按消息 ID）取回本地文件，图片通过 MCP 工具结果直接交给模型，内容本身不会直接塞进入站 prompt。Self-hosted Ark 不继承 daemon 的 Agent 工具，只有 Worker 环境另行提供等价本地能力时才能读取。未知消息类型不会触发回复。
+- 图片、文件和音视频会以受限资源引用进入 Agent；Codex/TraeX/Claude/Pi 可用 `get_message_media` 按消息中的 image_key/file_key（微信、Telegram 按消息 ID，Slack 按消息 ID 和文件 ID）取回本地文件，图片通过 MCP 工具结果直接交给模型，内容本身不会直接塞进入站 prompt。Self-hosted Ark 不继承 daemon 的 Agent 工具，只有 Worker 环境另行提供等价本地能力时才能读取。未知消息类型不会触发回复。
 - 本机 slash 命令在私聊里直接发 `/` 开头的消息，由 daemon 优先处理并回复，不等待当前模型 turn：`/new`、`/help`、`/status`、`/runtime [名称]`、`/model [名称]`、`/effort [档位]`。`/new` 开启干净会话；对 Ark 会先成功创建远端 session，再提交本地 epoch。`/runtime`（可简写 `/run`）查看或切换 Codex、TraeX、Claude、Pi、Ark，例如 `/run claude`、`/run ark`；重复选择当前 runtime 保留会话。跨 runtime 切换退役旧 native session，恢复目标 runtime 上次选择的模型，并在第一条真实消息里接上 OV archive overview + live messages。`/model` 只查看或切换当前 runtime 的模型，例如切到 Claude 后 `/model sonnet`，切到 Pi 后 `/model provider/id`；不会隐式切 runtime，也不会新建底层会话。Claude 模型列表来自 CLI，展示名称、实际版本 ID 和支持的 effort。`/model` 和 `/effort` 在下一轮生效，保留当前 turn 和上下文。`/effort` 只展示、校验当前模型的档位；能力信息不可用时不猜测候选项。切换模型时一起校验原 effort：仍受支持就保留，否则优先采用目标模型声明的默认档位，再选其支持的 medium 或首个档位，并在回执中说明；明确不支持 effort 时取消额外配置。目标能力未知时保留原设置并提示重试。切 runtime 时，保存的模型已不可用会回退该 runtime 的默认模型；目录发现失败不等于模型不存在，成功切换后才保存回退结果。Ark 的 model/effort 由远端 Agent 配置管理。`/status` 只看主模型是否正在采样及持续时间；主模型等工具或 subagent 时显示空闲。prompt 和代码更新通过当前实例自己的 `vika upgrade <instance-id>` 发布。
 - 连续 10 分钟没有成功 outbound delivery 后，daemon 只在后续入站消息的可信 metadata 里加 `idle=<seconds>s`，不会预先 reaction。Agent 仍先按正常规则判断是否要处理；Codex/TraeX/Claude/Pi 只有决定处理且预计是长工作时，才调用 `react_to_message` 的 `temporary: true` 发一个 `OnIt`。Ark 的 Worker/CLI 路径不使用 daemon 的临时 reaction helper，只支持最终 reaction。无需回复的群消息和短任务不会产生额外噪音；仅查看后保持静默也不会消费 idle 窗口。Core 按 chat/thread 在内存保存 exact `reaction_id`，同 scope 下一次成功的最终文字或 reaction 发出后立即删除，不轮询、不扫 DB。删除失败或进程被 `SIGKILL` 时可能残留，这是 best-effort UX 的明确边界。可用 `VIKA_IDLE_REACTION_AFTER_MS=0` 关闭 hint。
 - 显式不回复按实例可选，**默认关闭**：`config.json` 里该实例的 `agents[].explicitSilence` 设为 `true` 才开启，重启实例生效。开启后 Codex/TraeX/Claude/Pi 不回复时调用 `stay_silent`，每条聊天消息（各 IM 的私聊和群都算）都要有一个决定：投递或 `stay_silent`，记在 SQLite `decisions` 表；一轮结束还没表态的消息会带 `undecided=1` 再给模型一次，只提醒一次。关闭时 prompt、工具和 policyHash 与没有这个功能时完全一样；开关一改，该实例的 policyHash 就变，已存的 native thread 不再 resume。Ark（Volc）没有 Core 工具，不支持这个功能：开着开关跑在 Ark 上时，daemon 启动时（以及 `/runtime` 切到 Ark 时）打一条 warn 日志 `explicit_silence_not_applied`。
@@ -188,7 +203,7 @@ Codex/TraeX/Claude/Pi（MCP）的发消息、回复、reaction、撤回都经 Co
 
 1. 使用长连接订阅 `im.message.receive_v1`。
 2. 私聊消息权限 `im:message.p2p_msg`（或对应只读权限）。
-3. 群聊不 `@` 也要收到消息，需要敏感权限 `im:message.group_msg`；只有 group-at 权限时，平台不会投递普通群消息。
+3. 群聊不 `@` 也要收到消息，需要敏感权限 `im:message.group_msg`；只有 group-at 权限时，平台不会投递普通群消息。要收到群里其他机器人的消息，还需要 `im:message.group_msg.include_bot:read`（只有 @ 权限时对应 `im:message.group_at_msg.include_bot:readonly`）；`vika setup` 建应用时已经申请。
 4. 机器人发消息权限 `im:message:send_as_bot`。
 5. 获取机器人所在群列表权限 `im:chat:read`。
 6. 把机器人加入需要参与的群，并把应用可见范围限制为自己的日常使用范围。

@@ -18,6 +18,13 @@ function optionalId(value, label) {
   return value == null ? null : identifier(value, label);
 }
 
+// A display name as the Connector saw it: untrusted, one line, bounded.
+function displayName(value) {
+  if (value == null) return null;
+  if (typeof value !== 'string') throw new Error('actor name must be text');
+  return value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').trim().slice(0, 100) || null;
+}
+
 export function conversationKeyFor(instance, conversation) {
   return JSON.stringify([instance, 'conversation', conversation.tenant_id ?? null,
     conversation.id, conversation.thread_id ?? null]);
@@ -41,9 +48,11 @@ export function normalizeEvent(input) {
   const subject = { type: identifier(subjectInput.type, 'subject type', 64),
     id: identifier(subjectInput.id, 'subject id') };
   if (!KIND.test(subject.type)) throw new Error('invalid subject type');
+  const actorName = value.actor == null ? null : displayName(object(value.actor, 'actor').name);
   const actor = value.actor == null ? null : {
-    id: identifier(object(value.actor, 'actor').id, 'actor id'),
+    id: identifier(value.actor.id, 'actor id'),
     type: identifier(value.actor.type, 'actor type', 64),
+    ...(actorName ? { name: actorName } : {}),
   };
   const body = object(value.content ?? {}, 'event content');
   if (body.title != null && typeof body.title !== 'string') throw new Error('event title must be text');
@@ -60,6 +69,8 @@ export function normalizeEvent(input) {
     type: identifier(value.conversation.type, 'conversation type', 64),
     tenant_id: optionalId(value.conversation.tenant_id, 'tenant id'),
     thread_id: optionalId(value.conversation.thread_id, 'thread id'),
+    // People from outside the owner's organization are in it.
+    ...(value.conversation.external === true ? { external: true } : {}),
   };
   const mentions = value.message?.mentions ?? [];
   if (!Array.isArray(mentions) || mentions.length > 100) throw new Error('invalid mentions');
@@ -101,7 +112,8 @@ export function normalizeEvent(input) {
     messageId: message?.id ?? null, messageType: message?.type ?? null,
     rootId: message?.root_id ?? null, parentId: message?.parent_id ?? null,
     threadRootId: message?.thread_root_id ?? null, mentions: message?.mentions ?? [],
-    senderId: actor?.id ?? null, senderType: actor?.type ?? null,
+    senderId: actor?.id ?? null, senderType: actor?.type ?? null, senderName: actorName,
+    external: conversation?.external === true,
   };
 }
 

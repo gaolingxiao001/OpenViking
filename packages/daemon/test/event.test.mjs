@@ -50,6 +50,20 @@ describe('normalizeEvent', () => {
     assert.equal(event.conversationKey, JSON.stringify(['work', 'conversation', 'tenant-1', 'oc-chat', 'omt-topic']));
   });
 
+  it('keeps another bot\'s message marked as a bot even without a user id', async () => {
+    const { formatInboundLine } = await import('../src/runtime-input.mjs');
+    const event = normalizeEvent({
+      header: { event_id: 'evt-bot', event_type: 'im.message.receive_v1', tenant_key: 'tenant-1' },
+      event: {
+        sender: { sender_id: {}, sender_type: 'app' },
+        message: { message_id: 'om-bot', chat_id: 'oc-chat', chat_type: 'group', message_type: 'text',
+          content: JSON.stringify({ text: 'build failed' }), create_time: String(Date.now()) },
+      },
+    });
+    assert.deepEqual(event.actor, { id: 'bot', type: 'app' });
+    assert.match(formatInboundLine(event), / sender=bot\] build failed$/);
+  });
+
   it('keeps an ordinary quoted reply in the main conversation without thread_id', () => {
     const event = normalizeEvent({
       type: 'im.message.receive_v1',

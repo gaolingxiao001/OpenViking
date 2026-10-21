@@ -1,4 +1,4 @@
-import { lookupMemberName } from './roster.mjs';
+import { lookupMemberName, sanitizeMemberName } from './roster.mjs';
 
 // Runtime-neutral authenticated envelope shared by every adapter. Untrusted
 // content stays on one physical line so it cannot forge metadata.
@@ -77,8 +77,13 @@ export function isoMinute(ms) {
   return `${new Date(ms).toISOString().slice(0, 16)}Z`;
 }
 
-function fromLabel(chatId, senderId, resolveName = null, source = 'lark') {
-  if (source !== 'lark') return shortenId(senderId);
+// Senders that are another bot or app: integrations, alerts, other agents.
+export const BOT_SENDERS = new Set(['bot', 'app']);
+
+// Lark names come from the chat roster; other connectors name the sender in
+// the event itself.
+function fromLabel(chatId, senderId, resolveName = null, source = 'lark', senderName = null) {
+  if (source !== 'lark') return sanitizeMemberName(senderName) ?? shortenId(senderId);
   if (resolveName) {
     try {
       const resolved = resolveName(chatId, senderId);
@@ -127,11 +132,14 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
         ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName, message.source)
         : shortenId(replyTo.id)}`
     : '';
-  const line = `[chat=${chatTag(metadataTag(message.chatId), message.threadId)} source=${message.source || 'lark'}`
+  const bots = authenticated?.botsSinceHuman;
+  const botsTag = Number.isSafeInteger(bots) && bots > 0 ? ` bots_since_human=${bots}` : '';
+  const line = `[chat=${chatTag(metadataTag(message.chatId), message.threadId)}${message.external ? ' external=true' : ''} source=${message.source || 'lark'}`
     + (message.connectorInstance && message.connectorInstance !== message.source ? ` instance=${metadataTag(message.connectorInstance)}` : '')
     + ` msg=${metadataTag(message.messageId)} event=${metadataTag(message.eventId)}`
     + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source)}${replyTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source, message.senderName)}`
+    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
   return line;
 }
 

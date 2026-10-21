@@ -1,7 +1,7 @@
 import { normalizeEvent, deterministicFilter } from './event.mjs';
 import { commandCandidate, parseCommand } from './commands.mjs';
 import { GroupBurstRouter } from './group-burst.mjs';
-import { formatInboundLine, resolveReplyTarget, eventDeliveryItem } from './runtime-input.mjs';
+import { BOT_SENDERS, formatInboundLine, resolveReplyTarget, eventDeliveryItem } from './runtime-input.mjs';
 import { opaqueRef, safeError } from './logger.mjs';
 import { parseProtocolLine } from './connectors/protocol.mjs';
 
@@ -176,6 +176,9 @@ export class Harness {
         text: formatInboundLine(event, null, {
           ...(idleHint ?? {}),
           replyTo: event.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, event),
+          // How long only bots have been talking here: the model's cue to stop.
+          ...(BOT_SENDERS.has(event.senderType)
+            ? { botsSinceHuman: this.store.botsSincePerson(event.scopeKey, result.inbound.seq) } : {}),
         }),
       }));
     });

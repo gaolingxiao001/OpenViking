@@ -32,6 +32,18 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.deepEqual(config.connectors, ['telegram', 'weixin']);
     assert.equal(config.telegramToken, undefined);
   });
+  it('accepts Slack and a bot reply fuse that defaults to 20 and can be turned off', () => {
+    setEnv('VIKA_CHANNEL', 'slack');
+    setEnv('VIKA_CONNECTORS_JSON', '["slack","lark"]');
+    setEnv('VIKA_BOT_REPLY_FUSE', undefined);
+    const config = getConfig();
+    assert.equal(config.channel, 'slack');
+    assert.equal(config.botReplyFuse, 20);
+    setEnv('VIKA_BOT_REPLY_FUSE', '0');
+    assert.equal(getConfig().botReplyFuse, 0);
+    setEnv('VIKA_BOT_REPLY_FUSE', '-1');
+    assert.throws(() => getConfig(), /VIKA_BOT_REPLY_FUSE/);
+  });
   it('keeps explicit silence off unless the instance opts in', () => {
     setEnv('VIKA_EXPLICIT_SILENCE', undefined);
     assert.equal(getConfig().explicitSilence, false);
