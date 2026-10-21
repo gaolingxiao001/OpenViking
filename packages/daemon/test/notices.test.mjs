@@ -13,10 +13,12 @@ describe('automatic claude fallback', () => {
     const agentRuntime = {
       runtime,
       async transition(request) {
-        calls.push(['setModel', request.selector]);
+        assert.equal(request.kind, 'select-runtime');
+        assert.equal(request.runtime, 'codex');
+        calls.push(['setModel', request.model]);
         if (setModelError) throw setModelError;
         this.runtime = 'codex';
-        return { ok: true, runtimeChanged: true, runtime: 'codex', model: request.selector };
+        return { ok: true, runtimeChanged: true, runtime: 'codex', model: request.model };
       },
       submit(items) { delivered.push(items); return { accepted: true }; },
     };

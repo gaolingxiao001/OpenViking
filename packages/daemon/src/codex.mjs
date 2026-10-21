@@ -422,13 +422,13 @@ export class CodexAgent {
       epoch: this.cognitionEpoch,
     });
     // Model rides on every turn/start: thread/resume does not re-apply its
-    // config to an already-running thread. Selectable effort follows the same
-    // path so a fresh session starts under the requested reasoning level.
+    // config to an already-running thread. Effort follows the same path and
+    // takes effect on the next turn without replacing the thread.
     const params = {
       threadId: this.threadId,
       input: [{ type: 'text', text: body }],
       ...(this.model ? { model: this.model } : {}),
-      ...(this.turnStartEffort ? { effort: this.effort } : {}),
+      ...(this.turnStartEffort ? { effort: this.effort || null } : {}),
     };
     this._request('turn/start', params).catch((error) => {
       this.startingTurn = false;
@@ -968,7 +968,7 @@ export class CodexAgent {
       cwd: this.config.workspace,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      ...(this.turnStartEffort ? { config: { model_reasoning_effort: this.effort } } : {}),
+      ...(this.turnStartEffort && this.effort ? { config: { model_reasoning_effort: this.effort } } : {}),
       ...(this.model ? { model: this.model } : {}),
     };
   }
@@ -978,6 +978,7 @@ export class CodexAgent {
     if (this.storedThreadId) {
       try {
         const result = await this._request('thread/resume', { ...params, threadId: this.storedThreadId });
+        this.sessionModel = result?.model ?? '';
         this.threadId = result?.thread?.id ?? this.storedThreadId;
         this.needsHistoryPrefix = false; // app-server retains the resumed thread's context
         this.forceFreshThread = false;
@@ -988,6 +989,7 @@ export class CodexAgent {
       }
     }
     const result = await this._request('thread/start', params);
+    this.sessionModel = result?.model ?? '';
     this.threadId = result?.thread?.id;
     if (!this.threadId) throw new Error('thread/start returned no thread id');
     // A fresh native transcript has accepted none of the OV context yet. The first
@@ -1018,7 +1020,7 @@ export class CodexAgent {
     const result = await this._request('thread/start', this._threadParams());
     const id = result?.thread?.id;
     if (!id) throw new Error('thread/start returned no thread id');
-    this.sessionRotation = Object.freeze({ id });
+    this.sessionRotation = Object.freeze({ id, model: result?.model ?? '' });
     return Object.freeze({ id, sessionReady: true });
   }
 
@@ -1027,6 +1029,7 @@ export class CodexAgent {
       throw new Error(`prepared ${this.runtimeLabel} session is no longer current`);
     }
     this.threadId = prepared.deferred ? null : prepared.id;
+    this.sessionModel = this.sessionRotation.model ?? '';
     this.storedThreadId = null;
     this.needsHistoryPrefix = preserveContext;
     this.sessionRotation = null;
@@ -1046,7 +1049,7 @@ export class CodexAgent {
     this.sessionRotation = null;
   }
 
-  // /m must not wait for a stuck turn: best-effort turn/interrupt on the live
+  // /new and runtime switches must not wait for a stuck turn: best-effort turn/interrupt on the live
   // turn, then abandon local turn state. The abandoned turn's inbound rows are
   // already in the cognition journal and the queue keeps undelivered items, so
   // no message is lost. Queued work is deliberately NOT flushed here — the
@@ -1155,14 +1158,16 @@ export class CodexAgent {
   // runtime supports them. Command policy decides whether to preserve or rotate
   // the thread after updating them.
   setModel(model, { persist = true } = {}) {
-    this.model = model;
     if (persist) this.store.setSetting?.(this.modelSettingKey, model);
+    this.model = model;
   }
+
+  get resolvedModel() { return this.model || this.sessionModel || ''; }
 
   setEffort(effort, { persist = true } = {}) {
     if (!this.supportsEffort) throw new Error(`${this.runtimeLabel} does not support daemon-side effort control`);
-    this.effort = effort;
     if (persist) this.store.setSetting?.(this.effortSettingKey, effort);
+    this.effort = effort;
     return undefined;
   }
 
@@ -1178,6 +1183,11 @@ export class CodexAgent {
         .filter((model) => model && !model.hidden && typeof model.id === 'string')
         .map((model) => ({
           id: model.id,
+          ...(model.model ? { resolvedModel: model.model } : {}),
+          ...(model.displayName ? { displayName: model.displayName } : {}),
+          ...(model.isDefault ? { isDefault: true } : {}),
+          ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}),
+          effortsKnown: Array.isArray(model.supportedReasoningEfforts),
           efforts: this.supportsEffort
             ? (Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [])
               .map((effort) => (typeof effort === 'string' ? effort : effort?.reasoningEffort))

@@ -612,7 +612,7 @@ export class Store {
   }
 
   // Cognition epochs are the durable "sessions" the Activity page can pick:
-  // /new, effort changes, and runtime switches. Native thread/session ids stay
+  // /new advances the epoch; model/effort changes preserve it. Native ids stay
   // out of the public payload; the UI only gets epoch + time window + counts.
   listActivitySessions() {
     const cognition = this.getCognitionState();
@@ -1019,6 +1019,7 @@ export class Store {
     syncedThroughSeq = 0,
     sessionReady = true,
     model = '',
+    effort,
     expectedRuntime,
     expectedAuthorityToken,
   }) {
@@ -1038,6 +1039,7 @@ export class Store {
       this.setMetaStatement.run('global_session_synced_through_seq', String(syncedThroughSeq));
       this.setMetaStatement.run('global_session_ready', sessionReady ? '1' : '0');
       this.setMetaStatement.run(`setting:${runtime}_model`, String(model));
+      if (effort !== undefined) this.setSetting(`${runtime}_effort`, effort);
       return { runtime, epoch, authorityToken };
     });
   }
@@ -1463,6 +1465,13 @@ export class Store {
 
   setSetting(key, value) {
     this.setMetaStatement.run(`setting:${key}`, String(value));
+  }
+
+  setRuntimeSettings(runtime, { model, effort }) {
+    return this.transaction(() => {
+      this.setSetting(`${runtime}_model`, model);
+      if (effort !== undefined) this.setSetting(`${runtime}_effort`, effort);
+    });
   }
 
   // Reserve one external action together with its outbound journal row and

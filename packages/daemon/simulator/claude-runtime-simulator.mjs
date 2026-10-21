@@ -133,7 +133,7 @@ export async function runClaudeRuntimeSimulation() {
   await runtime.start();
   const codexGenerationToken = store.cognition.authorityToken;
   const originalCodex = runtime.backend;
-  const switched = await runtime.transition({ kind: 'select-model', selector: 'sonnet' });
+  const switched = await runtime.transition({ kind: 'select-runtime', runtime: 'claude', model: 'sonnet' });
   const claude = runtime.backend;
   const claudeImplementation = instances.at(-1);
   assert.equal(switched.runtimeChanged, true);
@@ -158,13 +158,13 @@ export async function runClaudeRuntimeSimulation() {
   const failingGenerationToken = failingStore.cognition.authorityToken;
   const stillCodex = failing.backend;
   await assert.rejects(() => failing.transition({
-    kind: 'select-model', selector: 'sonnet',
+    kind: 'select-runtime', runtime: 'claude', model: 'sonnet',
   }), /unavailable/);
   assert.equal(failing.runtime, 'codex');
   assert.equal(failing.backend, stillCodex);
   assert.equal(failingStore.cognition.authorityToken, failingGenerationToken);
 
-  await runtime.transition({ kind: 'select-model', selector: 'gpt-5.6-sol' });
+  await runtime.transition({ kind: 'select-runtime', runtime: 'codex', model: 'gpt-5.6-sol' });
   assert.equal(runtime.runtime, 'codex');
   assert.notEqual(runtime.backend, originalCodex);
   assert.equal(store.getGlobalSession().runtime, 'codex');

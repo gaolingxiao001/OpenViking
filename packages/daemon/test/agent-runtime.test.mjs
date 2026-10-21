@@ -35,7 +35,7 @@ function backend(runtime, options = {}) {
     async stop() { this.state.connected = false; },
     async whenIdle() {},
     activateSession() {},
-    async listModels() { return [{ id: this.model || 'gpt-5.6-sol', efforts: ['medium'] }]; },
+    async listModels() { return [{ id: this.model || 'gpt-5.6-sol', isDefault: true, efforts: ['medium', 'high'] }]; },
     async prepareSessionRotation() {
       this.preparedSession = { id: `${runtime}-fresh`, sessionReady: runtime !== 'claude' };
       return this.preparedSession;
@@ -50,6 +50,42 @@ function backend(runtime, options = {}) {
 }
 
 describe('global Codex/Claude hard switch', () => {
+  it('keeps catalogs scoped and validates max/ultra using the active default model', async () => {
+    const runtime = new AgentRuntime({}, {}, quietLogger);
+    const implementation = backend('codex');
+    implementation.resolvedModel = 'gpt-active';
+    implementation.listModels = async () => [
+      { id: 'gpt-active', efforts: ['medium', 'max', 'ultra'] },
+      { id: 'gpt-other', efforts: ['minimal'] },
+    ];
+    implementation.setEffort = (effort) => { implementation.effort = effort; };
+    runtime.backend = adaptRuntime('codex', implementation);
+    const snapshot = await runtime.snapshot({ catalog: 'refresh' });
+    assert.deepEqual(snapshot.models.map((entry) => entry.id), ['gpt-active', 'gpt-other']);
+    for (const effort of ['max', 'ultra']) {
+      assert.equal((await runtime.transition({ kind: 'select-effort', effort })).ok, true);
+    }
+    for (const effort of ['managed', 'minimal']) {
+      assert.equal((await runtime.transition({ kind: 'select-effort', effort })).ok, false);
+    }
+    assert.equal(runtime.effort, 'ultra');
+  });
+
+  it('rejects cross-runtime model intents and makes selecting the current runtime a no-op', async () => {
+    const runtime = new AgentRuntime({}, {}, quietLogger);
+    const implementation = backend('codex');
+    implementation.interruptTurn = () => assert.fail('must not interrupt');
+    runtime.backend = adaptRuntime('codex', implementation);
+    for (const selector of ['claude:sonnet', 'pi', 'sonnet']) {
+      await assert.rejects(runtime.transition({ kind: 'select-model', selector }), /runtime|unavailable/);
+    }
+    const before = runtime.backend;
+    const result = await runtime.transition({ kind: 'select-runtime', runtime: 'codex' });
+    assert.equal(result.unchanged, true);
+    assert.equal(runtime.backend, before);
+    assert.equal(runtime.threadId, 'codex-session');
+  });
+
   it('retires stale sessions, fences authority, and rolls back target-start failure', async () => {
     const result = await runClaudeRuntimeSimulation();
     assert.equal(result.ok, true);
@@ -113,6 +149,7 @@ describe('global Codex/Claude hard switch', () => {
         selected.push('pi');
         instance = backend('pi', options);
         instance.model = options.model || 'google/gemini-pro';
+        instance.listModels = async () => [{ id: 'google/gemini-pro', efforts: ['medium'] }, { id: 'openai/gpt-4o', efforts: ['medium'] }];
         instance.calls = [];
         instance.interruptTurn = async function interruptTurn() {
           this.calls.push('interrupt');
@@ -155,7 +192,8 @@ describe('global Codex/Claude hard switch', () => {
       assert.equal(live.runtime, 'pi');
       assert.equal(runtime.runtime, 'pi');
       assert.equal(selected.filter((id) => id === 'codex').length, 0);
-      assert.ok(instance.calls.includes('setModel:openai/gpt-4o'));
+      assert.equal(instance.model, 'openai/gpt-4o');
+      assert.equal(store.getSetting('pi_model'), 'openai/gpt-4o');
     } finally {
       await runtime.stop();
       store.close();
@@ -407,13 +445,13 @@ describe('global Codex/Claude hard switch', () => {
     try {
       await runtime.start();
       await assert.rejects(() => runtime.transition({
-        kind: 'select-model', selector: 'gpt-missing',
+        kind: 'select-runtime', runtime: 'codex', model: 'gpt-missing',
       }), /unavailable/);
       assert.equal(runtime.runtime, 'claude');
       assert.equal(store.getCognitionState().runtime, 'claude');
       assert.equal(stagedCodex[0].state.connected, false);
 
-      const result = await runtime.transition({ kind: 'select-model', selector: 'gpt-5.6-sol' });
+      const result = await runtime.transition({ kind: 'select-runtime', runtime: 'codex', model: 'gpt-5.6-sol' });
       assert.equal(result.runtimeChanged, true);
       assert.equal(result.model, 'gpt-5.6-sol');
       assert.equal(runtime.runtime, 'codex');
@@ -454,7 +492,9 @@ describe('global Codex/Claude hard switch', () => {
 
     try {
       await runtime.start();
-      const result = await runtime.transition({ kind: 'select-model', selector: 'sonnet' });
+      store.setSetting('claude_model', 'sonnet');
+      const result = await runtime.transition({ kind: 'select-runtime', runtime: 'claude' });
+      assert.equal(runtime.model, 'sonnet');
       assert.equal(result.runtimeChanged, true);
       assert.equal(runtime.runtime, 'claude');
       assert.deepEqual(previous.calls, ['interrupt']);
@@ -465,7 +505,7 @@ describe('global Codex/Claude hard switch', () => {
     }
   });
 
-  it('interrupts and rotates to a fresh session on a same-runtime model change', async () => {
+  it('preserves the active turn, session, epoch and authority on a same-runtime model change', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-samemodel-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     let instance;
@@ -485,6 +525,7 @@ describe('global Codex/Claude hard switch', () => {
         };
         instance.setModel = async function setModel(model) {
           this.calls.push(`setModel:${model}`);
+          store.setSetting('codex_model', model);
           this.model = model;
         };
         instance.prepareSessionRotation = async function prepareSessionRotation() {
@@ -507,22 +548,19 @@ describe('global Codex/Claude hard switch', () => {
       let preparedEpoch;
       store.prepareOVContext = async (epoch) => { preparedEpoch = epoch; };
       const result = await runtime.transition({ kind: 'select-model', selector: 'gpt-5.6-sol' });
-      assert.deepEqual(instance.calls, [
-        'interrupt',
-        'setModel:gpt-5.6-sol',
-        'prepare',
-        'commit:false',
-      ]);
-      assert.equal(preparedEpoch, before.epoch);
+      assert.deepEqual(instance.calls, []);
+      assert.equal(instance.model, 'gpt-5.6-sol');
+      assert.equal(instance.turnInProgress, true);
+      assert.equal(preparedEpoch, undefined);
       assert.equal(result.runtimeChanged, false);
-      assert.equal(result.threadId, 'codex-fresh');
-      // /m replaces the native session but preserves its logical OV epoch.
+      assert.equal(result.threadId, 'codex-session');
+      // Both native and logical sessions are preserved.
       assert.equal(store.getCognitionState().epoch, before.epoch);
       assert.equal(store.getSetting('codex_model'), 'gpt-5.6-sol');
       // Codex keeps one MCP child across native thread rotation, so its process
       // authority remains stable until that child is replaced.
       assert.equal(store.getCognitionState().authorityToken, before.authorityToken);
-      assert.equal(authorities.length, 2);
+      assert.equal(authorities.length, 1);
       assert.equal(authorities.at(-1).authorityToken, store.getCognitionState().authorityToken);
     } finally {
       await runtime.stop();
@@ -637,40 +675,55 @@ describe('global Codex/Claude hard switch', () => {
     assert.deepEqual(calls, []);
   });
 
-  it('rotates the TraeX session when changing effort', async () => {
-    const settings = {};
-    const runtime = new AgentRuntime({}, {
-      getCognitionState: () => ({ runtime: 'traex', epoch: 1, authorityToken: 'token' }),
-      commitCognitionSessionRotation: (request) => {
-        assert.equal(request.runtime, 'traex');
-        assert.deepEqual(request.settings, { traex_effort: 'high' });
-        Object.assign(settings, request.settings);
-        return { runtime: 'traex', epoch: 2, authorityToken: request.nextAuthorityToken };
-      },
-    }, quietLogger);
-    const calls = [];
-    const implementation = backend('traex');
-    implementation.interruptTurn = async () => { calls.push('interrupt'); };
-    implementation.setEffort = (effort) => { calls.push(`effort:${effort}`); };
-    implementation.prepareSessionRotation = async () => { calls.push('prepare'); return { id: 'traex-fresh' }; };
-    implementation.commitSessionRotation = (prepared) => {
-      calls.push(`commit:${prepared.id}`);
-      implementation.threadId = prepared.id;
-      return implementation.threadId;
-    };
-    runtime.runtime = 'traex';
-    runtime.backend = adaptRuntime('traex', implementation);
+  for (const id of ['codex', 'traex', 'claude', 'pi']) it(`${id} effort preserves an active turn, session, epoch and authority`, async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-effort-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    try {
+      store.initializeCognition(id, 'token');
+      const cognition = store.getCognitionState();
+      store.setGlobalSession(`${id}-session`, 'policy', { runtime: id, epoch: cognition.epoch, syncedThroughSeq: 7 });
+      const session = store.getGlobalSession();
+      const runtime = new AgentRuntime({}, store, quietLogger);
+      const implementation = backend(id);
+      implementation.turnInProgress = true;
+      implementation.interruptTurn = () => assert.fail('effort must not interrupt');
+      let updates = 0;
+      implementation.setEffort = (effort) => {
+        updates += 1;
+        store.setSetting(`${id}_effort`, effort);
+        implementation.effort = effort;
+      };
+      runtime.runtime = id;
+      runtime.backend = adaptRuntime(id, implementation);
 
-    const result = await runtime.transition({ kind: 'select-effort', effort: 'high' });
-    assert.deepEqual(result, {
-      ok: true,
-      kind: 'select-effort',
-      runtime: 'traex',
-      effort: 'high',
-      threadId: 'traex-fresh',
+      const result = await runtime.transition({ kind: 'select-effort', effort: 'high' });
+      assert.deepEqual(result, { ok: true, kind: 'select-effort', runtime: id, effort: 'high', unchanged: false });
+      assert.equal(implementation.turnInProgress, true);
+      assert.equal(runtime.threadId, session.sessionId);
+      assert.deepEqual(store.getCognitionState(), cognition);
+      assert.deepEqual(store.getGlobalSession(), session);
+      assert.equal(store.getSetting(`${id}_effort`), 'high');
+      const repeated = await runtime.transition({ kind: 'select-effort', effort: 'high' });
+      assert.equal(repeated.unchanged, true);
+      assert.equal(updates, 1);
+    } finally {
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('propagates an effort persistence failure without rotating or interrupting', async () => {
+    const runtime = new AgentRuntime({}, {}, quietLogger);
+    runtime.backend = adaptRuntime('codex', {
+      effort: 'medium', threadId: 'same-session',
+      listModels: async () => [{ id: 'gpt-default', isDefault: true, efforts: ['medium', 'high'] }],
+      async setEffort() { throw new Error('settings write failed'); },
+      interruptTurn() { assert.fail('effort must not interrupt'); },
     });
-    assert.deepEqual(calls, ['interrupt', 'effort:high', 'prepare', 'commit:traex-fresh']);
-    assert.equal(settings.traex_effort, 'high');
+    await assert.rejects(runtime.transition({ kind: 'select-effort', effort: 'high' }), /settings write failed/);
+    assert.equal(runtime.effort, 'medium');
+    assert.equal(runtime.threadId, 'same-session');
+    assert.equal(runtime.pendingTransitions, 0);
   });
 
   it('releases an Ark rotation fence when remote session preparation fails', async () => {
@@ -725,7 +778,7 @@ describe('global Codex/Claude hard switch', () => {
     try {
       await runtime.start();
       assert.equal(runtime.runtime, 'codex');
-      await assert.rejects(() => runtime.transition({ kind: 'select-model', selector: 'ark' }), /Volc/);
+      await assert.rejects(() => runtime.transition({ kind: 'select-runtime', runtime: 'volc' }), /Volc/);
       assert.equal(runtime.runtime, 'codex');
     } finally {
       await runtime.stop();
@@ -762,7 +815,7 @@ describe('global Codex/Claude hard switch', () => {
 
     try {
       await runtime.start();
-      const switchResult = runtime.transition({ kind: 'select-model', selector: 'claude:sonnet' });
+      const switchResult = runtime.transition({ kind: 'select-runtime', runtime: 'claude', model: 'sonnet' });
       assert.deepEqual(runtime.submit([{ text: 'must remain caller-owned', seq: 9 }]), {
         accepted: false,
         reason: 'switching',
@@ -796,10 +849,10 @@ describe('global Codex/Claude hard switch', () => {
         instance = backend('codex', options);
         instance.stopCount = 0;
         instance.interruptTurn = async () => {};
-        instance.setModel = async function setModel(model) {
+        instance.listModels = async function listModels() {
           markModelStarted();
           await modelGate;
-          this.model = model;
+          return [{ id: 'gpt-5.6-sol', efforts: ['medium'] }];
         };
         instance.stop = async function stop() {
           this.stopCount += 1;

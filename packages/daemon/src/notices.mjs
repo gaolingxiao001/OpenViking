@@ -86,7 +86,10 @@ export class FailurePolicy {
     this.fallbackInProgress = true;
     this.lastFallbackAtMs = now;
     try {
-      await this.runtime.transition({ kind: 'select-model', selector: model });
+      const result = await this.runtime.transition({
+        kind: 'select-runtime', runtime: 'codex', model, expectedRuntime: 'claude',
+      });
+      if (result.ok === false) throw new Error(result.reason || 'runtime switch failed');
     } catch (switchError) {
       this.recordActivity('agent.fallback', {
         summary: safeError(switchError),

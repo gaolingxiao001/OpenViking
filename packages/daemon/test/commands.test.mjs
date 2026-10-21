@@ -17,6 +17,7 @@ function fakeCodex(overrides = {}) {
     threadId: 'th-live',
     model: '',
     effort: 'medium',
+    async listModels() { return [{ id: this.model || 'gpt-default', isDefault: true, efforts: EFFORT_LEVELS }]; },
     state: { connected: true, activeTurn: 0, queued: 0 },
     turnInProgress: false,
     async interruptTurn() { calls.push(['interrupt']); },
@@ -29,6 +30,7 @@ function fakeCodex(overrides = {}) {
         runtime: this.runtime,
         session: { id: this.threadId, connected: this.state.connected },
         model: this.model,
+        resolvedModel: this.resolvedModel,
         effort: this.effort,
         queued: this.state.queued,
         work: this.workStatus ?? {
@@ -51,6 +53,12 @@ function fakeCodex(overrides = {}) {
         await this.interruptTurn();
         return { ok: true, threadId: await this.rotateSession({ resume: false }) };
       }
+      if (request.kind === 'select-runtime') {
+        calls.push(['runtime', request.runtime]);
+        const unchanged = this.runtime === request.runtime;
+        this.runtime = request.runtime;
+        return { ok: true, runtime: this.runtime, unchanged };
+      }
       if (request.kind === 'select-model') {
         const result = await this.setModel(request.selector);
         return result && typeof result === 'object'
@@ -58,12 +66,13 @@ function fakeCodex(overrides = {}) {
           : { ok: true, runtimeChanged: false, model: request.selector, threadId: result };
       }
       if (request.kind === 'select-effort') {
-        await this.interruptTurn();
-        await this.setEffort(request.effort);
+        const unchanged = this.effort === request.effort;
+        if (!unchanged) await this.setEffort(request.effort);
+        this.effort = request.effort;
         return {
           ok: true,
           effort: request.effort,
-          threadId: await this.rotateSession({ resume: false }),
+          unchanged,
         };
       }
       throw new Error(`unexpected transition ${request.kind}`);
@@ -85,6 +94,7 @@ describe('parseCommand', () => {
     assert.deepEqual(parseCommand('  /h  '), { name: 'help', arg: '' });
     assert.deepEqual(parseCommand('/M gpt-5.5'), { name: 'model', arg: 'gpt-5.5' });
     assert.deepEqual(parseCommand('/eff high'), { name: 'effort', arg: 'high' });
+    assert.deepEqual(parseCommand('/run claude'), { name: 'runtime', arg: 'claude' });
   });
 
   it('keeps everything after the command token as one arg', () => {
@@ -130,6 +140,28 @@ describe('matchPrefix', () => {
 });
 
 describe('executeCommand', () => {
+  it('uses the resolved default model for effort instead of the catalog union', async () => {
+    const agent = fakeCodex({ model: '', resolvedModel: 'gpt-active', listModels: async () => [
+      { id: 'gpt-active', efforts: ['medium', 'high', 'max', 'ultra'] },
+      { id: 'gpt-other', isDefault: true, efforts: ['minimal'] },
+    ] });
+    const listing = await executeCommand({ name: 'effort', arg: '' }, agent);
+    assert.match(listing.text, /可选：medium、high、max、ultra/);
+    assert.doesNotMatch(listing.text, /minimal|managed/);
+    assert.equal((await executeCommand({ name: 'effort', arg: 'ultra' }, agent)).ok, true);
+    assert.deepEqual(agent.calls, [['setEffort', 'ultra']]);
+  });
+
+  it('does not borrow effort levels when current model capabilities are unknown or empty', async () => {
+    for (const models of [[], [{ id: 'gpt-current', efforts: [] }, { id: 'other', efforts: ['high'] }]]) {
+      const agent = fakeCodex({ model: 'gpt-current', listModels: async () => models });
+      const listing = await executeCommand({ name: 'effort', arg: '' }, agent);
+      assert.doesNotMatch(listing.text, /可选：/);
+      assert.equal((await executeCommand({ name: 'effort', arg: 'high' }, agent)).ok, false);
+      assert.deepEqual(agent.calls, []);
+    }
+  });
+
   it('help reports commands and current session state', async () => {
     const codex = fakeCodex({ threadId: 'th-42', model: 'gpt-x', effort: 'high' });
     const outcome = await executeCommand({ name: 'help', arg: '' }, codex);
@@ -138,7 +170,7 @@ describe('executeCommand', () => {
     assert.match(outcome.text, /th-42/);
     assert.match(outcome.text, /gpt-x/);
     assert.match(outcome.text, /high/);
-    assert.match(outcome.text, /traex、pi、ark、sonnet、gpt-5\.6-sol/);
+    assert.match(outcome.text, /\/runtime/);
     assert.doesNotMatch(outcome.text, /claude:|codex:/);
     assert.doesNotMatch(outcome.text, /restart/);
     assert.equal(codex.calls.length, 0);
@@ -149,7 +181,7 @@ describe('executeCommand', () => {
     const outcome = await executeCommand({ name: 'help', arg: '' }, agent);
     assert.equal(outcome.ok, true);
     assert.match(outcome.text, /\/effort/);
-    assert.match(outcome.text, /max/);
+    assert.match(outcome.text, /当前模型的推理档位/);
     assert.match(outcome.text, /推理档位：medium/);
   });
 
@@ -248,198 +280,75 @@ describe('executeCommand', () => {
     assert.equal(codex.calls.length, 1);
   });
 
-  it('accepts a direct Codex model while Claude is active', async () => {
-    const codex = fakeCodex({
-      runtime: 'claude',
-      model: 'sonnet',
-      listModels: async () => [
-        { id: 'sonnet', efforts: ['medium'] },
-        { id: 'opus', efforts: ['medium'] },
-      ],
-      async setModel(model) {
-        this.calls.push(['setModel', model]);
-        return { runtimeChanged: true, runtime: 'codex', model, syncedThroughSeq: 12 };
-      },
-    });
-    const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.6-sol' }, codex);
-    assert.equal(outcome.ok, true);
-    assert.deepEqual(codex.calls, [['setModel', 'gpt-5.6-sol']]);
-    assert.match(outcome.text, /已切到 gpt-5\.6-sol/);
-    assert.doesNotMatch(outcome.text, /codex:/);
-    assert.doesNotMatch(outcome.text, /seq|hidden reasoning/);
+  it('rejects cross-runtime model selectors without switching', async () => {
+    const agent = fakeCodex({ runtime: 'claude', model: 'sonnet',
+      listModels: async () => [{ id: 'sonnet', efforts: ['medium'] }] });
+    for (const arg of ['gpt-5.6-sol', 'codex:gpt-5.6-sol', 'pi', 'ark', 'traex']) {
+      const result = await executeCommand({ name: 'model', arg }, agent);
+      assert.equal(result.ok, false);
+      assert.match(result.text, /\/runtime/);
+    }
+    assert.deepEqual(agent.calls, []);
   });
 
-  it('keeps qualified model aliases compatible but hides prefixes in replies', async () => {
-    const codex = fakeCodex({
-      runtime: 'claude',
-      model: 'sonnet',
-      listModels: async () => [
-        { id: 'sonnet', efforts: ['medium'] },
-        { id: 'opus', efforts: ['medium'] },
-      ],
-      async setModel(model) {
-        this.calls.push(['setModel', model]);
-        const direct = model.replace(/^(?:claude|codex):/, '');
-        return { runtimeChanged: model.startsWith('codex:'), model: direct };
-      },
-    });
-
-    const claude = await executeCommand({ name: 'model', arg: 'claude:son' }, codex);
-    assert.equal(claude.ok, true);
-    assert.deepEqual(codex.calls[0], ['setModel', 'claude:sonnet']);
-    assert.match(claude.text, /已切到 sonnet，已开启新会话/);
-    assert.doesNotMatch(claude.text, /claude:/);
-
-    const back = await executeCommand({ name: 'model', arg: 'codex:gpt-5.6-sol' }, codex);
-    assert.equal(back.ok, true);
-    assert.deepEqual(codex.calls[1], ['setModel', 'codex:gpt-5.6-sol']);
-    assert.match(back.text, /已切到 gpt-5\.6-sol/);
-    assert.doesNotMatch(back.text, /codex:/);
-
-    const invalid = await executeCommand({ name: 'model', arg: 'claude:' }, codex);
-    assert.equal(invalid.ok, false);
-    assert.equal(invalid.text, '无效的模型名');
-    assert.doesNotMatch(invalid.text, /claude:/);
-
-    const missing = await executeCommand({ name: 'model', arg: 'claude:missing' }, codex);
-    assert.equal(missing.ok, false);
-    assert.match(missing.text, /未找到模型：missing/);
-    assert.doesNotMatch(missing.text, /claude:/);
+  it('accepts a same-runtime qualifier and preserves the session', async () => {
+    const agent = fakeCodex({ runtime: 'claude', model: 'sonnet',
+      listModels: async () => [{ id: 'sonnet' }, { id: 'opus' }] });
+    const result = await executeCommand({ name: 'model', arg: 'claude:op' }, agent);
+    assert.equal(result.ok, true);
+    assert.deepEqual(agent.calls, [['setModel', 'opus']]);
+    assert.match(result.text, /下一轮生效，上下文保留/);
+    assert.doesNotMatch(result.text, /新会话/);
+    assert.equal((await executeCommand({ name: 'model', arg: 'claude:' }, agent)).ok, false);
   });
 
-  it('same-runtime model switch reports the fresh session id', async () => {
-    const codex = fakeCodex({
-      listModels: async () => [{ id: 'gpt-5.5', efforts: [] }],
-      async setModel(model) {
-        this.calls.push(['setModel', model]);
-        return { runtimeChanged: false, model, threadId: 'th-fresh' };
-      },
-    });
-    const outcome = await executeCommand({ name: 'model', arg: 'gpt-5.5' }, codex);
-    assert.equal(outcome.ok, true);
-    assert.match(outcome.text, /已切到 gpt-5\.5，已开启新会话：th-fresh/);
+  it('shows Claude versions and accepts resolved model ids', async () => {
+    const agent = fakeCodex({ runtime: 'claude', model: 'sonnet',
+      listModels: async () => [{ id: 'sonnet', displayName: 'Sonnet 5.5', resolvedModel: 'claude-sonnet-5-5' }] });
+    const listing = await executeCommand({ name: 'model', arg: '' }, agent);
+    assert.match(listing.text, /Sonnet 5.5/);
+    assert.match(listing.text, /实际模型：claude-sonnet-5-5/);
+    const result = await executeCommand({ name: 'model', arg: 'claude-sonnet-5-5' }, agent);
+    assert.equal(result.ok, true);
+    assert.deepEqual(agent.calls, [['setModel', 'claude-sonnet-5-5']]);
   });
 
-  it('selects Ark as a third runtime and allows a direct Codex name on the way back', async () => {
-    const agent = fakeCodex({
-      runtime: 'codex',
-      model: 'gpt-current',
-      listModels: async () => [
-        { id: 'gpt-current', efforts: ['medium'] },
-        { id: 'ark', efforts: ['managed'] },
-      ],
-      async setModel(model) {
-        calls.push(['setModel', model]);
-        this.runtime = model === 'ark' ? 'volc' : 'codex';
-        return { runtimeChanged: true, runtime: this.runtime, model };
-      },
-    });
-    const { calls } = agent;
-    const switched = await executeCommand({ name: 'model', arg: 'volcengine' }, agent);
+  it('lists runtimes without consulting the model backend', async () => {
+    const agent = fakeCodex({ listModels() { assert.fail('runtime listing is local'); } });
+    const result = await executeCommand({ name: 'runtime', arg: '' }, agent);
+    assert.match(result.text, /当前 Runtime：codex/);
+    assert.match(result.text, /claude/);
+    assert.match(result.text, /ark/);
+    assert.deepEqual(agent.calls, []);
+  });
+
+  it('selects runtime aliases and treats the current runtime as a no-op', async () => {
+    const agent = fakeCodex();
+    const switched = await executeCommand({ name: 'runtime', arg: 'ark' }, agent);
     assert.equal(switched.ok, true);
-    assert.deepEqual(calls.at(-1), ['setModel', 'ark']);
-
-    agent.listModels = async () => [{ id: 'ark', efforts: ['managed'] }, { id: 'sonnet' }];
-    const returned = await executeCommand({ name: 'model', arg: 'gpt-5.6-sol' }, agent);
-    assert.equal(returned.ok, true);
-    assert.deepEqual(calls.at(-1), ['setModel', 'gpt-5.6-sol']);
+    assert.deepEqual(agent.calls, [['runtime', 'volc']]);
+    const repeated = await executeCommand({ name: 'runtime', arg: 'volcengine' }, agent);
+    assert.match(repeated.text, /当前已是 Runtime：volc（会话保留）/);
+    assert.equal((await executeCommand({ name: 'runtime', arg: 'unknown' }, agent)).ok, false);
+    assert.equal(agent.calls.length, 2);
   });
 
-  it('selects Pi as a first-class runtime via /model pi and pi:<model>', async () => {
-    const agent = fakeCodex({
-      runtime: 'codex',
-      model: 'gpt-current',
-      listModels: async () => [
-        { id: 'gpt-current', efforts: ['medium'] },
-        { id: 'ark', efforts: ['managed'] },
-      ],
-      async setModel(model) {
-        this.calls.push(['setModel', model]);
-        const runtime = model === 'pi' || String(model).startsWith('pi:') ? 'pi' : this.runtime;
-        this.runtime = runtime;
-        return {
-          runtimeChanged: runtime === 'pi',
-          runtime,
-          model: model === 'pi' ? 'pi' : model.replace(/^pi:/, ''),
-        };
-      },
-    });
-    const switched = await executeCommand({ name: 'model', arg: 'pi' }, agent);
-    assert.equal(switched.ok, true);
-    assert.deepEqual(agent.calls.at(-1), ['setModel', 'pi']);
-    assert.match(switched.text, /已切到 pi/);
-
-    agent.runtime = 'codex';
-    const qualified = await executeCommand({ name: 'model', arg: 'pi:openai/gpt-4o' }, agent);
-    assert.equal(qualified.ok, true);
-    assert.deepEqual(agent.calls.at(-1), ['setModel', 'pi:openai/gpt-4o']);
-    assert.match(qualified.text, /已切到 openai\/gpt-4o/);
+  it('rejects a stale model transition instead of reporting success', async () => {
+    const agent = fakeCodex({ transition: async () => ({ ok: false, reason: 'stale-snapshot' }) });
+    const result = await executeCommand({ name: 'model', arg: 'gpt-default' }, agent);
+    assert.equal(result.ok, false);
+    assert.match(result.text, /重试/);
   });
 
-  it('selects TraeX as a first-class runtime via /model traex and trae:<model>', async () => {
-    const agent = fakeCodex({
-      runtime: 'codex',
-      model: 'gpt-current',
-      listModels: async () => [
-        { id: 'gpt-current', efforts: ['medium'] },
-      ],
-      async setModel(model) {
-        this.calls.push(['setModel', model]);
-        const resolved = model.replace(/^trae:/, '');
-        this.runtime = model.startsWith('trae') ? 'traex' : this.runtime;
-        return { runtimeChanged: this.runtime === 'traex', runtime: this.runtime, model: resolved || 'traex' };
-      },
-    });
-
-    const switched = await executeCommand({ name: 'model', arg: 'traex' }, agent);
-    assert.equal(switched.ok, true);
-    assert.deepEqual(agent.calls.at(-1), ['setModel', 'traex']);
-    assert.match(switched.text, /已切到 traex/);
-
-    agent.runtime = 'codex';
-    const model = await executeCommand({ name: 'model', arg: 'trae:gpt-5.6-sol' }, agent);
-    assert.equal(model.ok, true);
-    assert.deepEqual(agent.calls.at(-1), ['setModel', 'trae:gpt-5.6-sol']);
-    assert.match(model.text, /已切到 gpt-5\.6-sol/);
-    assert.doesNotMatch(model.text, /trae:/);
-  });
-
-  it('stays on Pi for pi:<id> and an unprefixed live-list id', async () => {
-    const agent = fakeCodex({
-      runtime: 'pi',
-      model: 'google/gemini-pro',
-      listModels: async () => [
-        { id: 'openai/gpt-4o', efforts: ['medium'] },
-        { id: 'google/gemini-pro', efforts: ['medium'] },
-        { id: 'sonnet', efforts: ['medium'] },
-      ],
-      async setModel(model) {
-        this.calls.push(['setModel', model]);
-        const runtimeChanged = !(model === 'pi' || String(model).startsWith('pi:')
-          || model === 'openai/gpt-4o' || model === 'google/gemini-pro');
-        if (runtimeChanged) this.runtime = 'codex';
-        return {
-          runtimeChanged,
-          runtime: this.runtime,
-          model: String(model).replace(/^pi:/, ''),
-          threadId: 'pi-fresh',
-        };
-      },
-    });
-
-    const qualified = await executeCommand({ name: 'model', arg: 'pi:openai/gpt-4o' }, agent);
-    assert.equal(qualified.ok, true);
-    assert.equal(agent.runtime, 'pi');
-    assert.deepEqual(agent.calls.at(-1), ['setModel', 'pi:openai/gpt-4o']);
-    assert.match(qualified.text, /已切到 openai\/gpt-4o，已开启新会话：pi-fresh/);
-    assert.doesNotMatch(qualified.text, /历史对话会接上/);
-
-    const live = await executeCommand({ name: 'model', arg: 'openai/gpt-4o' }, agent);
-    assert.equal(live.ok, true);
-    assert.equal(agent.runtime, 'pi');
-    assert.deepEqual(agent.calls.at(-1), ['setModel', 'openai/gpt-4o']);
-    assert.match(live.text, /已切到 openai\/gpt-4o，已开启新会话：pi-fresh/);
-    assert.doesNotMatch(live.text, /历史对话会接上/);
+  it('keeps provider-qualified Pi model ids inside Pi', async () => {
+    const agent = fakeCodex({ runtime: 'pi', model: 'google/gemini-pro',
+      listModels: async () => [{ id: 'openai/gpt-4o' }] });
+    for (const arg of ['pi:openai/gpt-4o', 'openai/gpt-4o']) {
+      const result = await executeCommand({ name: 'model', arg }, agent);
+      assert.equal(result.ok, true);
+      assert.match(result.text, /上下文保留/);
+      assert.deepEqual(agent.calls.at(-1), ['setModel', 'openai/gpt-4o']);
+    }
   });
 
   it('explains that Ark effort is managed remotely', async () => {
@@ -451,7 +360,7 @@ describe('executeCommand', () => {
     assert.equal(calls.some(([name]) => name === 'setEffort'), false);
   });
 
-  it('switches TraeX effort by rotating the session', async () => {
+  it('switches TraeX effort while preserving the session', async () => {
     const agent = fakeCodex({
       runtime: 'traex',
       model: 'gpt-5.5',
@@ -460,19 +369,20 @@ describe('executeCommand', () => {
     });
     const result = await executeCommand({ name: 'effort', arg: 'high' }, agent);
     assert.equal(result.ok, true);
-    assert.equal(result.text, '已切换推理档位：high，并已开启新会话：th-new');
-    assert.deepEqual(agent.calls, [['interrupt'], ['setEffort', 'high'], ['rotate', { resume: false }]]);
+    assert.equal(result.text, '已切换推理档位：high（下一轮生效，上下文保留）');
+    assert.deepEqual(agent.calls, [['setEffort', 'high']]);
+    const repeated = await executeCommand({ name: 'effort', arg: 'high' }, agent);
+    assert.equal(repeated.text, '当前已是推理档位：high（上下文保留）');
+    assert.equal(agent.calls.length, 1);
   });
 
   it('effort prefix-matches a level and rejects ambiguous or unknown input', async () => {
     const codex = fakeCodex();
     const high = await executeCommand({ name: 'effort', arg: 'h' }, codex);
     assert.equal(high.ok, true);
-    assert.match(high.text, /已开启新会话/);
+    assert.match(high.text, /下一轮生效，上下文保留/);
     assert.deepEqual(codex.calls, [
-      ['interrupt'],
       ['setEffort', 'high'],
-      ['rotate', { resume: false }],
     ]);
 
     const ambiguous = await executeCommand({ name: 'effort', arg: 'm' }, codex);
@@ -481,7 +391,21 @@ describe('executeCommand', () => {
 
     const unknown = await executeCommand({ name: 'effort', arg: 'turbo' }, codex);
     assert.equal(unknown.ok, false);
-    assert.equal(codex.calls.length, 3);
+    assert.equal(codex.calls.length, 1);
+  });
+
+  it('saves effort while disconnected without announcing a cleared session', async () => {
+    const agent = fakeCodex({ state: { connected: false, activeTurn: 0, queued: 0 } });
+    const result = await executeCommand({ name: 'effort', arg: 'high' }, agent);
+    assert.equal(result.text, '已切换推理档位：high（下一轮生效，上下文保留）');
+    assert.deepEqual(agent.calls, [['setEffort', 'high']]);
+  });
+
+  it('does not report success when the runtime rejects an effort', async () => {
+    const agent = fakeCodex({ transition: async () => ({ ok: false, reason: 'unsupported-effort' }) });
+    const result = await executeCommand({ name: 'effort', arg: 'high' }, agent);
+    assert.equal(result.ok, false);
+    assert.equal(result.text, '不支持的档位：high');
   });
 
   it('effort validates against the current model and rejects unsupported levels', async () => {
@@ -501,8 +425,7 @@ describe('executeCommand', () => {
 
     const none = await executeCommand({ name: 'effort', arg: 'n' }, codex);
     assert.equal(none.ok, true);
-    assert.deepEqual(codex.calls[0], ['interrupt']);
-    assert.deepEqual(codex.calls[1], ['setEffort', 'none']);
+    assert.deepEqual(codex.calls, [['setEffort', 'none']]);
 
     const listing = await executeCommand({ name: 'effort', arg: '' }, codex);
     assert.match(listing.text, /可选：none、low、medium、high、xhigh/);

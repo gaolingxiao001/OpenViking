@@ -122,7 +122,7 @@ export class GroupBurstRouter {
   }
 
   // Global slash-command barrier: hand every already-arrived group batch to
-  // the current runtime before a /model or /new control action can overtake it.
+  // the current runtime before a /runtime or /new control action can overtake it.
   flushAll() {
     if (this.stopped || this.pending.size === 0) return 0;
     const entries = [...this.pending.values()]
