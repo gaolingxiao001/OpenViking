@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
 import { SlackCli } from '../src/slack/cli.mjs';
 import { ProcessRegistry } from '../src/process-utils.mjs';
-import { installSlackCliBinary } from '../../../scripts/release/slack-cli.mjs';
+import { extractSlackCliBinary, installSlackCliBinary } from '../../../scripts/release/slack-cli.mjs';
 
 const token = 'xoxb-1111-2222-test-credential';
 function executable(t) {
@@ -101,4 +102,24 @@ test('Slack CLI installer refuses unverified archives before replacing the binar
   } }), /sha.?256|checksum/i);
   assert.match(url, /github\.com\/slackapi\/slack-cli\/releases\/download\/v4\.10\.0\/slack_cli_4\.10\.0_linux_amd64\.tar\.gz$/);
   assert.equal(fs.existsSync(path.join(root, 'bin', 'slack')), false);
+});
+
+test('Slack CLI extraction supports Linux and macOS archive layouts without an embedded license', (t) => {
+  const root = path.dirname(executable(t));
+  const source = path.join(root, 'source');
+  fs.mkdirSync(path.join(source, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'bin', 'slack'), 'executable fixture', { mode: 0o755 });
+  for (const [platform, entry] of [['linux', 'bin/slack'], ['macos', './bin/slack']]) {
+    const archive = path.join(root, `${platform}.tar.gz`);
+    const output = path.join(root, platform);
+    fs.mkdirSync(output);
+    execFileSync('tar', ['-czf', archive, '-C', source, entry]);
+    extractSlackCliBinary(archive, output);
+    assert.equal(fs.readFileSync(path.join(output, 'bin', 'slack'), 'utf8'), 'executable fixture');
+    assert.ok(fs.statSync(path.join(output, 'bin', 'slack')).mode & 0o111);
+  }
+  fs.writeFileSync(path.join(source, 'unexpected'), 'wrong archive');
+  const wrong = path.join(root, 'wrong.tar.gz');
+  execFileSync('tar', ['-czf', wrong, '-C', source, 'unexpected']);
+  assert.throws(() => extractSlackCliBinary(wrong, root), /no bin\/slack executable/);
 });
