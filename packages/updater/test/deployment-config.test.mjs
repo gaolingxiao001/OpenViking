@@ -360,6 +360,25 @@ test('OV recall is opt-in per instance, with actor scope and no Lark profile for
   });
 });
 
+test('explicit silence is opt-in per instance and always pinned in the daemon env', () => {
+  const manifest = validManifest();
+  manifest.agents[1].explicitSilence = true;
+  withManifest(manifest, (manifestPath) => {
+    const env = { VIKA_CONFIG: manifestPath, VIKA_EXPLICIT_SILENCE: 'true' };
+    const deployment = loadDeploymentManifest(env);
+    assert.equal(selectDeploymentAgent(deployment, 'alpha').explicitSilence, false);
+    applyDeploymentAgentEnv(env, deployment, 'alpha');
+    assert.equal(env.VIKA_EXPLICIT_SILENCE, 'false');
+    applyDeploymentAgentEnv(env, deployment, 'beta');
+    assert.equal(env.VIKA_EXPLICIT_SILENCE, 'true');
+  });
+  const broken = validManifest();
+  broken.agents[0].explicitSilence = 'true';
+  withManifest(broken, (manifestPath) => {
+    assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /agents\[0\]\.explicitSilence must be a boolean/);
+  });
+});
+
 test('rejects unknown and missing manifest fields instead of guessing', () => {
   const cases = [
     {

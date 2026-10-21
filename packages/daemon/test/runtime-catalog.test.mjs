@@ -42,6 +42,7 @@ describe('runtime catalog', () => {
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     });
     assert.equal(getRuntimeDefinition('claude').capabilities.sessionAuthority, 'preserve-process');
     assert.deepEqual(getRuntimeDefinition('ark').models, ['ark']);
@@ -53,6 +54,7 @@ describe('runtime catalog', () => {
       scopePolicy: 'single-conversation',
       outputOwnership: 'runtime',
       sessionAuthority: 'rotate',
+      agentTools: 'lark-cli',
     });
     assert.deepEqual(getRuntimeDefinition('pi').directAliases, ['pi']);
     assert.deepEqual(getRuntimeDefinition('pi').efforts, [
@@ -65,7 +67,11 @@ describe('runtime catalog', () => {
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     });
+    assert.deepEqual(RUNTIME_IDS.map((id) => [id, getRuntimeDefinition(id).capabilities.agentTools]), [
+      ['codex', 'core'], ['traex', 'core'], ['claude', 'core'], ['volc', 'lark-cli'], ['pi', 'core'],
+    ]);
     assert.equal(Object.isFrozen(RUNTIME_CATALOG), true);
     assert.equal(Object.isFrozen(getRuntimeDefinition('codex').capabilities), true);
     assert.equal(getRuntimeDefinition('__proto__'), null);

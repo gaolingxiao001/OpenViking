@@ -252,6 +252,10 @@ export function getConfig() {
       min: 0,
       max: 604_800_000,
     }),
+    // Opt-in per instance (agents[].explicitSilence): the stay_silent tool, the
+    // decisions ledger and the turn-end decision check. Off, the daemon offers
+    // the same tools and assembles the same policy text as without them.
+    explicitSilence: boolEnv('VIKA_EXPLICIT_SILENCE', false),
     historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
     // Replies to bot messages in one chat/thread with no person writing there
     // before the safety fuse holds further ones; 0 turns the fuse off.

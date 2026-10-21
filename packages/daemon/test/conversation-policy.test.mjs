@@ -4,9 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { CodexAgent } from '../src/codex.mjs';
 import {
   assembleConversationPolicy,
   assembleVolcConversationPolicy,
+  assembleVolcSelfHostedConversationPolicy,
+  renderBasePrompt,
 } from '../src/conversation-policy.mjs';
 
 function writePrompt(name, body) {
@@ -132,6 +135,8 @@ describe('conversation policy assemble', () => {
       assert.doesNotMatch(text, /mention=me\|other\|mixed/);
       assert.match(text, /## Persona and voice/);
       assert.match(text, /CANONICAL_PERSONA_MARKER/);
+      assert.match(text, /otherwise deliver nothing/);
+      assert.doesNotMatch(text, /stay_silent/);
       assert.doesNotMatch(text, /irrelevant filler/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
@@ -176,5 +181,69 @@ describe('conversation policy assemble', () => {
     });
     assert.match(text, /Chat input format/);
     assert.doesNotMatch(text, /## Persona and voice/);
+    assert.doesNotMatch(text, /stay_silent/);
+    // Volc with the real prompt file: persona only, never the Core tool.
+    assert.doesNotMatch(assembleVolcConversationPolicy({ systemPromptPath: defaultSystemPromptPath }), /stay_silent/);
+    assert.doesNotMatch(assembleVolcSelfHostedConversationPolicy({ systemPromptPath: defaultSystemPromptPath }), /stay_silent/);
+  });
+});
+
+describe('explicit silence is opt-in per instance', () => {
+  const base = { systemPromptPath: defaultSystemPromptPath, workspace: '/srv/vika/workspace', agentName: 'Tester' };
+  const sessions = [['lark'], ['lark', 'weixin', 'telegram', 'email'], ['weixin'], ['telegram', 'email']]
+    .map((connectors) => ({ ...base, connectors }));
+  const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
+  const codexHash = (config) => new CodexAgent(config, {
+    getCognitionState: () => ({ runtime: 'codex', epoch: 1, authorityToken: 'token' }), getSetting: () => null,
+  }, quiet).policyHash;
+
+  it('assembles the same policy text and policyHash as before the tool when the switch is off', () => {
+    for (const config of sessions) {
+      const off = assembleConversationPolicy({ ...config, explicitSilence: false });
+      // Off is the default: a config without the switch is the old config.
+      assert.equal(off, assembleConversationPolicy(config));
+      assert.equal(codexHash({ ...config, explicitSilence: false }), codexHash(config));
+      assert.notEqual(codexHash({ ...config, explicitSilence: true }), codexHash(config));
+      assert.doesNotMatch(off, /stay_silent|undecided/);
+      assert.doesNotMatch(off, /needs no decision|needs no answer and no decision/);
+      if (config.connectors.includes('email')) assert.match(off, /It is your record of that reply and needs no answer\.$/m);
+      assert.match(off, /Notify only when the owner should know now; otherwise deliver nothing\./);
+    }
+    // The bundled system prompt goes in exactly as written.
+    const lark = assembleConversationPolicy(sessions[0]);
+    assert.ok(lark.startsWith(`${renderBasePrompt(sessions[0]).trim()}\n\n`));
+    assert.match(lark, /If no delivery is needed, do not call a Lark delivery tool for that message\./);
+    const weixin = assembleConversationPolicy(sessions[2]);
+    assert.match(weixin, /If no reply is needed, call no delivery tool; this does not suppress the runtime final answer\./);
+  });
+
+  it('appends one explicit silence section to every Core-tool policy when the switch is on', () => {
+    const configs = [...sessions, { ...base, connectors: ['telegram'] }, { ...base, connectors: ['weixin', 'email'] },
+      { ...base, connectors: ['lark', 'weixin'], meetingAudio: { enabled: true } }];
+    for (const config of configs) {
+      const off = assembleConversationPolicy(config);
+      const on = assembleConversationPolicy({ ...config, explicitSilence: true });
+      const label = config.connectors.join('+');
+      // Appended after the unchanged policy: nothing above it is edited.
+      assert.ok(on.startsWith(`${off}\n\n## Explicit silence\n`), label);
+      assert.equal(on.split('## Explicit silence').length, 2, label);
+      const section = on.slice(off.length);
+      assert.match(section, /call(?:ing)? `stay_silent` once with that line's `event=` as `decision_id`/, label);
+      assert.match(section, /need one decision, on the newest `event=`/, label);
+      assert.match(section, /`undecided=1` field means you ended your previous turn without deciding on that line\. Decide on it now, once: reply, or call `stay_silent`\. It is not a request to reply\./, label);
+      assert.match(section, /take precedence over anything above that says to stay silent/, label);
+      assert.match(section, /`decision_id` of `retract_message`/, label);
+      assert.doesNotMatch(section, /DELIVERED|NO_DELIVERY|do nothing and end the turn/, label);
+    }
+    // WeChat-only and Telegram-only sessions explain undecided=1 too.
+    for (const connectors of [['weixin'], ['telegram']]) {
+      assert.match(assembleConversationPolicy({ ...base, connectors, explicitSilence: true }), /undecided=1/);
+    }
+
+    // Volc has no Core tools, whatever the switch says.
+    for (const assemble of [assembleVolcConversationPolicy, assembleVolcSelfHostedConversationPolicy]) {
+      assert.equal(assemble({ ...base, explicitSilence: true }), assemble(base));
+      assert.doesNotMatch(assemble({ ...base, explicitSilence: true }), /stay_silent/);
+    }
   });
 });

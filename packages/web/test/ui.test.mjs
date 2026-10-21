@@ -95,3 +95,34 @@ test('Core 已结算投递进入输出区，MCP 调用和未确认投递不会�
     assert.equal(turn.steps.filter((step) => step.type === 'tool').length, 3);
   }
 });
+
+test('明确不回复进入输出区，回合后的「本轮未表态」挂回原回合', () => {
+  const { buildModel, deliveryOf } = runInNewContext(
+    js.slice(0, js.indexOf('// ---------- 渲染：上下文流')) + '\n({ buildModel, deliveryOf });',
+    { document: { getElementById: () => ({}) } },
+  );
+  const rows = [
+    { kind: 'message.received', inboundSeq: 1, summary: '谢谢' },
+    { kind: 'agent.turn_started', metadata: { inboundSeqs: [1] } },
+    { kind: 'delivery.silent', inboundSeq: 1, status: 'SILENT', summary: 'chatter between others',
+      metadata: { tool: 'stay_silent', decisionSeq: 1 } },
+    { kind: 'agent.turn_completed', status: 'completed' },
+    { kind: 'message.received', inboundSeq: 2, summary: '在吗' },
+    { kind: 'agent.turn_started', metadata: { inboundSeqs: [2] } },
+    { kind: 'agent.turn_completed', status: 'completed' },
+    { kind: 'agent.decision_missing', inboundSeq: 2, status: 'NUDGED', severity: 'warn' },
+  ].map((row, i) => ({ id: i + 1, createdAtMs: i * 100, ...row }));
+  const model = buildModel(rows);
+  const [silent, missed] = model.turns;
+  const deliveries = silent.steps.filter((step) => step.type === 'tool' && deliveryOf(step));
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveryOf(deliveries[0]).mode, '不回复');
+  assert.equal(deliveryOf(deliveries[0]).text, 'chatter between others');
+  assert.equal(deliveryOf(deliveries[0]).silent, true);
+  assert.equal(JSON.stringify(missed.steps.map((step) => [step.type, step.row.kind])), '[["event","agent.decision_missing"]]');
+  assert.equal(model.items.some((item) => item.type === 'row'), false);
+  // The page cannot tell whether the instance has explicit silence on, so
+  // the empty output keeps its wording.
+  assert.match(js, /'没有发出消息（静默或仅模型文本）'/);
+  assert.match(js, /delivery\.silent \? 'muted' : 'out'/);
+});

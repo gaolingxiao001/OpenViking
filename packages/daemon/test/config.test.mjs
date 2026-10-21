@@ -44,6 +44,12 @@ describe('configuration safety', { concurrency: false }, () => {
     setEnv('VIKA_BOT_REPLY_FUSE', '-1');
     assert.throws(() => getConfig(), /VIKA_BOT_REPLY_FUSE/);
   });
+  it('keeps explicit silence off unless the instance opts in', () => {
+    setEnv('VIKA_EXPLICIT_SILENCE', undefined);
+    assert.equal(getConfig().explicitSilence, false);
+    setEnv('VIKA_EXPLICIT_SILENCE', 'true');
+    assert.equal(getConfig().explicitSilence, true);
+  });
   it('keeps meeting audio entirely disabled unless explicitly configured', () => {
     setEnv('VIKA_MEETING_AUDIO_ENABLED', 'false');
     setEnv('VIKA_MEETING_AUDIO_TARGET_CHAT_ID', undefined);

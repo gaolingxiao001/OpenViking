@@ -208,6 +208,27 @@ treat ov and it's viking:// as your only working directory to save and retrive l
 // one global runtime cannot wait on a person without stalling every chat.
 const UNATTENDED_INTERACTION_POLICY = 'This is an unattended daemon session. Native runtime dialogs, permission prompts, and MCP requests for user input are cancelled or denied; never depend on them. If you need clarification, use the messaging tools to send a question (or choices when the connector supports them), end the turn, and wait for a later authenticated user message or card answer. A cancelled dialog is not user approval.';
 
+// Appended last, and only with VIKA_EXPLICIT_SILENCE on, so an instance with it
+// off assembles exactly the policy (and policyHash) it had without the feature.
+// Only the Core-tool runtimes assemble this policy; Volc never sees it. It
+// overrides the main text's "stay silent" / "end the turn" wording instead of
+// editing it, so the prompt files stay as they are.
+const EXPLICIT_SILENCE_PROMPT = [
+  '## Explicit silence',
+  '',
+  'This instance records a decision for every input. These rules take precedence over anything above that says to stay silent, to take no delivery action for a message, or to end the turn and wait.',
+  '- When an input needs no reply, stay silent by calling `stay_silent` once with that line\'s `event=` as `decision_id` (optionally a short private `reason`), and take no other action for it. It sends nothing and is the one final decision for that input; never combine it with a delivery for the same input. Ending the turn without a delivery or `stay_silent` is not a decision.',
+  '- One decision per input. Several new lines in the same chat/thread, or about the same subject, need one decision, on the newest `event=`. A non-chat event you do not tell the owner about gets `stay_silent` too; one `notify_owner` may cover several of them.',
+  '- A retraction is the decision for the message that asked for it: pass that message\'s `event=` as the `decision_id` of `retract_message`.',
+  '- An authenticated `undecided=1` field means you ended your previous turn without deciding on that line. Decide on it now, once: reply, or call `stay_silent`. It is not a request to reply.',
+  '- If `stay_silent` reports newer input, decide on that input from its own line. If you set a temporary `OnIt` and then decide not to answer, `stay_silent` removes it.',
+  '- Daemon notes such as `[mail reply sent]` lines, and `[meeting-audio ...]` lines, need no decision.',
+].join('\n');
+
+function explicitSilencePromptSection(config = {}) {
+  return config.explicitSilence ? EXPLICIT_SILENCE_PROMPT : '';
+}
+
 // Native runtimes get the release markdown plus harness/OV/meeting plugins.
 export function assembleConversationPolicy(config = {}) {
   const connectors = connectorsOf(config);
@@ -222,6 +243,7 @@ export function assembleConversationPolicy(config = {}) {
       CONTEXT_WORKDIR_PROMPT,
       personaSection(config),
       UNATTENDED_INTERACTION_POLICY,
+      explicitSilencePromptSection(config),
     ]);
   }
   return joinSections([
@@ -237,6 +259,7 @@ export function assembleConversationPolicy(config = {}) {
     slackConnectorPolicy(config),
     emailConnectorPolicy(config),
     UNATTENDED_INTERACTION_POLICY,
+    explicitSilencePromptSection(config),
   ]);
 }
 

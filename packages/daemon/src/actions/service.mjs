@@ -9,14 +9,14 @@ import { chunkOffset, mailArchiveRoot, readStoredText, readTarget } from '../ema
 import { meetingContextLines } from '../meeting/index.mjs';
 import { OVUnavailableError } from '../ov-connection.mjs';
 import { OVSessionClient } from '../ov-session-context.mjs';
-import { opaqueRef, safeError } from '../logger.mjs';
+import { opaqueRef, redactSensitive, safeError } from '../logger.mjs';
 import { BOT_SENDERS, readMetadataTag } from '../runtime-input.mjs';
 import {
   APPROVAL_SECONDS, approvalCard, approvalMessage, approvalNote, approvalQuestion, approvalStatusText, approvedText,
   parseApprovalReply, settledApprovalCard,
 } from './approval.mjs';
 import { resolveContent } from './content.mjs';
-import { TOOLS, publicTool, validateInput } from './tools.mjs';
+import { TOOLS, publicTool, toolDefinition, validateInput } from './tools.mjs';
 
 const NO_ACTION = 'No action was taken.';
 // Replies to bot messages in one chat/thread with no person writing there,
@@ -29,6 +29,7 @@ const HANDLERS = {
   reply_message: 'replyMessage',
   react_to_message: 'reactToMessage',
   retract_message: 'retractMessage',
+  stay_silent: 'staySilent',
   list_chats: 'listChats',
   list_chat_messages: 'listChatMessages',
   search_messages: 'searchMessages',
@@ -89,11 +90,16 @@ export class ActionService {
     if (tool.query) return this.supporting(tool.query, 'queries').length > 0;
     if (tool.connector) return this.connectors.manifests().some(([, manifest]) => manifest.name === tool.connector);
     if (tool.meeting) return this.meetingEnabled;
+    if (tool.explicitSilence) return Boolean(this.config.explicitSilence);
     return true;
   }
 
   tools() {
-    return TOOLS.filter((tool) => this.offered(tool)).map(publicTool);
+    return TOOLS.filter((tool) => this.offered(tool)).map((tool) => publicTool(this.definition(tool)));
+  }
+
+  definition(tool) {
+    return toolDefinition(tool, { explicitSilence: Boolean(this.config.explicitSilence) });
   }
 
   // Agent entrypoint. Returns { text, data, media? }; throws a model-readable
@@ -105,12 +111,20 @@ export class ActionService {
     const trace = { tool: name, via };
     const caller = { authority, trace };
     const tool = TOOLS.find((candidate) => candidate.name === name);
+    // A refused stay_silent is shown like a blocked delivery, only while the
+    // tool is offered (explicitSilence on).
+    const silence = name === 'stay_silent' && Boolean(this.config.explicitSilence);
     try {
       if (!tool || !this.offered(tool)) throw blocked('unknown_tool', `unknown tool: ${name}`);
-      try { validateInput(tool.inputSchema, input); } catch (error) { throw blocked('invalid_input', error.message); }
+      try { validateInput(this.definition(tool).inputSchema, input); } catch (error) { throw blocked('invalid_input', error.message); }
       this.assertAuthority(authority);
       trace.runtime = this.store.getCognitionState().runtime;
-      const result = await this[HANDLERS[name]](input, caller);
+      let result = await this[HANDLERS[name]](input, caller);
+      // Only a call that changed nothing says STOP: a success after a refused
+      // attempt (decision_ambiguous fixed with decision_instance) is a fix.
+      if (silence && result.data?.duplicate) {
+        result = { ...result, text: `STOP: this stay_silent call changed nothing for this input. Do not call it again for it; decide any other input you still have, otherwise finish your turn. ${result.text}` };
+      }
       trace.outcome = result.data?.dry_run ? 'dry_run' : result.data?.duplicate ? 'duplicate' : 'ok';
       this.logger.info('agent_tool', { ...trace, durationMs: Date.now() - startedAt });
       return result;
@@ -118,7 +132,7 @@ export class ActionService {
       trace.outcome = trace.invoked ? 'failed' : 'blocked';
       trace.code = error.code ?? (trace.invoked ? 'connector_failed' : 'error');
       this.logger.warn('agent_tool', { ...trace, durationMs: Date.now() - startedAt, error: safeError(error) });
-      if (trace.outcome === 'blocked' && tool?.action) {
+      if (trace.outcome === 'blocked' && (tool?.action || silence)) {
         this.store.recordActivity({
           eventKey: `tool:${randomUUID()}`, kind: 'delivery.blocked', status: 'BLOCKED',
           conversationKey: caller.convKey ?? null, inboundSeq: trace.decisionSeq ?? null, summary: safeError(error),
@@ -210,22 +224,79 @@ export class ActionService {
     return this.store.acceptedEvents(id, instance);
   }
 
-  // Freshness fence: the decision must resolve to exactly one accepted inbound
-  // event with nothing newer accepted in its scope (the chat/thread, or the
-  // subject of a non-chat event).
-  fence(input, caller) {
+  // The one accepted inbound event a decision names. `verb` heads the refusal:
+  // a delivery is blocked, a silence is not recorded.
+  resolveDecision(input, caller, verb = 'Delivery blocked') {
     const rows = this.inputEvents(input.decision_id, input.decision_instance ?? null);
     if (rows.length === 0) {
-      throw blocked('unknown_decision', `Delivery blocked: decision_id is not the event= of an accepted daemon-authenticated input (msg= is not accepted). ${NO_ACTION}`);
+      throw blocked('unknown_decision', `${verb}: decision_id is not the event= of an accepted daemon-authenticated input (msg= is not accepted). ${NO_ACTION}`);
     }
     if (rows.length > 1) {
-      throw blocked('decision_ambiguous', `Delivery blocked: decision_id is an event on ${rows.length} instances. Pass that line's instance= (or source= when it has none) as decision_instance. ${NO_ACTION}`);
+      throw blocked('decision_ambiguous', `${verb}: decision_id is an event on ${rows.length} instances. Pass that line's instance= (or source= when it has none) as decision_instance. ${NO_ACTION}`);
     }
     const [row] = rows;
     Object.assign(caller.trace, { decisionSeq: row.seq, conversationRef: opaqueRef(row.scope_key) });
     caller.convKey = row.conv_key;
+    return row;
+  }
+
+  // Freshness fence: the decision must resolve to exactly one accepted inbound
+  // event with nothing newer accepted in its scope (the chat/thread, or the
+  // subject of a non-chat event).
+  fence(input, caller) {
+    const row = this.resolveDecision(input, caller);
     this.assertFresh(row, caller);
     return row;
+  }
+
+  // A delivery made on a decision settles it in the ledger, even when the send
+  // then fails or turns uncertain: the model did decide, and a nudge must not
+  // invite a resend. Keyed on the fence, never on the attributed input.
+  settleDecision(caller, fence, final) {
+    if (!this.config.explicitSilence || !caller.authority || !fence || !final) return;
+    try {
+      const { created, previous } = this.store.recordDecision({ row: fence, outcome: 'delivered' });
+      if (created && previous === 'silent') caller.trace.overrode = 'silent';
+    } catch (error) {
+      // Bookkeeping only: it must never stop the delivery itself.
+      this.logger.warn('decision_record_failed', { error: safeError(error) });
+    }
+  }
+
+  // stay_silent: the model read the input and chose to deliver nothing. Only a
+  // ledger row and an activity: no outbox, journal, connector call or liveness.
+  // Nothing about it is ever refused for being repeated or stale.
+  async staySilent(input, caller) {
+    const row = this.resolveDecision(input, caller, 'Silence not recorded');
+    if (this.store.decisionFor(row.connector_instance, row.event_id)?.outcome === 'delivered') {
+      return { text: 'A delivery is already recorded for this input; nothing to change. Do not call stay_silent for it.', data: { duplicate: true, delivered: true } };
+    }
+    const newerSeq = this.store.newerAcceptedSeq(row.scope_key, row.seq);
+    const superseded = newerSeq !== null;
+    if (superseded) caller.trace.newerSeq = newerSeq;
+    caller.trace.superseded = superseded;
+    const reason = input.reason ? redactSensitive(input.reason).trim() || null : null;
+    const { created } = this.store.recordDecision({ row, outcome: 'silent' });
+    if (!created) {
+      return { text: 'Already recorded: nothing is sent for this input. Do not call stay_silent again for it.', data: { duplicate: true } };
+    }
+    // A superseded input's OnIt may belong to work on the newer one.
+    if (!superseded && row.conv_key) await this.clearTemporaryReaction(row.conv_key, 'silent');
+    try {
+      this.store.recordActivity({
+        eventKey: `decision:silent:${row.connector_instance}:${row.event_id}`, kind: 'delivery.silent',
+        conversationKey: row.conv_key ?? null, inboundSeq: row.seq, status: superseded ? 'SUPERSEDED' : 'SILENT',
+        summary: reason ?? '',
+        metadata: { tool: 'stay_silent', decisionSeq: row.seq, newerSeq: newerSeq ?? undefined,
+          runtime: caller.trace.runtime, via: caller.trace.via },
+      });
+    } catch (error) {
+      this.logger.warn('activity_persist_failed', { kind: 'delivery.silent', error: safeError(error) });
+    }
+    return {
+      text: `Recorded: nothing is sent for this input.${superseded ? ' A newer input has arrived there; decide on that one from its own line.' : ''}`,
+      data: { silent: true, superseded },
+    };
   }
 
   // Checks the event the decision first resolved to, by its own scope and seq.
@@ -377,7 +448,9 @@ export class ActionService {
     return [...mentions.values()];
   }
 
-  async deliver({ caller, connector, action, input, key, summary, scope, fence = null, inboundSeq = null, metadata = {} }) {
+  async deliver({
+    caller, connector, action, input, key, summary, scope, fence = null, inboundSeq = null, metadata = {}, final = true,
+  }) {
     // Preparing the content may have awaited (a mention lookup), and a newer
     // message or a runtime switch could have landed meanwhile. Re-check right
     // before the reservation, with no await in between.
@@ -388,7 +461,10 @@ export class ActionService {
         this.assertNoBotLoop(fence, action, scope, caller);
       }
     }
-    if (this.config.dryRun) return { dry_run: true };
+    if (this.config.dryRun) {
+      this.settleDecision(caller, fence, final);
+      return { dry_run: true };
+    }
     // A Connector that is down and restarting gets no reservation: nothing was
     // sent, and the same call can go through once it is back.
     if (this.connectors.available?.(connector) === false) {
@@ -404,11 +480,15 @@ export class ActionService {
     });
     caller.trace.outboxId = reservation.id;
     if (!reservation.claimed) {
-      if (reservation.status === 'SENT') return { ...reservation.result, duplicate: true };
+      if (reservation.status === 'SENT') {
+        this.settleDecision(caller, fence, final);
+        return { ...reservation.result, duplicate: true };
+      }
       throw reservation.status === 'PENDING'
         ? blocked('in_progress', `Delivery blocked: this identical action is still in progress. ${NO_ACTION}`)
         : blocked('uncertain_not_retried', `Delivery blocked: this identical action was already attempted and its outcome is uncertain. ${NO_ACTION}`);
     }
+    this.settleDecision(caller, fence, final);
     caller.trace.attempt = reservation.attempt;
     caller.trace.invoked = true;
     let result;
@@ -738,6 +818,8 @@ export class ActionService {
       scope: { chatId: target?.chat_id ?? fence.chat_id, threadId: target?.thread_id ?? null, convKey: responseTo.conv_key },
       fence,
       inboundSeq: responseTo.seq,
+      // A temporary OnIt says "working", not a decision.
+      final: !temporary,
     });
     if (!result.dry_run && !result.duplicate) {
       if (temporary && result.reaction_id) {
@@ -753,6 +835,9 @@ export class ActionService {
 
   async retractMessage(input, caller) {
     const connector = this.route(caller, 'message.retract', 'actions', input.source, { messageId: input.message_id });
+    // decision_id is offered only with explicit silence on: the retraction is
+    // then fenced and recorded like any other final delivery.
+    const fence = input.decision_id === undefined ? null : this.fence(input, caller);
     const target = this.store.deliveredMessage(input.message_id, connector);
     const result = await this.deliver({
       caller, connector, action: 'message.retract',
@@ -760,6 +845,8 @@ export class ActionService {
       key: this.key(null, 'retract', connector, input.message_id),
       summary: '[message retracted]',
       scope: { chatId: target?.chat_id ?? null, convKey: target?.conv_key ?? null },
+      fence,
+      inboundSeq: fence?.seq ?? null,
     });
     return this.deliveryResult(result, `retraction of message_id=${input.message_id}`);
   }

@@ -122,6 +122,8 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
   const idleTag = Number.isFinite(idleForMs) && idleForMs >= 0
     ? ` idle=${Math.max(1, Math.floor(idleForMs / 1_000))}s`
     : '';
+  // A one-time reminder: the last turn ended without a decision on this line.
+  const undecidedTag = authenticated?.undecided ? ' undecided=1' : '';
   const replyTo = authenticated?.replyTo;
   const replyTag = replyTo
     ? ` reply_to=${replyTo.kind === 'me'
@@ -137,7 +139,7 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     + ` msg=${metadataTag(message.messageId)} event=${metadataTag(message.eventId)}`
     + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
     + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source, message.senderName)}`
-    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${idleTag}] ${renderInboundContent(message)}`;
+    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
   return line;
 }
 

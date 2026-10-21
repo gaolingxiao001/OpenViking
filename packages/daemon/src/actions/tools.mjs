@@ -4,7 +4,9 @@ import { CONTENT_PROPERTIES } from './content.mjs';
 // and calls to the Core; it neither validates nor executes.
 // `action` / `query` name the Connector operation a tool needs, so a tool is
 // offered only when some configured Connector declares it; `connector` names
-// the kind of Connector whose data a Core-side tool reads.
+// the kind of Connector whose data a Core-side tool reads; `explicitSilence`
+// marks the opt-in stay_silent tool, and `silenceInput` holds the optional
+// fields a tool gains only when explicit silence is on (see toolDefinition).
 
 const ID = '^[A-Za-z0-9_.:@=+-]{1,256}$';
 const SOURCE = {
@@ -119,7 +121,25 @@ export const TOOLS = [
       source: SOURCE,
       message_id: { type: 'string', pattern: ID, description: 'Full id of the bot message to retract.' },
     }, ['message_id']),
+    silenceInput: {
+      decision_id: { ...DECISION, description: 'event= (never msg=) of the input that asked for this retraction, copied exactly. Records the retraction as your decision on it, so no stay_silent or reply is needed for that input. Freshness fence: blocked if anything newer has arrived there.' },
+      decision_instance: DECISION_INSTANCE,
+    },
     annotations: { ...WRITE, destructiveHint: true },
+  },
+  {
+    // A decision, not a delivery: sends nothing. Offered on every connector,
+    // but only on an instance with explicitSilence on (VIKA_EXPLICIT_SILENCE).
+    name: 'stay_silent',
+    explicitSilence: true,
+    title: 'Decide not to respond',
+    description: 'Record that you read an input and deliberately deliver nothing for it: no message, reply, reaction or owner notice. Call it instead of a delivery tool whenever the policy says to stay silent, once per chat/thread (or non-chat subject), with the event= of the newest input you have seen there; that covers the earlier inputs there. It sends nothing, notifies no one, and removes your temporary OnIt in that chat/thread. Repeating it changes nothing: never call it twice for the same input.',
+    inputSchema: schema({
+      decision_id: { type: 'string', pattern: REF, description: 'event= (never msg=) of the newest daemon-authenticated input you have seen in that chat/thread, or about that subject. Copy it exactly. If newer input has arrived, silence is still recorded for this one.' },
+      decision_instance: DECISION_INSTANCE,
+      reason: { type: 'string', maxLength: 120, description: 'Optional short private reason, e.g. "chatter between others", "waiting for OpenViking小助手", "newsletter". Kept only in the local Activity log; never sent.' },
+    }, ['decision_id']),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'list_chats',
@@ -225,6 +245,14 @@ export const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
 ];
+
+// A tool as this instance offers it. With explicit silence on, its
+// `silenceInput` fields join the schema as optional properties; off, the
+// definition is exactly the one without the feature.
+export function toolDefinition(tool, { explicitSilence = false } = {}) {
+  if (!explicitSilence || !tool.silenceInput) return tool;
+  return { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, ...tool.silenceInput } } };
+}
 
 export function publicTool({ name, title, description, inputSchema, annotations }) {
   return { name, title, description, inputSchema, annotations };

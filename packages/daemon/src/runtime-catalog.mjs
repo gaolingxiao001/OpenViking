@@ -38,6 +38,8 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      // Where model actions go: the Core agent tools (MCP), or the Worker's lark-cli.
+      agentTools: 'core',
     },
   }),
   traex: runtimeDefinition({
@@ -53,6 +55,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     },
   }),
   claude: runtimeDefinition({
@@ -68,6 +71,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     },
   }),
   volc: runtimeDefinition({
@@ -84,6 +88,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'single-conversation',
       outputOwnership: 'runtime',
       sessionAuthority: 'rotate',
+      agentTools: 'lark-cli',
     },
   }),
   pi: runtimeDefinition({
@@ -99,6 +104,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     },
   }),
 });

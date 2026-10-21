@@ -67,6 +67,7 @@ const AGENT_FIELDS = Object.freeze([
   'workspace',
   'ovConfig',
   'ovAutoRecall',
+  'explicitSilence',
   'model',
   'volcSessionId',
   'volcEnvironmentId',
@@ -267,6 +268,9 @@ function parseAgent(value, index) {
   if (value.ovAutoRecall !== undefined && typeof value.ovAutoRecall !== 'boolean') {
     throw new Error(`${label}.ovAutoRecall must be a boolean`);
   }
+  if (value.explicitSilence !== undefined && typeof value.explicitSilence !== 'boolean') {
+    throw new Error(`${label}.explicitSilence must be a boolean`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -278,6 +282,7 @@ function parseAgent(value, index) {
     workspace: manifestAbsolutePath(value.workspace, `${label}.workspace`),
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     ovAutoRecall: value.ovAutoRecall ?? false,
+    explicitSilence: value.explicitSilence ?? false,
     model,
     volcSessionId,
     volcEnvironmentId,
@@ -458,6 +463,8 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     delete env.LARKSUITE_CLI_PROFILE;
   }
   Object.assign(env, openVikingAgentEnv(agent));
+  // Always set, so neither the shell nor another instance's value leaks in.
+  env.VIKA_EXPLICIT_SILENCE = agent.explicitSilence ? 'true' : 'false';
   env.VIKA_CHANNEL = agent.channel;
   env.VIKA_CONNECTORS_JSON = JSON.stringify(agent.connectors);
   if (agent.emailAccounts.length > 0) env.VIKA_EMAIL_ACCOUNTS_JSON = JSON.stringify(agent.emailAccounts);
