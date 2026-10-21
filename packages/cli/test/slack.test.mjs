@@ -67,6 +67,9 @@ test('the app manifest asks for Socket Mode, message events and a valid bot name
   assert.equal(manifest.settings.token_rotation_enabled, false);
   assert.deepEqual(manifest.settings.event_subscriptions.bot_events, ['message.channels', 'message.groups', 'message.im', 'message.mpim']);
   assert.ok(!manifest.oauth_config.scopes.bot.includes('chat:write.public'));
+  for (const scope of ['channels:read', 'groups:read', 'im:read', 'mpim:read', 'users:read']) {
+    assert.ok(manifest.oauth_config.scopes.bot.includes(scope), `member lookup needs ${scope}`);
+  }
   assert.deepEqual(JSON.parse(new URL(createAppUrl('Vika')).searchParams.get('manifest_json')), appManifest('Vika'));
 });
 

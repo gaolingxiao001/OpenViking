@@ -12,7 +12,8 @@ import { showScan } from './qr.mjs';
 // and pastes its two tokens. The app stays internal to that workspace.
 
 export const BOT_SCOPES = Object.freeze(['chat:write', 'reactions:write', 'files:read', 'files:write', 'users:read',
-  'channels:history', 'groups:history', 'im:history', 'mpim:history']);
+  'channels:history', 'groups:history', 'im:history', 'mpim:history',
+  'channels:read', 'groups:read', 'im:read', 'mpim:read']);
 export const BOT_EVENTS = Object.freeze(['message.channels', 'message.groups', 'message.im', 'message.mpim']);
 
 export function appManifest(name) {

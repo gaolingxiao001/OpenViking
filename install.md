@@ -100,10 +100,6 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 只处理绑定 owner 的私聊，支持文本、图片、文件与引用回复。Telegram 可以作为主渠道接收新邮件提醒和带编号的回信审批。纯 Telegram 实例不填飞书 `profile`；混合实例只在接入飞书时填写。凭证和游标在 `<dataDir>/telegram/state.sqlite3`，token 不写入 `config.json`。完整范围与文件大小限制见 [README 的 Telegram 私聊](./README.md#telegram-私聊)。
 
-### Slack 接入
-
-运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装，再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
-
 重新授权已接入的实例：
 
 ```bash
@@ -111,6 +107,20 @@ vika login telegram [实例]
 ```
 
 此命令先停止实例，再验证新 token 和 Start 绑定，最后恢复启动；失败或取消时保留旧凭证，并尝试恢复原实例。每个实例使用独立 Bot，不能让其他程序同时轮询它。若 Bot 已有 Webhook，向导会拒绝接入，请使用独立 Bot 或先在原服务中移除 Webhook。支持 Codex、TraeX、Claude 和 Pi，不支持方舟。
+
+### Slack 接入
+
+运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装，再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
+
+成员查询使用 `conversations.members` 和 `users.info`。新建 App 的模板已包含 `channels:read`（公开频道）、`groups:read`（私有频道）、`mpim:read`（多人私聊）、`im:read`（私聊）和 `users:read`（姓名与机器人标记）。已有 App 升级 Vika 不会自动获得新权限：到 **OAuth & Permissions → Bot Token Scopes** 添加对应会话类型的权限，再 **Reinstall to Workspace** 完成授权。查询报 `missing_scope` 时会提示这些步骤，原有收发消息能力仍可使用。
+
+重新绑定已有 Slack，或重新安装后 Bot token 发生变化时，运行：
+
+```bash
+vika login slack [实例]
+```
+
+输入同一个目标 App 的两个 token，并在机器人私聊发送终端显示的口令。这个命令也可以更换为另一个 App/bot；验证期间暂停所选实例，完成后重启。实例名是配置中的 ID，不是机器人的显示名。新增权限后 token 未变化则不必重新绑定。
 
 ### 方舟 Self-hosted Managed Agent
 

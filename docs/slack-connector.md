@@ -131,7 +131,7 @@ slack: connectorManifest({
     'message.react': {},
     'message.retract': {},
   },
-  queries: ['message.media'],          // 第二期加 chat.list / chat.messages / thread.messages / message.search
+  queries: ['message.media', 'chat.members.list'], // 后续加 chat.list / chat.messages / thread.messages / message.search
   auth_schema: EMPTY_SCHEMA, config_schema: EMPTY_SCHEMA,
 }),
 ```
@@ -148,6 +148,7 @@ slack: connectorManifest({
 | `message.react` | `reactions.add(channel, timestamp, name)` | Core 传的是飞书 emoji 类型（`OnIt`/`THUMBSUP`/`DONE`…），Connector 映射到 Slack 名字（`eyes`/`+1`/`white_check_mark`…），未知的拒绝。临时 `OnIt` 会经 Core 内部的 `message.reaction.delete` 调 `reactions.remove`，所以这个内部操作也要实现 |
 | `message.retract` | `chat.delete(channel, ts)` | 只能删 bot 自己发的消息 |
 | `message.media` | `files.info` + `url_private_download` | 带 `Authorization: Bearer xoxb-`；**禁止跟随重定向、只允许 Slack 文件域名**，防止 token 外泄（和 Telegram 同一原则）；大小上限沿用 20 MiB |
+| `chat.members.list` | `conversations.members` + `users.info` | Agent 工具 `list_chat_members`，默认每页 100 人、上限 200，通过 `next_cursor` 翻页。返回 ID、显示名与已知的 `is_self` / `is_bot` / `deleted`；资料失败保留成员 ID 并标记未知。查到的姓名加入该频道提及缓存，重名必须用 ID。缺 scope 时提示补权限并重新安装 App，不中断 Connector |
 | 文件发送 | `files.getUploadURLExternal` → POST 字节 → `files.completeUploadExternal(channel_id, thread_ts)` | 旧的 `files.upload` 已于 2025-11-12 下线。分享是异步的，complete 不直接返回消息 ts；如果要支持撤回文件消息，需要短轮询 `files.info` 的 `shares` 拿 ts，否则结果里 `message_id` 为空 |
 
 ### 6.3 文本格式
