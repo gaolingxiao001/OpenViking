@@ -16,6 +16,9 @@ const EMOJI = { OK: 'ok_hand', THUMBSUP: '+1', DONE: 'white_check_mark', THANKS:
 
 // Same spelling either way: "Alice Smith", "alice_smith".
 const nameKey = (name) => String(name ?? '').toLocaleLowerCase().replace(/[\s_]+/g, ' ').trim();
+const userName = (user) => cleanName(user?.profile?.display_name) ?? cleanName(user?.profile?.real_name)
+  ?? cleanName(user?.real_name) ?? cleanName(user?.name);
+const validCursor = (value) => typeof value === 'string' && /^[!-~]{1,2048}$/.test(value);
 
 export class SlackClient {
   constructor(config, _registry, logger, { fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, receiver = {}, paceMs = 1100 } = {}) {
@@ -117,14 +120,75 @@ export class SlackClient {
       if ((this.failedNames.get(id) ?? 0) > Date.now() || signal.aborted) continue;
       try {
         const { user } = await this.api.call('users.info', { user: id }, signal);
-        const name = cleanName(user?.profile?.display_name) ?? cleanName(user?.profile?.real_name)
-          ?? cleanName(user?.real_name) ?? cleanName(user?.name);
+        const name = userName(user);
         if (name) { this.state.saveName(id, name); names.set(id, name); }
       } catch {
         this.failedNames.set(id, Date.now() + 10 * 60_000);
       }
     }
     return names;
+  }
+
+  // One Slack page per tool call. The cursor, not the page length, says
+  // whether the roster is complete. Profiles supply labels, never authority.
+  async listChatMembers(channel, { limit = 100, cursor } = {}) {
+    if (!validChannel(channel)) throw new Error('Slack chat_id must be a channel id');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('Slack member limit must be between 1 and 200');
+    if (cursor !== undefined && !validCursor(cursor)) throw new Error('Invalid Slack member cursor');
+    const signal = this.actionSignal();
+    let page;
+    try {
+      page = await this.api.call('conversations.members', { channel, limit, cursor }, signal);
+    } catch (error) {
+      if (error instanceof SlackError && error.code === 'missing_scope') {
+        error.message += '. Add the Bot Token Scope for this conversation type: channels:read (public channels), groups:read (private channels), mpim:read (group DMs), or im:read (DMs), then reinstall the Slack app to the workspace to grant it. If the bot token changes, update it with vika login slack <instance>.';
+      }
+      throw error;
+    }
+    if (!Array.isArray(page.members) || page.members.length > limit
+      || page.members.some((id) => typeof id !== 'string' || !/^[UW][A-Z0-9]{2,30}$/.test(id))) {
+      throw new Error('Slack returned an invalid member list');
+    }
+    const nextCursor = page.response_metadata?.next_cursor ?? '';
+    if (nextCursor !== '' && (!validCursor(nextCursor) || nextCursor === cursor)) {
+      throw new Error('Slack returned an invalid member cursor');
+    }
+    const ids = [...new Set(page.members)];
+    const members = new Array(ids.length);
+    let next = 0;
+    // Bound profile fan-out; a slow or inaccessible profile must not hide a
+    // member whose ID Slack returned, or masquerade as a known human.
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
+      while (next < ids.length) {
+        const index = next++;
+        members[index] = await this.memberProfile(ids[index], signal);
+      }
+    }));
+    signal.throwIfAborted();
+    for (const member of members) {
+      if (member.name) {
+        this.state.saveName(member.user_id, member.name);
+        this.state.rememberPerson(channel, member.user_id, member.name);
+      }
+    }
+    return { chat_id: channel, members, has_more: Boolean(nextCursor), next_cursor: nextCursor || null };
+  }
+
+  async memberProfile(id, signal) {
+    const member = { user_id: id, name: null, is_self: id === this.account.botUserId,
+      is_bot: id === this.account.botUserId ? true : null, deleted: null };
+    try {
+      signal.throwIfAborted();
+      const { user } = await this.api.call('users.info', { user: id },
+        AbortSignal.any([signal, AbortSignal.timeout(NAME_LOOKUP_MS)]));
+      if (user?.id !== id) throw new Error('Slack returned an invalid member profile');
+      member.name = userName(user);
+      member.is_bot = typeof user.is_bot === 'boolean' ? user.is_bot : member.is_bot;
+      member.deleted = typeof user.deleted === 'boolean' ? user.deleted : null;
+    } catch (error) {
+      member.profile_error = error instanceof SlackError ? error.code : 'profile_unavailable';
+    }
+    return member;
   }
 
   target(id) {

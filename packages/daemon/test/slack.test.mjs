@@ -125,6 +125,104 @@ test('API keeps tokens in the header, never in errors, and retries only explicit
   assert.equal(getConnectorManifest('slack').actions['message.reply'].thread, true);
 });
 
+test('member query identifies an unseen person and a tool reply can mention them by name', async (t) => {
+  const posts = [];
+  const c = await client(t, {
+    'conversations.members': () => ({ members: ['U0BOT', 'U0OWNER', 'U0BOB12345', 'U0OTHERBOT', 'U0DELETED'], response_metadata: { next_cursor: '' } }),
+    'users.info': ({ user }) => ({ user: { id: user, is_bot: ['U0BOT', 'U0OTHERBOT'].includes(user), deleted: user === 'U0DELETED',
+      profile: { display_name: { U0BOT: 'Vika', U0OWNER: 'Owner', U0BOB12345: 'Bob Smith', U0OTHERBOT: 'Another bot', U0DELETED: 'Former member' }[user] } } }),
+    'chat.postMessage': (params) => { posts.push(params); return { channel: params.channel, ts: ts(900) }; },
+  });
+  const store = new Store(':memory:', logger);
+  store.initializeCognition('codex', 'runtime-token');
+  t.after(() => store.close());
+  const inbound = normalizeMessage(payload({ user: 'U0OWNER', text: 'Greet the other person' }), { account });
+  c.state.recordRoute(inbound.id, inbound.route);
+  store.ingest(normalizeEvent(inbound.envelope));
+  const actions = new ActionService({ store, logger,
+    config: { channel: 'slack', maxReplyChars: 30_000, workspace: c.config.dataDir, tempDir: c.config.dataDir },
+    connectors: { manifests: () => [['slack', getConnectorManifest('slack')]],
+      invoke: (_id, name, input) => invokeOperation(c, name, input) },
+  });
+  const call = (name, input) => actions.call(name, input, { authority: 'runtime-token' });
+  assert.ok(actions.tools().some((tool) => tool.name === 'list_chat_members'));
+  const result = await call('list_chat_members', { chat_id: 'C0GENERAL' });
+  assert.equal(result.data.has_more, false);
+  assert.equal(result.data.next_cursor, null);
+  assert.deepEqual(result.data.members.filter((member) => !member.is_self && member.is_bot === false && member.deleted === false)
+    .map((member) => member.user_id), ['U0OWNER', 'U0BOB12345']);
+  assert.equal(result.data.members[0].is_self, true);
+  assert.equal(result.data.members[3].is_bot, true);
+  assert.equal(result.data.members[4].deleted, true);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n, 0, 'reading members sends nothing');
+  assert.throws(() => c.mentionsFor('C0OTHER', [{ name: 'Bob Smith' }]), /not someone seen/);
+  await call('reply_message', { message_id: inbound.id, markdown: 'Hello @Bob Smith!', mention_names: ['Bob Smith'],
+    reply_in_thread: true, decision_id: inbound.envelope.id });
+  assert.equal(posts[0].text, 'Hello <@U0BOB12345>!');
+  assert.equal(posts[0].thread_ts, ts(1));
+});
+
+test('member pages preserve Slack cursors, unknown profiles and ambiguous names', async (t) => {
+  const calls = [];
+  const c = await client(t, {
+    'conversations.members': ({ cursor }) => cursor === 'page-two='
+      ? { members: [], response_metadata: { next_cursor: '' } }
+      : { members: ['U0ALICE', 'U0BOB', 'U0GONE'], response_metadata: { next_cursor: 'page-two=' } },
+    'users.info': ({ user }) => user === 'U0GONE' ? { error: 'user_not_found' }
+      : { user: { id: user, is_bot: false, deleted: false, profile: { display_name: 'Same\nName' } } },
+  }, { calls });
+  const page = await invokeOperation(c, 'chat.members.list', { chat_id: 'C0GENERAL', limit: 10 });
+  assert.equal(page.has_more, true, 'a short page can still have more members');
+  assert.equal(page.next_cursor, 'page-two=');
+  assert.deepEqual(page.members[2], { user_id: 'U0GONE', name: null, is_self: false, is_bot: null, deleted: null, profile_error: 'user_not_found' });
+  assert.equal(page.members[0].name, 'Same Name');
+  assert.throws(() => c.mentionsFor('C0GENERAL', [{ name: 'Same Name' }]), /ambiguous/);
+  assert.equal(c.mentionsFor('C0GENERAL', [{ id: 'U0BOB' }])[0].id, 'U0BOB');
+  const last = await invokeOperation(c, 'chat.members.list', { chat_id: 'C0GENERAL', cursor: page.next_cursor, limit: 10 });
+  assert.deepEqual(last, { chat_id: 'C0GENERAL', members: [], has_more: false, next_cursor: null });
+  assert.deepEqual(calls.filter(([method]) => method === 'conversations.members').map(([, input]) => input), [
+    { channel: 'C0GENERAL', limit: '10' }, { channel: 'C0GENERAL', limit: '10', cursor: 'page-two=' },
+  ]);
+});
+
+test('missing member scopes give repair guidance while an existing Slack connection still works', async (t) => {
+  let allowed = false;
+  const c = await client(t, {
+    'conversations.members': () => allowed ? { members: [] } : { error: 'missing_scope' },
+    'chat.postMessage': ({ channel }) => ({ channel, ts: ts(901) }),
+  });
+  await assert.rejects(c.listChatMembers('C0GENERAL'), (error) => {
+    assert.equal(error.code, 'missing_scope');
+    assert.match(error.message, /channels:read[\s\S]*groups:read[\s\S]*mpim:read[\s\S]*im:read[\s\S]*reinstall/);
+    assert.ok(!error.message.includes(BOT_TOKEN));
+    return true;
+  });
+  assert.ok((await c.sendMessage({ chat_id: 'C0GENERAL', content: { type: 'markdown', text: 'Still connected' } })).message_id);
+  allowed = true;
+  assert.equal((await c.listChatMembers('C0GENERAL')).members.length, 0);
+});
+
+test('member lookup rejects malformed lists and cursors without inventing a complete roster', async (t) => {
+  let response = {};
+  const calls = [];
+  const c = await client(t, { 'conversations.members': () => response,
+    'users.info': () => ({ user: { id: 'U0WRONG', profile: { display_name: 'Wrong person' } } }),
+  }, { calls });
+  for (const [channel, options] of [['bad', {}], ['C0GENERAL', { limit: 201 }], ['C0GENERAL', { cursor: '\n' }]]) {
+    await assert.rejects(c.listChatMembers(channel, options));
+  }
+  assert.equal(calls.filter(([method]) => method === 'conversations.members').length, 0);
+  for (response of [{}, { members: ['invalid'] }, { members: [], response_metadata: { next_cursor: 42 } },
+    { members: [], response_metadata: { next_cursor: 'same' } }]) {
+    await assert.rejects(c.listChatMembers('C0GENERAL', { cursor: 'same' }), /invalid member/);
+  }
+  response = { members: ['U0ALICE'] };
+  const page = await c.listChatMembers('C0GENERAL');
+  assert.equal(page.members[0].name, null);
+  assert.equal(page.members[0].profile_error, 'profile_unavailable');
+  assert.deepEqual(c.state.people('C0GENERAL'), []);
+});
+
 test('normalizes channel, thread and direct messages with names, files and external channels', () => {
   const names = new Map([['U0ALICE', 'Alice Smith'], ['U0CAROL', 'Carol']]);
   const top = normalizeMessage(payload({ text: 'hi <@U0BOT> and <@U0CAROL|carol>, see <https://x.test/a?b=1&amp;c=2|docs> &lt;@U0EVIL&gt; <!channel>' }),
@@ -467,7 +565,8 @@ test('real connector worker supports check/start/pause/reply/stop and releases i
         'auth.test': { team_id: 'T0TEAM', user_id: 'U0BOT', bot_id: 'B0BOT' },
         'bots.info': { bot: { app_id: 'A0APP' } },
         'apps.connections.open': { url: 'wss://wss-primary.slack.com/link/?ticket=1' },
-        'users.info': { user: { profile: { display_name: 'Alice' } } },
+        'users.info': { user: { id: params.user, is_bot: false, deleted: false, profile: { display_name: 'Alice' } } },
+        'conversations.members': { members: ['U0ALICE'], response_metadata: { next_cursor: '' } },
         'chat.postMessage': { channel: params.channel, ts: '${now}.000099' },
       }[method];
       return Response.json({ ok: true, ...result });
@@ -497,6 +596,11 @@ test('real connector worker supports check/start/pause/reply/stop and releases i
   await worker.startSubscription(receive, () => assert.fail('unexpected worker exit'));
   const message = await event;
   assert.equal(message.actor.name, 'Alice');
+  assert.ok(worker.manifest.queries.includes('chat.members.list'));
+  const members = await worker.invoke('chat.members.list', { chat_id: 'C0GENERAL', limit: 10 });
+  assert.equal(members.members[0].user_id, 'U0ALICE');
+  assert.equal(members.members[0].name, 'Alice');
+  assert.equal(members.has_more, false);
   await worker.request('pause', {});
   const sent = await worker.invoke('message.reply', { message_id: message.message.id, content: { type: 'markdown', text: 'reply' } });
   assert.equal(sent.message_id, messageId('T0TEAM', 'C0GENERAL', `${now}.000099`));

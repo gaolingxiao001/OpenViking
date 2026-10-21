@@ -53,6 +53,8 @@ describe('agent tools', () => {
     assert.ok(names(lark.service).includes('react_to_message'));
     assert.ok(names(lark.service).includes('list_chats'));
     assert.ok(names(lark.service).includes('read_meeting_inbox'));
+    assert.ok(!names(lark.service).includes('list_chat_members'));
+    assert.ok(names(setup(t, { ids: ['slack'] }).service).includes('list_chat_members'));
     const weixin = setup(t, { ids: ['weixin'] });
     assert.deepEqual(names(weixin.service), [
       'send_message', 'notify_owner', 'reply_message', 'get_message_media', 'read_openviking_session_context',
@@ -188,6 +190,34 @@ describe('agent tools', () => {
     await assert.rejects(() => call('react_to_message', react), /outcome is uncertain/);
     await assert.rejects(() => call('reply_message', weixin), /outcome is uncertain/);
     assert.equal(connectors.calls.length, 4);
+  });
+
+  it('routes member queries without delivery and validates pagination and runtime authority', async (t) => {
+    const { call, service, store, connectors, inbound } = setup(t, { ids: ['lark', 'slack'], run: (_connector, action, input) => {
+      assert.equal(action, 'chat.members.list');
+      return { chat_id: input.chat_id, members: [
+        { user_id: 'U0BOB12345', name: 'Bob', is_bot: false, is_self: false, deleted: false },
+        { user_id: 'U0UNKNOWN', name: null, is_bot: null, is_self: false, deleted: null, profile_error: 'user_not_found' },
+      ], has_more: true, next_cursor: 'page-two=' };
+    } });
+    inbound({ source: 'slack', messageId: 'sl:T0TEAM:C0GENERAL:1.000001', chatId: 'C0GENERAL' });
+    inbound({ messageId: 'om_lark12345678', chatId: 'oc_chat12345678' });
+    const definition = service.tools().find((tool) => tool.name === 'list_chat_members');
+    assert.equal(definition.annotations.readOnlyHint, true);
+    const result = await call('list_chat_members', { chat_id: 'C0GENERAL', limit: 2, cursor: 'page-one=' });
+    assert.deepEqual(connectors.calls, [{ connector: 'slack', action: 'chat.members.list',
+      input: { chat_id: 'C0GENERAL', limit: 2, cursor: 'page-one=' } }]);
+    assert.match(result.text, /user_id=U0BOB12345.*name="Bob".*is_bot=false/);
+    assert.match(result.text, /More members exist[\s\S]*page-two=/);
+    assert.match(result.text, /Some profiles could not be read/);
+    assert.equal(result.data.members[1].is_bot, null);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n, 0);
+    for (const input of [{}, { chat_id: 'C0GENERAL', limit: 201 }, { chat_id: 'C0GENERAL', cursor: '\n' }]) {
+      await assert.rejects(call('list_chat_members', input), (error) => error.code === 'invalid_input');
+    }
+    await assert.rejects(call('list_chat_members', { chat_id: 'C0GENERAL' }, 'retired-runtime'), /no longer owns/);
+    await assert.rejects(call('list_chat_members', { chat_id: 'oc_chat12345678' }), /lark does not support/);
+    assert.equal(connectors.calls.length, 1);
   });
 
   it('routes by a known target id, an explicit source, or the only capable connector', async (t) => {
