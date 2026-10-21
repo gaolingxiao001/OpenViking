@@ -6,6 +6,20 @@ const NUDGE_RECEIPT = 'decision:';
 // durable, the reminder is best effort.
 const NUDGED_LIMIT = 1_000;
 
+// explicitSilence only means something to a runtime with Core agent tools
+// (stay_silent, the turn-end check). On the others it is inert, so say so once
+// per runtime instead of letting an operator believe it is on. Returns whether
+// it warned.
+export function warnIfSilenceInert(config, runtime, logger) {
+  if (!config.explicitSilence) return false;
+  if (getRuntimeDefinition(runtime)?.capabilities.agentTools === 'core') return false;
+  logger.warn('explicit_silence_not_applied', {
+    runtime,
+    reason: 'runtime has no core agent tools; explicit silence is not applied for this runtime',
+  });
+  return true;
+}
+
 export function isDecisionReceipt(receiptId) {
   return typeof receiptId === 'string' && receiptId.startsWith(NUDGE_RECEIPT);
 }

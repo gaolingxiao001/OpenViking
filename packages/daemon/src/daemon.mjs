@@ -11,7 +11,7 @@ import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy } from './notices.mjs';
-import { DecisionPolicy, isDecisionReceipt } from './decisions.mjs';
+import { DecisionPolicy, isDecisionReceipt, warnIfSilenceInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
@@ -254,8 +254,14 @@ export class PersonalAgentDaemon {
           this.decisionPolicy?.onTurnAbandoned(info);
         },
         onAvailable: () => { this.harness?.onAvailable(); },
-        onAuthorityChanged: ({ authorityToken }) => {
+        onAuthorityChanged: ({ runtime, authorityToken }) => {
           this.meeting?.onAuthorityChanged(authorityToken);
+          // Fires at startup and on a /model runtime switch; authority also rotates
+          // within a runtime, so warn only when the runtime changes.
+          if (runtime !== this.silenceRuntime) {
+            this.silenceRuntime = runtime;
+            warnIfSilenceInert(this.config, runtime, this.logger);
+          }
         },
       });
       this.failurePolicy = new FailurePolicy({

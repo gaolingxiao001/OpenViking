@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DecisionPolicy, isDecisionReceipt } from '../src/decisions.mjs';
+import { DecisionPolicy, isDecisionReceipt, warnIfSilenceInert } from '../src/decisions.mjs';
 import { Harness } from '../src/harness.mjs';
+import { RUNTIME_IDS, getRuntimeDefinition } from '../src/runtime-catalog.mjs';
 import { Store } from '../src/store.mjs';
 import { chatEvent, mailEvent } from './event-fixture.mjs';
 
@@ -167,5 +168,36 @@ describe('turn-end decision settlement', () => {
     policy.onTurnFailed({ inboundSeqs: [row.seq], receiptIds: ['decision:1'], error: 'boom' });
     policy.onTurnAbandoned({ inboundSeqs: [row.seq], receiptIds: ['decision:1'] });
     assert.deepEqual([activities, submitted], [[], []]);
+  });
+});
+
+describe('explicit silence on a runtime without core agent tools', () => {
+  const capture = () => {
+    const warnings = [];
+    return { warnings, logger: { ...quiet, warn: (message, fields) => warnings.push({ message, ...fields }) } };
+  };
+
+  it('warns once per call that explicit silence is not applied, naming the runtime', () => {
+    const { warnings, logger } = capture();
+    assert.equal(warnIfSilenceInert({ explicitSilence: true }, 'volc', logger), true);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].message, 'explicit_silence_not_applied');
+    assert.equal(warnings[0].runtime, 'volc');
+    assert.match(warnings[0].reason, /explicit silence is not applied for this runtime/);
+  });
+
+  it('stays quiet on every runtime that has core agent tools', () => {
+    const { warnings, logger } = capture();
+    for (const id of RUNTIME_IDS.filter((runtime) => getRuntimeDefinition(runtime).capabilities.agentTools === 'core')) {
+      assert.equal(warnIfSilenceInert({ explicitSilence: true }, id, logger), false, id);
+    }
+    assert.deepEqual(warnings, []);
+  });
+
+  it('stays quiet when the switch is off, whatever the runtime', () => {
+    const { warnings, logger } = capture();
+    for (const id of RUNTIME_IDS) assert.equal(warnIfSilenceInert({ explicitSilence: false }, id, logger), false, id);
+    assert.equal(warnIfSilenceInert({}, 'volc', logger), false);
+    assert.deepEqual(warnings, []);
   });
 });
