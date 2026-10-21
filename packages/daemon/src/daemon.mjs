@@ -245,7 +245,7 @@ export class PersonalAgentDaemon {
         onAvailable: () => { this.harness?.onAvailable(); },
         onAuthorityChanged: ({ runtime, authorityToken }) => {
           this.meeting?.onAuthorityChanged(authorityToken);
-          // Fires at startup and on a /model runtime switch; authority also rotates
+          // Fires at startup and on a /runtime switch; authority also rotates
           // within a runtime, so warn only when the runtime changes.
           if (runtime !== this.silenceRuntime) {
             this.silenceRuntime = runtime;

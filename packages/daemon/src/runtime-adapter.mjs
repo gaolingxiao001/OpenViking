@@ -24,6 +24,7 @@ export class RuntimeAdapter {
   get threadId() { return this.#implementation.threadId ?? null; }
   get effort() { return this.#implementation.effort ?? 'medium'; }
   get model() { return this.#implementation.model ?? ''; }
+  get resolvedModel() { return this.#implementation.resolvedModel ?? ''; }
   get state() { return normalizeState(this.#implementation.state); }
   get turnInProgress() { return Boolean(this.#implementation.turnInProgress); }
   get modelWorking() { return Boolean(this.#implementation.modelWorking); }
@@ -39,6 +40,13 @@ export class RuntimeAdapter {
   listModels() { return this.#implementation.listModels?.() ?? Promise.resolve([]); }
   selectModel(model, options) { return this.#implementation.setModel(model, options); }
   selectEffort(effort, options) { return this.#implementation.setEffort(effort, options); }
+
+  // Desired settings are plain fields on every transport. Publish the whole
+  // validated pair synchronously, after persistence, before another turn drains.
+  applySettings({ model = this.model, effort = this.effort }) {
+    this.#implementation.model = model;
+    this.#implementation.effort = effort;
+  }
 
   async prepareInputContext() {
     const agent = this.#implementation;
