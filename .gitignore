@@ -9,3 +9,5 @@ node_modules/
 __pycache__/
 *.py[cod]
 dist/
+bin/slack
+bin/slack.LICENSE

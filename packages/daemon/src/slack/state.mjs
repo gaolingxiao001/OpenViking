@@ -101,9 +101,10 @@ export class SlackState {
     });
   }
 
-  recordRoute(id, { channel, ts, threadTs = null, files = null }) {
+  recordRoute(id, { channel, ts, threadTs = null, files = null }, { refresh = false } = {}) {
     this.db.prepare(`INSERT INTO routes VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET saved_at = excluded.saved_at`)
+      ON CONFLICT(id) DO UPDATE SET saved_at = excluded.saved_at
+      ${refresh ? ', thread_ts = excluded.thread_ts, files_json = excluded.files_json' : ''}`)
       .run(id, channel, ts, threadTs, files?.length ? JSON.stringify(files) : null, Date.now());
   }
 

@@ -17,7 +17,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "setup": "npm ci --no-audit --no-fund && node scripts/install-lark-cli.mjs && npm run check:pi",
+    "setup": "npm ci --no-audit --no-fund && node scripts/install-lark-cli.mjs && node scripts/install-slack-cli.mjs && npm run check:pi",
     "pi": "pi",
     "check:pi": "node packages/daemon/scripts/check-pi.mjs",
     "release:build": "node scripts/build-release.mjs",

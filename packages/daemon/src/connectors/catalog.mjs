@@ -31,7 +31,7 @@ const MANIFESTS = Object.freeze({
       'message.react': {},
       'message.retract': {},
     },
-    queries: ['message.media', 'chat.members.list'], auth_schema: EMPTY_SCHEMA, config_schema: EMPTY_SCHEMA,
+    queries: ['message.media', 'chat.members.list', 'chat.list', 'chat.messages', 'thread.messages'], auth_schema: EMPTY_SCHEMA, config_schema: EMPTY_SCHEMA,
   }),
   lark: connectorManifest({
     name: 'lark',

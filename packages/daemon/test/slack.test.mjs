@@ -95,7 +95,8 @@ async function client(t, handlers = {}, { calls = [], ws = sockets() } = {}) {
   state.saveAccount(account);
   state.close();
   const c = new SlackClient({ dataDir: dir, retentionMs: 86400_000, instance: 'slack', agentName: 'Vika', sendTimeoutMs: 5000 },
-    null, logger, { fetchImpl: provider(handlers, calls), WebSocketImpl: ws.Socket, receiver: fast, paceMs: 20 });
+    null, logger, { fetchImpl: provider(handlers, calls), WebSocketImpl: ws.Socket, receiver: fast, paceMs: 20,
+      queryApi: new SlackApi(BOT_TOKEN, { fetchImpl: provider(handlers, calls) }) });
   t.after(() => c.stop());
   await c.preflight();
   return c;
@@ -221,6 +222,116 @@ test('member lookup rejects malformed lists and cursors without inventing a comp
   assert.equal(page.members[0].name, null);
   assert.equal(page.members[0].profile_error, 'profile_unavailable');
   assert.deepEqual(c.state.people('C0GENERAL'), []);
+});
+
+test('conversation pages keep continuation after filtering and only list joined groups', async (t) => {
+  const calls = [];
+  const c = await client(t, { 'users.conversations': ({ cursor, types }) => {
+    assert.equal(types, 'public_channel,private_channel,mpim');
+    return cursor ? { channels: [{ id: 'G0PRIVATE', name: 'Design', is_member: true }], response_metadata: { next_cursor: '' } }
+      : { channels: [{ id: 'C0GENERAL', name: 'general' }], response_metadata: { next_cursor: 'next=' } };
+  } }, { calls });
+  assert.deepEqual(await c.listChats({ query: 'design', limit: 2 }), { chats: [], has_more: true, next_cursor: 'next=' });
+  const result = await c.listChats({ query: 'design', limit: 2, cursor: 'next=' });
+  assert.equal(result.chats[0].chat_id, 'G0PRIVATE');
+  assert.equal(result.has_more, false);
+  const before = calls.length;
+  await assert.rejects(c.listChats({ cursor: '\n' }), /cursor/);
+  await assert.rejects(c.listChats({ limit: 501 }), /limit/);
+  assert.equal(calls.length, before);
+});
+
+test('history to thread, media and reply works in a mixed instance without replaying old messages', async (t) => {
+  const calls = [], posts = [];
+  const channel = 'C0ARCHIVE', root = '1.000001', child = '1.000002';
+  const rootId = messageId(account.teamId, channel, root), childId = messageId(account.teamId, channel, child);
+  const events = [
+    { ts: child, thread_ts: root, user: 'U0ALICE', text: 'Hi <@U0BOT>',
+      files: [{ id: 'F012345678', name: 'context.txt', mimetype: 'text/plain', size: 7 }] },
+    { ts: root, user: account.botUserId, text: 'My old message', reply_count: 1 },
+  ];
+  const c = await client(t, {
+    'users.conversations': () => ({ channels: [{ id: channel, name: 'archive' }] }),
+    'conversations.history': () => ({ messages: events, has_more: true, response_metadata: { next_cursor: 'older=' } }),
+    'conversations.replies': params => {
+      assert.equal(params.channel, channel); assert.equal(params.ts, root);
+      return { messages: [...events].reverse(), response_metadata: { next_cursor: '' } };
+    },
+    'chat.postMessage': params => { posts.push(params); return { channel: params.channel, ts: ts(350) }; },
+    'files.info': () => ({ file: { url_private_download: 'https://files.slack.com/context.txt' } }),
+    raw: async () => new Response('context', { headers: { 'content-type': 'text/plain' } }),
+  }, { calls });
+  c.account.activatedAt = Date.now(); // History must survive the live receiver cutoff.
+  const store = new Store(':memory:', logger);
+  t.after(() => store.close());
+  store.initializeCognition('codex', 'runtime-token');
+  const incoming = normalizeMessage(payload(), { account });
+  store.ingest(normalizeEvent(incoming.envelope));
+  const connectors = { manifests: () => ['lark', 'slack'].map(id => [id, getConnectorManifest(id)]),
+    invoke: (id, action, input) => { assert.equal(id, 'slack'); return invokeOperation(c, action, input); } };
+  const actions = new ActionService({ config: { workspace: c.config.dataDir, tempDir: c.config.dataDir, maxReplyChars: 30_000 }, store, connectors, logger });
+  const call = (tool, input) => actions.call(tool, input, { authority: 'runtime-token' });
+  await call('list_chats', { source: 'slack' });
+  const history = await call('list_chat_messages', { chat_id: channel });
+  assert.match(history.text, /thread_id=sl:T0TEAM:C0ARCHIVE:1.000001/);
+  assert.match(history.text, /older=/);
+  assert.equal(history.data.messages[0].content.split('\n')[0], 'Hi @Vika');
+  assert.equal(history.data.messages[1].sender.type, 'bot');
+  assert.equal(c.state.route(childId).threadTs, root);
+  const thread = await call('list_thread_messages', { thread_id: childId });
+  assert.equal(thread.data.messages[0].message_id, rootId);
+  const media = await call('get_message_media', { message_id: childId, key: 'F012345678' });
+  assert.equal(fs.readFileSync(media.data.media[0].path, 'utf8'), 'context');
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM connector_events').get().n, 1);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n, 0);
+  assert.deepEqual(c.state.pending(account.teamId), []);
+  await assert.rejects(call('reply_message', { message_id: childId, markdown: 'hi', decision_id: 'T0TEAM:C0ARCHIVE:1.000002' }), /accepted daemon-authenticated/);
+  await call('reply_message', { message_id: childId, markdown: 'Hi @Alice Smith', mention_names: ['Alice Smith'], decision_id: incoming.envelope.id });
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].channel, channel);
+  assert.equal(posts[0].thread_ts, root);
+  assert.match(posts[0].text, /<@U0ALICE>/);
+  const sent = store.db.prepare('SELECT chat_id, conv_key FROM outbox').get();
+  assert.equal(sent.chat_id, channel);
+  assert.deepEqual(JSON.parse(sent.conv_key), ['slack', 'conversation', account.teamId, channel, root]);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM connector_events').get().n, 1);
+  assert.equal(calls.filter(([method]) => method === 'conversations.replies').length, 1);
+});
+
+test('history validates identity, pagination and thread membership before caching routes', async (t) => {
+  let messages = [{ ts: '1.000001', user: 'U0ALICE', text: 'old' }];
+  let metadata = { next_cursor: '' };
+  let hasMore = false;
+  const calls = [];
+  const c = await client(t, {
+    'conversations.history': () => ({ messages, has_more: hasMore, response_metadata: metadata }),
+    'conversations.replies': () => ({ messages, response_metadata: metadata }),
+    'users.info': () => ({ error: 'missing_scope' }),
+  }, { calls });
+  const before = calls.length;
+  for (const input of [{ chat_id: 'not-a-channel' }, { chat_id: 'C0GENERAL', as: 'user' }, { chat_id: 'C0GENERAL', limit: 51 }]) {
+    await assert.rejects(c.listChatMessages(input));
+  }
+  for (const thread_id of ['1.000001', 'sl:T0OTHER:C0GENERAL:1.000001']) await assert.rejects(c.listThreadMessages({ thread_id }), /full sl:/);
+  assert.equal(calls.length, before);
+  hasMore = true;
+  await assert.rejects(c.listChatMessages({ chat_id: 'C0GENERAL' }), /continuation cursor/);
+  hasMore = false; metadata = { next_cursor: 'same=' };
+  await assert.rejects(c.listChatMessages({ chat_id: 'C0GENERAL', cursor: 'same=' }), /invalid cursor/);
+  metadata = { next_cursor: '' };
+  messages.push({ ts: '1.000002', channel: 'C0OTHER', text: 'bad page' });
+  await assert.rejects(c.listChatMessages({ chat_id: 'C0GENERAL' }), /history message identity/);
+  assert.equal(c.state.route('sl:T0TEAM:C0GENERAL:1.000001'), null);
+  messages = [{ ts: '1.000002', thread_ts: '1.000009', text: 'different thread' }];
+  await assert.rejects(c.listThreadMessages({ thread_id: 'sl:T0TEAM:C0GENERAL:1.000001' }), /outside the requested thread/);
+  messages = [{ ts: '1.000001', user: 'U0ALICE', text: 'no readable profile' }, { ts: '1.000003', subtype: 'tombstone' }];
+  const result = await c.listChatMessages({ chat_id: 'C0GENERAL' });
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].sender.id, 'U0ALICE');
+  assert.equal(result.messages[0].sender.name, null);
+  messages = [{ ts: '1.000010', thread_ts: '1.000009', user: 'U0ALICE', text: 'later thread page' }];
+  await c.listThreadMessages({ thread_id: 'sl:T0TEAM:C0GENERAL:1.000009', cursor: 'later=' });
+  assert.equal(c.state.route('sl:T0TEAM:C0GENERAL:1.000009').ts, '1.000009', 'a root omitted from this page is still a usable reply target');
 });
 
 test('normalizes channel, thread and direct messages with names, files and external channels', () => {
@@ -556,6 +667,19 @@ test('Harness delivers named lines and the outbox keeps one reply per decision',
 test('real connector worker supports check/start/pause/reply/stop and releases its lease', async (t) => {
   const { dir, state } = fixture(t);
   state.saveAccount(account);
+  const slackCliBin = path.join(dir, 'slack-cli');
+  fs.writeFileSync(slackCliBin, `#!${process.execPath}
+    const method = process.argv[3];
+    const params = Object.fromEntries(new URLSearchParams(process.argv[process.argv.indexOf('--data') + 1]));
+    const result = {
+      'users.info': { user: { id: params.user, is_bot: false, deleted: false, profile: { display_name: 'Alice' } } },
+      'conversations.members': { members: ['U0ALICE'] },
+      'users.conversations': { channels: [{ id: 'C0GENERAL', name: 'general' }] },
+      'conversations.history': { messages: [{ ts: '${ts(1)}', user: 'U0ALICE', text: 'history' }] },
+      'conversations.replies': { messages: [{ ts: '${ts(1)}', user: 'U0ALICE', text: 'root' }] },
+    }[method];
+    console.log(JSON.stringify({ ok: true, ...result }));
+  `, { mode: 0o755 });
   const workerFile = path.join(dir, 'worker.mjs');
   fs.writeFileSync(workerFile, `
     globalThis.fetch = async (url, init) => {
@@ -586,7 +710,7 @@ test('real connector worker supports check/start/pause/reply/stop and releases i
     await import(${JSON.stringify(new URL('../src/connectors/worker.mjs', import.meta.url).href)});
   `);
   const registry = new ProcessRegistry(logger);
-  const worker = new ConnectorProcess('slack', { dataDir: dir, projectDir: process.cwd(), connectorWorkerPath: workerFile,
+  const worker = new ConnectorProcess('slack', { dataDir: dir, projectDir: process.cwd(), connectorWorkerPath: workerFile, slackCliBin,
     retentionMs: 86400_000, maxEventBytes: 100_000, sendTimeoutMs: 5000, agentName: 'Vika' }, registry, logger);
   t.after(async () => { await worker.stop(); await registry.stopAll(1000); });
   assert.equal((await worker.preflight()).manifest.name, 'slack');
@@ -601,6 +725,10 @@ test('real connector worker supports check/start/pause/reply/stop and releases i
   assert.equal(members.members[0].user_id, 'U0ALICE');
   assert.equal(members.members[0].name, 'Alice');
   assert.equal(members.has_more, false);
+  assert.equal((await worker.invoke('chat.list', {})).chats[0].chat_id, 'C0GENERAL');
+  const history = await worker.invoke('chat.messages', { chat_id: 'C0GENERAL' });
+  assert.equal(history.messages[0].content, 'history');
+  assert.equal((await worker.invoke('thread.messages', { thread_id: history.messages[0].thread_id })).messages[0].content, 'root');
   await worker.request('pause', {});
   const sent = await worker.invoke('message.reply', { message_id: message.message.id, content: { type: 'markdown', text: 'reply' } });
   assert.equal(sent.message_id, messageId('T0TEAM', 'C0GENERAL', `${now}.000099`));

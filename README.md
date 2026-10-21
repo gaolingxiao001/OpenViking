@@ -99,9 +99,13 @@ Bot token、owner/chat ID、接收游标及回复路由保存在 `<dataDir>/tele
 
 和飞书一样，工作区里任何人都可以私聊机器人；频道要先用 `/invite @机器人` 把它拉进去才会收到消息，群里不用 @ 它，是否回复由 Agent 判断。和其他公司共享的 Slack Connect 频道照常接收，消息行会标上 `external=true`，按外部群的信息边界处理。其他 App 发的消息（GitHub、告警、其他 AI 机器人）也会交给 Agent，行内标 `sender=bot` 和 `bots_since_human=N`（自上一条真人消息以来这里有几条 bot 消息）。要不要回、和别的机器人协作几轮，都由 Agent 按「有必要才说话」判断，不需要 @。只有失控时才有一根保险丝：同一个频道或线程里一直没有真人说话、Agent 已经回应了 20 条 bot 消息，再回就会被拦下，并私聊通知你一次；有人在那里说一句话就恢复。阈值用 `VIKA_BOT_REPLY_FUSE` 调，设为 `0` 关闭。飞书也是同一套规则。
 
-Slack 没有引用回复：Agent 在频道里回某条消息时会回到它的线程里，线程里的消息自然也回到线程。Agent 写的 Markdown 发送前转成 Slack 的格式，单条最多 12000 字符，更长的发文件；`@channel`/`@here` 不会被发出。支持文本、文件（工作区文件最多 20 MiB，入站文件按需下载）、@提及、reaction 和撤回；暂不支持按钮卡片、读聊天历史和搜索，邮件审批用编号消息（「发送 N」）。Slack 会把 `/` 开头的消息当成 Slack 命令拦下，要用 `/new`、`/model` 这些命令时前面加一个空格，发 ` /new`。
+Slack 没有引用回复：Agent 在频道里回某条消息时会回到它的线程里，线程里的消息自然也回到线程。Agent 写的 Markdown 发送前转成 Slack 的格式，单条最多 12000 字符，更长的发文件；`@channel`/`@here` 不会被发出。支持文本、文件（工作区文件最多 20 MiB，入站文件按需下载）、@提及、reaction 和撤回；暂不支持按钮卡片和搜索，邮件审批用编号消息（「发送 N」）。Slack 会把 `/` 开头的消息当成 Slack 命令拦下，要用 `/new`、`/model` 这些命令时前面加一个空格，发 ` /new`。
 
 Agent 可用 `list_chat_members` 分页查询当前频道或私聊的成员，获取用户 ID、显示名，以及已知的机器人、本人和停用标记；查到的名字可以直接用于 `mention_names`，重名时使用返回的用户 ID。默认每页 100 人、最多 200 人，通过 `next_cursor` 翻页；个别用户资料不可用时仍返回其 ID，并明确标记未知，不会把资料缺失的成员当作真人。新建 App 的模板包含成员查询权限；旧 App 需要补授权，步骤见 [Slack 接入](./install.md#slack-接入)。缺权限只影响这个查询，不会停掉消息收发。
+
+基础查询统一走 `Agent → Core → Slack Connector → 官方 Slack CLI`：`list_chats` 列出 bot 已加入的群会话，`list_chat_messages` 从新到旧读会话历史，`list_thread_messages` 从旧到新读线程（含根消息），成员与用户资料也由 CLI 查询。每次返回一页，`has_more` 为真时用 `next_cursor` 继续；按名称过滤后即使本页为空也可能还有下一页。历史与线程每页最多 50 条，只支持 bot 身份，权限范围内可以读取绑定前的消息和 bot 自己的消息。查询结果里的完整 `message_id` / `thread_id` 可用于后续回复、线程查询和附件下载；历史只作上下文，不会再次进入入站队列，也不能充当 `decision_id`。混合 IM 实例可以显式指定 `source: "slack"`。
+
+官方 [Slack CLI](https://github.com/slackapi/slack-cli) 固定为 4.10.0，随发布包安装到 `bin/slack`，源码开发运行 `npm run setup` 安装。Connector 通过 `slack api` 调用白名单内的只读接口，独立临时配置、bot token 环境变量与进程超时由 Connector 管理；Core 不执行 CLI，Agent 不获取 bot token。Socket Mode 收消息及发送、reaction、撤回、文件传输继续由 Connector 的 Web API 实现。
 
 纯 Slack 实例使用 `"channel": "slack"`、`"connectors": ["slack"]`，不填 `profile`；Codex、TraeX、Claude、Pi 均可用，方舟 Self-hosted Ark 暂不支持。两个 token、owner、回复路由、显示名缓存和待处理消息保存在 `<dataDir>/slack/state.sqlite3`（0600，父目录 0700），token 不写入 manifest 或日志。收到的消息先存进这个库再向 Slack 确认，所以 Connector 重启不会丢掉已确认的消息；daemon 整体停机期间 Slack 只短暂重试，停得久了会漏消息。Slack 没有幂等键，结果不明的发送不会自动重发。
 

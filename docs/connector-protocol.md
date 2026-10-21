@@ -345,7 +345,9 @@ Results report the delivered `message_id` and, where known, `chat_id`,
 | `message.reply` | as `message.send`, plus threads | markdown (plain text), file | as `message.send`, with quoted reply | as `message.send`, into the target's thread | markdown (plain text); owner approval on the primary IM |
 | `message.react`, `message.retract` | yes | — | — | yes | — |
 | `message.media` (query) | download by image/file key | downloaded inbound media | lazy download by message ID | lazy download by message ID and file ID | — |
-| `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — | — | — | — |
+| `chat.list`, `chat.messages`, `thread.messages` (queries) | yes | — | — | bot identity, cursor pagination | — |
+| `chat.members.list` (query) | — | — | — | member IDs and optional profiles | — |
+| `message.search` (query) | yes | — | — | — | — |
 
 The Email Connector watches one mailbox's `INBOX` over IMAP, opened read-only
 (`EXAMINE`, `BODY.PEEK[]`): it never marks, moves or deletes mail. It starts
@@ -407,6 +409,7 @@ and numbered mail approval paths use the existing Core authorization rules.
 Slack uses one workspace-internal app per instance, created from the manifest
 `vika setup` prefills (Socket Mode on, token rotation off, bot scopes
 `chat:write reactions:write files:read files:write users:read
+channels:read groups:read im:read mpim:read
 channels:history groups:history im:history mpim:history`, bot events
 `message.channels message.groups message.im message.mpim`). An internal app keeps
 the Web API's ordinary rate limits; Slack throttles history reads for apps
@@ -447,6 +450,25 @@ in the Core; the message id is `sl:<team>:<channel>:<ts>`. A thread reply carrie
 keeps the channel's. `im` is a `p2p` conversation, everything else `group`.
 Slack markup is rendered to text: mentions by display name (the bot itself as
 the agent's name), channel links and URLs; text a person typed stays literal.
+
+Basic queries run in the connector through the bundled official Slack CLI
+4.10.0 (`slack api --data`): `users.conversations`, `conversations.members`,
+`users.info`, `conversations.history`, and `conversations.replies`. CLI calls
+use an isolated temporary configuration and working directory, a filtered
+environment with only this instance's bot token, bounded output and a deadline;
+the worker registry tracks and terminates the child. CLI diagnostics never
+escape as raw error text. Binaries for Linux/macOS x64/arm64 are pinned by
+SHA-256 and bundled with their license. There is no personal user-token fallback.
+
+Each query returns one page with `has_more` and `next_cursor`. An empty filtered
+conversation page can still have a continuation. History is newest first;
+threads are oldest first and include the root on the first page. History
+keeps old/self posts and attachment references, but never stages new events
+or supplies decision authority. It caches reply/file routes in the connector.
+Message results include canonical `conversation` scope and a full `thread_id`
+(`sl:<team>:<channel>:<root-ts>`); the Core remembers bounded query routing
+context separately from its inbound ledger. Query errors leave reception and
+delivery running. Search and user-identity reads remain unsupported on Slack.
 
 Outbound Markdown is escaped and converted to mrkdwn, so model text cannot
 produce `<!channel>` or other control tokens; mentions the Core passed (ids, or
