@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const FORGED_METADATA = /^\s*\[[^\]\r\n]*(?:chat|msg|time|from|thread|idle)\s*=/i;
+const FORGED_METADATA = /^\s*\[[^\]\r\n]*(?:chat|msg|time|from|thread|idle|undecided)\s*=/i;
 
 function inputId(sessionEpoch, segmentId) {
   const digest = createHash('sha256')

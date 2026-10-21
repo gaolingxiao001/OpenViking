@@ -11,6 +11,7 @@ import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy } from './notices.mjs';
+import { DecisionPolicy, warnIfSilenceInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
@@ -64,6 +65,9 @@ export class PersonalAgentDaemon {
     this.roster = null;
     this.chatNames = null;
     this.failurePolicy = null;
+    this.decisionPolicy = null;
+    // The runtime explicit_silence_not_applied last checked, to warn once per switch.
+    this.silenceRuntime = null;
     this.httpServer = null;
     this.startedAt = Date.now();
     this.ready = false;
@@ -227,13 +231,20 @@ export class PersonalAgentDaemon {
         onTurnSucceeded: (info) => {
           this.meeting?.onTurnSucceeded(info);
           this.failurePolicy.onTurnSucceeded(info);
+          this.decisionPolicy?.onTurnSucceeded(info);
         },
         onTurnAbandoned: (info) => {
           this.meeting?.onTurnAbandoned(info);
         },
         onAvailable: () => { this.harness?.onAvailable(); },
-        onAuthorityChanged: ({ authorityToken }) => {
+        onAuthorityChanged: ({ runtime, authorityToken }) => {
           this.meeting?.onAuthorityChanged(authorityToken);
+          // Fires at startup and on a /model runtime switch; authority also rotates
+          // within a runtime, so warn only when the runtime changes.
+          if (runtime !== this.silenceRuntime) {
+            this.silenceRuntime = runtime;
+            warnIfSilenceInert(this.config, runtime, this.logger);
+          }
         },
       });
       this.failurePolicy = new FailurePolicy({
@@ -284,6 +295,16 @@ export class PersonalAgentDaemon {
         },
         isStopping: () => this.shuttingDown,
       });
+      // Checks at each successful turn's end that every input it consumed got a
+      // decision (a delivery or stay_silent), with one reminder if not. Only on
+      // an instance with explicitSilence on.
+      this.decisionPolicy = this.config.explicitSilence ? new DecisionPolicy({
+        store: this.store,
+        harness: this.harness,
+        logger: this.logger.child({ component: 'decisions' }),
+        recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
+        isStopping: () => this.shuttingDown,
+      }) : null;
       this.meeting.attachHarness({
         runtime: this.agentRuntime,
         enqueueIngress: (action) => this.harness.enqueueIngress(action),

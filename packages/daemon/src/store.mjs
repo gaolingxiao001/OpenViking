@@ -25,6 +25,7 @@ function rowToInbound(row) {
     messageId: row.message_id,
     eventId: row.event_id,
     conversationKey: row.conv_key,
+    scopeKey: row.scope_key,
     chatId: row.chat_id,
     chatType: row.chat_type,
     messageType: row.message_type,
@@ -281,6 +282,23 @@ export class Store {
         ON outbox(status, updated_at_ms);
       CREATE INDEX IF NOT EXISTS outbox_remote_message
         ON outbox(remote_message_id);
+
+      -- One model decision per accepted inbound event: a final delivery
+      -- ('delivered') or an explicit stay_silent ('silent'). Not a side effect:
+      -- no outbox or journal row, never synced to OpenViking. A decision on the
+      -- newest input of a scope covers the earlier ones there.
+      CREATE TABLE IF NOT EXISTS decisions (
+        connector_instance TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        scope_key TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        decided_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (connector_instance, event_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS decisions_scope_seq
+        ON decisions(scope_key, seq);
 
       CREATE TABLE IF NOT EXISTS activities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1547,6 +1565,40 @@ export class Store {
     return newer?.seq == null ? null : number(newer.seq);
   }
 
+  // Records the model's decision on one accepted event (a connector_events
+  // row). A delivery always wins and replaces an earlier silence; silence never
+  // replaces anything. `created` is false when the row was already there with
+  // this outcome (or silence met a delivery).
+  recordDecision({ row, outcome }, now = Date.now()) {
+    if (!['silent', 'delivered'].includes(outcome)) throw new Error(`unknown decision outcome: ${outcome}`);
+    const previous = this.decisionFor(row.connector_instance, row.event_id);
+    const result = this.db.prepare(`
+      INSERT INTO decisions(connector_instance, event_id, seq, scope_key, outcome, decided_at_ms)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connector_instance, event_id) DO UPDATE SET
+        outcome = excluded.outcome, decided_at_ms = excluded.decided_at_ms
+      WHERE excluded.outcome = 'delivered' AND decisions.outcome = 'silent'
+    `).run(row.connector_instance, row.event_id, number(row.seq), row.scope_key, outcome, now);
+    return {
+      created: number(result.changes) > 0,
+      previous: previous?.outcome ?? null,
+      row: this.decisionFor(row.connector_instance, row.event_id),
+    };
+  }
+
+  decisionFor(instance, eventId) {
+    const row = this.db.prepare('SELECT * FROM decisions WHERE connector_instance = ? AND event_id = ?').get(instance, eventId);
+    return row ? { ...row, seq: number(row.seq), decided_at_ms: number(row.decided_at_ms) } : null;
+  }
+
+  // The outcome of a decision in the scope that covers seq ('delivered' over
+  // 'silent'), or null: one on that input or on a newer one there, as
+  // attribution lets the newest input answer earlier ones.
+  coveringDecision(scopeKey, seq) {
+    return this.db.prepare(`SELECT outcome FROM decisions WHERE scope_key = ? AND seq >= ?
+      ORDER BY outcome = 'delivered' DESC LIMIT 1`).get(scopeKey, seq)?.outcome ?? null;
+  }
+
   // Which connector a message or chat id belongs to, as far as this daemon has
   // seen it: an authenticated inbound or one of its own deliveries.
   connectorForMessage(messageId) {
@@ -1590,6 +1642,7 @@ export class Store {
         DELETE FROM outbox WHERE updated_at_ms < ? AND status IN ('SENT', 'UNCERTAIN')
       `).run(cutoff);
       const approvals = pruneApprovals(this.db, cutoff);
+      const decisions = this.db.prepare('DELETE FROM decisions WHERE decided_at_ms < ?').run(cutoff);
       const conversations = this.db.prepare(`
         DELETE FROM conversations
         WHERE NOT EXISTS (SELECT 1 FROM connector_events WHERE connector_events.conv_key = conversations.conv_key)
@@ -1600,6 +1653,7 @@ export class Store {
         meetingSessions: meeting.sessions,
         outbox: number(outbox.changes),
         approvals: number(approvals),
+        decisions: number(decisions.changes),
         conversations: number(conversations.changes),
       };
     });

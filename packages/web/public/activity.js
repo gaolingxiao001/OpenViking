@@ -194,6 +194,7 @@ function buildModel(rows) {
   const system = [];
   const turns = [];
   const bySeq = new Map();        // inboundSeq -> 尚未归入回合的消息项
+  const turnBySeq = new Map();    // inboundSeq -> 处理它的回合
   let open = null;
   let tools = new Map();
 
@@ -203,6 +204,7 @@ function buildModel(rows) {
       if (!message || message.claimed) continue;
       message.claimed = true;
       turn.messages.push(message);
+      turnBySeq.set(seq, turn);
     }
   };
 
@@ -234,6 +236,14 @@ function buildModel(rows) {
       if (meta.input) open.steps.push({ type: 'input', key: `in:${row.id}`, row, text: meta.input, historyChars: meta.historyChars });
       turns.push(open);
       items.push(open);
+      continue;
+    }
+
+    // 回合结束后才记的「本轮未表态」挂回处理那条消息的回合
+    if (kind === 'agent.decision_missing' && !open && turnBySeq.has(row.inboundSeq)) {
+      const turn = turnBySeq.get(row.inboundSeq);
+      turn.steps.push({ type: 'event', key: `e:${row.id}`, row });
+      turn.lastId = Math.max(turn.lastId, row.id);
       continue;
     }
 
@@ -276,6 +286,15 @@ function buildModel(rows) {
             'message.retract': '撤回', 'message.reaction.delete': '移除表态' })[meta.action] || '投递',
           text: row.summary || '',
         },
+      });
+      continue;
+    }
+    if (kind === 'delivery.silent') {
+      // 模型明确选择不回复：记在输出区，但不算发出消息
+      open.steps.push({
+        ...newTool(row),
+        key: `delivery:${row.id}`,
+        delivery: { mode: '不回复', text: row.summary || '', silent: true },
       });
       continue;
     }
@@ -368,7 +387,7 @@ function renderTool(tool) {
   const head = h('div', 'step-head');
   head.append(h('time', 'ts', fmtTime(tool.startMs)));
   if (delivery) {
-    head.append(tag(delivery.mode, 'tag-out'));
+    head.append(tag(delivery.mode, delivery.silent ? 'tag-muted' : 'tag-out'));
     el.append(head, h('div', 'reply-body txt', delivery.text || tool.summary || ''));
   } else {
     const description = parseJson(tool.input)?.description;
@@ -431,7 +450,11 @@ function renderStep(step) {
     return el;
   }
   const bad = row.severity === 'error';
-  head.append(tag(row.title, bad ? 'tag-bad' : 'tag-muted'), h('span', 'step-text txt', oneLine(row.summary, 400)));
+  const missing = row.kind === 'agent.decision_missing';
+  const text = missing
+    ? ({ NUDGED: '已提醒模型补一次决定', MISSING: '没有发出消息，也没有记录不回复' })[row.status] || ''
+    : row.summary;
+  head.append(tag(row.title, bad ? 'tag-bad' : missing ? 'tag-warn' : 'tag-muted'), h('span', 'step-text txt', oneLine(text, 400)));
   el.append(head);
   if (bad) el.classList.add('failed');
   return el;
@@ -642,7 +665,8 @@ function renderStrip(model) {
     fragment.append(bar);
     for (const message of turn.messages) fragment.append(tick(map, message.row.createdAtMs, 'in'));
     for (const step of turn.steps) {
-      if (step.type === 'tool' && deliveryOf(step)) fragment.append(tick(map, step.startMs, step.failed ? 'bad' : 'out'));
+      const delivery = step.type === 'tool' ? deliveryOf(step) : null;
+      if (delivery) fragment.append(tick(map, step.startMs, step.failed ? 'bad' : delivery.silent ? 'muted' : 'out'));
     }
   });
   for (const item of model.items) {

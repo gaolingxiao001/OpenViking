@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getConfig, projectDir } from '../src/config.mjs';
 import { createLogger } from '../src/logger.mjs';
 import { PersonalAgentDaemon } from '../src/daemon.mjs';
@@ -122,11 +123,16 @@ function fakeLarkSource(dir) {
 
 // Fake codex app-server: newline JSON-RPC over stdio. Appends every turn input
 // to INPUT_LOG and its own argv to SPAWN_LOG; turn outcome is fixed per env:
-// 'complete' | 'fail' (with FAIL_BLOB) | 'ack-only'.
+// 'complete' | 'fail' (with FAIL_BLOB) | 'ack-only' | 'silent' (calls
+// stay_silent on the newest event= of the turn input over the daemon's agent
+// tool socket, as a real runtime's MCP adapter would, then completes).
+const ACTION_CLIENT = fileURLToPath(new URL('../src/actions/client.mjs', import.meta.url));
+
 function fakeCodexSource(dir, { behavior, failBlob }) {
   return `
     import fs from 'node:fs';
     import readline from 'node:readline';
+    import { actionEndpoint, callTool } from ${JSON.stringify(ACTION_CLIENT)};
     const INPUT_LOG = ${JSON.stringify(path.join(dir, 'codex-input.log'))};
     const SPAWN_LOG = ${JSON.stringify(path.join(dir, 'codex-spawns.ndjson'))};
     const BEHAVIOR = ${JSON.stringify(behavior)};
@@ -159,6 +165,15 @@ function fakeCodexSource(dir, { behavior, failBlob }) {
         send({ method: 'turn/started', params: { turn: { id: turnId } } });
         if (BEHAVIOR === 'complete') {
           send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
+        } else if (BEHAVIOR === 'silent') {
+          const decision = [...text.matchAll(/ event=(\\S+)/g)].at(-1)?.[1];
+          const done = () => send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
+          if (!decision) { done(); return; }
+          callTool(actionEndpoint('fake-codex'), 'stay_silent', { decision_id: decision, reason: 'mock' })
+            .then(done, (error) => {
+              fs.appendFileSync(INPUT_LOG, JSON.stringify({ method: 'tool-error', text: String(error.message) }) + '\\n');
+              done();
+            });
         } else if (BEHAVIOR === 'fail') {
           send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'failed', error: { message: FAIL_BLOB } } } });
         }
