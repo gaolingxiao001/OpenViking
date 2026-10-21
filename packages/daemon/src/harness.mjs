@@ -197,7 +197,7 @@ export class Harness {
   // neither a delivery nor stay_silent for it. Same event= (still a valid
   // decision_id), but no seq: it never moves the fence or counts as a new
   // input, so it cannot start another reminder.
-  redeliverUndecided(row, { receiptId }) {
+  redeliverUndecided(row) {
     return this.enqueueIngress(async () => {
       await this.runtime.prepareInputContext?.();
       this.groupBurst.route(eventDeliveryItem(row, null, {
@@ -205,7 +205,6 @@ export class Harness {
           replyTo: row.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, row),
           undecided: true,
         }),
-        receiptId,
       }));
     });
   }

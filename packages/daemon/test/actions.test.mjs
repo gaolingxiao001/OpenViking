@@ -9,6 +9,7 @@ import { EDITABLE_CHARS, approvalCard, approvalNote, approvedText } from '../src
 import { ActionService } from '../src/actions/service.mjs';
 import { startActionApi, stopActionApi } from '../src/actions/api.mjs';
 import { createMcpHandler } from '../src/actions/mcp.mjs';
+import { TOOLS, publicTool } from '../src/actions/tools.mjs';
 import { resolveCardAction } from '../src/card-messages.mjs';
 import { formatCognitionJournalLine } from '../src/cognition.mjs';
 import { eventMessage } from '../src/connectors/protocol.mjs';
@@ -979,7 +980,7 @@ describe('owner notices and owner-only actions', () => {
 describe('stay_silent decisions', () => {
   // The tool and the ledger exist only on an instance that opts in.
   const setupOn = (t, options = {}) => setup(t, { explicitSilence: true, ...options });
-  const decisions = (store) => store.db.prepare('SELECT connector_instance, event_id, seq, outcome, tool, reason, superseded FROM decisions ORDER BY seq')
+  const decisions = (store) => store.db.prepare('SELECT connector_instance, event_id, seq, outcome FROM decisions ORDER BY seq')
     .all().map((row) => ({ ...row }));
   const activities = (store, kind) => store.db.prepare('SELECT status, summary, inbound_seq, detail_json FROM activities WHERE kind = ? ORDER BY id')
     .all(kind).map((row) => ({ ...row, metadata: JSON.parse(row.detail_json) }));
@@ -1000,7 +1001,7 @@ describe('stay_silent decisions', () => {
     const result = await call('stay_silent', { decision_id: 'message:om_quiet12345678', reason: 'chatter between others' });
     assert.equal(result.text, 'Recorded: nothing is sent for this input.');
     assert.deepEqual(decisions(store), [{ connector_instance: 'lark', event_id: 'message:om_quiet12345678', seq: row.seq,
-      outcome: 'silent', tool: 'stay_silent', reason: 'chatter between others', superseded: 0 }]);
+      outcome: 'silent' }]);
     // Not an outbound side effect: no outbox, no journal, no connector, no liveness.
     assert.deepEqual(store.stats().outbox, {});
     assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM cognition_journal WHERE kind = 'outbound'").get().n, 0);
@@ -1019,7 +1020,6 @@ describe('stay_silent decisions', () => {
     assert.equal(again.data.duplicate, true);
     assert.equal(toolLines(logs)[1].outcome, 'duplicate');
     assert.equal(decisions(store).length, 1);
-    assert.equal(decisions(store)[0].reason, 'chatter between others');
     assert.equal(activities(store, 'delivery.silent').length, 1);
 
     // A delivery still touches liveness.
@@ -1034,7 +1034,7 @@ describe('stay_silent decisions', () => {
     const newer = inbound({ messageId: 'om_newer12345678', chatId: 'oc_burst12345678' });
     const result = await call('stay_silent', { decision_id: 'message:om_older12345678' });
     assert.equal(result.text, 'Recorded: nothing is sent for this input. A newer input has arrived there; decide on that one from its own line.');
-    assert.deepEqual(decisions(store).map((row) => [row.seq, row.outcome, row.superseded]), [[older.seq, 'silent', 1]]);
+    assert.deepEqual(decisions(store).map((row) => [row.seq, row.outcome]), [[older.seq, 'silent']]);
     assert.equal(service.temporaryReactions.size, 1);
     assert.equal(connectors.calls.some(({ action }) => action === 'message.reaction.delete'), false);
     const line = toolLines(logs).at(-1);
@@ -1055,7 +1055,7 @@ describe('stay_silent decisions', () => {
     assert.deepEqual(store.db.prepare("SELECT status FROM cognition_journal WHERE kind = 'outbound'").all().map((row) => row.status), ['CANCELLED']);
   });
 
-  it('refuses only what the model can fix, and needs no decision on a daemon-handled input', async (t) => {
+  it('refuses only what the model can fix', async (t) => {
     const { store, call, inbound } = setupOn(t);
     inbound({ messageId: 'om_known12345678', chatId: 'oc_known12345678' });
     await assert.rejects(call('stay_silent', { decision_id: 'om_known12345678' }),
@@ -1065,18 +1065,15 @@ describe('stay_silent decisions', () => {
     await assert.rejects(call('stay_silent', { decision_id: 'reminder-1' }),
       (error) => error.code === 'decision_ambiguous' && /decision_instance/.test(error.message));
     await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-work' });
-    // 「发送 N」 was handled by the daemon; its event= needs no decision.
+    // 「发送 N」 was handled by the daemon: not an accepted input, so nothing to decide on.
     store.ingest(chatEvent({ messageId: 'om_approve123456', eventId: 'evt-approve', chatId: 'oc_known12345678' }), 'approval_reply');
-    const handled = await call('stay_silent', { decision_id: 'evt-approve' });
-    assert.deepEqual([handled.text, handled.data], [
-      'STOP: this stay_silent call changed nothing. Calling it again does nothing. Finish your turn. This input was handled by the daemon and needs no decision.',
-      { not_required: true },
-    ]);
+    await assert.rejects(call('stay_silent', { decision_id: 'evt-approve' }), (error) => error.code === 'unknown_decision');
     assert.deepEqual(decisions(store).map((row) => [row.connector_instance, row.seq]), [['calendar-work', work.seq]]);
     await assert.rejects(call('stay_silent', { decision_id: 'message:om_known12345678' }, 'retired-token'),
       (error) => error.code === 'authority_revoked');
     assert.deepEqual(activities(store, 'delivery.blocked').map((row) => [row.metadata.tool, row.metadata.code]), [
-      ['stay_silent', 'unknown_decision'], ['stay_silent', 'decision_ambiguous'], ['stay_silent', 'authority_revoked'],
+      ['stay_silent', 'unknown_decision'], ['stay_silent', 'decision_ambiguous'], ['stay_silent', 'unknown_decision'],
+      ['stay_silent', 'authority_revoked'],
     ]);
   });
 
@@ -1096,35 +1093,32 @@ describe('stay_silent decisions', () => {
         return action === 'message.react' ? { reaction_id: 'reaction_x' } : { message_id: 'om_delivered123456' };
       },
     });
-    const outcome = (eventId) => store.db.prepare('SELECT outcome, tool FROM decisions WHERE event_id = ?').get(eventId);
+    const outcome = (eventId) => store.db.prepare('SELECT outcome FROM decisions WHERE event_id = ?').get(eventId)?.outcome;
 
     // Silence first, then a real answer: the answer wins.
     inbound({ messageId: 'om_first12345678', chatId: 'oc_first12345678' });
     await call('stay_silent', { decision_id: 'message:om_first12345678' });
     await call('send_message', { chat_id: 'oc_first12345678', markdown: 'changed my mind', decision_id: 'message:om_first12345678' });
-    assert.deepEqual({ ...outcome('message:om_first12345678') }, { outcome: 'delivered', tool: 'send_message' });
+    assert.equal(outcome('message:om_first12345678'), 'delivered');
     assert.equal(toolLines(logs).at(-1).overrode, 'silent');
     // A delivery first: silence changes nothing.
     const after = await call('stay_silent', { decision_id: 'message:om_first12345678' });
     assert.match(after.text, /^STOP: .* A delivery is already recorded for this input; nothing to change\. Do not call stay_silent for it\.$/);
-    assert.deepEqual({ ...outcome('message:om_first12345678') }, { outcome: 'delivered', tool: 'send_message' });
-    // A retraction has no decision.
-    await call('retract_message', { message_id: 'om_delivered123456' });
-    assert.equal(decisions(store).length, 1);
+    assert.equal(outcome('message:om_first12345678'), 'delivered');
 
     // A temporary OnIt is not a decision, a final reaction is.
     inbound({ messageId: 'om_react12345678', chatId: 'oc_react12345678' });
     await call('react_to_message', { message_id: 'om_react12345678', emoji_type: 'OnIt', temporary: true, decision_id: 'message:om_react12345678' });
     assert.equal(outcome('message:om_react12345678'), undefined);
     await call('react_to_message', { message_id: 'om_react12345678', emoji_type: 'OK', decision_id: 'message:om_react12345678' });
-    assert.deepEqual({ ...outcome('message:om_react12345678') }, { outcome: 'delivered', tool: 'react_to_message' });
+    assert.equal(outcome('message:om_react12345678'), 'delivered');
 
     // A send that fails after the reservation was still decided.
     inbound({ messageId: 'om_failed1234567', chatId: 'oc_failed1234567' });
     failing.fail = true;
     await assert.rejects(call('send_message', { chat_id: 'oc_failed1234567', markdown: 'x', decision_id: 'message:om_failed1234567' }), /provider down/);
     failing.fail = false;
-    assert.deepEqual({ ...outcome('message:om_failed1234567') }, { outcome: 'delivered', tool: 'send_message' });
+    assert.equal(outcome('message:om_failed1234567'), 'delivered');
 
     // Attribution to an older input settles the fence, not the older one.
     const older = inbound({ messageId: 'om_olderA1234567', chatId: 'oc_attrib1234567' });
@@ -1138,7 +1132,36 @@ describe('stay_silent decisions', () => {
     service.config.dryRun = true;
     inbound({ messageId: 'om_dryrun1234567', chatId: 'oc_dryrun1234567' });
     await call('send_message', { chat_id: 'oc_dryrun1234567', markdown: 'x', decision_id: 'message:om_dryrun1234567' });
-    assert.deepEqual({ ...outcome('message:om_dryrun1234567') }, { outcome: 'delivered', tool: 'send_message' });
+    assert.equal(outcome('message:om_dryrun1234567'), 'delivered');
+  });
+
+  it('records a requested retraction as the decision on the request, through the freshness fence', async (t) => {
+    const { store, service, call, connectors, inbound, logs } = setupOn(t);
+    const retract = service.tools().find((tool) => tool.name === 'retract_message');
+    assert.deepEqual(Object.keys(retract.inputSchema.properties), ['source', 'message_id', 'decision_id', 'decision_instance']);
+    assert.deepEqual(retract.inputSchema.required, ['message_id']);
+
+    inbound({ messageId: 'om_ask123456789', chatId: 'oc_undo123456789' });
+    await call('send_message', { chat_id: 'oc_undo123456789', markdown: 'oops', decision_id: 'message:om_ask123456789' });
+    const request = inbound({ messageId: 'om_undo123456789', chatId: 'oc_undo123456789' });
+    const result = await call('retract_message', { message_id: 'om_delivered123456', decision_id: 'message:om_undo123456789' });
+    assert.match(result.text, /^Delivered retraction of message_id=om_delivered123456/);
+    assert.deepEqual(decisions(store).map((row) => [row.event_id, row.outcome]),
+      [['message:om_ask123456789', 'delivered'], ['message:om_undo123456789', 'delivered']]);
+    assert.equal(toolLines(logs).at(-1).decisionSeq, request.seq);
+    // Nothing is left to remind about, and a silence on it changes nothing.
+    assert.equal(store.coveringDecision(request.scopeKey, request.seq), 'delivered');
+    assert.match((await call('stay_silent', { decision_id: 'message:om_undo123456789' })).text, /^STOP: /);
+
+    // Fenced like every other delivery: a newer input there blocks it.
+    inbound({ messageId: 'om_later12345678', chatId: 'oc_undo123456789' });
+    const before = connectors.calls.length;
+    await assert.rejects(call('retract_message', { message_id: 'om_other12345678', decision_id: 'message:om_undo123456789' }),
+      (error) => error.code === 'stale_decision');
+    assert.equal(connectors.calls.length, before);
+    // Without decision_id it behaves as before and records nothing.
+    await call('retract_message', { message_id: 'om_other12345678' });
+    assert.equal(decisions(store).length, 2);
   });
 
   it('counts an approval draft as the decision on the mail', async (t) => {
@@ -1146,7 +1169,7 @@ describe('stay_silent decisions', () => {
       run: (connector) => (connector === 'email' ? { sent: true } : { message_id: 'om_card12345678', chat_id: 'oc_p2p12345678' }) });
     store.ingest(mailEvent({ uid: 7 }));
     await call('reply_message', { message_id: 'mail:1:7', markdown: '周四可以', decision_id: 'imap:1:7' });
-    assert.deepEqual(decisions(store).map((row) => [row.event_id, row.outcome, row.tool]), [['imap:1:7', 'delivered', 'reply_message']]);
+    assert.deepEqual(decisions(store).map((row) => [row.event_id, row.outcome]), [['imap:1:7', 'delivered']]);
   });
 
   it('says STOP only for a call that changed nothing, never for a retry that fixed a refusal', async (t) => {
@@ -1163,8 +1186,6 @@ describe('stay_silent decisions', () => {
     assert.equal(second.text, 'Recorded: nothing is sent for this input.');
     assert.match((await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-work' })).text,
       /^STOP: this stay_silent call changed nothing\. .*Already recorded/);
-    store.ingest(chatEvent({ messageId: 'om_approve123456', eventId: 'evt-approve', chatId: 'oc_known12345678' }), 'approval_reply');
-    assert.match((await call('stay_silent', { decision_id: 'evt-approve' })).text, /^STOP: .*needs no decision\.$/);
   });
 });
 
@@ -1177,5 +1198,16 @@ describe('stay_silent switched off (the default)', () => {
     await call('send_message', { chat_id: 'oc_off123456789', markdown: 'hi', decision_id: 'message:om_off123456789' });
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM decisions').get().n, 0);
     assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM activities WHERE kind IN ('delivery.silent', 'delivery.blocked')").get().n, 0);
+  });
+
+  it('keeps retract_message exactly as it was: no decision_id in its schema or input', async (t) => {
+    const { service, call } = setup(t);
+    const retract = service.tools().find((tool) => tool.name === 'retract_message');
+    const defined = TOOLS.find((tool) => tool.name === 'retract_message');
+    assert.deepEqual(retract, publicTool(defined));
+    assert.deepEqual(Object.keys(retract.inputSchema.properties), ['source', 'message_id']);
+    assert.equal(retract.inputSchema.additionalProperties, false);
+    await assert.rejects(call('retract_message', { message_id: 'om_delivered123456', decision_id: 'message:om_x' }),
+      (error) => error.code === 'invalid_input');
   });
 });

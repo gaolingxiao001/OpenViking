@@ -16,7 +16,7 @@ import {
   parseApprovalReply, settledApprovalCard,
 } from './approval.mjs';
 import { resolveContent } from './content.mjs';
-import { TOOLS, publicTool, validateInput } from './tools.mjs';
+import { TOOLS, publicTool, toolDefinition, validateInput } from './tools.mjs';
 
 const NO_ACTION = 'No action was taken.';
 
@@ -92,7 +92,11 @@ export class ActionService {
   }
 
   tools() {
-    return TOOLS.filter((tool) => this.offered(tool)).map(publicTool);
+    return TOOLS.filter((tool) => this.offered(tool)).map((tool) => publicTool(this.definition(tool)));
+  }
+
+  definition(tool) {
+    return toolDefinition(tool, { explicitSilence: Boolean(this.config.explicitSilence) });
   }
 
   // Agent entrypoint. Returns { text, data, media? }; throws a model-readable
@@ -109,17 +113,16 @@ export class ActionService {
     const silence = name === 'stay_silent' && Boolean(this.config.explicitSilence);
     try {
       if (!tool || !this.offered(tool)) throw blocked('unknown_tool', `unknown tool: ${name}`);
-      try { validateInput(tool.inputSchema, input); } catch (error) { throw blocked('invalid_input', error.message); }
+      try { validateInput(this.definition(tool).inputSchema, input); } catch (error) { throw blocked('invalid_input', error.message); }
       this.assertAuthority(authority);
       trace.runtime = this.store.getCognitionState().runtime;
       let result = await this[HANDLERS[name]](input, caller);
       // Only a call that changed nothing says STOP: a success after a refused
       // attempt (decision_ambiguous fixed with decision_instance) is a fix.
-      if (silence && (result.data?.duplicate || result.data?.not_required)) {
+      if (silence && result.data?.duplicate) {
         result = { ...result, text: `STOP: this stay_silent call changed nothing. Calling it again does nothing. Finish your turn. ${result.text}` };
       }
-      trace.outcome = result.data?.dry_run ? 'dry_run' : result.data?.duplicate ? 'duplicate'
-        : result.data?.not_required ? 'not_required' : 'ok';
+      trace.outcome = result.data?.dry_run ? 'dry_run' : result.data?.duplicate ? 'duplicate' : 'ok';
       this.logger.info('agent_tool', { ...trace, durationMs: Date.now() - startedAt });
       return result;
     } catch (error) {
@@ -249,9 +252,7 @@ export class ActionService {
   settleDecision(caller, fence, final) {
     if (!this.config.explicitSilence || !caller.authority || !fence || !final) return;
     try {
-      const { created, previous } = this.store.recordDecision({
-        row: fence, outcome: 'delivered', tool: caller.trace.tool, runtime: caller.trace.runtime ?? null,
-      });
+      const { created, previous } = this.store.recordDecision({ row: fence, outcome: 'delivered' });
       if (created && previous === 'silent') caller.trace.overrode = 'silent';
     } catch (error) {
       // Bookkeeping only: it must never stop the delivery itself.
@@ -263,13 +264,6 @@ export class ActionService {
   // ledger row and an activity: no outbox, journal, connector call or liveness.
   // Nothing about it is ever refused for being repeated or stale.
   async staySilent(input, caller) {
-    if (this.inputEvents(input.decision_id, input.decision_instance ?? null).length === 0) {
-      let id = null;
-      try { id = readMetadataTag(input.decision_id); } catch { /* falls through to unknown_decision */ }
-      if (id !== null && this.store.eventStatus(id, input.decision_instance ?? null).some((row) => row.status === 'RULE_IGNORED')) {
-        return { text: 'This input was handled by the daemon and needs no decision.', data: { not_required: true } };
-      }
-    }
     const row = this.resolveDecision(input, caller, 'Silence not recorded');
     if (this.store.decisionFor(row.connector_instance, row.event_id)?.outcome === 'delivered') {
       return { text: 'A delivery is already recorded for this input; nothing to change. Do not call stay_silent for it.', data: { duplicate: true, delivered: true } };
@@ -279,9 +273,7 @@ export class ActionService {
     if (superseded) caller.trace.newerSeq = newerSeq;
     caller.trace.superseded = superseded;
     const reason = input.reason ? redactSensitive(input.reason).trim() || null : null;
-    const { created } = this.store.recordDecision({
-      row, outcome: 'silent', tool: 'stay_silent', reason, superseded, runtime: caller.trace.runtime ?? null,
-    });
+    const { created } = this.store.recordDecision({ row, outcome: 'silent' });
     if (!created) {
       return { text: 'Already recorded: nothing is sent for this input. Do not call stay_silent again for it.', data: { duplicate: true } };
     }
@@ -801,6 +793,9 @@ export class ActionService {
 
   async retractMessage(input, caller) {
     const connector = this.route(caller, 'message.retract', 'actions', input.source, { messageId: input.message_id });
+    // decision_id is offered only with explicit silence on: the retraction is
+    // then fenced and recorded like any other final delivery.
+    const fence = input.decision_id === undefined ? null : this.fence(input, caller);
     const target = this.store.deliveredMessage(input.message_id, connector);
     const result = await this.deliver({
       caller, connector, action: 'message.retract',
@@ -808,6 +803,8 @@ export class ActionService {
       key: this.key(null, 'retract', connector, input.message_id),
       summary: '[message retracted]',
       scope: { chatId: target?.chat_id ?? null, convKey: target?.conv_key ?? null },
+      fence,
+      inboundSeq: fence?.seq ?? null,
     });
     return this.deliveryResult(result, `retraction of message_id=${input.message_id}`);
   }

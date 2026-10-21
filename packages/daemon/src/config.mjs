@@ -256,9 +256,6 @@ export function getConfig() {
     // decisions ledger and the turn-end decision check. Off, the daemon offers
     // the same tools and assembles the same policy text as without them.
     explicitSilence: boolEnv('VIKA_EXPLICIT_SILENCE', false),
-    // With explicitSilence on: one reminder turn for a chat message whose turn
-    // ended with neither a delivery nor stay_silent. Off only records the miss.
-    decisionNudge: boolEnv('VIKA_DECISION_NUDGE', true),
     historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
     cognitionMaxChars: intEnv('VIKA_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
     retentionMs: intEnv('VIKA_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),

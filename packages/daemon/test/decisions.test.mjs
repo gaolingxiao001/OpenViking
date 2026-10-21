@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DecisionPolicy, isDecisionReceipt, warnIfSilenceInert } from '../src/decisions.mjs';
+import { DecisionPolicy, warnIfSilenceInert } from '../src/decisions.mjs';
 import { Harness } from '../src/harness.mjs';
 import { RUNTIME_IDS, getRuntimeDefinition } from '../src/runtime-catalog.mjs';
 import { Store } from '../src/store.mjs';
@@ -9,7 +9,7 @@ import { chatEvent, mailEvent } from './event-fixture.mjs';
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 // A real Store and Harness; the runtime only records what it is handed.
-function setup(t, { runtime = 'codex', decisionNudge = true } = {}) {
+function setup(t, { runtime = 'codex' } = {}) {
   const store = new Store(':memory:', quiet);
   store.initializeCognition(runtime, 'token');
   const submitted = [];
@@ -24,7 +24,7 @@ function setup(t, { runtime = 'codex', decisionNudge = true } = {}) {
   const logs = [];
   const state = { stopping: false };
   const policy = new DecisionPolicy({
-    config: { decisionNudge }, store, harness,
+    store, harness,
     logger: { ...quiet, info: (message, fields) => logs.push({ message, ...fields }) },
     recordActivity: (kind, fields) => activities.push({ kind, ...fields }),
     isStopping: () => state.stopping,
@@ -32,10 +32,10 @@ function setup(t, { runtime = 'codex', decisionNudge = true } = {}) {
   t.after(() => { harness.stop(); store.close(); });
   const ingest = (fields) => store.ingest(chatEvent({ chatType: 'p2p', ...fields })).inbound;
   const silence = (row) => store.recordDecision({ row: store.db.prepare('SELECT * FROM connector_events WHERE seq = ?').get(row.seq),
-    outcome: 'silent', tool: 'stay_silent' });
+    outcome: 'silent' });
   const settlement = () => logs.filter((line) => line.message === 'decision_settlement').at(-1);
-  const turn = async (inboundSeqs, receiptIds = []) => {
-    policy.onTurnSucceeded({ inboundSeqs, receiptIds });
+  const turn = async (inboundSeqs) => {
+    policy.onTurnSucceeded({ inboundSeqs });
     await harness.ingressBarrier;
     // A group line waits out the burst window otherwise.
     harness.flushBufferedIngress();
@@ -63,29 +63,18 @@ describe('turn-end decision settlement', () => {
       [['agent.decision_missing', 'NUDGED', row.seq, { expectation: 'expected', runtime: 'codex' }]]);
     assert.equal(submitted.length, 1);
     assert.equal(submitted[0].seq, null);
-    assert.equal(submitted[0].receiptId, `decision:${row.seq}`);
-    assert.ok(isDecisionReceipt(submitted[0].receiptId));
+    assert.equal(submitted[0].receiptId, undefined);
     assert.match(submitted[0].text, /^\[chat=oc_p2p12345678 source=lark msg=om_forgot1234567 event=message:om_forgot1234567 time=\S+ from=\S+ undecided=1\] hello$/);
     assert.equal(logs.find((line) => line.message === 'decision_nudged').seq, row.seq);
     assert.doesNotMatch(JSON.stringify(logs), /oc_p2p|om_forgot/);
 
-    // The same seq is never reminded about twice.
+    // The same seq is never reminded about twice; a later miss is only recorded.
     await turn([row.seq]);
     assert.equal(submitted.length, 1);
     assert.deepEqual(activities.map(({ status }) => status), ['NUDGED', 'MISSING']);
-    // The reminder turn ending without a decision is final.
-    await turn([], [`decision:${row.seq}`]);
-    assert.deepEqual(activities.map(({ status }) => status), ['NUDGED', 'MISSING', 'UNSETTLED']);
-    assert.equal(submitted.length, 1);
-  });
-
-  it('closes a reminder receipt quietly once the model decides', async (t) => {
-    const { activities, ingest, silence, turn } = setup(t);
-    const row = ingest({ messageId: 'om_late12345678' });
-    await turn([row.seq]);
-    silence(row);
-    await turn([], [`decision:${row.seq}`]);
-    assert.deepEqual(activities.map(({ status }) => status), ['NUDGED']);
+    // The reminder turn itself carries no seq, so it checks nothing.
+    await turn([]);
+    assert.equal(activities.length, 2);
   });
 
   it('lets one decision on the newest input cover a burst, but not one on an older input', async (t) => {
@@ -123,9 +112,10 @@ describe('turn-end decision settlement', () => {
     const mail = store.ingest(mailEvent({ uid: 7 })).inbound;
     await turn([card.seq, quote.seq, group.seq, mail.seq]);
     assert.deepEqual(activities.map(({ inboundSeq }) => inboundSeq), [card.seq, quote.seq, group.seq]);
-    assert.match(submitted.find((item) => item.receiptId === `decision:${quote.seq}`).text, / reply_to=me undecided=1\]/);
-    assert.match(submitted.find((item) => item.receiptId === `decision:${card.seq}`).text, / reply_to=me undecided=1\]/);
-    assert.match(submitted.find((item) => item.receiptId === `decision:${group.seq}`).text, /msg=om_ambient123456 [^\]]* undecided=1\]/);
+    const line = (messageId) => submitted.find((item) => item.text.includes(` msg=${messageId} `)).text;
+    assert.match(line('om_quoteMe123456'), / reply_to=me undecided=1\]/);
+    assert.match(line('ca_answer1234567'), / reply_to=me undecided=1\]/);
+    assert.match(line('om_ambient123456'), /msg=om_ambient123456 [^\]]* undecided=1\]/);
     assert.deepEqual([settlement().expected_unsettled, settlement().optional_unsettled, settlement().nudged], [3, 1, 3]);
   });
 
@@ -135,7 +125,7 @@ describe('turn-end decision settlement', () => {
       .map((messageId) => ingest({ messageId, chatId: 'oc_gburst1234567', chatType: 'group' }));
     await turn(burst.map((row) => row.seq));
     assert.deepEqual(activities.map(({ status, inboundSeq }) => [status, inboundSeq]), [['NUDGED', burst[2].seq]]);
-    assert.deepEqual(submitted.map((item) => item.receiptId), [`decision:${burst[2].seq}`]);
+    assert.deepEqual(submitted.map((item) => item.text.includes(' msg=om_gburstC123456 ')), [true]);
     assert.equal(settlement().nudged, 1);
   });
 
@@ -152,21 +142,10 @@ describe('turn-end decision settlement', () => {
     assert.deepEqual([stopping.activities, stopping.submitted], [[], []]);
   });
 
-  it('only records a missing decision when reminders are off', async (t) => {
-    const { activities, submitted, ingest, turn } = setup(t, { decisionNudge: false });
-    const row = ingest({ messageId: 'om_noNudge123456' });
-    await turn([row.seq]);
-    assert.deepEqual(activities.map(({ status }) => status), ['MISSING']);
-    assert.deepEqual(submitted, []);
-  });
-
-  it('ignores null seqs, daemon-handled inputs, and failed or abandoned turns', async (t) => {
-    const { store, policy, activities, submitted, ingest, turn } = setup(t);
+  it('ignores null seqs and daemon-handled inputs', async (t) => {
+    const { store, activities, submitted, turn } = setup(t);
     const ignored = store.ingest(chatEvent({ chatType: 'p2p', messageId: 'om_slash12345678' }), 'slash_command').inbound;
     await turn([null, undefined, ignored.seq]);
-    const row = ingest({ messageId: 'om_failed1234567', chatId: 'oc_failed1234567' });
-    policy.onTurnFailed({ inboundSeqs: [row.seq], receiptIds: ['decision:1'], error: 'boom' });
-    policy.onTurnAbandoned({ inboundSeqs: [row.seq], receiptIds: ['decision:1'] });
     assert.deepEqual([activities, submitted], [[], []]);
   });
 });

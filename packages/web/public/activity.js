@@ -452,7 +452,7 @@ function renderStep(step) {
   const bad = row.severity === 'error';
   const missing = row.kind === 'agent.decision_missing';
   const text = missing
-    ? ({ NUDGED: '已提醒模型补一次决定', MISSING: '没有发出消息，也没有记录不回复', UNSETTLED: '提醒后仍未决定' })[row.status] || ''
+    ? ({ NUDGED: '已提醒模型补一次决定', MISSING: '没有发出消息，也没有记录不回复' })[row.status] || ''
     : row.summary;
   head.append(tag(row.title, bad ? 'tag-bad' : missing ? 'tag-warn' : 'tag-muted'), h('span', 'step-text txt', oneLine(text, 400)));
   el.append(head);

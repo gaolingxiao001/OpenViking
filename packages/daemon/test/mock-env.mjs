@@ -250,9 +250,6 @@ export async function startMockEnv({
     // dataDir does not rebuild that object, so a developer shell with
     // VIKA_MEETING_AUDIO_ENABLED would bind the production socket.
     meetingAudio: null,
-    // The fake codex completes turns without tools; a reminder turn after each
-    // would only add noise. Tests of the reminder turn it back on.
-    decisionNudge: false,
     ...configOverrides,
   };
   const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), {

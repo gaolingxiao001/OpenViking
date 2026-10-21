@@ -11,7 +11,7 @@ import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy } from './notices.mjs';
-import { DecisionPolicy, isDecisionReceipt, warnIfSilenceInert } from './decisions.mjs';
+import { DecisionPolicy, warnIfSilenceInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
@@ -27,14 +27,6 @@ import {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Decision reminders are the Core's own receipts; the meeting plugin only
-// releases its inbox items.
-function meetingTurn(info) {
-  const receipts = info?.receiptIds;
-  if (!Array.isArray(receipts) || !receipts.some(isDecisionReceipt)) return info;
-  return { ...info, receiptIds: receipts.filter((id) => !isDecisionReceipt(id)) };
 }
 
 class DisabledMeetingPlugin {
@@ -74,6 +66,8 @@ export class PersonalAgentDaemon {
     this.chatNames = null;
     this.failurePolicy = null;
     this.decisionPolicy = null;
+    // The runtime explicit_silence_not_applied last checked, to warn once per switch.
+    this.silenceRuntime = null;
     this.httpServer = null;
     this.startedAt = Date.now();
     this.ready = false;
@@ -228,21 +222,19 @@ export class PersonalAgentDaemon {
       await this.loadOpenVikingIdentity(ovClient);
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
-          this.meeting?.onTurnFailed(meetingTurn(info));
-          this.decisionPolicy?.onTurnFailed(info);
+          this.meeting?.onTurnFailed(info);
           void this.failurePolicy.onTurnFailed(info)
             .catch((error) => {
               this.logger.warn('turn_failure_handler_failed', { error: safeError(error) });
             });
         },
         onTurnSucceeded: (info) => {
-          this.meeting?.onTurnSucceeded(meetingTurn(info));
+          this.meeting?.onTurnSucceeded(info);
           this.failurePolicy.onTurnSucceeded(info);
           this.decisionPolicy?.onTurnSucceeded(info);
         },
         onTurnAbandoned: (info) => {
-          this.meeting?.onTurnAbandoned(meetingTurn(info));
-          this.decisionPolicy?.onTurnAbandoned(info);
+          this.meeting?.onTurnAbandoned(info);
         },
         onAvailable: () => { this.harness?.onAvailable(); },
         onAuthorityChanged: ({ runtime, authorityToken }) => {
@@ -307,7 +299,6 @@ export class PersonalAgentDaemon {
       // decision (a delivery or stay_silent), with one reminder if not. Only on
       // an instance with explicitSilence on.
       this.decisionPolicy = this.config.explicitSilence ? new DecisionPolicy({
-        config: this.config,
         store: this.store,
         harness: this.harness,
         logger: this.logger.child({ component: 'decisions' }),

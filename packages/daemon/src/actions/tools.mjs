@@ -5,7 +5,8 @@ import { CONTENT_PROPERTIES } from './content.mjs';
 // `action` / `query` name the Connector operation a tool needs, so a tool is
 // offered only when some configured Connector declares it; `connector` names
 // the kind of Connector whose data a Core-side tool reads; `explicitSilence`
-// marks the opt-in stay_silent tool.
+// marks the opt-in stay_silent tool, and `silenceInput` holds the optional
+// fields a tool gains only when explicit silence is on (see toolDefinition).
 
 const ID = '^[A-Za-z0-9_.:@=+-]{1,256}$';
 const SOURCE = {
@@ -120,6 +121,10 @@ export const TOOLS = [
       source: SOURCE,
       message_id: { type: 'string', pattern: ID, description: 'Full id of the bot message to retract.' },
     }, ['message_id']),
+    silenceInput: {
+      decision_id: { ...DECISION, description: 'event= (never msg=) of the input that asked for this retraction, copied exactly. Records the retraction as your decision on it, so no stay_silent or reply is needed for that input. Freshness fence: blocked if anything newer has arrived there.' },
+      decision_instance: DECISION_INSTANCE,
+    },
     annotations: { ...WRITE, destructiveHint: true },
   },
   {
@@ -240,6 +245,14 @@ export const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
 ];
+
+// A tool as this instance offers it. With explicit silence on, its
+// `silenceInput` fields join the schema as optional properties; off, the
+// definition is exactly the one without the feature.
+export function toolDefinition(tool, { explicitSilence = false } = {}) {
+  if (!explicitSilence || !tool.silenceInput) return tool;
+  return { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, ...tool.silenceInput } } };
+}
 
 export function publicTool({ name, title, description, inputSchema, annotations }) {
   return { name, title, description, inputSchema, annotations };

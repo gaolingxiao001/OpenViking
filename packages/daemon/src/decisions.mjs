@@ -1,7 +1,6 @@
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
 import { opaqueRef, safeError } from './logger.mjs';
 
-const NUDGE_RECEIPT = 'decision:';
 // Seqs already nudged in this process. A restart forgets them: the ledger is
 // durable, the reminder is best effort.
 const NUDGED_LIMIT = 1_000;
@@ -20,10 +19,6 @@ export function warnIfSilenceInert(config, runtime, logger) {
   return true;
 }
 
-export function isDecisionReceipt(receiptId) {
-  return typeof receiptId === 'string' && receiptId.startsWith(NUDGE_RECEIPT);
-}
-
 // Whether an unsettled input needs a decision: every chat message on every IM
 // (direct, group, thread, card answer), as zouk asks a send or no_reply of
 // every inbound message. A reminder costs a turn only when the model missed
@@ -38,34 +33,26 @@ function expected(row) {
 // decision: a final delivery or stay_silent (the ledger in `decisions`). It
 // never judges the decision, never sends anything, and never touches the
 // inbound ledger, freshness or the outbox. An expected input with no decision
-// gets one reminder line (same event=, undecided=1, no seq); a second miss is
-// only recorded.
+// gets one reminder line (same event=, undecided=1, no seq); a seq is reminded
+// about at most once per process, and a later miss on it is only recorded.
 export class DecisionPolicy {
-  constructor({ config, store, harness, logger, recordActivity, isStopping = () => false }) {
-    Object.assign(this, { config, store, harness, logger, recordActivity, isStopping });
+  constructor({ store, harness, logger, recordActivity, isStopping = () => false }) {
+    Object.assign(this, { store, harness, logger, recordActivity, isStopping });
     this.nudged = new Set();
   }
 
-  onTurnSucceeded({ inboundSeqs = [], receiptIds = [] } = {}) {
+  onTurnSucceeded({ inboundSeqs = [] } = {}) {
     if (this.isStopping()) return;
     const runtime = this.store.getCognitionState().runtime;
     if (getRuntimeDefinition(runtime)?.capabilities.agentTools !== 'core') return;
     try {
-      this.settle({ inboundSeqs, receiptIds, runtime });
+      this.settle({ inboundSeqs, runtime });
     } catch (error) {
       this.logger.warn('decision_settlement_failed', { error: safeError(error) });
     }
   }
 
-  // A failed turn belongs to FailurePolicy (notice, or the claude → codex
-  // resubmit of the same seqs); an abandoned one stays in the native thread or
-  // becomes catch-up history. Neither is a decision, and a reminder receipt on
-  // either is dropped.
-  onTurnFailed() {}
-
-  onTurnAbandoned() {}
-
-  settle({ inboundSeqs, receiptIds, runtime }) {
+  settle({ inboundSeqs, runtime }) {
     const scopes = new Map();
     for (const seq of Array.isArray(inboundSeqs) ? inboundSeqs : []) {
       if (seq === null || seq === undefined) continue;
@@ -91,9 +78,9 @@ export class DecisionPolicy {
         continue;
       }
       counts.expected_unsettled += 1;
-      if (this.config.decisionNudge && !this.nudged.has(row.seq)) {
+      if (!this.nudged.has(row.seq)) {
         this.remember(row.seq);
-        this.harness.redeliverUndecided(row, { receiptId: `${NUDGE_RECEIPT}${row.seq}` });
+        this.harness.redeliverUndecided(row);
         this.missing(row, 'NUDGED', runtime);
         this.logger.info('decision_nudged', { seq: row.seq, conversationRef: opaqueRef(scopeKey) });
         counts.nudged += 1;
@@ -101,17 +88,7 @@ export class DecisionPolicy {
         this.missing(row, 'MISSING', runtime);
       }
     }
-    // A reminder turn that still ended without a decision is final.
-    for (const receiptId of Array.isArray(receiptIds) ? receiptIds : []) {
-      if (!isDecisionReceipt(receiptId)) continue;
-      const seq = Number(receiptId.slice(NUDGE_RECEIPT.length));
-      const row = Number.isSafeInteger(seq) ? this.store.inboundBySeq(seq) : null;
-      if (!row?.scopeKey) continue;
-      if (this.store.coveringDecision(row.scopeKey, row.seq)
-        || this.store.newerAcceptedSeq(row.scopeKey, row.seq) !== null) continue;
-      this.missing(row, 'UNSETTLED', runtime);
-    }
-    if (scopes.size > 0 || receiptIds.some(isDecisionReceipt)) this.logger.info('decision_settlement', counts);
+    if (scopes.size > 0) this.logger.info('decision_settlement', counts);
     return counts;
   }
 
