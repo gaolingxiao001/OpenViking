@@ -221,6 +221,21 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
     }
   });
 
+  it('reminds once about an ordinary group message the turn did not decide on', async () => {
+    const env = await startMockEnv({ codex: { behavior: 'complete' }, config: { explicitSilence: true, decisionNudge: true } });
+    try {
+      env.receive(textMessage({ messageId: 'om-group-undecided', chatId: 'oc-group', chatType: 'group', text: '大家早' }));
+      await env.waitFor(() => env.daemon.store.db
+        .prepare("SELECT COUNT(*) AS n FROM activities WHERE kind = 'agent.decision_missing' AND status = 'UNSETTLED'").get().n === 1);
+      const turns = env.codexInput();
+      assert.equal(turns.length, 2);
+      assert.match(turns[1].text, /chat=oc-group [^\]]*msg=om-group-undecided [^\]]* undecided=1\] 大家早/);
+      assert.deepEqual(env.replies(), []);
+    } finally {
+      await env.stop();
+    }
+  });
+
   it('without explicit silence (the default) checks no decisions and offers no stay_silent', async () => {
     const env = await startMockEnv({ codex: { behavior: 'complete' }, config: { decisionNudge: true } });
     try {

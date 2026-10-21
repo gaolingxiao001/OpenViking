@@ -273,10 +273,13 @@ reply) needs no decision. Silence is not an outbound side effect: no outbox or
 journal row, no OpenViking history, no idle-liveness touch, no Connector call;
 only the temporary `OnIt` of a fresh decision is removed. At the end of each
 successful turn of a Core-tool runtime (not Volc) the Core checks the seqs the
-turn consumed: a direct chat, a card answer or a group quote of the bot left
-without a decision gets one reminder line (same `event=`, `undecided=1`, no
-seq; `VIKA_DECISION_NUDGE=false` turns it off) and an `agent.decision_missing`
-activity; ambient group messages and non-chat events are only counted. A turn
+turn consumed: a chat message on any IM (direct, group, thread or card
+answer; the newest one of each scope) left without a decision gets one
+reminder line (same `event=`, `undecided=1`, no seq;
+`VIKA_DECISION_NUDGE=false` turns it off) and an `agent.decision_missing`
+activity, so a reminder costs a turn only when the model missed a decision.
+Non-chat events are only counted: one owner notice may cover several mails,
+so a mail without a decision of its own is not reliably a miss. A turn
 that calls `stay_silent` on one input three times, or makes more than 40 calls
 that record nothing new (repeats, events that need no decision, refusals), is
 interrupted; new decisions on distinct events never count toward that limit.

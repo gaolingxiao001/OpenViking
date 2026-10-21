@@ -1,5 +1,4 @@
 import { getRuntimeDefinition } from './runtime-catalog.mjs';
-import { resolveReplyTarget } from './runtime-input.mjs';
 import { opaqueRef, safeError } from './logger.mjs';
 
 const NUDGE_RECEIPT = 'decision:';
@@ -11,14 +10,14 @@ export function isDecisionReceipt(receiptId) {
   return typeof receiptId === 'string' && receiptId.startsWith(NUDGE_RECEIPT);
 }
 
-// Whether an unsettled input is one the model is expected to decide on, from
-// what its row already says: a direct chat, a card answer, or a group message
-// quoting the bot. Ambient group chat and non-chat events (mail) stay optional:
-// the daemon does not know its own open_id, so an @mention is not visible here.
-function expected(store, row) {
-  if (!row.chatId || !row.kind?.startsWith('message.')) return false;
-  if (row.chatType === 'p2p' || row.messageType === 'card_action') return true;
-  return resolveReplyTarget(store, row)?.kind === 'me';
+// Whether an unsettled input needs a decision: every chat message on every IM
+// (direct, group, thread, card answer), as zouk asks a send or no_reply of
+// every inbound message. A reminder costs a turn only when the model missed
+// one. Non-chat events (mail) stay optional: each is its own subject scope and
+// one owner notice may rightly cover several, so a mail without its own
+// decision is not reliably a miss, and nobody is waiting in a conversation.
+function expected(row) {
+  return Boolean(row.chatId) && Boolean(row.kind?.startsWith('message.'));
 }
 
 // Turn-end check that every input a successful turn consumed ended in a
@@ -73,7 +72,7 @@ export class DecisionPolicy {
         counts.superseded += 1;
         continue;
       }
-      if (!expected(this.store, row)) {
+      if (!expected(row)) {
         counts.optional_unsettled += 1;
         continue;
       }

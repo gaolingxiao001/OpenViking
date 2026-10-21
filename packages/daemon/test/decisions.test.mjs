@@ -110,7 +110,7 @@ describe('turn-end decision settlement', () => {
     assert.deepEqual([activities, submitted], [[], []]);
   });
 
-  it('expects a decision on card answers and quotes of the bot, never on ambient group chat or mail', async (t) => {
+  it('expects a decision on every chat message, group and mention alike, never on mail', async (t) => {
     const { store, activities, submitted, ingest, settlement, turn } = setup(t);
     // One of the bot's own messages, so a quote of it reads reply_to=me.
     const outbox = store.reserveOutbox({ connector: 'lark', action: 'message.send', idempotencyKey: 'k1', payload: {}, caller: 'agent',
@@ -118,13 +118,24 @@ describe('turn-end decision settlement', () => {
     store.settleOutbox(outbox.id, 'SENT', { result: { message_id: 'om_botSaid123456' } });
     const card = ingest({ messageId: 'ca_answer1234567', kind: 'message.action', messageType: 'card_action', chatId: 'oc_cards12345678', chatType: 'group' });
     const quote = ingest({ messageId: 'om_quoteMe123456', chatId: 'oc_groupQ1234567', chatType: 'group', parentId: 'om_botSaid123456' });
-    const ambient = ingest({ messageId: 'om_ambient123456', chatId: 'oc_ambient123456', chatType: 'group' });
+    const group = ingest({ messageId: 'om_ambient123456', chatId: 'oc_ambient123456', chatType: 'group' });
     const mail = store.ingest(mailEvent({ uid: 7 })).inbound;
-    await turn([card.seq, quote.seq, ambient.seq, mail.seq]);
-    assert.deepEqual(activities.map(({ inboundSeq }) => inboundSeq), [card.seq, quote.seq]);
+    await turn([card.seq, quote.seq, group.seq, mail.seq]);
+    assert.deepEqual(activities.map(({ inboundSeq }) => inboundSeq), [card.seq, quote.seq, group.seq]);
     assert.match(submitted.find((item) => item.receiptId === `decision:${quote.seq}`).text, / reply_to=me undecided=1\]/);
     assert.match(submitted.find((item) => item.receiptId === `decision:${card.seq}`).text, / reply_to=me undecided=1\]/);
-    assert.deepEqual([settlement().expected_unsettled, settlement().optional_unsettled, settlement().nudged], [2, 2, 2]);
+    assert.match(submitted.find((item) => item.receiptId === `decision:${group.seq}`).text, /msg=om_ambient123456 [^\]]* undecided=1\]/);
+    assert.deepEqual([settlement().expected_unsettled, settlement().optional_unsettled, settlement().nudged], [3, 1, 3]);
+  });
+
+  it('reminds about only the newest line of an undecided group burst', async (t) => {
+    const { activities, submitted, ingest, settlement, turn } = setup(t);
+    const burst = ['om_gburstA123456', 'om_gburstB123456', 'om_gburstC123456']
+      .map((messageId) => ingest({ messageId, chatId: 'oc_gburst1234567', chatType: 'group' }));
+    await turn(burst.map((row) => row.seq));
+    assert.deepEqual(activities.map(({ status, inboundSeq }) => [status, inboundSeq]), [['NUDGED', burst[2].seq]]);
+    assert.deepEqual(submitted.map((item) => item.receiptId), [`decision:${burst[2].seq}`]);
+    assert.equal(settlement().nudged, 1);
   });
 
   it('does nothing for Volc or while the daemon stops', async (t) => {
