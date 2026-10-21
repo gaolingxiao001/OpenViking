@@ -1016,7 +1016,7 @@ describe('stay_silent decisions', () => {
 
     // A repeat changes nothing and says to stop.
     const again = await call('stay_silent', { decision_id: 'message:om_quiet12345678', reason: 'again' });
-    assert.match(again.text, /^STOP: this stay_silent call changed nothing\. Calling it again does nothing\. Finish your turn\. Already recorded/);
+    assert.match(again.text, /^STOP: this stay_silent call changed nothing for this input\. Do not call it again for it; decide any other input you still have, otherwise finish your turn\. Already recorded/);
     assert.equal(again.data.duplicate, true);
     assert.equal(toolLines(logs)[1].outcome, 'duplicate');
     assert.equal(decisions(store).length, 1);
@@ -1185,7 +1185,7 @@ describe('stay_silent decisions', () => {
     const second = await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-personal' });
     assert.equal(second.text, 'Recorded: nothing is sent for this input.');
     assert.match((await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-work' })).text,
-      /^STOP: this stay_silent call changed nothing\. .*Already recorded/);
+      /^STOP: this stay_silent call changed nothing for this input\. .*Already recorded/);
   });
 });
 

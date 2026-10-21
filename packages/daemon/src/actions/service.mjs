@@ -120,7 +120,7 @@ export class ActionService {
       // Only a call that changed nothing says STOP: a success after a refused
       // attempt (decision_ambiguous fixed with decision_instance) is a fix.
       if (silence && result.data?.duplicate) {
-        result = { ...result, text: `STOP: this stay_silent call changed nothing. Calling it again does nothing. Finish your turn. ${result.text}` };
+        result = { ...result, text: `STOP: this stay_silent call changed nothing for this input. Do not call it again for it; decide any other input you still have, otherwise finish your turn. ${result.text}` };
       }
       trace.outcome = result.data?.dry_run ? 'dry_run' : result.data?.duplicate ? 'duplicate' : 'ok';
       this.logger.info('agent_tool', { ...trace, durationMs: Date.now() - startedAt });
