@@ -50,6 +50,7 @@ const IDENTITY = {
 };
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+const LOCAL_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
 function schema(properties, required = []) {
   return { type: 'object', additionalProperties: false, properties, required };
@@ -243,6 +244,48 @@ export const TOOLS = [
       limit: LIMIT(500, 100),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  {
+    name: 'get_time',
+    timer: true,
+    title: 'Get daemon time',
+    description: 'Return the daemon current time, timezone, and now_ms. Use it before creating timers from relative time.',
+    inputSchema: schema({}),
+    annotations: READ,
+  },
+  {
+    name: 'create_timer',
+    timer: true,
+    title: 'Create a local timer',
+    description: 'Create one local reminder timer. Use schedule only for fixed wake times: type once, interval, daily, or weekly. Dynamic conditions such as workdays, holidays, or makeup workdays belong in text for the AI to judge after wakeup, not in schedule. The decision_id is the event= of the user input that requested the timer; repeating the same decision_id returns the existing timer.',
+    inputSchema: schema({
+      title: { type: 'string', minLength: 1, maxLength: 200 },
+      text: { type: 'string', minLength: 1, maxLength: 4000 },
+      timezone: { type: 'string', minLength: 1, maxLength: 100 },
+      schedule: { type: 'object' },
+      max_runs: { minimum: 1, maximum: 1_000_000 },
+      delivery: { type: 'object' },
+      ...DECISION_FIELDS,
+    }, ['title', 'text', 'schedule', 'delivery', 'decision_id']),
+    annotations: LOCAL_WRITE,
+  },
+  {
+    name: 'list_timers',
+    timer: true,
+    title: 'List active timers',
+    description: 'List active local timers that can still fire. It does not show already fired once timers or cancelled timers.',
+    inputSchema: schema({}),
+    annotations: READ,
+  },
+  {
+    name: 'cancel_timer',
+    timer: true,
+    title: 'Cancel a local timer',
+    description: 'Cancel a local timer by timer_id. This deletes the active timer record.',
+    inputSchema: schema({
+      timer_id: { type: 'string', pattern: '^tm_[A-Za-z0-9_-]{1,64}$' },
+    }, ['timer_id']),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
 ];
 

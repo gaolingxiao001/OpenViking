@@ -21,6 +21,7 @@ import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import { OVUnavailableError } from './ov-connection.mjs';
 import { loadOpenVikingIdentity } from './openviking.mjs';
+import { TimerConnector, TimerRepository } from './timers.mjs';
 import {
   MeetingPlugin,
 } from './meeting/index.mjs';
@@ -61,6 +62,8 @@ export class PersonalAgentDaemon {
     this.actions = null;
     this.actionApi = null;
     this.meeting = null;
+    this.timers = null;
+    this.timerConnector = null;
     this.liveness = null;
     this.roster = null;
     this.chatNames = null;
@@ -141,6 +144,7 @@ export class PersonalAgentDaemon {
     this.lock.acquire();
     try {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
+      this.timers = new TimerRepository(this.store.db);
       const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
       this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
         { canCommit: () => !this.connectors?.subscribed });
@@ -211,6 +215,8 @@ export class PersonalAgentDaemon {
         liveness: this.liveness,
         meetingEnabled: this.connectorIds.includes('lark'),
         ovClient,
+        timers: this.timers,
+        onTimersChanged: () => this.timerConnector?.wake(),
         logger: this.logger.child({ component: 'actions' }),
       });
       this.actionApi = await startActionApi({
@@ -311,6 +317,11 @@ export class PersonalAgentDaemon {
         flushBufferedIngress: () => this.harness.flushBufferedIngress(),
       });
       await this.agentRuntime.start();
+      this.timerConnector = new TimerConnector({
+        repository: this.timers,
+        submitEvent: (event) => this.harness.handleConnectorEvent(event),
+        logger: this.logger.child({ component: 'timer' }),
+      });
       this.meeting.onAuthorityChanged(this.store.getCognitionState().authorityToken);
       void this.meeting.start().catch((error) => {
         this.logger.warn('meeting_plugin_start_failed', { error: safeError(error) });
@@ -493,6 +504,7 @@ export class PersonalAgentDaemon {
       }, 'stopping');
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       if (this.ovSyncTimer) clearInterval(this.ovSyncTimer);
+      this.timerConnector?.stop();
       this.ovContext?.stop();
       this.maintenanceTimer = null;
       registerNameResolver(null);

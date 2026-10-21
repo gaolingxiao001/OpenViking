@@ -11,6 +11,7 @@ import { OVUnavailableError } from '../ov-connection.mjs';
 import { OVSessionClient } from '../ov-session-context.mjs';
 import { opaqueRef, redactSensitive, safeError } from '../logger.mjs';
 import { BOT_SENDERS, readMetadataTag } from '../runtime-input.mjs';
+import { TimerSchedule } from '../timers.mjs';
 import {
   APPROVAL_SECONDS, approvalCard, approvalMessage, approvalNote, approvalQuestion, approvalStatusText, approvedText,
   parseApprovalReply, settledApprovalCard,
@@ -38,6 +39,10 @@ const HANDLERS = {
   read_email: 'readEmail',
   read_openviking_session_context: 'readOVSession',
   read_meeting_inbox: 'readMeetingInbox',
+  get_time: 'getTime',
+  create_timer: 'createTimer',
+  list_timers: 'listTimers',
+  cancel_timer: 'cancelTimer',
 };
 
 // A refusal the model can act on; `code` is what logs and activities record.
@@ -68,8 +73,22 @@ function messageLines(messages, { withChat = false } = {}) {
 // outbox, invoke the Connector, settle. Authority, freshness, routing and
 // content checks happen here once, whichever runtime asked.
 export class ActionService {
-  constructor({ config, store, connectors, roster = null, liveness = null, meetingEnabled = false, ovClient = null, logger }) {
-    Object.assign(this, { config, store, connectors, roster, liveness, meetingEnabled, ovClient, logger });
+  constructor({
+    config,
+    store,
+    connectors,
+    roster = null,
+    liveness = null,
+    meetingEnabled = false,
+    ovClient = null,
+    timers = null,
+    clock = () => Date.now(),
+    onTimersChanged = () => {},
+    logger,
+  }) {
+    Object.assign(this, {
+      config, store, connectors, roster, liveness, meetingEnabled, ovClient, timers, clock, onTimersChanged, logger,
+    });
     // One temporary working reaction per conversation, removed by the next
     // final delivery there.
     this.temporaryReactions = new Map();
@@ -90,6 +109,8 @@ export class ActionService {
     if (tool.query) return this.supporting(tool.query, 'queries').length > 0;
     if (tool.connector) return this.connectors.manifests().some(([, manifest]) => manifest.name === tool.connector);
     if (tool.meeting) return this.meetingEnabled;
+    if (tool.openviking) return Boolean(this.ovClient || this.config.openVikingConfigPath);
+    if (tool.timer) return Boolean(this.timers);
     if (tool.explicitSilence) return Boolean(this.config.explicitSilence);
     return true;
   }
@@ -370,8 +391,13 @@ export class ActionService {
   // notice, or a draft the owner approves.
   authorize(fence, { toOwner = false } = {}) {
     if (!fence.conv_key && !toOwner) {
+      if (this.isTimerReminder(fence)) return;
       throw blocked('owner_only', `Delivery blocked: a non-chat event can only notify the owner; use notify_owner. ${NO_ACTION}`);
     }
+  }
+
+  isTimerReminder(fence) {
+    return fence.connector_instance === 'timer' && fence.kind === 'reminder.due';
   }
 
   // Where a notice to the owner goes: the primary IM (config.channel), or the
@@ -1031,6 +1057,107 @@ export class ActionService {
     return {
       text: `Read and acknowledged ${result.items.length} meeting messages; remaining=${result.remaining}.\n${lines.join('\n')}`,
       data: result,
+    };
+  }
+
+  getTime() {
+    const nowMs = this.clock();
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const data = {
+      now_ms: nowMs,
+      now: new Date(nowMs).toISOString(),
+      timezone,
+    };
+    return { text: JSON.stringify(data), data };
+  }
+
+  normalizeDelivery(delivery) {
+    const value = delivery && typeof delivery === 'object' && !Array.isArray(delivery) ? delivery : null;
+    if (!value) throw blocked('invalid_input', 'delivery must be an object');
+    if (value.mode === 'owner') return { mode: 'owner' };
+    if (value.mode === 'chat' && typeof value.source === 'string' && typeof value.chat_id === 'string' && value.chat_id) {
+      return { mode: 'chat', source: value.source, chat_id: value.chat_id };
+    }
+    throw blocked('invalid_input', 'delivery must be {mode:"owner"} or {mode:"chat", source, chat_id}');
+  }
+
+  async createTimer(input, caller) {
+    if (!this.timers) throw blocked('unknown_tool', 'timer tools are not available');
+    const fence = this.fence(input, caller);
+    const existing = this.timers.findByDecision(fence.connector_instance, fence.event_id);
+    if (existing) return this.timerResult(existing, { duplicate: true });
+    const maxRuns = input.max_runs === undefined || input.max_runs === null ? null : Number(input.max_runs);
+    if (maxRuns !== null && (!Number.isSafeInteger(maxRuns) || maxRuns < 1)) {
+      throw blocked('invalid_input', 'max_runs must be a positive integer or null');
+    }
+    const nowMs = this.clock();
+    const timezone = input.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const normalized = TimerSchedule.normalize(input.schedule, {
+      nowMs,
+      timezone,
+    });
+    const timer = this.timers.create({
+      title: input.title,
+      text: input.text,
+      timezone,
+      schedule: normalized.schedule,
+      nextRunAtMs: normalized.nextRunAtMs,
+      maxRuns,
+      delivery: this.normalizeDelivery(input.delivery),
+      createdFromEventId: fence.event_id,
+      createdFromSource: fence.connector_instance,
+      createdAtMs: nowMs,
+    });
+    this.onTimersChanged?.();
+    return this.timerResult(timer, { duplicate: false });
+  }
+
+  timerResult(timer, { duplicate = false } = {}) {
+    const data = {
+      timer_id: timer.timerId,
+      title: timer.title,
+      text: timer.text,
+      timezone: timer.timezone,
+      next_run_at_ms: timer.nextRunAtMs,
+      schedule: timer.schedule,
+      max_runs: timer.maxRuns,
+      delivery: timer.delivery,
+      run_count: timer.runCount,
+      duplicate,
+    };
+    return {
+      text: duplicate
+        ? `Timer already exists: timer_id=${timer.timerId}.`
+        : `Timer created: timer_id=${timer.timerId}.`,
+      data,
+    };
+  }
+
+  listTimers() {
+    if (!this.timers) throw blocked('unknown_tool', 'timer tools are not available');
+    const timers = this.timers.listActive().map((timer) => ({
+      timer_id: timer.timerId,
+      title: timer.title,
+      text: timer.text,
+      timezone: timer.timezone,
+      next_run_at_ms: timer.nextRunAtMs,
+      schedule: timer.schedule,
+      max_runs: timer.maxRuns,
+      delivery: timer.delivery,
+      run_count: timer.runCount,
+    }));
+    if (timers.length === 0) return { text: 'No active timers.', data: { timers } };
+    const lines = timers.map((timer) => `- ${timer.timer_id} | ${timer.title} | next_run_at_ms=${timer.next_run_at_ms}`);
+    return { text: `Active timers (${timers.length}):\n${lines.join('\n')}`, data: { timers } };
+  }
+
+  cancelTimer(input) {
+    if (!this.timers) throw blocked('unknown_tool', 'timer tools are not available');
+    const cancelled = this.timers.cancel(input.timer_id);
+    if (cancelled) this.onTimersChanged?.();
+    return {
+      text: cancelled ? `Timer cancelled: timer_id=${input.timer_id}.` : `Timer was not active: timer_id=${input.timer_id}.`,
+      data: { timer_id: input.timer_id, cancelled },
     };
   }
 }
