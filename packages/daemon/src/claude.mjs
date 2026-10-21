@@ -10,7 +10,7 @@ import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs
 import { agentToolEnv, agentToolServer } from './actions/api.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
-import { getRuntimeDefinition } from './runtime-catalog.mjs';
+import { getRuntimeDefinition, isModelUnavailableError } from './runtime-catalog.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -294,9 +294,9 @@ export class ClaudeAgent {
         '--mcp-config', mcpConfigPath,
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
         '--append-system-prompt', this.developerInstructionsText,
-        '--effort', effort,
         '--no-chrome',
       ];
+      if (effort) args.push('--effort', effort);
       if (model) args.push('--model', model);
       if (this.resumeRequested && this.sessionInitialized) args.push('--resume', this.sessionId);
       else args.push('--session-id', this.sessionId);
@@ -325,6 +325,7 @@ export class ClaudeAgent {
       let ready = false;
       let settled = false;
       let stabilityTimer = null;
+      let startupStderr = '';
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
@@ -356,6 +357,7 @@ export class ClaudeAgent {
         if (this.child === child) this._onStdout(chunk, child);
       });
       child.stderr?.on('data', (chunk) => {
+        if (!ready) startupStderr = (startupStderr + chunk).slice(-4_000);
         if (this.child === child) this._onStderr(chunk);
       });
       child.once('spawn', () => {
@@ -380,7 +382,9 @@ export class ClaudeAgent {
       });
       child.once('exit', (code, signal) => {
         if (!ready) {
-          failStart(new Error(`claude exited during startup (code ${code}, signal ${signal})`));
+          const error = new Error(`claude exited during startup (code ${code}, signal ${signal})`);
+          if (isModelUnavailableError({ message: startupStderr })) error.code = 'MODEL_UNAVAILABLE';
+          failStart(error);
           return;
         }
         this._handleExit(child, code, signal);
@@ -1051,6 +1055,8 @@ export class ClaudeAgent {
           displayName: entry.displayName,
           resolvedModel: entry.resolvedModel,
           isDefault: entry.value === 'default',
+          ...(entry.defaultEffort ? { defaultEffort: entry.defaultEffort } : {}),
+          effortsKnown: entry.supportsEffort === false || Array.isArray(entry.supportedEffortLevels),
           efforts: entry.supportsEffort === false ? [] : (entry.supportedEffortLevels ?? []),
         }));
         return this.modelCatalog;

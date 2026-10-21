@@ -10,6 +10,9 @@ import {
   resolveRuntimeModelTarget,
   staticModelEntries,
   supportedModelEfforts,
+  compatibleModelEffort,
+  currentModelEntry,
+  isModelUnavailableError,
 } from './runtime-catalog.mjs';
 
 const SWITCH_JOURNAL_HEADROOM = 4_096;
@@ -299,9 +302,21 @@ export class AgentRuntime {
       throw new Error(`${this.runtime} model is unavailable: ${model}`);
     }
     const unchanged = this.backend.model === model;
-    if (!unchanged) await this.backend.selectModel(model);
-    if (this.stopping) throw new Error('agent runtime stopped during model transition');
-    return { runtimeChanged: false, runtime: this.runtime, model, threadId: this.threadId, unchanged };
+    const previousEffort = this.effort;
+    const selectable = getRuntimeDefinition(this.runtime)?.capabilities.effortControl === 'selectable';
+    const entry = currentModelEntry({ runtime: this.runtime, model, models });
+    const effort = selectable ? compatibleModelEffort(entry, previousEffort) : previousEffort;
+    if (effort === undefined) {
+      if (unchanged) return { runtimeChanged: false, runtime: this.runtime, model, threadId: this.threadId, unchanged: true };
+      return { ok: false, reason: 'model-capabilities-unavailable' };
+    }
+    const effortChanged = effort !== previousEffort;
+    if (!unchanged || effortChanged) {
+      this.store.setRuntimeSettings(this.runtime, { model, ...(selectable ? { effort } : {}) });
+      this.backend.applySettings({ model, effort });
+    }
+    return { runtimeChanged: false, runtime: this.runtime, model, threadId: this.threadId,
+      unchanged: unchanged && !effortChanged, effort, previousEffort, effortChanged };
   }
 
   async _selectRuntime(value, requestedModel) {
@@ -315,7 +330,8 @@ export class AgentRuntime {
     const model = requestedModel ?? this.store.getSetting?.(`${definition.id}_model`)
       ?? (this.config[`${definition.id}Model`] || undefined)
       ?? (initial.runtime === definition.id ? initial.model : definition.defaultModel);
-    return this._hardSwitch({ runtime: definition.id, model, canonical: model || definition.canonicalDefault });
+    return this._hardSwitch({ runtime: definition.id, model, canonical: model || definition.canonicalDefault,
+      allowModelFallback: requestedModel === undefined });
   }
 
   async _hardSwitch(target) {
@@ -325,6 +341,9 @@ export class AgentRuntime {
     const previous = this.backend;
     const previousRuntime = this.runtime;
     let staged = null;
+    let modelFallback = null;
+    let effort;
+    let previousEffort;
     try {
       // Never wait for a stuck in-flight turn: interrupt/abandon it. Its
       // inbound rows are already in the cognition journal, which the target
@@ -334,7 +353,8 @@ export class AgentRuntime {
       const cognition = this.store.getCognitionState();
       const journalThrough = this.store.cognitionJournalHead(cognition.epoch);
       const authorityToken = randomUUID();
-      staged = this._instantiate(target.runtime, {
+      const definition = getRuntimeDefinition(target.runtime);
+      const stageOptions = {
         authorityToken,
         cognitionEpoch: cognition.epoch,
         sessionPersistence: false,
@@ -342,21 +362,55 @@ export class AgentRuntime {
         // The journal is not acknowledged until the target's first real turn
         // completes. journalThrough is only the bounded staging snapshot.
         syncedThroughSeq: 0,
-        model: target.model,
         onAvailable: null,
-      });
-      this.stagedBackend = staged;
-      await staged.start();
-      if (this.stopping || this.stagedBackend !== staged) {
-        throw new Error('agent runtime stopped during runtime switch');
-      }
-      if (!staged.state?.connected) throw new Error('target runtime exited before switch commit');
-      if (staged.model !== target.model) throw new Error('target runtime did not apply the requested model');
-      if (getRuntimeDefinition(target.runtime)?.capabilities.modelCatalog === 'dynamic' && target.model) {
-        const available = await staged.listModels();
-        if (!available.some((model) => model.id === target.model || model.resolvedModel === target.model)) {
+      };
+      const fallback = async (models = []) => {
+        if (!target.allowModelFallback || modelFallback || !target.model) return false;
+        modelFallback = { from: target.model, to: definition.defaultModel };
+        // Resolve effort against the default before starting its replacement.
+        const entry = models.find((model) => model.isDefault || model.id === definition.defaultModel);
+        effort = compatibleModelEffort(entry, staged.effort);
+        await staged.stop();
+        target = { ...target, model: definition.defaultModel, canonical: definition.canonicalDefault };
+        return true;
+      };
+      for (;;) {
+        if (this.stopping) throw new Error('agent runtime stopped during runtime switch');
+        staged = this._instantiate(target.runtime, { ...stageOptions, model: target.model,
+          ...(effort === undefined ? {} : { effort }) });
+        previousEffort ??= staged.effort;
+        this.stagedBackend = staged;
+        try {
+          await staged.start();
+        } catch (error) {
+          if (!this.stopping && isModelUnavailableError(error) && await fallback()) continue;
+          throw error;
+        }
+        if (this.stopping || this.stagedBackend !== staged) {
+          throw new Error('agent runtime stopped during runtime switch');
+        }
+        if (!staged.state?.connected) throw new Error('target runtime exited before switch commit');
+        if (staged.model !== target.model) throw new Error('target runtime did not apply the requested model');
+        let available = [];
+        try { available = await staged.listModels(); } catch {
+          this.logger.info('runtime_model_list_unavailable', { runtime: target.runtime });
+        }
+        if (this.stopping) throw new Error('agent runtime stopped during runtime switch');
+        const entry = currentModelEntry({ runtime: target.runtime, model: target.model,
+          resolvedModel: staged.resolvedModel, models: available });
+        if (available.length && target.model && !available.some((model) => model.id === target.model || model.resolvedModel === target.model)) {
+          if (await fallback(available)) continue;
           throw new Error(`${target.runtime} model is unavailable: ${target.model}`);
         }
+        if (definition.capabilities.effortControl === 'selectable') {
+          const compatible = compatibleModelEffort(entry, staged.effort);
+          if (compatible !== undefined) {
+            effort = compatible;
+            staged.applySettings({ effort });
+          }
+        }
+        if (!staged.state?.connected) throw new Error('target runtime exited before switch commit');
+        break;
       }
       const catchup = cognitionHistoryPrefix(
         this.store,
@@ -384,6 +438,7 @@ export class AgentRuntime {
         syncedThroughSeq: 0,
         sessionReady: session.sessionReady !== false,
         model: target.model,
+        effort,
         expectedRuntime: cognition.runtime,
         expectedAuthorityToken: cognition.authorityToken,
       });
@@ -413,6 +468,10 @@ export class AgentRuntime {
         runtimeChanged: true,
         runtime: target.runtime,
         model: target.canonical,
+        modelFallback,
+        effort: this.effort,
+        previousEffort,
+        effortChanged: previousEffort !== this.effort,
         syncedThroughSeq: catchup.throughSeq,
         catchupPending: true,
       };

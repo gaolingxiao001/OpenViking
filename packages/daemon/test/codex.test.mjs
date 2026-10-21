@@ -1295,6 +1295,7 @@ describe('CodexAgent session rotation (slash commands)', () => {
             isDefault: true,
             model: 'gpt-5.5',
             displayName: 'GPT 5.5',
+            defaultReasoningEffort: 'high',
             supportedReasoningEfforts: [
               { reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'high' },
             ],
@@ -1305,8 +1306,8 @@ describe('CodexAgent session rotation (slash commands)', () => {
       },
     });
     assert.deepEqual(await listing, [
-      { id: 'gpt-5.5', resolvedModel: 'gpt-5.5', displayName: 'GPT 5.5', isDefault: true, efforts: ['low', 'medium', 'high'] },
-      { id: 'gpt-5.5-codex', efforts: [] },
+      { id: 'gpt-5.5', resolvedModel: 'gpt-5.5', displayName: 'GPT 5.5', isDefault: true, defaultEffort: 'high', effortsKnown: true, efforts: ['low', 'medium', 'high'] },
+      { id: 'gpt-5.5-codex', effortsKnown: false, efforts: [] },
     ]);
 
     const failing = agent.listModels();

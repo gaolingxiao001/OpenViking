@@ -41,6 +41,13 @@ export class RuntimeAdapter {
   selectModel(model, options) { return this.#implementation.setModel(model, options); }
   selectEffort(effort, options) { return this.#implementation.setEffort(effort, options); }
 
+  // Desired settings are plain fields on every transport. Publish the whole
+  // validated pair synchronously, after persistence, before another turn drains.
+  applySettings({ model = this.model, effort = this.effort }) {
+    this.#implementation.model = model;
+    this.#implementation.effort = effort;
+  }
+
   async prepareInputContext() {
     const agent = this.#implementation;
     const fresh = agent.needsHistoryPrefix ?? (agent.deliveredThroughSeq === 0);

@@ -149,7 +149,7 @@ describe('global Codex/Claude hard switch', () => {
         selected.push('pi');
         instance = backend('pi', options);
         instance.model = options.model || 'google/gemini-pro';
-        instance.listModels = async () => [{ id: 'google/gemini-pro' }, { id: 'openai/gpt-4o' }];
+        instance.listModels = async () => [{ id: 'google/gemini-pro', efforts: ['medium'] }, { id: 'openai/gpt-4o', efforts: ['medium'] }];
         instance.calls = [];
         instance.interruptTurn = async function interruptTurn() {
           this.calls.push('interrupt');
@@ -192,7 +192,8 @@ describe('global Codex/Claude hard switch', () => {
       assert.equal(live.runtime, 'pi');
       assert.equal(runtime.runtime, 'pi');
       assert.equal(selected.filter((id) => id === 'codex').length, 0);
-      assert.ok(instance.calls.includes('setModel:openai/gpt-4o'));
+      assert.equal(instance.model, 'openai/gpt-4o');
+      assert.equal(store.getSetting('pi_model'), 'openai/gpt-4o');
     } finally {
       await runtime.stop();
       store.close();
@@ -547,7 +548,8 @@ describe('global Codex/Claude hard switch', () => {
       let preparedEpoch;
       store.prepareOVContext = async (epoch) => { preparedEpoch = epoch; };
       const result = await runtime.transition({ kind: 'select-model', selector: 'gpt-5.6-sol' });
-      assert.deepEqual(instance.calls, ['setModel:gpt-5.6-sol']);
+      assert.deepEqual(instance.calls, []);
+      assert.equal(instance.model, 'gpt-5.6-sol');
       assert.equal(instance.turnInProgress, true);
       assert.equal(preparedEpoch, undefined);
       assert.equal(result.runtimeChanged, false);
@@ -847,10 +849,10 @@ describe('global Codex/Claude hard switch', () => {
         instance = backend('codex', options);
         instance.stopCount = 0;
         instance.interruptTurn = async () => {};
-        instance.setModel = async function setModel(model) {
+        instance.listModels = async function listModels() {
           markModelStarted();
           await modelGate;
-          this.model = model;
+          return [{ id: 'gpt-5.6-sol', efforts: ['medium'] }];
         };
         instance.stop = async function stop() {
           this.stopCount += 1;

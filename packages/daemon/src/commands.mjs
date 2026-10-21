@@ -20,6 +20,15 @@ const COMMANDS = ['new', 'help', 'status', 'runtime', 'model', 'effort'];
 
 const MODEL_NAME = /^[A-Za-z0-9._:\/\[\]-]{1,256}$/;
 
+function settingsAdjustmentText(result) {
+  const lines = [];
+  if (result.modelFallback) lines.push(`原模型 ${result.modelFallback.from} 已不可用，已恢复默认模型。`);
+  if (result.effortChanged) lines.push(result.effort
+    ? `推理档位已从 ${result.previousEffort || '未设置'} 调整为 ${result.effort}，以匹配目标模型。`
+    : '目标模型不支持推理档位，已取消额外的 effort 配置。');
+  return lines.length ? `\n${lines.join('\n')}` : '';
+}
+
 // All candidates the token is a prefix of; an exact match wins outright so a
 // short name can never be shadowed by a longer one added later.
 export function matchPrefix(token, candidates) {
@@ -73,7 +82,7 @@ export function helpText(snapshot) {
     `Runtime：${snapshot.runtime ?? 'codex'}`,
     `模型：${snapshot.model || '（默认）'}`,
   );
-  if (supportsEffort) lines.push(`推理档位：${snapshot.effort}`);
+  if (supportsEffort) lines.push(`推理档位：${snapshot.effort || '未设置'}`);
   return lines.join('\n');
 }
 
@@ -150,9 +159,10 @@ export async function executeCommand(command, runtime) {
     const applied = await runtime.transition({ kind: 'select-runtime', runtime: targets[0],
       expectedRuntime: cached.runtime, expectedRevision: cached.revision });
     if (applied.ok === false) return { ok: false, text: 'Runtime 已变更，请重试 /runtime' };
-    return { ok: true, text: applied.unchanged
+    const adjustment = settingsAdjustmentText(applied);
+    return { ok: true, text: (applied.unchanged
       ? `当前已是 Runtime：${applied.runtime}（会话保留）`
-      : `已切换 Runtime：${applied.runtime}。会尝试从 OV 接上历史对话；隐藏思考和未落盘的工具过程不会继承` };
+      : `已切换 Runtime：${applied.runtime}。会尝试从 OV 接上历史对话；隐藏思考和未落盘的工具过程不会继承`) + adjustment };
   }
 
   let current = cached;
@@ -194,10 +204,12 @@ export async function executeCommand(command, runtime) {
     const target = matches[0] || lookupName;
     const applied = await runtime.transition({ kind: 'select-model', selector: target,
       expectedRuntime: current.runtime, expectedRevision: current.revision });
-    if (applied.ok === false) return { ok: false, text: '模型设置已变更，请重试 /model' };
-    return { ok: true, text: applied.unchanged
+    if (applied.ok === false) return { ok: false, text: applied.reason === 'model-capabilities-unavailable'
+      ? '暂时无法确认目标模型支持的推理档位，模型和档位均未修改，请稍后重试 /model'
+      : '模型设置已变更，请重试 /model' };
+    return { ok: true, text: (applied.unchanged
       ? `当前已是模型：${applied.model || target}（上下文保留）`
-      : `已切到 ${applied.model || target}（下一轮生效，上下文保留）` };
+      : `已切到 ${applied.model || target}（下一轮生效，上下文保留）`) + settingsAdjustmentText(applied) };
   }
 
   const capabilities = current.capabilities ?? getRuntimeDefinition(current.runtime)?.capabilities;
@@ -217,7 +229,11 @@ export async function executeCommand(command, runtime) {
 
   const supported = supportedModelEfforts(current);
   if (!supported.length) {
-    return { ok: !command.arg, text: `当前推理档位：${current.effort}\n当前模型没有可用的推理档位信息，请稍后重试 /effort` };
+    const entry = currentModelEntry(current);
+    const knownUnsupported = entry?.effortsKnown !== false && Array.isArray(entry?.efforts) && !entry.efforts.length;
+    return { ok: !command.arg, text: knownUnsupported
+      ? '当前模型不支持配置推理档位'
+      : `当前推理档位：${current.effort || '未设置'}\n当前模型没有可用的推理档位信息，请稍后重试 /effort` };
   }
   if (!command.arg) {
     return { ok: true, text: `当前推理档位：${current.effort}\n可选：${supported.join('、')}` };

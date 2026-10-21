@@ -428,7 +428,7 @@ export class CodexAgent {
       threadId: this.threadId,
       input: [{ type: 'text', text: body }],
       ...(this.model ? { model: this.model } : {}),
-      ...(this.turnStartEffort ? { effort: this.effort } : {}),
+      ...(this.turnStartEffort ? { effort: this.effort || null } : {}),
     };
     this._request('turn/start', params).catch((error) => {
       this.startingTurn = false;
@@ -968,7 +968,7 @@ export class CodexAgent {
       cwd: this.config.workspace,
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
-      ...(this.turnStartEffort ? { config: { model_reasoning_effort: this.effort } } : {}),
+      ...(this.turnStartEffort && this.effort ? { config: { model_reasoning_effort: this.effort } } : {}),
       ...(this.model ? { model: this.model } : {}),
     };
   }
@@ -1186,6 +1186,8 @@ export class CodexAgent {
           ...(model.model ? { resolvedModel: model.model } : {}),
           ...(model.displayName ? { displayName: model.displayName } : {}),
           ...(model.isDefault ? { isDefault: true } : {}),
+          ...(model.defaultReasoningEffort ? { defaultEffort: model.defaultReasoningEffort } : {}),
+          effortsKnown: Array.isArray(model.supportedReasoningEfforts),
           efforts: this.supportsEffort
             ? (Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [])
               .map((effort) => (typeof effort === 'string' ? effort : effort?.reasoningEffort))

@@ -192,7 +192,7 @@ describe('TraexAgent app-server backend', () => {
       },
     });
 
-    assert.deepEqual(await listing, [{ id: 'gpt-5.5', efforts: ['high'] }]);
+    assert.deepEqual(await listing, [{ id: 'gpt-5.5', effortsKnown: true, efforts: ['high'] }]);
   });
 
   it('publishes and records TraeX session ownership separately from Codex', async () => {

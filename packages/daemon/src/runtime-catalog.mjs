@@ -141,6 +141,23 @@ export function supportedModelEfforts(snapshot) {
   return currentModelEntry(snapshot)?.efforts ?? [];
 }
 
+// undefined means discovery did not establish capabilities; '' explicitly
+// disables the override for a model that has no effort control.
+export function compatibleModelEffort(entry, effort) {
+  if (!entry || entry.effortsKnown === false || !Array.isArray(entry.efforts)) return undefined;
+  if (!entry.efforts.length) return '';
+  if (entry.efforts.includes(effort)) return effort;
+  if (entry.efforts.includes(entry.defaultEffort)) return entry.defaultEffort;
+  return entry.efforts.includes('medium') ? 'medium' : entry.efforts[0];
+}
+
+export function isModelUnavailableError(error) {
+  if (error?.code === 'MODEL_UNAVAILABLE') return true;
+  const message = error?.message ?? '';
+  if (/\b(?:effort|thinking level|reasoning level|authentication|unauthorized|credentials|API key|network|connection|timed out|timeout|service (?:is )?unavailable)\b/i.test(message)) return false;
+  return /\b(?:unknown|invalid|unsupported|unavailable) model\b|\bmodel\b[^\n]{0,180}\b(?:not found|does not exist|not available|not supported|is unavailable|may not exist)\b/i.test(message);
+}
+
 export function isDirectRuntimeAlias(value) {
   const raw = String(value ?? '');
   return RUNTIME_IDS.some((id) => RUNTIME_CATALOG[id].directAliases.includes(raw));

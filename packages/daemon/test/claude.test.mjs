@@ -184,6 +184,39 @@ function harness({ loggedIn = true, store = makeStore(), agentOptions = {}, help
 }
 
 describe('ClaudeAgent persistent stream-json runtime', () => {
+  it('classifies only model-specific startup exits for default-model recovery', async () => {
+    for (const [detail, modelError] of [['Invalid model: claude-retired\n', true],
+      ['Authentication failed: invalid API key\n', false], ['Unsupported model reasoning effort: minimal\n', false],
+      ['Model claude-sonnet is unavailable due to a network error\n', false]]) {
+      const { agent } = harness();
+      agent._spawn = () => {
+        const child = new FakeChild();
+        queueMicrotask(() => {
+          child.emit('spawn');
+          child.stderr.emit('data', detail);
+          child.finish(1);
+        });
+        return child;
+      };
+      await assert.rejects(agent._spawnPersistent(), (error) => {
+        assert.equal(error.code === 'MODEL_UNAVAILABLE', modelError);
+        assert.doesNotMatch(error.message, /invalid API key|claude-retired/);
+        return true;
+      });
+      await agent.stop();
+    }
+  });
+
+  it('omits the effort CLI override when the selected model has no effort control', async () => {
+    const { agent, calls } = harness({ agentOptions: { effort: '' } });
+    try {
+      await agent.start();
+      const args = calls.find((call) => call.args.includes('--print')).args;
+      assert.equal(args.includes('--effort'), false);
+      assert.equal(agent.appliedEffort, '');
+    } finally { await agent.stop(); }
+  });
+
   it('discovers versioned models and effort capabilities without sending a prompt', async () => {
     const { agent, persistent } = harness();
     await agent.start();
