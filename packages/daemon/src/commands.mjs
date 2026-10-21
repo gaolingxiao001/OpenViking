@@ -6,19 +6,19 @@
 import {
   DEFAULT_RUNTIME_ID,
   getRuntimeDefinition,
-  isDirectRuntimeAlias,
-  modelMatchesRuntime,
+  RUNTIME_ALIASES,
+  RUNTIME_IDS,
+  currentModelEntry,
+  supportedModelEfforts,
   parseRuntimeModelSelector,
-  resolveRuntimeModelTarget,
 } from './runtime-catalog.mjs';
 
-// Static fallback only (offline); when connected, /effort validates against the
-// current model's supportedReasoningEfforts from model/list.
+// Default vocabulary for callers; command validation uses current model metadata.
 export const EFFORT_LEVELS = getRuntimeDefinition(DEFAULT_RUNTIME_ID).efforts;
 
-const COMMANDS = ['new', 'help', 'status', 'model', 'effort'];
+const COMMANDS = ['new', 'help', 'status', 'runtime', 'model', 'effort'];
 
-const MODEL_NAME = /^[A-Za-z0-9._:\/-]{1,128}$/;
+const MODEL_NAME = /^[A-Za-z0-9._:\/\[\]-]{1,256}$/;
 
 // All candidates the token is a prefix of; an exact match wins outright so a
 // short name can never be shadowed by a longer one added later.
@@ -57,15 +57,15 @@ export function parseCommand(text) {
 
 export function helpText(snapshot) {
   const supportsEffort = snapshot.capabilities?.effortControl === 'selectable';
-  const effortLevels = getRuntimeDefinition(snapshot.runtime ?? DEFAULT_RUNTIME_ID)?.efforts ?? EFFORT_LEVELS;
   const lines = [
     '可用命令（支持前缀匹配，如 /h、/m）：',
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
     '/status — 查看模型是否在工作以及持续时间',
-    '/model [名称] — 查看或切换模型，如 traex、pi、ark、sonnet、gpt-5.6-sol',
+    '/runtime [名称] — 查看或切换 Runtime（可简写 /run）',
+    '/model [名称] — 查看或切换当前 Runtime 的模型，保留会话',
   ];
-  if (supportsEffort) lines.push(`/effort [档位] — 查看或切换推理档位（${effortLevels.join('/')}）`);
+  if (supportsEffort) lines.push('/effort [档位] — 查看或切换当前模型的推理档位，保留会话');
   else lines.push('/effort [档位] — 当前 Runtime 不支持 daemon 侧推理档位配置');
   lines.push(
     '',
@@ -137,79 +137,67 @@ export async function executeCommand(command, runtime) {
     };
   }
 
+  if (command.name === 'runtime') {
+    const options = RUNTIME_IDS.map((id) => id === 'volc' ? 'volc（ark）' : id).join('、');
+    if (!command.arg) {
+      return { ok: true, text: `当前 Runtime：${cached.runtime}\n可选：${options}\n用法：/runtime <名称>（可简写 /run）` };
+    }
+    const matches = matchPrefix(command.arg.toLowerCase(), Object.keys(RUNTIME_ALIASES));
+    const targets = [...new Set(matches.map((alias) => RUNTIME_ALIASES[alias]))];
+    if (targets.length !== 1) {
+      return { ok: false, text: `未知或有歧义的 Runtime：${command.arg}\n可选：${options}` };
+    }
+    const applied = await runtime.transition({ kind: 'select-runtime', runtime: targets[0],
+      expectedRuntime: cached.runtime, expectedRevision: cached.revision });
+    if (applied.ok === false) return { ok: false, text: 'Runtime 已变更，请重试 /runtime' };
+    return { ok: true, text: applied.unchanged
+      ? `当前已是 Runtime：${applied.runtime}（会话保留）`
+      : `已切换 Runtime：${applied.runtime}。会尝试从 OV 接上历史对话；隐藏思考和未落盘的工具过程不会继承` };
+  }
+
   let current = cached;
   try { current = await runtime.snapshot({ catalog: 'refresh' }); } catch { /* offline: cached options */ }
   const models = current.models ?? [];
 
   if (command.name === 'model') {
-    const ids = models.map((model) => model.id);
+    const ids = [...new Set(models.flatMap((model) => [model.id, model.resolvedModel].filter(Boolean)))];
     if (!command.arg) {
-      const lines = [`当前模型：${current.model || '（默认）'}`];
-      if (ids.length > 0) lines.push(`可选：${ids.join('、')}`);
-      lines.push('用法：/model <名称>（支持前缀匹配）');
+      const selected = currentModelEntry(current);
+      const resolved = selected?.resolvedModel || current.resolvedModel;
+      const lines = [`Runtime：${current.runtime}`, `当前模型：${current.model || '（默认）'}`];
+      if (resolved) lines.push(`实际模型：${resolved}`);
+      if (models.length) {
+        lines.push('可选：' + models.map((entry) => {
+          const details = [entry.displayName, entry.resolvedModel]
+            .filter((value) => value && value !== entry.id);
+          return entry.id + (details.length ? `（${[...new Set(details)].join(' · ')}）` : '');
+        }).join('、'));
+      } else lines.push('模型列表暂不可用');
+      lines.push('用法：/model <名称>（支持前缀匹配）；切换 Runtime 请用 /runtime');
       return { ok: true, text: lines.join('\n') };
     }
     const selector = parseRuntimeModelSelector(command.arg);
-    const providerHint = selector.runtime;
-    const lookupName = selector.model;
-    if (!MODEL_NAME.test(command.arg) || (selector.qualified && !lookupName)) {
+    const lookupName = selector.qualified ? selector.model : selector.raw;
+    if (!MODEL_NAME.test(command.arg) || !lookupName) {
       return { ok: false, text: lookupName ? `无效的模型名：${lookupName}` : '无效的模型名' };
     }
-    let target = command.arg;
-    if (isDirectRuntimeAlias(command.arg)) {
-      // /model pi, /model ark: the token is a runtime switch, not a live-list
-      // prefix. Empty default models (Pi) keep the alias; others use the
-      // catalog default (volcengine → ark).
-      const resolved = resolveRuntimeModelTarget(command.arg);
-      target = resolved.model || command.arg;
-    } else if (ids.length > 0) {
-      const candidates = providerHint
-        ? ids.filter((id) => modelMatchesRuntime(id, providerHint))
-        : ids;
-      const matches = matchPrefix(lookupName, candidates);
-      if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
-      if (matches.length === 0) {
-        // The live snapshot only lists the current runtime plus static ids.
-        // Codex and other dynamic catalogs are staged here; AgentRuntime
-        // validates the target's live list before the switch commits.
-        const requestedRuntime = providerHint
-          ?? resolveRuntimeModelTarget(lookupName).runtime;
-        const requested = getRuntimeDefinition(requestedRuntime);
-        const canStage = requestedRuntime
-          && requestedRuntime !== current.runtime
-          && (
-            requestedRuntime === DEFAULT_RUNTIME_ID
-            || requested?.capabilities.modelCatalog === 'dynamic'
-          );
-        if (!canStage) {
-          return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}` };
-        }
-        // Unprefixed leftovers resolve to the current dynamic runtime (Pi).
-        // Force a Codex qualifier so `/model gpt-5.6-sol` still leaves Pi.
-        if (!selector.qualified
-          && requestedRuntime === DEFAULT_RUNTIME_ID
-          && current.runtime !== DEFAULT_RUNTIME_ID
-          && getRuntimeDefinition(current.runtime)?.capabilities.modelCatalog === 'dynamic') {
-          target = `${DEFAULT_RUNTIME_ID}:${lookupName}`;
-        }
-      } else {
-        target = selector.qualifier ? `${selector.qualifier}:${matches[0]}` : matches[0];
-      }
+    const namedRuntime = getRuntimeDefinition(command.arg);
+    const foreignRuntime = selector.runtime || namedRuntime?.id;
+    if (foreignRuntime && foreignRuntime !== current.runtime) {
+      return { ok: false, text: `/model 只选择当前 Runtime（${current.runtime}）的模型；请先 /runtime ${foreignRuntime}` };
     }
-    const applied = await runtime.transition({ kind: 'select-model', selector: target });
-    const displayTarget = applied?.model
-      || resolveRuntimeModelTarget(target, current.runtime).canonical
-      || target;
-    if (applied?.runtimeChanged) {
-      return {
-        ok: true,
-        text: `已切到 ${displayTarget}。会尝试从 OV 接上历史对话；隐藏思考和未落盘的工具过程不会继承`,
-      };
+    const matches = matchPrefix(lookupName, ids);
+    if (matches.length > 1) return { ok: false, text: `模型名有歧义：${matches.join('、')}` };
+    if (ids.length && !matches.length) {
+      return { ok: false, text: `未找到模型：${lookupName}\n可选：${ids.join('、')}\n切换 Runtime 请用 /runtime` };
     }
-    return {
-      ok: true,
-      text: `已切到 ${displayTarget}，已开启新会话${applied?.threadId ? `：${applied.threadId}` : ""}。会尝试从 OV 接上历史上下文`,
-    };
+    const target = matches[0] || lookupName;
+    const applied = await runtime.transition({ kind: 'select-model', selector: target,
+      expectedRuntime: current.runtime, expectedRevision: current.revision });
+    if (applied.ok === false) return { ok: false, text: '模型设置已变更，请重试 /model' };
+    return { ok: true, text: applied.unchanged
+      ? `当前已是模型：${applied.model || target}（上下文保留）`
+      : `已切到 ${applied.model || target}（下一轮生效，上下文保留）` };
   }
 
   const capabilities = current.capabilities ?? getRuntimeDefinition(current.runtime)?.capabilities;
@@ -227,14 +215,10 @@ export async function executeCommand(command, runtime) {
     };
   }
 
-  // effort: validate against what the current model actually supports — an
-  // unsupported level (e.g. minimal on gpt-5.6) makes every turn fail with a 400.
-  // Unknown current model → union across listed models; offline → static list.
-  const currentModel = models.find((model) => model.id === current.model);
-  const modelEfforts = currentModel?.efforts?.length
-    ? currentModel.efforts
-    : [...new Set(models.flatMap((model) => model.efforts ?? []))];
-  const supported = modelEfforts.length > 0 ? modelEfforts : EFFORT_LEVELS;
+  const supported = supportedModelEfforts(current);
+  if (!supported.length) {
+    return { ok: !command.arg, text: `当前推理档位：${current.effort}\n当前模型没有可用的推理档位信息，请稍后重试 /effort` };
+  }
   if (!command.arg) {
     return { ok: true, text: `当前推理档位：${current.effort}\n可选：${supported.join('、')}` };
   }
@@ -269,11 +253,13 @@ export async function executeCommand(command, runtime) {
       text: '当前 Runtime 不支持 daemon 侧 /effort 配置',
     };
   }
-  const threadId = applied.threadId;
+  if (applied.ok === false) {
+    return { ok: false, text: `不支持的档位：${levels[0]}` };
+  }
   return {
     ok: true,
-    text: threadId
-      ? `已切换推理档位：${levels[0]}，并已开启新会话：${threadId}`
-      : `已切换推理档位：${levels[0]}，已清除当前会话；重连后将开启新会话`,
+    text: applied.unchanged
+      ? `当前已是推理档位：${levels[0]}（上下文保留）`
+      : `已切换推理档位：${levels[0]}（下一轮生效，上下文保留）`,
   };
 }

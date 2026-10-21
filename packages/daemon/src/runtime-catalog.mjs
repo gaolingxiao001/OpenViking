@@ -62,7 +62,7 @@ export const RUNTIME_CATALOG = Object.freeze({
     models: ['sonnet', 'opus', 'haiku', 'fable'],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     capabilities: {
-      modelCatalog: 'static',
+      modelCatalog: 'dynamic',
       effortControl: 'selectable',
       activeInput: 'steer',
       scopePolicy: 'any',
@@ -116,6 +116,25 @@ export function getRuntimeDefinition(runtimeOrAlias) {
   return Object.hasOwn(RUNTIME_CATALOG, id) ? RUNTIME_CATALOG[id] : null;
 }
 
+// Resolve the selected model before consulting capabilities. Never combine
+// efforts from unrelated models (or fall back from an explicit empty list).
+export function currentModelEntry({ runtime, model, resolvedModel, models = [] }) {
+  const selected = models.find((entry) => entry.id === model);
+  if (selected) return selected;
+  const resolved = models.find((entry) => entry.id === resolvedModel
+    || (entry.resolvedModel && [model, resolvedModel].includes(entry.resolvedModel)));
+  if (resolved) return resolved;
+  if (resolvedModel) return undefined;
+  if (!model || model === getRuntimeDefinition(runtime)?.canonicalDefault) {
+    return models.find((entry) => entry.isDefault);
+  }
+  return undefined;
+}
+
+export function supportedModelEfforts(snapshot) {
+  return currentModelEntry(snapshot)?.efforts ?? [];
+}
+
 export function isDirectRuntimeAlias(value) {
   const raw = String(value ?? '');
   return RUNTIME_IDS.some((id) => RUNTIME_CATALOG[id].directAliases.includes(raw));
@@ -166,10 +185,9 @@ export function modelMatchesRuntime(model, runtimeOrAlias) {
   const definition = getRuntimeDefinition(runtimeOrAlias);
   if (!definition) return false;
   const owner = staticModelRuntime(model);
-  // Dynamic catalogs (Codex, Pi) share the unowned leftover; static catalogs
-  // only match ids they published. Otherwise `pi:openai/gpt-4o` cannot see
-  // the live Pi list and unprefixed live ids look like Codex names.
-  if (definition.capabilities.modelCatalog === 'dynamic') {
+  // Legacy configuration inference keeps Claude's known aliases. Interactive
+  // model selection instead uses the active runtime's live catalog exclusively.
+  if (definition.capabilities.modelCatalog === 'dynamic' && definition.id !== 'claude') {
     return owner === null || owner === definition.id;
   }
   return owner === definition.id;
@@ -203,7 +221,7 @@ export function resolveRuntimeModelTarget(value, currentRuntime = null) {
     return { runtime: owner, model: selector.model, canonical: selector.model };
   }
   const current = getRuntimeDefinition(currentRuntime);
-  if (current?.capabilities.modelCatalog === 'dynamic') {
+  if (current?.capabilities.modelCatalog === 'dynamic' && current.id !== 'claude') {
     return {
       runtime: current.id,
       model: selector.model,

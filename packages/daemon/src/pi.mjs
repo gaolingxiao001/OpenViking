@@ -135,6 +135,9 @@ export class PiAgent {
     this.pendingRpc = new Map();
     this.idleWaiters = [];
     this.sessionRotation = null;
+    this.appliedModel = null;
+    this.appliedEffort = null;
+    this.settingsUpdate = null;
   }
 
   get threadId() { return this.sessionId; }
@@ -154,7 +157,7 @@ export class PiAgent {
     };
   }
 
-  get turnInProgress() { return this.turnActive; }
+  get turnInProgress() { return this.turnActive || Boolean(this.settingsUpdate); }
 
   get sessionDescriptor() {
     return {
@@ -285,19 +288,21 @@ export class PiAgent {
 
   async _spawnPersistent() {
     if (this.needsHistoryPrefix) await this.store.prepareOVContext?.(this.cognitionEpoch);
+    const model = this.model;
+    const effort = this.effort;
     return new Promise((resolve, reject) => {
       const promptPath = this._promptPath();
       fs.writeFileSync(promptPath, this.developerInstructionsText, { encoding: 'utf8', mode: 0o600 });
       const args = [
         '--mode', 'rpc',
         '--append-system-prompt', promptPath,
-        '--thinking', this.effort,
+        '--thinking', effort,
         '--session-id', this.sessionId,
         '--session-dir', this._sessionDir(),
         '--approve',
         '--extension', PI_MCP_EXTENSION,
       ];
-      if (this.model) args.push('--model', this.model);
+      if (model) args.push('--model', model);
 
       const env = sanitizePiEnv(process.env, this.larkProfile(), agentToolEnv(this.config, this.authorityToken));
       env.PERSONAL_AGENT_MCP_CONFIG = JSON.stringify({
@@ -363,6 +368,8 @@ export class PiAgent {
           resolve: () => {
             if (settled) return;
             this.connected = true;
+            this.appliedModel = model;
+            this.appliedEffort = effort;
             ready = true;
             settled = true;
             clearTimeout(timer);
@@ -463,14 +470,14 @@ export class PiAgent {
   }
 
   tryStartBatch(items) {
-    if (this.stopping || !this.connected || this.turnActive || this.queue.length > 0
+    if (this.stopping || !this.connected || this.turnInProgress || this.queue.length > 0
       || !Array.isArray(items) || items.length === 0) return false;
     this._writeBatch(items.map(deliveryItem));
     return true;
   }
 
   whenIdle() {
-    if (!this.turnActive && this.queue.length === 0) return Promise.resolve();
+    if (!this.turnInProgress && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 
@@ -510,6 +517,11 @@ export class PiAgent {
   }
 
   _writeBatch(items) {
+    if (this.settingsUpdate || (!this.turnActive && this._settingsPending())) {
+      this.queue.push(items);
+      this._applySettings();
+      return;
+    }
     let prepared;
     try {
       prepared = this._bodyFor(items);
@@ -801,7 +813,7 @@ export class PiAgent {
   }
 
   _drain() {
-    if (this.stopping || !this.connected || !this.child?.stdin?.writable) return;
+    if (this.stopping || this.settingsUpdate || !this.connected || !this.child?.stdin?.writable) return;
     if (this.queue.length === 0) return;
     if (this.turnActive) {
       while (this.queue.length > 0) this._writeBatch(this.queue.shift());
@@ -948,6 +960,7 @@ export class PiAgent {
   }
 
   async prepareSessionRotation({ rollback = {} } = {}) {
+    while (this.settingsUpdate) await this.settingsUpdate;
     if (this.turnActive) throw new Error('pi session rotation requires an idle runtime');
     if (this.sessionRotation) throw new Error('pi session rotation is already prepared');
     const previous = Object.freeze({
@@ -994,6 +1007,7 @@ export class PiAgent {
   }
 
   async interruptTurn() {
+    while (this.settingsUpdate) await this.settingsUpdate;
     if (!this.turnActive) return;
     const inboundSeqs = this._activeSeqs();
     const receipts = receiptIds(this.activeItems);
@@ -1018,6 +1032,7 @@ export class PiAgent {
   }
 
   async rotateSession({ resume = false } = {}) {
+    while (this.settingsUpdate) await this.settingsUpdate;
     if (this.turnActive) throw new Error('pi session rotation requires an idle runtime');
     if (resume) {
       await this._replaceProcess({ fresh: false });
@@ -1030,31 +1045,59 @@ export class PiAgent {
     return this.sessionId;
   }
 
-  async setModel(model, { persist = true, reconfigure = true } = {}) {
-    if (reconfigure) await this.whenIdle();
-    this.model = model;
+  setModel(model, { persist = true } = {}) {
     if (persist) this.store.setSetting?.('pi_model', model);
-    if (reconfigure && this.connected) {
-      const parsed = parsePiModelSelector(model);
-      if (parsed.provider && parsed.modelId) {
-        try {
-          await this._rpc({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId });
-        } catch {
-          await this._replaceProcess({ fresh: false });
-        }
-      } else {
-        await this._replaceProcess({ fresh: false });
-      }
-    }
+    this.model = model;
+  }
+
+  _settingsPending() {
+    return this.appliedModel !== this.model || this.appliedEffort !== this.effort;
   }
 
   setEffort(effort, { persist = true } = {}) {
-    this.effort = effort;
     if (persist) this.store.setSetting?.('pi_effort', effort);
+    this.effort = effort;
+  }
+
+  _applySettings() {
+    if (this.settingsUpdate) return;
+    const model = this.model;
+    const effort = this.effort;
+    // Apply between prompts, never while an agent turn (including tools) is
+    // running. Keep input queued until Pi acknowledges the in-session update.
+    this.settingsUpdate = (async () => {
+      try {
+        if (this.appliedModel !== model) {
+          const parsed = parsePiModelSelector(model);
+          if (parsed.provider && parsed.modelId) {
+            await this._rpc({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId });
+            this.appliedModel = model;
+            // Pi can change thinking level when selecting a model.
+            this.appliedEffort = null;
+          } else {
+            await this._replaceProcess({ fresh: false, activate: false });
+            return;
+          }
+        }
+        await this._rpc({ type: 'set_thinking_level', level: effort });
+        this.appliedEffort = effort;
+      } catch (error) {
+        this.logger.warn('pi_settings_update_failed', { error: safe(error) });
+        this._failItems(this.queue.splice(0).flat(), error);
+      } finally {
+        this.settingsUpdate = null;
+        this._drain();
+        this._notifyAvailable();
+      }
+    })();
   }
 
   async listModels() {
     if (!this.connected) return [];
+    if (!this.model) {
+      const state = await this._rpc({ type: 'get_state' });
+      this.resolvedModel = formatPiModelId(state?.data?.model);
+    }
     const response = await this._rpc({ type: 'get_available_models' });
     const models = response?.data?.models;
     if (!Array.isArray(models)) return [];
@@ -1089,7 +1132,7 @@ export class PiAgent {
   }
 
   _notifyAvailable() {
-    if (this.turnActive || this.queue.length > 0 || !this.connected) return;
+    if (this.turnInProgress || this.queue.length > 0 || !this.connected) return;
     this._resolveIdleWaiters();
     try { this.onAvailable?.(); } catch (error) {
       this.logger.warn('pi_available_callback_failed', { error: safe(error) });
@@ -1124,6 +1167,8 @@ export class PiAgent {
   async stop() {
     this.stopping = true;
     this.autoReconnect = false;
+    this._rejectPendingRpc(new Error('pi stopped'));
+    await this.settingsUpdate;
     const midTurn = this.turnActive;
     const queued = this.queue.flat();
     this.queue = [];

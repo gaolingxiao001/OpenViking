@@ -594,7 +594,7 @@ export class Store {
   }
 
   // Cognition epochs are the durable "sessions" the Activity page can pick:
-  // /new, effort changes, and runtime switches. Native thread/session ids stay
+  // /new advances the epoch; model/effort changes preserve it. Native ids stay
   // out of the public payload; the UI only gets epoch + time window + counts.
   listActivitySessions() {
     const cognition = this.getCognitionState();

@@ -10,7 +10,7 @@ import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs
 import { agentToolEnv, agentToolServer } from './actions/api.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
 import { deliveryItem, receiptIds, withReceiptIds } from './runtime-input.mjs';
-import { getRuntimeDefinition, staticModelEntries } from './runtime-catalog.mjs';
+import { getRuntimeDefinition } from './runtime-catalog.mjs';
 
 const MAX_LINE_BYTES = 5_000_000;
 const START_TIMEOUT_MS = 5_000;
@@ -104,9 +104,23 @@ export class ClaudeAgent {
     this.toolStarts = new Map(); // tool_use id -> name and Activity start time
     this.mcpTempDir = null;
     this.sessionRotation = null;
+    this.appliedModel = null;
+    this.appliedEffort = null;
+    this.settingsUpdate = null;
+    this.modelCatalog = [];
+    this.catalogRequest = null;
+    this.pendingControl = new Map();
+    this.controlTimeoutMs = options.controlTimeoutMs ?? 15_000;
+    this.actualModel = '';
   }
 
   get threadId() { return this.sessionId; }
+
+  get resolvedModel() {
+    if (this.appliedModel === this.model && this.actualModel) return this.actualModel;
+    return this.modelCatalog.find((entry) => entry.id === (this.model || 'default'))?.resolvedModel
+      || this.model;
+  }
 
   get policyHash() {
     return createHash('sha256')
@@ -123,7 +137,7 @@ export class ClaudeAgent {
     };
   }
 
-  get turnInProgress() { return this.turnActive; }
+  get turnInProgress() { return this.turnActive || Boolean(this.settingsUpdate); }
 
   get sessionDescriptor() {
     return {
@@ -262,6 +276,8 @@ export class ClaudeAgent {
 
   async _spawnPersistent() {
     if (this.needsHistoryPrefix) await this.store.prepareOVContext?.(this.cognitionEpoch);
+    const model = this.model;
+    const effort = this.effort;
     return new Promise((resolve, reject) => {
       const mcpConfigPath = this._writeMcpConfig();
       const args = [
@@ -278,10 +294,10 @@ export class ClaudeAgent {
         '--mcp-config', mcpConfigPath,
         '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
         '--append-system-prompt', this.developerInstructionsText,
-        '--effort', this.effort,
+        '--effort', effort,
         '--no-chrome',
       ];
-      if (this.model) args.push('--model', this.model);
+      if (model) args.push('--model', model);
       if (this.resumeRequested && this.sessionInitialized) args.push('--resume', this.sessionId);
       else args.push('--session-id', this.sessionId);
 
@@ -301,6 +317,8 @@ export class ClaudeAgent {
       }
 
       this.child = child;
+      this.catalogRequest = null;
+      this.actualModel = '';
       this.stdoutBuffer = '';
       this.stderrBuffer = '';
       let spawned = false;
@@ -351,6 +369,8 @@ export class ClaudeAgent {
           settled = true;
           clearTimeout(timer);
           this.connected = true;
+          this.appliedModel = model;
+          this.appliedEffort = effort;
           resolve();
         }, this.startStabilityMs);
       });
@@ -384,14 +404,14 @@ export class ClaudeAgent {
   }
 
   tryStartBatch(items) {
-    if (this.stopping || !this.connected || this.turnActive || this.queue.length > 0
+    if (this.stopping || !this.connected || this.turnInProgress || this.queue.length > 0
       || !Array.isArray(items) || items.length === 0) return false;
     this._writeBatch(items.map(deliveryItem));
     return true;
   }
 
   whenIdle() {
-    if (!this.turnActive && this.queue.length === 0) return Promise.resolve();
+    if (!this.turnInProgress && this.queue.length === 0) return Promise.resolve();
     return new Promise((resolve) => this.idleWaiters.push(resolve));
   }
 
@@ -428,6 +448,11 @@ export class ClaudeAgent {
   }
 
   _writeBatch(items) {
+    if (this.settingsUpdate || (!this.turnActive && this._settingsPending())) {
+      this.queue.push(items);
+      this._applySettings();
+      return;
+    }
     let prepared;
     try {
       prepared = this._bodyFor(items);
@@ -470,8 +495,8 @@ export class ClaudeAgent {
       summary: wasActive ? input : undefined,
       metadata: {
         runtime: CLAUDE_RUNTIME.id,
-        model: this.model || undefined,
-        effort: this.effort || undefined,
+        model: this.appliedModel || undefined,
+        effort: this.appliedEffort || undefined,
         input,
         historyChars: Math.max(0, prepared.body.length - input.length),
         inboundSeqs: prepared.seqs,
@@ -513,6 +538,17 @@ export class ClaudeAgent {
     try { message = JSON.parse(line); } catch { return; }
     if (!message || typeof message !== 'object') return;
 
+    if (message.type === 'control_response') {
+      const response = message.response;
+      const pending = this.pendingControl.get(response?.request_id);
+      if (pending) {
+        this.pendingControl.delete(response.request_id);
+        if (response.subtype === 'error') pending.reject(new Error(response.error || 'Claude control request failed'));
+        else pending.resolve(response.response);
+      }
+      return;
+    }
+
     if (message.type === 'control_request' && message.request_id != null) {
       const subtype = message.request?.subtype;
       const reason = 'This unattended daemon cannot answer interactive requests. Ask the user through the messaging tools instead.';
@@ -542,6 +578,7 @@ export class ClaudeAgent {
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
+      if (typeof message.model === 'string') this.actualModel = message.model;
       const sessionId = message.session_id ?? message.sessionId;
       if (typeof sessionId === 'string' && sessionId) {
         this.sessionId = sessionId;
@@ -727,8 +764,12 @@ export class ClaudeAgent {
   }
 
   _drain() {
-    if (this.stopping || !this.connected || !this.child?.stdin?.writable) return;
-    while (this.queue.length > 0) this._writeBatch(this.queue.shift());
+    if (this.stopping || this.settingsUpdate || !this.connected || !this.child?.stdin?.writable) return;
+    if (this.queue.length > 0 && !this.turnActive && this._settingsPending()) {
+      this._applySettings();
+      return;
+    }
+    while (this.queue.length > 0 && !this.settingsUpdate) this._writeBatch(this.queue.shift());
   }
 
   _markSessionUnresumable() {
@@ -775,6 +816,7 @@ export class ClaudeAgent {
 
   _handleExit(child, code, signal, processError = null) {
     if (this.child !== child) return;
+    this._rejectControl(new Error('Claude connection closed'));
     this.child = null;
     this.connected = false;
     if (!this.stopping) terminateProcessTree(child, 'SIGKILL');
@@ -878,6 +920,7 @@ export class ClaudeAgent {
   // SQLite CAS publishes the new epoch/session. On CAS failure cancel restores
   // the old session under the still-current authority token.
   async prepareSessionRotation({ rollback = {} } = {}) {
+    while (this.settingsUpdate) await this.settingsUpdate;
     if (this.turnActive) throw new Error('claude session rotation requires an idle runtime');
     if (this.sessionRotation) throw new Error('claude session rotation is already prepared');
     const previous = Object.freeze({
@@ -928,6 +971,7 @@ export class ClaudeAgent {
   // survive in this.queue and are written after the next respawn. Intentional
   // abandonment, so onTurnFailed is not raised for the interrupted items.
   async interruptTurn() {
+    while (this.settingsUpdate) await this.settingsUpdate;
     if (!this.turnActive) return;
     const inboundSeqs = this._activeSeqs();
     const receipts = receiptIds(this.activeItems);
@@ -949,6 +993,7 @@ export class ClaudeAgent {
   }
 
   async rotateSession({ resume = false } = {}) {
+    while (this.settingsUpdate) await this.settingsUpdate;
     if (this.turnActive) throw new Error('claude session rotation requires an idle runtime');
     if (resume) {
       await this._replaceProcess({ fresh: false });
@@ -961,20 +1006,87 @@ export class ClaudeAgent {
     return this.sessionId;
   }
 
-  async setModel(model, { persist = true, reconfigure = true } = {}) {
-    if (reconfigure) await this.whenIdle();
-    this.model = model;
+  setModel(model, { persist = true } = {}) {
     if (persist) this.store.setSetting?.('claude_model', model);
-    if (reconfigure && this.connected) await this._replaceProcess({ fresh: false });
+    this.model = model;
+  }
+
+  _settingsPending() {
+    return this.appliedModel !== this.model || this.appliedEffort !== this.effort;
   }
 
   setEffort(effort, { persist = true } = {}) {
-    this.effort = effort;
     if (persist) this.store.setSetting?.('claude_effort', effort);
+    this.effort = effort;
+  }
+
+  _applySettings() {
+    if (this.settingsUpdate) return;
+    // Claude receives model and effort as process arguments. Wait for the next input
+    // after the current result, then resume the same transcript with new args.
+    this.settingsUpdate = (async () => {
+      try {
+        await this._replaceProcess({ fresh: false, activate: false });
+      } catch (error) {
+        this.logger.warn('claude_settings_update_failed', { error: safe(error) });
+        this._failItems(this.queue.splice(0).flat(), error);
+        if (!this.connected && this.autoReconnect && !this.stopping) void this._reconnectLoop();
+      } finally {
+        this.settingsUpdate = null;
+        this._drain();
+        this._notifyAvailable();
+      }
+    })();
   }
 
   async listModels() {
-    return staticModelEntries(CLAUDE_RUNTIME.id);
+    if (!this.connected) return this.modelCatalog;
+    if (!this.catalogRequest) {
+      const child = this.child;
+      this.catalogRequest = this._requestControl({ subtype: 'initialize' }).then((result) => {
+        if (this.child !== child) return this.modelCatalog;
+        if (!Array.isArray(result?.models)) throw new Error('Claude returned no model catalog');
+        this.modelCatalog = result.models.filter((entry) => entry?.value && !entry.disabled).map((entry) => ({
+          id: entry.value,
+          displayName: entry.displayName,
+          resolvedModel: entry.resolvedModel,
+          isDefault: entry.value === 'default',
+          efforts: entry.supportsEffort === false ? [] : (entry.supportedEffortLevels ?? []),
+        }));
+        return this.modelCatalog;
+      }).catch((error) => {
+        if (this.child === child) this.catalogRequest = null;
+        this.logger.info('claude_model_list_failed', { error: safe(error) });
+        return this.modelCatalog;
+      });
+    }
+    return this.catalogRequest;
+  }
+
+  _requestControl(request) {
+    if (!this.child?.stdin?.writable) return Promise.reject(new Error('Claude is disconnected'));
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingControl.delete(requestId);
+        reject(new Error('Claude control request timed out'));
+      }, this.controlTimeoutMs);
+      this.pendingControl.set(requestId, {
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      try {
+        this.child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: requestId, request })}\n`);
+      } catch (error) {
+        this.pendingControl.get(requestId)?.reject(error);
+        this.pendingControl.delete(requestId);
+      }
+    });
+  }
+
+  _rejectControl(error) {
+    for (const pending of this.pendingControl.values()) pending.reject(error);
+    this.pendingControl.clear();
   }
 
   _recordActivity(kind, fields = {}) {
@@ -999,7 +1111,7 @@ export class ClaudeAgent {
   }
 
   _notifyAvailable() {
-    if (this.turnActive || this.queue.length > 0 || !this.connected) return;
+    if (this.turnInProgress || this.queue.length > 0 || !this.connected) return;
     this._resolveIdleWaiters();
     try { this.onAvailable?.(); } catch (error) {
       this.logger.warn('claude_available_callback_failed', { error: safe(error) });
@@ -1007,6 +1119,7 @@ export class ClaudeAgent {
   }
 
   async _terminateCurrent() {
+    this._rejectControl(new Error('Claude process replaced'));
     const child = this.child;
     this.child = null;
     this.connected = false;
@@ -1036,6 +1149,7 @@ export class ClaudeAgent {
   async stop() {
     this.stopping = true;
     this.autoReconnect = false;
+    await this.settingsUpdate;
     const midTurn = this.turnActive;
     const queued = this.queue.flat();
     this.queue = [];

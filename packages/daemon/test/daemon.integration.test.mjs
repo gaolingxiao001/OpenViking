@@ -339,6 +339,6 @@ describe('/model immediate switch', () => {
     await daemon.handleSlashCommand({ name: 'model', arg: 'gpt-x' }, event, { seq: 1 });
     assert.deepEqual(order, ['setModel:gpt-x']);
     assert.equal(replies.length, 1);
-    assert.match(replies[0].text, /已切到 gpt-x，已开启新会话：th-fresh/);
+    assert.match(replies[0].text, /已切到 gpt-x（下一轮生效，上下文保留）/);
   });
 });

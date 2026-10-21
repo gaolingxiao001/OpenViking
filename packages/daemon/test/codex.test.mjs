@@ -89,13 +89,13 @@ function newAgent(store, options = {}, config = baseConfig) {
 
 // Drive the initialize -> initialized -> thread(start|resume) handshake. Returns the
 // child the agent spawned.
-async function handshake(agent, children, { threadId = 'th-1' } = {}) {
+async function handshake(agent, children, { threadId = 'th-1', model } = {}) {
   const started = agent.start();
   await flush();
   const child = children[0];
   child.feed({ id: 1, result: {} });
   await flush();
-  child.feed({ id: 2, result: { thread: { id: threadId } } });
+  child.feed({ id: 2, result: { thread: { id: threadId }, model } });
   await started;
   return child;
 }
@@ -310,7 +310,8 @@ describe('CodexAgent handshake', () => {
     const stored = [];
     store.setGlobalSession = (sessionId, policyHash) => stored.push({ sessionId, policyHash });
     const { agent, children } = newAgent(store);
-    await handshake(agent, children);
+    await handshake(agent, children, { model: 'gpt-resolved' });
+    assert.equal(agent.resolvedModel, 'gpt-resolved');
 
     const sent = children[0].sent();
     assert.equal(sent[0].method, 'initialize');
@@ -1291,6 +1292,9 @@ describe('CodexAgent session rotation (slash commands)', () => {
           {
             id: 'gpt-5.5',
             hidden: false,
+            isDefault: true,
+            model: 'gpt-5.5',
+            displayName: 'GPT 5.5',
             supportedReasoningEfforts: [
               { reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'high' },
             ],
@@ -1301,7 +1305,7 @@ describe('CodexAgent session rotation (slash commands)', () => {
       },
     });
     assert.deepEqual(await listing, [
-      { id: 'gpt-5.5', efforts: ['low', 'medium', 'high'] },
+      { id: 'gpt-5.5', resolvedModel: 'gpt-5.5', displayName: 'GPT 5.5', isDefault: true, efforts: ['low', 'medium', 'high'] },
       { id: 'gpt-5.5-codex', efforts: [] },
     ]);
 

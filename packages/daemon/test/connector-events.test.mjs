@@ -163,7 +163,14 @@ it('retries a non-chat event after model fallback and records failures without i
   const policy = new FailurePolicy({ config: {}, store, logger,
     actions: new ActionService({ config: {}, store, logger,
       connectors: { manifests: () => [], invoke: () => assert.fail('there is no reply target') } }),
-    runtime: { transition: async () => {}, submit: (items) => delivered.push(...items) },
+    runtime: {
+      transition: async (request) => {
+        assert.equal(request.kind, 'select-runtime');
+        assert.equal(request.runtime, 'codex');
+        return { ok: true, runtimeChanged: true };
+      },
+      submit: (items) => delivered.push(...items),
+    },
     recordActivity: (kind, fields) => activities.push({ kind, ...fields }),
   });
   assert.equal(await policy.tryModelFallback({ inboundSeqs: [inbound.seq], error: 'test failure' }), true);

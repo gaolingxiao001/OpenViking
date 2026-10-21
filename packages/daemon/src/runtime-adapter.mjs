@@ -24,6 +24,7 @@ export class RuntimeAdapter {
   get threadId() { return this.#implementation.threadId ?? null; }
   get effort() { return this.#implementation.effort ?? 'medium'; }
   get model() { return this.#implementation.model ?? ''; }
+  get resolvedModel() { return this.#implementation.resolvedModel ?? ''; }
   get state() { return normalizeState(this.#implementation.state); }
   get turnInProgress() { return Boolean(this.#implementation.turnInProgress); }
   get modelWorking() { return Boolean(this.#implementation.modelWorking); }

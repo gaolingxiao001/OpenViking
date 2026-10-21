@@ -208,7 +208,7 @@ export class Harness {
   }
 
   // Hand every already-arrived group batch to the current runtime, e.g. before
-  // a /model or /new control action can overtake it.
+  // a /runtime or /new control action can overtake it.
   flushBufferedIngress() {
     return this.groupBurst.flushAll();
   }

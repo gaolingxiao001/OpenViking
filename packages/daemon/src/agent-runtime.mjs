@@ -6,8 +6,10 @@ import {
   DEFAULT_RUNTIME_ID,
   RUNTIME_IDS,
   getRuntimeDefinition,
+  parseRuntimeModelSelector,
   resolveRuntimeModelTarget,
   staticModelEntries,
+  supportedModelEfforts,
 } from './runtime-catalog.mjs';
 
 const SWITCH_JOURNAL_HEADROOM = 4_096;
@@ -147,11 +149,12 @@ export class AgentRuntime {
   _interrupt() { return this.backend?.interrupt() ?? Promise.resolve(); }
 
   async _listModels() {
-    const current = await this.backend?.listModels() ?? [];
-    const models = [
-      ...current,
-      ...staticModelEntries(),
-    ];
+    const backend = this.backend;
+    const current = await backend?.listModels() ?? [];
+    if (backend !== this.backend) return this.cachedModels;
+    const models = current.length ? current : this.cachedModels.length ? this.cachedModels
+      : getRuntimeDefinition(this.runtime)?.capabilities.modelCatalog === 'static'
+        ? staticModelEntries(this.runtime) : [];
     const seen = new Set();
     this.cachedModels = models.filter((model) => {
       if (!model?.id || seen.has(model.id)) return false;
@@ -181,6 +184,7 @@ export class AgentRuntime {
       runtime: this.runtime,
       session: Object.freeze({ id: this.threadId, connected: state.connected }),
       model: this.model,
+      resolvedModel: this.backend?.resolvedModel ?? '',
       effort: this.effort,
       capabilities: definition?.capabilities ?? Object.freeze({}),
       queued: state.queued ?? 0,
@@ -234,7 +238,6 @@ export class AgentRuntime {
     }
     this.transitioning = true;
     this.revision += 1;
-    this.cachedModels = [];
     try {
       if (request.kind === 'new-session') {
         await this._interrupt();
@@ -244,6 +247,10 @@ export class AgentRuntime {
       }
       if (request.kind === 'select-model') {
         const result = await this._selectModel(request.selector);
+        return { ok: true, kind: request.kind, ...result };
+      }
+      if (request.kind === 'select-runtime') {
+        const result = await this._selectRuntime(request.runtime, request.model);
         return { ok: true, kind: request.kind, ...result };
       }
       if (request.kind === 'select-effort') {
@@ -258,26 +265,16 @@ export class AgentRuntime {
               : 'unsupported-effort-control',
           };
         }
-        if (!definition.efforts.includes(request.effort)) {
+        const models = await this._listModels();
+        if (this.stopping) throw new Error('agent runtime stopped during effort transition');
+        if (!supportedModelEfforts(this._snapshot(models)).includes(request.effort)) {
           return { ok: false, kind: request.kind, reason: 'unsupported-effort' };
         }
-        // TODO（gaolingxiao）：当前切effort后直接重开session，后续可以讨论是否不重开
-        await this._interrupt();
-        if (this.stopping) throw new Error('agent runtime stopped during effort transition');
-        const previousEffort = this.backend.effort;
-        this._selectEffort(request.effort, { persist: false });
-        let threadId;
-        try {
-          threadId = await this._rotateSession({
-            resume: false,
-            settings: { [`${this.runtime}_effort`]: request.effort },
-            rollback: { effort: previousEffort },
-          });
-        } catch (error) {
-          this._selectEffort(previousEffort, { persist: false });
-          throw error;
-        }
-        return { ok: true, kind: request.kind, runtime: this.runtime, effort: request.effort, threadId };
+        const unchanged = this.backend.effort === request.effort;
+        // Each backend applies the setting at its next turn boundary. Changing
+        // reasoning depth must not interrupt work or retire its native context.
+        if (!unchanged) await this._selectEffort(request.effort);
+        return { ok: true, kind: request.kind, runtime: this.runtime, effort: request.effort, unchanged };
       }
       throw new TypeError(`unsupported transition: ${request.kind}`);
     } finally {
@@ -288,42 +285,37 @@ export class AgentRuntime {
 
   async _selectModel(value) {
     if (this.stopping) throw new Error('agent runtime is stopping');
-    const target = resolveRuntimeModelTarget(value, this.runtime);
-    this._assertConnectorSupport(target.runtime);
-    if (target.runtime === this.runtime) {
-      // /m must not wait for a stuck turn, and every model change opens a
-      // fresh session: interrupt the in-flight turn (its inbound rows stay in
-      // the cognition journal, queued items survive), apply, then rotate.
-      await this.backend.interrupt();
-      if (this.stopping) throw new Error('agent runtime stopped during model transition');
-      const previousModel = this.backend.model;
-      await this.backend.selectModel(target.model, { persist: false, reconfigure: false });
-      if (this.stopping) throw new Error('agent runtime stopped during model transition');
-      let threadId;
-      try {
-        threadId = await this._rotateSession({
-          resume: false,
-          preserveContext: true,
-          settings: { [`${this.runtime}_model`]: target.model },
-          rollback: { model: previousModel },
-        });
-      } catch (error) {
-        await this.backend.selectModel(previousModel, { persist: false, reconfigure: false });
-        throw error;
-      }
-      try {
-        this.store.appendCognitionJournal({
-          kind: 'control',
-          actor: 'daemon',
-          text: `model changed within ${this.runtime} runtime to ${target.model || 'default'}; fresh native session opened`,
-          dedupeKey: `control:model:${randomUUID()}`,
-        });
-      } catch (error) {
-        this.logger.warn('runtime_model_journal_write_failed', { error: error.message });
-      }
-      return { runtimeChanged: false, runtime: this.runtime, model: target.canonical, threadId };
+    const selector = parseRuntimeModelSelector(value);
+    const namedRuntime = getRuntimeDefinition(value);
+    if ((selector.qualified && selector.runtime !== this.runtime)
+      || (namedRuntime && namedRuntime.id !== this.runtime)) {
+      throw new Error('Use /runtime to switch runtimes');
     }
-    return await this._hardSwitch(target);
+    const model = selector.qualified ? selector.model : selector.raw;
+    if (!/^[A-Za-z0-9._:\/\[\]-]{1,256}$/.test(model)) throw new Error('Invalid model name');
+    const models = await this._listModels();
+    if (this.stopping) throw new Error('agent runtime stopped during model transition');
+    if (models.length && !models.some((entry) => entry.id === model || entry.resolvedModel === model)) {
+      throw new Error(`${this.runtime} model is unavailable: ${model}`);
+    }
+    const unchanged = this.backend.model === model;
+    if (!unchanged) await this.backend.selectModel(model);
+    if (this.stopping) throw new Error('agent runtime stopped during model transition');
+    return { runtimeChanged: false, runtime: this.runtime, model, threadId: this.threadId, unchanged };
+  }
+
+  async _selectRuntime(value, requestedModel) {
+    const definition = getRuntimeDefinition(value);
+    if (!definition) throw new Error(`Unknown runtime: ${value}`);
+    this._assertConnectorSupport(definition.id);
+    if (definition.id === this.runtime) {
+      return { runtimeChanged: false, runtime: this.runtime, model: this.model, unchanged: true };
+    }
+    const initial = resolveRuntimeModelTarget(this.config.initialModel || '');
+    const model = requestedModel ?? this.store.getSetting?.(`${definition.id}_model`)
+      ?? (this.config[`${definition.id}Model`] || undefined)
+      ?? (initial.runtime === definition.id ? initial.model : definition.defaultModel);
+    return this._hardSwitch({ runtime: definition.id, model, canonical: model || definition.canonicalDefault });
   }
 
   async _hardSwitch(target) {
@@ -362,8 +354,8 @@ export class AgentRuntime {
       if (staged.model !== target.model) throw new Error('target runtime did not apply the requested model');
       if (getRuntimeDefinition(target.runtime)?.capabilities.modelCatalog === 'dynamic' && target.model) {
         const available = await staged.listModels();
-        if (!available.some((model) => model.id === target.model)) {
-          throw new Error(`Codex model is unavailable: ${target.model}`);
+        if (!available.some((model) => model.id === target.model || model.resolvedModel === target.model)) {
+          throw new Error(`${target.runtime} model is unavailable: ${target.model}`);
         }
       }
       const catchup = cognitionHistoryPrefix(
@@ -398,6 +390,7 @@ export class AgentRuntime {
       staged.activate();
       this.backend = staged;
       this.runtime = target.runtime;
+      this.cachedModels = [];
       this._authorityChanged({ runtime: target.runtime, epoch: cognition.epoch, authorityToken });
       this.stagedBackend = null;
       staged = null;
