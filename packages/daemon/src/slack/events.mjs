@@ -26,6 +26,7 @@ export function parseMessageId(id, teamId) {
 }
 
 export function validChannel(id) { return CHANNEL.test(id ?? ''); }
+export function validTimestamp(value) { return typeof value === 'string' && TS.test(value); }
 
 export function cleanName(value) {
   const name = String(value ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').trim().slice(0, NAME_CHARS);
@@ -95,6 +96,32 @@ function files(event) {
       mimeType: typeof file.mimetype === 'string' ? file.mimetype.slice(0, 255) : 'application/octet-stream',
       size: Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : null,
     }));
+}
+
+// History is context, never a new event: retain old/self messages without
+// applying the receive activation cutoff or waking the model again.
+export function historyMessage(event, { account, channel, names = new Map(), agentName }) {
+  if (!validTimestamp(event?.ts) || (event.channel && event.channel !== channel)
+    || (event.thread_ts !== undefined && !validTimestamp(event.thread_ts))) throw new Error('Invalid Slack history message identity');
+  if (event.hidden || ['tombstone', 'message_deleted'].includes(event.subtype)) return null;
+  const bot = isBot(event) || event.user === account.botUserId;
+  const author = USER.test(event.user ?? '') ? event.user : BOT.test(event.bot_id ?? '') ? event.bot_id : null;
+  const nameOf = (id) => id === account.botUserId ? cleanName(agentName) : names.get(id) ?? null;
+  const name = bot ? cleanName(event.bot_profile?.name ?? event.username) ?? nameOf(author) : nameOf(author);
+  const attached = files(event);
+  const text = renderText(event.text, nameOf).trim() || renderText(fallbackText(event), nameOf).trim();
+  const id = messageId(account.teamId, channel, event.ts);
+  const threadTs = event.thread_ts && event.thread_ts !== event.ts ? event.thread_ts : null;
+  const root = messageId(account.teamId, channel, threadTs ?? event.ts);
+  const content = [text, ...attached.map(file => `[attachment type=${file.kind} id=${file.id} name=${JSON.stringify(file.name)}]`)].filter(Boolean).join('\n');
+  return {
+    message: { message_id: id, chat_id: channel, tenant_key: account.teamId, thread_id: root,
+      conversation: { id: channel, tenant_id: account.teamId, thread_id: threadTs },
+      thread_ts: threadTs, create_time: String(millis(event.ts)), msg_type: attached.length ? 'file' : 'text',
+      sender: { id: author, name, type: bot ? 'bot' : author ? 'user' : 'unknown' }, content,
+      attachments: attached.map(file => ({ id: file.id, type: file.kind, name: file.name })) },
+    route: { channel, ts: event.ts, threadTs, files: attached },
+  };
 }
 
 // The canonical event, its reply route and the people it named; null when

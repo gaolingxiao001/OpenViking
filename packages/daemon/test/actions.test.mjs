@@ -89,6 +89,22 @@ describe('agent tools', () => {
     assert.equal(connectors.calls.length, 0);
   });
 
+  it('keeps empty Slack pages pageable, rejects Lark cursors and fences query results after runtime retirement', async (t) => {
+    let finish;
+    const { call, service, store, connectors } = setup(t, { ids: ['lark', 'slack'], run: async (_id, _action, input) => {
+      if (input.query === 'pending') return new Promise(resolve => { finish = resolve; });
+      return { chats: [], has_more: true, next_cursor: 'next=' };
+    } });
+    assert.match((await call('list_chats', { source: 'slack', query: 'design' })).text, /cursor="next="/);
+    await assert.rejects(call('list_chat_messages', { source: 'lark', chat_id: 'oc_test', cursor: 'next=' }), /only for Slack/);
+    assert.equal(connectors.calls.length, 1);
+    const pending = call('list_chats', { source: 'slack', query: 'pending' });
+    store.initializeCognition('claude', 'new-owner');
+    finish({ chats: [{ chat_id: 'C0OLD', name: 'old' }] });
+    await assert.rejects(pending, /no longer owns/);
+    assert.equal(service.queryTargets.size, 0);
+  });
+
   it('separates response attribution from the latest freshness fence', async (t) => {
     const { store, call, connectors, inbound, logs } = setup(t);
     const older = inbound({ messageId: 'om_olderDecision1', chatId: 'oc_steer12345678' });

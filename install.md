@@ -64,7 +64,7 @@ daemon 启动 Pi 时只为该会话注册 `personal_agent` MCP server，使用 `
 ```bash
 git clone <repo-url> vika
 cd vika
-npm run setup          # 按 lockfile 装依赖，取回固定版本的 lark-cli，检查托管 Pi
+npm run setup          # 按 lockfile 装依赖，取回固定版本的 lark-cli、Slack CLI，检查托管 Pi
 npm test && npm run check
 mkdir -p ~/.vika && cp config.example.json ~/.vika/config.json
 # 编辑 config.json：至少填 profile（飞书实例）、dataDir、workspace、model、ovConfig；ovAutoRecall 默认 false
@@ -113,6 +113,8 @@ vika login telegram [实例]
 运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装，再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
 
 成员查询使用 `conversations.members` 和 `users.info`。新建 App 的模板已包含 `channels:read`（公开频道）、`groups:read`（私有频道）、`mpim:read`（多人私聊）、`im:read`（私聊）和 `users:read`（姓名与机器人标记）。已有 App 升级 Vika 不会自动获得新权限：到 **OAuth & Permissions → Bot Token Scopes** 添加对应会话类型的权限，再 **Reinstall to Workspace** 完成授权。查询报 `missing_scope` 时会提示这些步骤，原有收发消息能力仍可使用。
+
+会话列表使用 `users.conversations`，历史与线程使用 `conversations.history` / `conversations.replies`，都由 Slack Connector 调用官方 Slack CLI 4.10.0。历史和线程需要对应类型的 `channels:history`、`groups:history`、`im:history` 或 `mpim:history`；这些 scope 已包含在新建 App 模板中。只读 bot 已获授权的会话，不能用个人 Slack 账号的登录状态扩大范围。发布包自带 CLI，源码开发可单独运行 `node scripts/install-slack-cli.mjs`；Linux/macOS 的 x64/arm64 二进制按固定 SHA-256 校验，并保留官方许可证。开发调试可用 `SLACK_CLI_BIN` 指定兼容官方 CLI 的绝对路径。
 
 重新绑定已有 Slack，或重新安装后 Bot token 发生变化时，运行：
 

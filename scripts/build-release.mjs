@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the release archives the installer and updater download: one
 // vika-<version>-<platform>.tar.gz per platform, each holding the committed
-// code, its production dependencies, the pinned lark-cli binary and the
+// code, its production dependencies, the pinned lark-cli and Slack CLI binaries and the
 // official Node it runs on, plus a release manifest with their SHA-256s.
 //
 //   node scripts/build-release.mjs [--ref HEAD] [--platform linux-x64 ...|--all]
@@ -20,6 +20,7 @@ import {
   PLATFORMS, artifactName, assertSha256, assertVersion, checksumFor, download, fetchText, hostPlatform, platform, sha256File,
 } from '../packages/updater/src/artifacts.mjs';
 import { installLarkCliBinary } from './release/lark-cli.mjs';
+import { installSlackCliBinary } from './release/slack-cli.mjs';
 
 const REPO = fileURLToPath(new URL('..', import.meta.url));
 const NODE_MIRROR = (process.env.VIKA_NODE_MIRROR || 'https://nodejs.org/dist').replace(/\/$/, '');
@@ -100,9 +101,10 @@ async function buildPlatform({ stage, platformId, version, commit, nodeVersion, 
 
   say(`fetching lark-cli for ${platformId} ...`);
   await installLarkCliBinary({ packageDir: path.join(root, 'node_modules', '@larksuite', 'cli'), platformId });
+  const slack = await installSlackCliBinary({ root, platformId });
 
   const metadata = {
-    name: 'vika', version, commit, platform: platformId, node: nodeVersion,
+    name: 'vika', version, commit, platform: platformId, node: nodeVersion, slackCli: slack.version,
     builtAt: new Date().toISOString(), ...(downloadBase ? { downloadBase: downloadBase.replace(/\/+$/, '') } : {}),
   };
   fs.writeFileSync(path.join(root, 'release.json'), `${JSON.stringify(metadata, null, 2)}\n`);
@@ -114,6 +116,7 @@ async function buildPlatform({ stage, platformId, version, commit, nodeVersion, 
       + `${run(path.join(root, 'node', 'bin', 'node'), [path.join(root, 'packages', 'cli', 'bin', 'vika.mjs'), '--version'])}, `
       + `${run(path.join(root, 'node_modules', '@larksuite', 'cli', 'bin', 'lark-cli'), ['--version'])}`);
     run(path.join(root, 'node', 'bin', 'node'), [path.join(root, 'packages', 'daemon', 'scripts', 'check-pi.mjs')]);
+    run(slack.bin, ['version', '--skip-update', '--no-color']);
   }
 
   const name = artifactName(version, platformId);

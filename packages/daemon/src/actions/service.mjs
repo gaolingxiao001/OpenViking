@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { eventIdentity } from '../event.mjs';
+import { conversationKeyFor, eventIdentity } from '../event.mjs';
 import { registerCard } from '../card-messages.mjs';
 import {
   cancelApproval, claimApproval, createApproval, editApproval, finishApproval, getApproval, supersedeApprovals,
@@ -65,8 +65,15 @@ function messageLines(messages, { withChat = false } = {}) {
   return messages.map((message) => {
     const sender = message.sender.name || message.sender.id || 'unknown';
     const chat = withChat && message.chat_id ? ` | chat_id=${message.chat_id}` : '';
-    return `- ${message.message_id}${chat} | ${sender} | ${message.msg_type} | ${message.content}`;
+    const thread = message.thread_id ? ` | thread_id=${message.thread_id}` : '';
+    return `- ${message.message_id}${chat}${thread} | ${sender} | ${message.msg_type} | ${message.content}`;
   }).join('\n');
+}
+
+function morePages(data) {
+  if (!data.has_more) return '';
+  return data.next_cursor ? `\nMore results exist; repeat the same query with cursor=${JSON.stringify(data.next_cursor)}.`
+    : '\nMore results exist; narrow the query or raise limit.';
 }
 
 // The single outbound path. Agent tool calls (through the MCP adapter and the
@@ -93,6 +100,8 @@ export class ActionService {
     // One temporary working reaction per conversation, removed by the next
     // final delivery there.
     this.temporaryReactions = new Map();
+    // Query context may identify a reply target, but never an input/decision.
+    this.queryTargets = new Map();
   }
 
   manifest(connector) {
@@ -208,8 +217,8 @@ export class ActionService {
   route(caller, operation, kind, source, { messageId = null, chatId = null } = {}) {
     caller.trace.action = operation;
     const candidates = this.supporting(operation, kind);
-    const owner = (messageId ? this.store.connectorForMessage(messageId) : null)
-      ?? (chatId ? this.store.connectorForChat(chatId) : null);
+    const owner = (messageId ? this.store.connectorForMessage(messageId) ?? this.queryOwner('message', messageId) : null)
+      ?? (chatId ? this.store.connectorForChat(chatId) ?? this.queryOwner('chat', chatId) : null);
     const known = source ? this.instanceNamed(source, owner) : owner;
     if (known) {
       if (!candidates.includes(known)) throw blocked('unsupported', `${known} does not support ${operation}. ${NO_ACTION}`);
@@ -531,9 +540,23 @@ export class ActionService {
   }
 
   // Scope of a target message on its connector: an inbound this daemon
-  // accepted, or one of its own deliveries.
+  // accepted, one of its own deliveries, or trusted query routing context.
   messageScope(connector, messageId) {
-    return this.store.eventByMessageId(messageId, connector) ?? this.store.deliveredMessage(messageId, connector);
+    return this.store.eventByMessageId(messageId, connector) ?? this.store.deliveredMessage(messageId, connector)
+      ?? this.queryTargets.get(JSON.stringify([connector, 'message', messageId]))?.scope ?? null;
+  }
+
+  queryOwner(kind, id) {
+    const owners = new Set([...this.queryTargets.values()].filter(target => target.kind === kind && target.id === id)
+      .map(target => target.connector));
+    return owners.size === 1 ? [...owners][0] : null;
+  }
+
+  rememberQueryTarget(connector, kind, id, scope = null) {
+    const key = JSON.stringify([connector, kind, id]);
+    this.queryTargets.delete(key);
+    this.queryTargets.set(key, { connector, kind, id, scope });
+    while (this.queryTargets.size > 2000) this.queryTargets.delete(this.queryTargets.keys().next().value);
   }
 
   // Registers a delivered card against where it landed. `seen` are inbounds that
@@ -923,18 +946,38 @@ export class ActionService {
     }
   }
 
-  query(caller, operation, { source, ...input }, ids = {}) {
+  async query(caller, operation, { source, ...input }, ids = {}) {
     const connector = this.route(caller, operation, 'queries', source, ids);
+    if (input.cursor !== undefined && this.manifest(connector).name !== 'slack') {
+      throw blocked('unsupported', 'cursor is currently supported only for Slack queries.');
+    }
     caller.trace.invoked = true;
-    return this.connectors.invoke(connector, operation, input);
+    const data = await this.connectors.invoke(connector, operation, input);
+    this.assertAuthority(caller.authority);
+    if (operation === 'chat.list') {
+      for (const chat of data.chats) this.rememberQueryTarget(connector, 'chat', chat.chat_id);
+    }
+    if (['chat.messages', 'thread.messages'].includes(operation)) {
+      for (const message of data.messages) {
+        const conversation = message.conversation;
+        if (!conversation) continue;
+        const scope = { connector_instance: connector, chat_id: conversation.id, thread_id: conversation.thread_id ?? null,
+          conv_key: conversationKeyFor(connector, conversation) };
+        this.rememberQueryTarget(connector, 'chat', conversation.id);
+        this.rememberQueryTarget(connector, 'message', message.message_id, scope);
+        if (message.thread_id && message.thread_id !== message.message_id) {
+          this.rememberQueryTarget(connector, 'message', message.thread_id, { ...scope, thread_id: null,
+            conv_key: conversationKeyFor(connector, { ...conversation, thread_id: null }) });
+        }
+      }
+    }
+    return data;
   }
 
   async listChats(input, caller) {
     const data = await this.query(caller, 'chat.list', input);
-    if (data.chats.length === 0) return { text: 'No joined group chats matched.', data };
     const lines = data.chats.map((chat) => `- ${chat.name || '(unnamed)'} | chat_id=${chat.chat_id} | ${chat.chat_status}`);
-    const more = data.has_more ? '\nMore joined chats exist; narrow query or raise limit.' : '';
-    return { text: `Joined group chats (${data.chats.length}):\n${lines.join('\n')}${more}`, data };
+    return { text: `Joined group chats (${data.chats.length}):\n${lines.join('\n')}${morePages(data)}`, data };
   }
 
   async listChatMembers(input, caller) {
@@ -948,8 +991,7 @@ export class ActionService {
 
   async listChatMessages(input, caller) {
     const data = await this.query(caller, 'chat.messages', input, { chatId: input.chat_id });
-    if (data.messages.length === 0) return { text: `No recent messages found in chat_id=${input.chat_id}.`, data };
-    return { text: `Recent messages (${data.messages.length}) in chat_id=${input.chat_id}:\n${messageLines(data.messages)}`, data };
+    return { text: `Recent messages (${data.messages.length}) in chat_id=${input.chat_id}:\n${messageLines(data.messages)}${morePages(data)}`, data };
   }
 
   async searchMessages(input, caller) {
@@ -961,8 +1003,7 @@ export class ActionService {
 
   async listThreadMessages(input, caller) {
     const data = await this.query(caller, 'thread.messages', input, { messageId: input.thread_id });
-    if (data.messages.length === 0) return { text: `No messages found in thread ${input.thread_id}.`, data };
-    return { text: `Thread messages (${data.messages.length}) in ${input.thread_id}:\n${messageLines(data.messages)}`, data };
+    return { text: `Thread messages (${data.messages.length}) in ${input.thread_id}:\n${messageLines(data.messages)}${morePages(data)}`, data };
   }
 
   async getMessageMedia(input, caller) {

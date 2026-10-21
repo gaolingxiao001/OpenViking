@@ -5,8 +5,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { SlackApi, SlackError, SLACK_VERSION, TEXT_LIMIT, FILE_BYTES } from './api.mjs';
 import { SlackState } from './state.mjs';
 import { SocketModeReceiver } from './socket.mjs';
-import { cleanName, messageId, namedUsers, normalizeMessage, parseMessageId, relevant, validChannel } from './events.mjs';
+import { cleanName, historyMessage, messageId, namedUsers, normalizeMessage, parseMessageId, relevant, validChannel } from './events.mjs';
 import { toMrkdwn } from './format.mjs';
+import { SlackCli } from './cli.mjs';
 
 const NAME_LOOKUP_MS = 2_000;
 // The model names reactions as Lark does; Slack wants its own emoji names.
@@ -20,8 +21,21 @@ const userName = (user) => cleanName(user?.profile?.display_name) ?? cleanName(u
   ?? cleanName(user?.real_name) ?? cleanName(user?.name);
 const validCursor = (value) => typeof value === 'string' && /^[!-~]{1,2048}$/.test(value);
 
+function pageInput(limit, max, cursor, as = 'bot') {
+  if (as !== 'bot') throw new Error('Slack queries support bot identity only');
+  if (!Number.isInteger(limit) || limit < 1 || limit > max) throw new Error(`Slack limit must be between 1 and ${max}`);
+  if (cursor !== undefined && !validCursor(cursor)) throw new Error('Invalid Slack cursor');
+}
+
+function pagination(page, cursor) {
+  const next = page.response_metadata?.next_cursor ?? '';
+  if (next !== '' && (!validCursor(next) || next === cursor)) throw new Error('Slack returned an invalid cursor');
+  if (page.has_more === true && !next) throw new Error('Slack returned more results without a continuation cursor');
+  return { has_more: Boolean(next), next_cursor: next || null };
+}
+
 export class SlackClient {
-  constructor(config, _registry, logger, { fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, receiver = {}, paceMs = 1100 } = {}) {
+  constructor(config, registry, logger, { fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, receiver = {}, paceMs = 1100, queryApi = null } = {}) {
     this.config = config;
     this.logger = logger;
     this.fetchImpl = fetchImpl;
@@ -35,6 +49,8 @@ export class SlackClient {
     this.nextSendAt = new Map();
     this.actions = new AbortController();
     this.failedNames = new Map();
+    this.registry = registry;
+    this.queryApi = queryApi;
   }
 
   async preflight() {
@@ -44,6 +60,7 @@ export class SlackClient {
     try {
       this.api = new SlackApi(this.account.botToken, { fetchImpl: this.fetchImpl });
       this.appApi = new SlackApi(this.account.appToken, { kind: 'app', fetchImpl: this.fetchImpl });
+      this.queryApi ??= new SlackCli(this.account.botToken, { bin: this.config.slackCliBin, registry: this.registry });
       const identity = await this.api.identity(AbortSignal.timeout(15_000));
       if (identity.teamId !== this.account.teamId || identity.appId !== this.account.appId
         || identity.botUserId !== this.account.botUserId) throw new Error('Slack bot identity changed; authorize again');
@@ -119,7 +136,7 @@ export class SlackClient {
       if (cached) { names.set(id, cached); continue; }
       if ((this.failedNames.get(id) ?? 0) > Date.now() || signal.aborted) continue;
       try {
-        const { user } = await this.api.call('users.info', { user: id }, signal);
+        const { user } = await this.queryApi.call('users.info', { user: id }, signal);
         const name = userName(user);
         if (name) { this.state.saveName(id, name); names.set(id, name); }
       } catch {
@@ -138,7 +155,7 @@ export class SlackClient {
     const signal = this.actionSignal();
     let page;
     try {
-      page = await this.api.call('conversations.members', { channel, limit, cursor }, signal);
+      page = await this.queryApi.call('conversations.members', { channel, limit, cursor }, signal);
     } catch (error) {
       if (error instanceof SlackError && error.code === 'missing_scope') {
         error.message += '. Add the Bot Token Scope for this conversation type: channels:read (public channels), groups:read (private channels), mpim:read (group DMs), or im:read (DMs), then reinstall the Slack app to the workspace to grant it. If the bot token changes, update it with vika login slack <instance>.';
@@ -179,7 +196,7 @@ export class SlackClient {
       is_bot: id === this.account.botUserId ? true : null, deleted: null };
     try {
       signal.throwIfAborted();
-      const { user } = await this.api.call('users.info', { user: id },
+      const { user } = await this.queryApi.call('users.info', { user: id },
         AbortSignal.any([signal, AbortSignal.timeout(NAME_LOOKUP_MS)]));
       if (user?.id !== id) throw new Error('Slack returned an invalid member profile');
       member.name = userName(user);
@@ -189,6 +206,93 @@ export class SlackClient {
       member.profile_error = error instanceof SlackError ? error.code : 'profile_unavailable';
     }
     return member;
+  }
+
+  async read(method, params, signal) {
+    try { return await this.queryApi.call(method, params, signal); } catch (error) {
+      if (error instanceof SlackError && error.code === 'missing_scope') {
+        error.message += '. Grant the bot the conversation read/history scope for this type (channels, groups, im or mpim), then reinstall the Slack app. User profiles require users:read.';
+      }
+      throw error;
+    }
+  }
+
+  async listChats({ query = '', limit = 100, cursor } = {}) {
+    pageInput(limit, 500, cursor);
+    if (typeof query !== 'string' || query.length > 200) throw new Error('Invalid Slack chat query');
+    const page = await this.read('users.conversations', {
+      types: 'public_channel,private_channel,mpim', exclude_archived: true, limit, cursor,
+    }, this.actionSignal());
+    if (!Array.isArray(page.channels) || page.channels.length > limit
+      || page.channels.some(chat => !validChannel(chat?.id))) throw new Error('Slack returned an invalid conversation list');
+    const chats = page.channels.filter(chat => !chat.is_im && chat.is_member !== false && !chat.is_archived)
+      .map(chat => ({ chat_id: chat.id, name: cleanName(chat.name), chat_status: 'normal',
+        tenant_key: this.account.teamId, external: chat.is_ext_shared === true }))
+      .filter(chat => (chat.name ?? '').toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+    return { chats, ...pagination(page, cursor) };
+  }
+
+  async listChatMessages({ chat_id: channel, limit = 20, cursor, as = 'bot' }) {
+    pageInput(limit, 50, cursor, as);
+    if (!validChannel(channel)) throw new Error('Slack chat_id must be a channel id');
+    const signal = this.actionSignal();
+    const page = await this.read('conversations.history', { channel, limit, cursor }, signal);
+    return this.historyPage(page, { channel, limit, cursor, signal });
+  }
+
+  async listThreadMessages({ thread_id: id, limit = 50, cursor, as = 'bot' }) {
+    pageInput(limit, 50, cursor, as);
+    const parsed = parseMessageId(id, this.account.teamId);
+    if (!parsed) throw new Error('Slack thread_id must be a full sl:<team>:<channel>:<ts> id in this workspace');
+    const route = this.state.route(id);
+    const root = route?.threadTs ?? parsed.ts;
+    const signal = this.actionSignal();
+    const page = await this.read('conversations.replies', { channel: parsed.channel, ts: root, limit, cursor }, signal);
+    return this.historyPage(page, { channel: parsed.channel, root, limit, cursor, signal });
+  }
+
+  async historyPage(page, { channel, root, limit, cursor, signal }) {
+    if (!Array.isArray(page.messages) || page.messages.length > limit) throw new Error('Slack returned an invalid message list');
+    const more = pagination(page, cursor);
+    // Validate the entire page before caching any route. A thread may only
+    // contain its root and replies to that root.
+    for (const event of page.messages) {
+      historyMessage(event, { account: this.account, channel });
+      if (root && (event.thread_ts ?? event.ts) !== root) throw new Error('Slack returned a message outside the requested thread');
+    }
+    const names = new Map();
+    const ids = [...new Set(page.messages.flatMap(event => [...namedUsers(event)]))];
+    const missing = [];
+    for (const id of ids) {
+      const cached = this.state.cachedName(id);
+      if (cached) names.set(id, cached);
+      else if (id !== this.account.botUserId) missing.push(id);
+    }
+    // Labels are optional. Keep the whole page usable when profiles are slow.
+    const labels = AbortSignal.any([signal, AbortSignal.timeout(NAME_LOOKUP_MS)]);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
+      while (next < missing.length && !labels.aborted) {
+        const member = await this.memberProfile(missing[next++], labels);
+        if (member.name) names.set(member.user_id, member.name);
+      }
+    }));
+    signal.throwIfAborted();
+    const messages = [];
+    for (const event of page.messages) {
+      const item = historyMessage(event, { account: this.account, channel, names, agentName: this.config.agentName });
+      if (!item) continue;
+      this.state.recordRoute(item.message.message_id, item.route, { refresh: true });
+      if (item.route.threadTs && !this.state.route(item.message.thread_id)) {
+        this.state.recordRoute(item.message.thread_id, { channel, ts: item.route.threadTs });
+      }
+      messages.push(item.message);
+    }
+    for (const [id, name] of names) {
+      this.state.saveName(id, name);
+      this.state.rememberPerson(channel, id, name);
+    }
+    return { chat_id: channel, messages, ...more };
   }
 
   target(id) {
