@@ -279,10 +279,9 @@ reminder line (same `event=`, `undecided=1`, no seq;
 `VIKA_DECISION_NUDGE=false` turns it off) and an `agent.decision_missing`
 activity, so a reminder costs a turn only when the model missed a decision.
 Non-chat events are only counted: one owner notice may cover several mails,
-so a mail without a decision of its own is not reliably a miss. A turn
-that calls `stay_silent` on one input three times, or makes more than 40 calls
-that record nothing new (repeats, events that need no decision, refusals), is
-interrupted; new decisions on distinct events never count toward that limit.
+so a mail without a decision of its own is not reliably a miss. A
+`stay_silent` call that changes nothing (a repeat, an event that needs no
+decision) gets a STOP hint in its tool result; the turn is never interrupted.
 
 Who a decision may reach is decided in one Core function, so routing rules
 (a source that may also post to a group, say) can be added there later. Today

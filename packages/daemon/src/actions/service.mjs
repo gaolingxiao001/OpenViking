@@ -20,14 +20,6 @@ import { TOOLS, publicTool, validateInput } from './tools.mjs';
 
 const NO_ACTION = 'No action was taken.';
 
-// Loop guard for stay_silent, counted per runtime turn and only for the
-// runtime that holds authority: the call that repeats one decision this many
-// times, or the one past this many calls in the turn that recorded nothing new
-// (a repeat, an input that needs no decision, a refusal), interrupts the turn.
-// New decisions never count toward the second limit: a busy group needs many.
-export const SILENCE_REPEAT_LIMIT = 3;
-export const SILENCE_TURN_LIMIT = 40;
-
 const HANDLERS = {
   send_message: 'sendMessage',
   notify_owner: 'notifyOwner',
@@ -73,27 +65,11 @@ function messageLines(messages, { withChat = false } = {}) {
 // outbox, invoke the Connector, settle. Authority, freshness, routing and
 // content checks happen here once, whichever runtime asked.
 export class ActionService {
-  constructor({
-    config, store, connectors, roster = null, liveness = null, meetingEnabled = false, ovClient = null, logger,
-    onDecisionLoop = null,
-  }) {
-    Object.assign(this, { config, store, connectors, roster, liveness, meetingEnabled, ovClient, logger, onDecisionLoop });
+  constructor({ config, store, connectors, roster = null, liveness = null, meetingEnabled = false, ovClient = null, logger }) {
+    Object.assign(this, { config, store, connectors, roster, liveness, meetingEnabled, ovClient, logger });
     // One temporary working reaction per conversation, removed by the next
     // final delivery there.
     this.temporaryReactions = new Map();
-    // stay_silent calls in the current runtime turn, keyed by authority and
-    // decision; endTurn() resets them.
-    this.silenceCalls = new Map();
-    this.silenceWasted = 0;
-    this.silenceLoopTripped = false;
-  }
-
-  // Every runtime turn callback ends the turn's bookkeeping. Only one turn is
-  // live at a time, and a runtime switch changes the authority in the key.
-  endTurn() {
-    this.silenceCalls.clear();
-    this.silenceWasted = 0;
-    this.silenceLoopTripped = false;
   }
 
   manifest(connector) {
@@ -128,20 +104,19 @@ export class ActionService {
     const trace = { tool: name, via };
     const caller = { authority, trace };
     const tool = TOOLS.find((candidate) => candidate.name === name);
-    // Loop-guarded only while the tool is offered (explicitSilence on).
-    const guarded = name === 'stay_silent' && Boolean(this.config.explicitSilence);
-    let silence = null;
+    // A refused stay_silent is shown like a blocked delivery, only while the
+    // tool is offered (explicitSilence on).
+    const silence = name === 'stay_silent' && Boolean(this.config.explicitSilence);
     try {
       if (!tool || !this.offered(tool)) throw blocked('unknown_tool', `unknown tool: ${name}`);
       try { validateInput(tool.inputSchema, input); } catch (error) { throw blocked('invalid_input', error.message); }
       this.assertAuthority(authority);
-      if (guarded) silence = this.countSilence(authority, input);
       trace.runtime = this.store.getCognitionState().runtime;
       let result = await this[HANDLERS[name]](input, caller);
-      // Only a call that changed nothing says STOP: a first success after a
-      // refused attempt is a fix, not a repeat.
-      if (silence?.calls >= 2 && (result.data?.duplicate || result.data?.not_required)) {
-        result = { ...result, text: `STOP: stay_silent was already called for this input (${silence.calls} calls). Calling it again does nothing. Finish your turn. ${result.text}` };
+      // Only a call that changed nothing says STOP: a success after a refused
+      // attempt (decision_ambiguous fixed with decision_instance) is a fix.
+      if (silence && (result.data?.duplicate || result.data?.not_required)) {
+        result = { ...result, text: `STOP: this stay_silent call changed nothing. Calling it again does nothing. Finish your turn. ${result.text}` };
       }
       trace.outcome = result.data?.dry_run ? 'dry_run' : result.data?.duplicate ? 'duplicate'
         : result.data?.not_required ? 'not_required' : 'ok';
@@ -151,7 +126,7 @@ export class ActionService {
       trace.outcome = trace.invoked ? 'failed' : 'blocked';
       trace.code = error.code ?? (trace.invoked ? 'connector_failed' : 'error');
       this.logger.warn('agent_tool', { ...trace, durationMs: Date.now() - startedAt, error: safeError(error) });
-      if (trace.outcome === 'blocked' && (tool?.action || guarded)) {
+      if (trace.outcome === 'blocked' && (tool?.action || silence)) {
         this.store.recordActivity({
           eventKey: `tool:${randomUUID()}`, kind: 'delivery.blocked', status: 'BLOCKED',
           conversationKey: caller.convKey ?? null, inboundSeq: trace.decisionSeq ?? null, summary: safeError(error),
@@ -160,41 +135,6 @@ export class ActionService {
         });
       }
       throw error;
-    } finally {
-      // A call refused before the authority check counts too; a retired
-      // runtime's call never counts, and never interrupts the current runtime.
-      if (guarded && this.holdsAuthority(authority)) {
-        this.guardSilenceLoop(silence ?? this.countSilence(authority, input), trace);
-      }
-    }
-  }
-
-  countSilence(authority, input) {
-    const key = [authority ?? '', input?.decision_id ?? '', input?.decision_instance ?? ''].map(String).join('\u0000');
-    const calls = (this.silenceCalls.get(key) ?? 0) + 1;
-    this.silenceCalls.set(key, calls);
-    return { calls };
-  }
-
-  // A model that keeps deciding silence (the same input again and again, or
-  // ever new ids that record nothing) is in a loop no tool result will break:
-  // end the turn once. Recorded silence stays in the ledger.
-  guardSilenceLoop({ calls }, trace) {
-    if (trace.outcome !== 'ok') this.silenceWasted += 1;
-    if (this.silenceLoopTripped || (calls < SILENCE_REPEAT_LIMIT && this.silenceWasted <= SILENCE_TURN_LIMIT)) return;
-    this.silenceLoopTripped = true;
-    const fields = { decisionSeq: trace.decisionSeq ?? null, calls: Math.max(calls, this.silenceWasted) };
-    this.logger.warn('decision_loop', fields);
-    try {
-      this.store.recordActivity({
-        eventKey: `decision:loop:${randomUUID()}`, kind: 'agent.decision_loop', status: 'INTERRUPTED',
-        inboundSeq: trace.decisionSeq ?? null, summary: '', metadata: fields,
-      });
-    } catch (error) {
-      this.logger.warn('activity_persist_failed', { kind: 'agent.decision_loop', error: safeError(error) });
-    }
-    try { this.onDecisionLoop?.(); } catch (error) {
-      this.logger.warn('decision_loop_interrupt_failed', { error: safeError(error) });
     }
   }
 
@@ -229,12 +169,8 @@ export class ActionService {
     await Promise.allSettled(scopes.map((scope) => this.clearTemporaryReaction(scope, 'shutdown')));
   }
 
-  holdsAuthority(authority) {
-    return Boolean(authority) && authority === this.store.getCognitionState().authorityToken;
-  }
-
   assertAuthority(authority) {
-    if (!this.holdsAuthority(authority)) {
+    if (!authority || authority !== this.store.getCognitionState().authorityToken) {
       throw blocked('authority_revoked', `Blocked: this model runtime no longer owns tool authority. ${NO_ACTION}`);
     }
   }

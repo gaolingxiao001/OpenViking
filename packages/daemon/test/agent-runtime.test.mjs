@@ -324,25 +324,6 @@ describe('global Codex/Claude hard switch', () => {
     ]);
   });
 
-  it('interrupts a looping turn and reopens the same native session, but never during a transition', async () => {
-    const runtime = new AgentRuntime({}, {}, quietLogger);
-    const calls = [];
-    const implementation = {
-      turnInProgress: true,
-      async interruptTurn() { calls.push('interrupt'); this.turnInProgress = false; },
-      async rotateSession({ resume }) { calls.push(`rotate:${resume}`); return 'claude-session'; },
-    };
-    runtime.runtime = 'claude';
-    runtime.backend = adaptRuntime('claude', implementation);
-    runtime.pendingTransitions = 1;
-    assert.equal(await runtime.interruptTurn(), false);
-    runtime.pendingTransitions = 0;
-    assert.equal(await runtime.interruptTurn(), true);
-    assert.deepEqual(calls, ['interrupt', 'rotate:true']);
-    assert.equal(await runtime.interruptTurn(), false, 'no live turn');
-    assert.deepEqual(calls, ['interrupt', 'rotate:true']);
-  });
-
   it('publishes an immutable normalized snapshot', async () => {
     const runtime = new AgentRuntime({}, {}, quietLogger);
     const implementation = backend('claude');

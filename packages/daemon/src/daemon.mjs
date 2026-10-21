@@ -218,12 +218,6 @@ export class PersonalAgentDaemon {
         meetingEnabled: this.connectorIds.includes('lark'),
         ovClient,
         logger: this.logger.child({ component: 'actions' }),
-        // A stay_silent loop ends the turn; the runtime may not exist yet here.
-        onDecisionLoop: () => {
-          void this.agentRuntime?.interruptTurn().catch((error) => {
-            this.logger.warn('decision_loop_interrupt_failed', { error: safeError(error) });
-          });
-        },
       });
       this.actionApi = await startActionApi({
         socketPath: this.config.actionSocketPath,
@@ -234,7 +228,6 @@ export class PersonalAgentDaemon {
       await this.loadOpenVikingIdentity(ovClient);
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
-          this.actions.endTurn();
           this.meeting?.onTurnFailed(meetingTurn(info));
           this.decisionPolicy?.onTurnFailed(info);
           void this.failurePolicy.onTurnFailed(info)
@@ -243,13 +236,11 @@ export class PersonalAgentDaemon {
             });
         },
         onTurnSucceeded: (info) => {
-          this.actions.endTurn();
           this.meeting?.onTurnSucceeded(meetingTurn(info));
           this.failurePolicy.onTurnSucceeded(info);
           this.decisionPolicy?.onTurnSucceeded(info);
         },
         onTurnAbandoned: (info) => {
-          this.actions.endTurn();
           this.meeting?.onTurnAbandoned(meetingTurn(info));
           this.decisionPolicy?.onTurnAbandoned(info);
         },

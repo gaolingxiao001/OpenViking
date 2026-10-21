@@ -6,7 +6,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { EDITABLE_CHARS, approvalCard, approvalNote, approvedText } from '../src/actions/approval.mjs';
-import { ActionService, SILENCE_REPEAT_LIMIT, SILENCE_TURN_LIMIT } from '../src/actions/service.mjs';
+import { ActionService } from '../src/actions/service.mjs';
 import { startActionApi, stopActionApi } from '../src/actions/api.mjs';
 import { createMcpHandler } from '../src/actions/mcp.mjs';
 import { resolveCardAction } from '../src/card-messages.mjs';
@@ -1015,7 +1015,7 @@ describe('stay_silent decisions', () => {
 
     // A repeat changes nothing and says to stop.
     const again = await call('stay_silent', { decision_id: 'message:om_quiet12345678', reason: 'again' });
-    assert.match(again.text, /^STOP: stay_silent was already called for this input \(2 calls\)\. Calling it again does nothing\. Finish your turn\. Already recorded/);
+    assert.match(again.text, /^STOP: this stay_silent call changed nothing\. Calling it again does nothing\. Finish your turn\. Already recorded/);
     assert.equal(again.data.duplicate, true);
     assert.equal(toolLines(logs)[1].outcome, 'duplicate');
     assert.equal(decisions(store).length, 1);
@@ -1068,7 +1068,10 @@ describe('stay_silent decisions', () => {
     // 「发送 N」 was handled by the daemon; its event= needs no decision.
     store.ingest(chatEvent({ messageId: 'om_approve123456', eventId: 'evt-approve', chatId: 'oc_known12345678' }), 'approval_reply');
     const handled = await call('stay_silent', { decision_id: 'evt-approve' });
-    assert.deepEqual([handled.text, handled.data], ['This input was handled by the daemon and needs no decision.', { not_required: true }]);
+    assert.deepEqual([handled.text, handled.data], [
+      'STOP: this stay_silent call changed nothing. Calling it again does nothing. Finish your turn. This input was handled by the daemon and needs no decision.',
+      { not_required: true },
+    ]);
     assert.deepEqual(decisions(store).map((row) => [row.connector_instance, row.seq]), [['calendar-work', work.seq]]);
     await assert.rejects(call('stay_silent', { decision_id: 'message:om_known12345678' }, 'retired-token'),
       (error) => error.code === 'authority_revoked');
@@ -1103,7 +1106,7 @@ describe('stay_silent decisions', () => {
     assert.equal(toolLines(logs).at(-1).overrode, 'silent');
     // A delivery first: silence changes nothing.
     const after = await call('stay_silent', { decision_id: 'message:om_first12345678' });
-    assert.match(after.text, /^STOP: .*\(2 calls\).* A delivery is already recorded for this input; nothing to change\. Do not call stay_silent for it\.$/);
+    assert.match(after.text, /^STOP: .* A delivery is already recorded for this input; nothing to change\. Do not call stay_silent for it\.$/);
     assert.deepEqual({ ...outcome('message:om_first12345678') }, { outcome: 'delivered', tool: 'send_message' });
     // A retraction has no decision.
     await call('retract_message', { message_id: 'om_delivered123456' });
@@ -1146,84 +1149,22 @@ describe('stay_silent decisions', () => {
     assert.deepEqual(decisions(store).map((row) => [row.event_id, row.outcome, row.tool]), [['imap:1:7', 'delivered', 'reply_message']]);
   });
 
-  it('interrupts a turn that loops on stay_silent, once, until the turn ends', async (t) => {
-    const { store, service, call, inbound } = setupOn(t);
-    let interrupts = 0;
-    service.onDecisionLoop = () => { interrupts += 1; };
-    inbound({ messageId: 'om_loop12345678', chatId: 'oc_loop12345678' });
-    const silence = () => call('stay_silent', { decision_id: 'message:om_loop12345678' });
-    await silence();
-    await silence();
-    assert.equal(interrupts, 0);
-    assert.match((await silence()).text, /^STOP: .*\(3 calls\)/);
-    assert.equal(interrupts, 1);
-    await silence();
-    assert.equal(interrupts, 1, 'once per turn');
-    const [loop] = activities(store, 'agent.decision_loop');
-    assert.equal(activities(store, 'agent.decision_loop').length, 1);
-    assert.equal(loop.metadata.calls, SILENCE_REPEAT_LIMIT);
-
-    // A new turn starts counting again.
-    service.endTurn();
-    await silence();
-    assert.equal(interrupts, 1);
-  });
-
-  it('never trips on many distinct decisions, only on calls that record nothing', async (t) => {
-    const { service, call, inbound } = setupOn(t);
-    let interrupts = 0;
-    service.onDecisionLoop = () => { interrupts += 1; };
-    const id = (index) => `om_many${String(index).padStart(8, '0')}`;
-    // A busy group: more new decisions in one turn than the limit, all legitimate.
-    for (let index = 0; index < SILENCE_TURN_LIMIT + 5; index += 1) {
-      inbound({ messageId: id(index), chatId: `oc_${id(index)}` });
-      const result = await call('stay_silent', { decision_id: `message:${id(index)}` });
-      assert.equal(result.data.silent, true);
-    }
-    assert.equal(interrupts, 0);
-    // Repeats spread over ever other ids: each one changes nothing.
-    for (let index = 0; index < SILENCE_TURN_LIMIT; index += 1) {
-      assert.match((await call('stay_silent', { decision_id: `message:${id(index)}` })).text, /^STOP: /);
-    }
-    assert.equal(interrupts, 0);
-    await call('stay_silent', { decision_id: `message:${id(SILENCE_TURN_LIMIT)}` });
-    assert.equal(interrupts, 1);
-  });
-
-  it('keys the guard by decision_instance and says STOP only for a call that changed nothing', async (t) => {
+  it('says STOP only for a call that changed nothing, never for a retry that fixed a refusal', async (t) => {
     const { store, call } = setupOn(t);
     store.ingest(subjectEvent({ instance: 'calendar-personal', eventId: 'reminder-1' }));
     store.ingest(subjectEvent({ instance: 'calendar-work', eventId: 'reminder-1' }));
     await assert.rejects(call('stay_silent', { decision_id: 'reminder-1' }), (error) => error.code === 'decision_ambiguous');
-    // The corrected retry is a first call for its key, and a real record.
+    // The corrected retry is a real record.
     const fixed = await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-work' });
     assert.equal(fixed.text, 'Recorded: nothing is sent for this input.');
-    // A refused attempt followed by a success on the same key is no repeat either.
+    // A refused attempt followed by a success on another instance is no repeat either.
     await assert.rejects(call('stay_silent', { decision_id: 'reminder-1' }), (error) => error.code === 'decision_ambiguous');
     const second = await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-personal' });
     assert.equal(second.text, 'Recorded: nothing is sent for this input.');
     assert.match((await call('stay_silent', { decision_id: 'reminder-1', decision_instance: 'calendar-work' })).text,
-      /^STOP: stay_silent was already called for this input \(2 calls\)/);
+      /^STOP: this stay_silent call changed nothing\. .*Already recorded/);
     store.ingest(chatEvent({ messageId: 'om_approve123456', eventId: 'evt-approve', chatId: 'oc_known12345678' }), 'approval_reply');
-    assert.equal((await call('stay_silent', { decision_id: 'evt-approve' })).text, 'This input was handled by the daemon and needs no decision.');
     assert.match((await call('stay_silent', { decision_id: 'evt-approve' })).text, /^STOP: .*needs no decision\.$/);
-  });
-
-  it('does not count a retired runtime\'s calls, nor let them interrupt the current runtime', async (t) => {
-    const { service, call, inbound } = setupOn(t);
-    let interrupts = 0;
-    service.onDecisionLoop = () => { interrupts += 1; };
-    inbound({ messageId: 'om_retired123456', chatId: 'oc_retired123456' });
-    for (let index = 0; index < SILENCE_REPEAT_LIMIT + 2; index += 1) {
-      await assert.rejects(call('stay_silent', { decision_id: 'message:om_retired123456' }, 'retired-token'),
-        (error) => error.code === 'authority_revoked');
-    }
-    for (let index = 0; index < SILENCE_TURN_LIMIT + 2; index += 1) {
-      await assert.rejects(call('stay_silent', { decision_id: `message:om_gone${index}` }, 'retired-token'));
-    }
-    assert.equal(interrupts, 0);
-    // The current runtime's first call is a first call.
-    assert.equal((await call('stay_silent', { decision_id: 'message:om_retired123456' })).text, 'Recorded: nothing is sent for this input.');
   });
 });
 
@@ -1235,6 +1176,6 @@ describe('stay_silent switched off (the default)', () => {
     await assert.rejects(call('stay_silent', { decision_id: 'message:om_off123456789' }), (error) => error.code === 'unknown_tool');
     await call('send_message', { chat_id: 'oc_off123456789', markdown: 'hi', decision_id: 'message:om_off123456789' });
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM decisions').get().n, 0);
-    assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM activities WHERE kind IN ('delivery.silent', 'delivery.blocked', 'agent.decision_loop')").get().n, 0);
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM activities WHERE kind IN ('delivery.silent', 'delivery.blocked')").get().n, 0);
   });
 });

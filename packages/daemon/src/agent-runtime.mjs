@@ -146,17 +146,6 @@ export class AgentRuntime {
 
   _interrupt() { return this.backend?.interrupt() ?? Promise.resolve(); }
 
-  // Ends the live turn as abandoned and keeps the native session, for a model
-  // stuck in a tool loop. Claude and Pi kill their process to interrupt, so the
-  // same session is then reopened (resume) and queued input drains as after a
-  // /model. Does nothing while a transition runs: that one interrupts anyway.
-  interruptTurn() {
-    if (this.stopping || this.transitioning || this.pendingTransitions > 0 || !this.backend?.turnInProgress) {
-      return Promise.resolve(false);
-    }
-    return this.transition({ kind: 'interrupt-turn' }).then(() => true);
-  }
-
   async _listModels() {
     const current = await this.backend?.listModels() ?? [];
     const models = [
@@ -251,12 +240,6 @@ export class AgentRuntime {
         await this._interrupt();
         if (this.stopping) throw new Error('agent runtime stopped during session transition');
         const threadId = await this._rotateSession({ resume: false });
-        return { ok: true, kind: request.kind, runtime: this.runtime, threadId };
-      }
-      if (request.kind === 'interrupt-turn') {
-        await this._interrupt();
-        if (this.stopping) throw new Error('agent runtime stopped during turn interrupt');
-        const threadId = await this._rotateSession({ resume: true });
         return { ok: true, kind: request.kind, runtime: this.runtime, threadId };
       }
       if (request.kind === 'select-model') {
