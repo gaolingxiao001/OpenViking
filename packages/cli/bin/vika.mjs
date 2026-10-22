@@ -14,8 +14,8 @@ const commands = () => {
   const target = t('[实例|web|updater]', '[instance|web|updater]');
   return [
     [t('配置', 'Set up'), [
-      ['setup', '', t('添加或修改实例：接飞书、微信、邮箱、Telegram、Slack、QQ，设主渠道等',
-        'Add or change an instance: connect Feishu/Lark, WeChat, email, Telegram, Slack, QQ, pick the primary channel')],
+      ['setup', '', t('添加、修改或删除实例：接入消息渠道、设主渠道等',
+        'Add, change or remove an instance: connect messaging channels, pick the primary channel')],
       ['login', '<lark|weixin|email|telegram|slack|qq>', t('登录过期或改了密码后重新授权；后面可加实例名',
         'Authorize again after a login expired or a password changed; an instance name may follow')],
     ]],

@@ -277,6 +277,8 @@ OpenViking 是 Vika 的必需组件：setup 新建实例时，会在接入 IM �
 
 `npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `VIKA_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `vika upgrade all`（或 `vika start <新实例>` 加 `vika restart web`）。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `vika upgrade <id>`。
 
+删除实例也可以运行 `vika setup`，选择「删除一个实例」，选定后确认（默认取消）。setup 会移除实例配置和对应的受管 PM2 进程、保存进程列表，并刷新控制台；工作目录、历史数据、登录凭据、OpenViking 记忆和各平台的机器人均保留。删除默认实例时，可选择新的默认实例（只剩一个时自动选用）。删除最后一个实例时，也会移除 Web 和 updater 进程，将配置备份到原路径加 `.bak` 后移走原文件，下次 `vika setup` 可重新新建实例。部署或升级进行中不能删除；进程删除失败时保留配置，可修好后重试。
+
 代码升级先由维护者发布新版本（见 install.md），再调用 `vika upgrade <instance-id>`。升级承载当前 turn 的自身进程也由 updater 继续完成，但当前 CLI/模型连接可能随进程退出，结果应用 `/status` 或本机 health check 验收。
 
 ## Activity 页面

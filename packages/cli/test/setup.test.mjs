@@ -55,6 +55,7 @@ function harness(t, answers, { ov = { configPath: null, url: 'http://127.0.0.1:1
     control: {
       start: async (target) => { calls.push(['start', target]); if (failStart) throw new Error('pm2 is not installed'); },
       restart: async (target) => { calls.push(['restart', target]); },
+      remove: async (targets) => { calls.push(['remove', targets]); },
     },
     // On a terminal setup waits for the owner's message; here it has arrived.
     listen: async ({ port }) => { calls.push(['listen', port]); return { wait: async () => true }; },
@@ -490,6 +491,30 @@ function existing(h, agent) {
   return full;
 }
 
+test('setup offers removal without requiring a usable runtime or OpenViking', async (t) => {
+  const h = harness(t, ['3', '1', 'y'], { runtimes: [], ov: { usable: false } });
+  const agent = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.calls, [['remove', ['updater', agent.id, 'web']]]);
+  assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+  assert.match(h.written(), /删除一个实例/);
+  assert.match(h.written(), /确认删除这个实例？.*y\/N/);
+  assert.doesNotMatch(h.written(), /机器人名字|OpenViking 已就绪/);
+});
+
+test('removal confirmation defaults to cancel, in Chinese and English', async (t) => {
+  for (const lang of ['zh', 'en']) {
+    const h = harness(t, ['3', '1', ''], { runtimes: [] });
+    h.options.lang = lang;
+    const before = existing(h, {});
+    assert.equal(await setupCommand(h.options), 0);
+    assert.deepEqual(h.manifest().agents, [before]);
+    assert.deepEqual(h.calls, []);
+    assert.match(h.written(), lang === 'zh' ? /已取消，没有删除实例/ : /Cancelled; no instance was removed/);
+    if (lang === 'en') assert.doesNotMatch(h.written(), /[一-龥]/);
+  }
+});
+
 // The change menu: 1 名字 2 角色 3 工作目录 4 运行时 5 IM 6 飞书应用 7 主渠道 8 邮箱 9 OpenViking 10 保存 11 放弃.
 test('changing an instance lists every setting; only the ones opened change', async (t) => {
   //                    change asd  IMs  lark+weixin  primary  weixin  save
@@ -673,6 +698,37 @@ function terminalHarness(t, options) {
 const LEFT = '\x1b[D';
 const RIGHT = '\x1b[C';
 const DOWN = '\x1b[B';
+
+test('QQ verification cannot go back after Slack has already bound in the same setup', async (t) => {
+  const h = terminalHarness(t);
+  const verified = [];
+  h.options.connect.slack = async ({ canGoBack }) => { verified.push(['slack', canGoBack]); };
+  h.options.connect.qq = async ({ canGoBack }) => { verified.push(['qq', canGoBack]); };
+  const driving = h.drive([
+    ['机器人名字', RIGHT], ['它的角色', RIGHT], ['工作目录', RIGHT], ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', ' ', DOWN, DOWN, DOWN, DOWN, ' ', DOWN, ' ', RIGHT],
+    ['主渠道', DOWN, RIGHT], ['开始接入', '\r'],
+  ]);
+  assert.equal(await setupCommand(h.options), 0);
+  await driving;
+  assert.deepEqual(verified, [['slack', true], ['qq', false]]);
+  const [agent] = h.manifest().agents;
+  assert.deepEqual(agent.connectors, ['slack', 'qq']);
+  assert.equal(agent.channel, 'qq');
+});
+
+test('back from removal confirmation returns to the setup menu without changing anything', async (t) => {
+  const h = terminalHarness(t);
+  const before = existing(h, {});
+  const driving = h.drive([
+    ['要做什么', DOWN, DOWN, '\r'], ['删除哪个实例', '\r'],
+    ['确认删除这个实例', LEFT], ['要做什么', '\x03'],
+  ]);
+  await assert.rejects(setupCommand(h.options), { name: 'PromptAborted' });
+  await driving;
+  assert.deepEqual(h.manifest().agents, [before]);
+  assert.deepEqual(h.calls, []);
+});
 
 test('back from Telegram key entry returns to setup confirmation without saving or starting', async (t) => {
   const h = terminalHarness(t);
@@ -1223,7 +1279,7 @@ test('in English, a first setup says it all in English, and the bot says hello i
   assert.equal(await setupCommand(h.options), 0);
   const text = h.written();
   assert.doesNotMatch(text, /[一-鿿]/);
-  assert.match(text, /^Vika setup: add or change the agent instances on this machine\.\n\n  ✔ Found Codex, Pi \(built in\)\n/);
+  assert.match(text, /^Vika setup: add, change or remove the agent instances on this machine\.\n\n  ✔ Found Codex, Pi \(built in\)\n/);
   assert.match(text, /Primary channel \(where the bot reaches you first, e\.g\. new-mail alerts\)/);
   assert.match(text, /Next, scanning: Feishu\/Lark 2 scans, WeChat 1 scan; the instance is saved after the scans are done/);
   assert.match(text, /Vee \(primary\) is ready\.\n  Feishu\/Lark: It said hello in your chat; just reply\n  WeChat: Say "hi" to it first/);

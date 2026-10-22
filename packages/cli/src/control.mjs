@@ -16,6 +16,7 @@ import {
 } from '../../updater/src/pm2.mjs';
 import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '../../updater/src/targets.mjs';
 import { imList, loadInstances } from './instances.mjs';
+import { manifestPath } from './manifest.mjs';
 import { t } from './i18n.mjs';
 import { padEnd, spinner, styler } from './ui.mjs';
 
@@ -171,6 +172,48 @@ export async function stopCommand(target, options) {
   }
   await context.execFileImpl(context.pm2Bin, ['save'], { timeout: 30_000, env: context.pm2Env });
   return 0;
+}
+
+// Setup removes exact managed processes, including stopped ones. Check every
+// app before deleting any, and use PM2 ids so a same-name app is never swept up.
+export async function removeManagedApps(targets, options = {}) {
+  const context = defaults(options);
+  const processes = await pm2Processes(context);
+  const selected = [];
+  // The shared Web is checked too before setup refreshes its routes.
+  for (const target of new Set([...targets, ...(options.checkTargets ?? [])])) {
+    if (!/^[a-z][a-z0-9-]{0,31}$/.test(target) || target === 'all') throw new Error(`invalid removal target: ${target}`);
+    const app = `vika-${target}`;
+    const matches = processes.filter((info) => info?.name === app);
+    if (!matches.length) continue;
+    if (matches.length !== 1) throw new Error(`expected exactly one PM2 app named ${app}`);
+    const [info] = matches;
+    const releasesRoot = await realpath(path.join(path.dirname(context.releaseLink), 'releases'));
+    const execPath = await realpath(info.pm2_env?.pm_exec_path || '');
+    const component = ['web', 'updater'].includes(target) ? target : 'daemon';
+    const relative = path.relative(releasesRoot, execPath).split(path.sep);
+    if (!isInside(releasesRoot, execPath) || relative.length !== 5
+      || relative.slice(1).join('/') !== `packages/${component}/src/main.mjs`) {
+      throw new Error(`${app} is outside the managed releases or has an unexpected executable; refusing to remove it`);
+    }
+    if (component !== 'web') {
+      const configured = info.pm2_env?.VIKA_CONFIG;
+      if (!configured || await realpath(configured) !== await realpath(manifestPath(context.env))) {
+        throw new Error(`${app} belongs to a different manifest; refusing to remove it`);
+      }
+      if (component === 'daemon' && info.pm2_env?.VIKA_INSTANCE_ID !== target) {
+        throw new Error(`${app} belongs to a different instance; refusing to remove it`);
+      }
+    }
+    if (!Number.isSafeInteger(info.pm_id) || info.pm_id < 0) throw new Error(`${app} has no valid PM2 id`);
+    if (targets.includes(target)) selected.push(info);
+  }
+  for (const info of selected) {
+    await context.execFileImpl(context.pm2Bin, ['delete', String(info.pm_id)], { timeout: 60_000, env: context.pm2Env });
+  }
+  // Without --force, PM2 keeps its previous dump when the list is empty and
+  // resurrects the deleted instances at the next login.
+  await context.execFileImpl(context.pm2Bin, ['save', '--force'], { timeout: 30_000, env: context.pm2Env });
 }
 
 async function ready(spec, context) {

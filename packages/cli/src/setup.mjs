@@ -20,6 +20,7 @@ import { configureOpenViking, prepareInstanceOpenViking, saveOVConnection } from
 import { detectRuntimes, which } from './runtimes.mjs';
 import { showScan } from './qr.mjs';
 import { restartCommand, startCommand } from './control.mjs';
+import { removeInstance } from './remove-instance.mjs';
 import { autostartCommand, autostartEnabled } from './autostart.mjs';
 import { openingBanner } from './banner.mjs';
 import { box, padEnd, width } from './ui.mjs';
@@ -32,7 +33,7 @@ import { connectTelegram } from './telegram.mjs';
 import { connectQQ } from './qq.mjs';
 import { connectSlack } from './slack.mjs';
 
-// `vika setup`: add an instance, or change one. A new instance is asked
+// `vika setup`: add, change or remove an instance. A new instance is asked
 // question by question; a change is a list of every setting with its current
 // value, where the owner opens the ones to change and saves. Then the QR scans
 // (only for a newly connected IM), then the manifest is written and the
@@ -142,6 +143,7 @@ async function chooseTarget(prompter, manifest) {
     ...agents.map((agent) => ({
       label: t(`修改 ${agent.displayName}（${agent.id}）`, `Change ${agent.displayName} (${agent.id})`), hint: imList(connectorsOf(agent), agent.emailAccounts?.length), value: agent,
     })),
+    { label: t('删除一个实例', 'Remove an instance'), value: 'remove' },
   ], { back: false });
 }
 
@@ -1127,7 +1129,7 @@ async function setupFlow({
   const out = (text) => prompter.write(text);
   const vika = vikaCommand(env);
   if (!memo.runtimes) {
-    if (!prompter.fancy) out(t('Vika setup：添加或修改这台机器上的 agent 实例。\n\n', 'Vika setup: add or change the agent instances on this machine.\n\n'));
+    if (!prompter.fancy) out(t('Vika setup：添加、修改或删除这台机器上的 agent 实例。\n\n', 'Vika setup: add, change or remove the agent instances on this machine.\n\n'));
     memo.runtimes = await step(prompter, t('看看这台机器上有哪些 agent', 'Looking for agents on this machine'),
       () => detect.runtimes({ env }), foundLine);
     memo.mark = prompter.mark();
@@ -1142,6 +1144,14 @@ async function setupFlow({
   // ← and → move between the questions, until the scans begin.
   prompter.navigable = prompter.tty;
   const current = await chooseTarget(prompter, manifest);
+  if (current === 'remove') {
+    try {
+      return await removeInstance({ prompter, manifest, configPath, env, control });
+    } catch (error) {
+      if (error instanceof GoBack) throw new StartOver();
+      throw error;
+    }
+  }
   if (!current) {
     runtimes = await ensureRuntime({ prompter, env, detect, connect, live }, runtimes);
     if (!runtimes) return 1;
