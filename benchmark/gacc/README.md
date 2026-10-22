@@ -131,6 +131,11 @@ OV applies that as a hard Working Memory summary budget: if an incremental updat
 would exceed it, OV rewrites the full summary with that output cap. The total
 returned context is still bounded by the requested target ratio.
 
+Use `--adapter codex-local-summary` to compare against a Codex-style local
+summarization prompt. It keeps the same 20% retained-tail and 80% summary budget
+split, then returns the same summary-plus-retained reader context shape as the
+OV adapter so the comparison focuses on summary generation quality.
+
 `gacc.sqlite` is the primary record layer. `metrics.json` and `report.html`
 summarize condition and dataset-subset accuracy, token ratios and failures.
 `results.jsonl` keeps per-question rows for lightweight debugging.

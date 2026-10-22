@@ -216,6 +216,18 @@ def _effective_config(
     }
 
 
+def build_compression_adapter(args: argparse.Namespace, compressor: Any, root: Path) -> Any:
+    if args.adapter == "ov":
+        return adapters.OVCompressionAdapter(
+            compressor,
+            model=compressor.model,
+            state_root=root / "ov_state" / args.run_id,
+        )
+    if args.adapter == adapters.CodexLocalSummaryAdapter.name:
+        return adapters.CodexLocalSummaryAdapter(compressor, model=compressor.model)
+    raise ValueError(f"unsupported adapter: {args.adapter}")
+
+
 def _print_summary(metrics: dict[str, Any], output: Path) -> None:
     print("\n=== GACC-Bench summary ===")
     for condition, data in metrics.get("conditions", {}).items():
@@ -347,11 +359,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     if not judge.is_available():
         raise RuntimeError("judge VLM is not configured")
 
-    adapter = adapters.OVCompressionAdapter(
-        compressor,
-        model=compressor.model,
-        state_root=root / "ov_state" / args.run_id,
-    )
+    adapter = build_compression_adapter(args, compressor, root)
     try:
         rows = []
         with records.connect(root / "gacc.sqlite") as conn:
@@ -457,7 +465,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Deprecated comma-separated retention percentages; use --compression-ratios",
     )
-    parser.add_argument("--adapter", choices=("ov",), default="ov")
+    parser.add_argument(
+        "--adapter",
+        choices=("ov", adapters.CodexLocalSummaryAdapter.name),
+        default="ov",
+    )
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--sample-size", type=int, default=3)

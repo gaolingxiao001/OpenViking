@@ -54,7 +54,8 @@ Eval 配置与注意事项：
 - 模型接入配置统一复用 OpenViking 配置；评测 CLI 只暴露核心生成控制项 `temperature`，并记录实际生效的 provider、model、temperature、max tokens 等配置快照但不记录 secret。
 - 隔离 OV 状态：每次 eval 使用独立 user / session / storage，关闭或清理自动记忆，避免记忆提炼污染后续评测。
 - 压缩方法可插拔：`target_ratio` 定义期望 `final_messages` 的总 token 比例；OV adapter 使用 20% raw retained budget + 80% `summary_tokens`。`summary_tokens` 是 OV Working Memory 的硬预算：增量更新后如果超过阈值，不继续 append，直接 full rewrite 生成完整 summary 替换旧 summary。
-- 默认 adapter 使用 OV，并预留 Codex local / remote。
+- `codex-local-summary` adapter 用相同的 20% retained tail + 80% summary budget 和相同的 `summary + retained` reader 输入形态，只把 summary 生成 prompt 换成 Codex local compact prompt，用来对比摘要质量。
+- 默认 adapter 使用 OV。
 - 所有 adapter 统一输出 `final_messages`、token metrics、`effective_options`。
 - smoke 随机抽 2-3 个样本重复跑，先看模型波动。
 

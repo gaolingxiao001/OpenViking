@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from benchmark.gacc import adapters, core, records, report
-from benchmark.gacc.run_eval import _effective_config, parse_args
+from benchmark.gacc.run_eval import _effective_config, build_compression_adapter, parse_args
 from openviking.session.retention import RETENTION_MODE_TURN_BUDGET
 
 
@@ -322,10 +322,13 @@ def test_run_eval_cli_exposes_temperature_as_only_model_control(tmp_path):
             str(tmp_path / "gacc.jsonl"),
             "--temperature",
             "0",
+            "--adapter",
+            "codex-local-summary",
         ]
     )
 
     assert args.temperature == 0
+    assert args.adapter == "codex-local-summary"
     for removed_name in (
         "provider",
         "model",
@@ -346,6 +349,85 @@ def test_run_eval_cli_exposes_temperature_as_only_model_control(tmp_path):
         "judge_api_key",
     ):
         assert not hasattr(args, removed_name)
+
+
+def test_run_eval_builds_selected_codex_local_summary_adapter(tmp_path):
+    class FakeVLM:
+        model = "fake-model"
+
+    args = parse_args(
+        [
+            "--input",
+            str(tmp_path / "gacc.jsonl"),
+            "--adapter",
+            "codex-local-summary",
+        ]
+    )
+
+    adapter = build_compression_adapter(args, FakeVLM(), tmp_path)
+
+    assert isinstance(adapter, adapters.CodexLocalSummaryAdapter)
+    assert adapter.model == "fake-model"
+
+
+@pytest.mark.asyncio
+async def test_codex_local_summary_adapter_uses_codex_prompt_and_retains_recent_user_tail():
+    long_context = "head-alpha " + ("middle facts " * 90000) + "tail-omega"
+    bundle = core.GACCBundle.from_mapping({**_row(), "context": long_context})
+
+    class FakeVLM:
+        model = "fake-model"
+
+        def __init__(self):
+            self.calls = []
+
+        async def get_completion_async(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("max_tokens") is None:
+                return SimpleNamespace(content="summary " * 50000)
+            return SimpleNamespace(content="summary alpha beta")
+
+    vlm = FakeVLM()
+    adapter = adapters.CodexLocalSummaryAdapter(vlm, model=vlm.model)
+
+    compressed = await adapter.compress(
+        adapters.CompressionRequest(
+            bundle=bundle,
+            target_ratio=0.3,
+            run_id="run-1",
+            repeat_index=1,
+        )
+    )
+
+    target_tokens = core.budget_tokens(bundle, 0.3)
+    retained_budget = max(1, int(target_tokens * 0.2))
+    summary_budget = max(1, target_tokens - retained_budget)
+
+    assert compressed.condition == "ratio_0_3"
+    assert compressed.final_messages[0]["role"] == "assistant"
+    assert compressed.final_messages[1]["role"] == "user"
+    assert compressed.final_messages[0]["content"] == "Codex local summary:\nsummary alpha beta"
+    assert "tail-omega" in compressed.final_messages[1]["content"]
+    assert "head-alpha" not in compressed.final_messages[1]["content"]
+    assert compressed.token_metrics["retained_budget_tokens"] == retained_budget
+    assert compressed.token_metrics["summary_budget_tokens"] == summary_budget
+    assert compressed.token_metrics["target_tokens"] == target_tokens
+    assert compressed.effective_options["adapter"] == "codex-local-summary"
+    assert compressed.effective_options["mode"] == "codex_local_summarization"
+    assert compressed.effective_options["retention"]["retained_budget_ratio"] == 0.2
+    assert compressed.effective_options["retention"]["summary_budget_ratio"] == 0.8
+    assert (
+        compressed.effective_options["retention"]["retained_message_token_budget"]
+        == retained_budget
+    )
+    assert compressed.effective_options["retention"]["summary_tokens"] == summary_budget
+    assert compressed.effective_options["output_contract"] == "summary_plus_retained"
+    assert compressed.raw_response == "summary alpha beta"
+    assert len(vlm.calls) == 2
+    assert vlm.calls[0]["max_tokens"] is None
+    assert vlm.calls[1]["max_tokens"] == summary_budget
+    assert "CONTEXT CHECKPOINT COMPACTION" in vlm.calls[0]["prompt"]
+    assert long_context in vlm.calls[0]["prompt"]
 
 
 def test_smoke_sampling_is_seeded_and_uses_no_compression_only():
