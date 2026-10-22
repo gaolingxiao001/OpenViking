@@ -1,12 +1,16 @@
 import { registerApp } from '@larksuiteoapi/node-sdk';
 
-// Create a Feishu/Lark bot app by QR scan, then read back what it was
-// granted. Creation goes through the official SDK's registerApp (the device
-// flow of the app registration endpoint): a hand-written client of the same
-// endpoint saw every scan create the app while its poll stayed "pending", so
-// the SDK's own HTTP client is the one that is known to complete. One scan
-// creates, configures and publishes the app; the platform drops unknown scope
-// names silently, so the caller compares the granted scopes with the request.
+// Get a Feishu/Lark bot app by QR scan, then read back what it has. The scan
+// goes through the official SDK's registerApp (the device flow of the app
+// registration endpoint): a hand-written client of the same endpoint saw
+// every scan create the app while its poll stayed "pending", so the SDK's own
+// HTTP client is the one that is known to complete. One scan creates an app
+// (`create`), or picks one the scanner owns or administers (`select`; the page
+// can still make a new one), or updates the app given (`update`). The confirm
+// page adds what the app lacks from the request below, moves its events and
+// callbacks to the long connection, and publishes a version. The platform
+// drops unknown scope names silently, so the caller compares the granted
+// scopes with the request.
 
 export const EVENTS = Object.freeze(['im.message.receive_v1']);
 export const CALLBACKS = Object.freeze(['card.action.trigger']);
@@ -19,14 +23,26 @@ export class LarkRegistrationError extends Error {
   }
 }
 
+// The App ID and App Secret were refused (or belong to the other tenant brand).
+export class LarkCredentialsError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'LarkCredentialsError';
+    this.code = code;
+  }
+}
+
 export function openApiBase(brand) {
   return brand === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn';
 }
 
 // scopes: { tenant: [...], user: [...] }. onQRCode({ url, expiresIn }) shows
-// the code; onStatus gets polling / slow_down / domain_switched. Resolves with
+// the code; onStatus gets polling / slow_down / domain_switched. `appId` is
+// the app an `update` scan changes. Resolves with
 // { appId, appSecret, brand, ownerOpenId }.
-export async function createApp({
+export async function scanApp({
+  mode = 'create',
+  appId = null,
   name,
   description,
   scopes,
@@ -39,8 +55,8 @@ export async function createApp({
   try {
     result = await register({
       source: 'vika',
-      createOnly: true,
-      appPreset: { ...(name ? { name } : {}), ...(description ? { desc: description } : {}) },
+      ...(mode === 'create' ? { createOnly: true } : {}),
+      ...(mode === 'update' ? { appId } : { appPreset: { ...(name ? { name } : {}), ...(description ? { desc: description } : {}) } }),
       addons: {
         scopes: { tenant: [...scopes.tenant], user: [...scopes.user] },
         events: { items: { tenant: [...EVENTS] } },
@@ -66,35 +82,68 @@ export async function createApp({
   };
 }
 
-async function openApi(fetchImpl, brand, token, pathname) {
-  const response = await fetchImpl(`${openApiBase(brand)}${pathname}`, {
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(15_000),
-  });
-  return response.json().catch(() => ({ code: -1, msg: `HTTP ${response.status} without JSON` }));
-}
-
-// What the new app actually got: online version, bot, and granted scopes.
-export async function inspectApp({ appId, appSecret, brand }, { fetchImpl = globalThis.fetch } = {}) {
-  const tokenResponse = await fetchImpl(`${openApiBase(brand)}/open-apis/auth/v3/tenant_access_token/internal`, {
+// The app's own token: the check that an App ID and App Secret are right.
+export async function tenantToken({ appId, appSecret, brand }, { fetchImpl = globalThis.fetch } = {}) {
+  const response = await fetchImpl(`${openApiBase(brand)}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'content-type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
     signal: AbortSignal.timeout(15_000),
   });
-  const token = await tokenResponse.json();
-  if (token.code !== 0) throw new Error(`tenant_access_token failed: code=${token.code} ${token.msg ?? ''}`.trim());
-  const info = await openApi(fetchImpl, brand, token.tenant_access_token, '/open-apis/application/v6/applications/me?lang=zh_cn');
-  const bot = await openApi(fetchImpl, brand, token.tenant_access_token, '/open-apis/bot/v3/info');
-  const app = info.data?.app;
-  if (info.code !== 0 || !app) throw new Error(`reading the app failed: code=${info.code} ${info.msg ?? ''}`.trim());
+  const token = await response.json().catch(() => ({ code: -1, msg: `HTTP ${response.status} without JSON` }));
+  if (token.code !== 0 || !token.tenant_access_token) {
+    throw new LarkCredentialsError(token.code, `tenant_access_token failed: code=${token.code} ${token.msg ?? ''}`.trim());
+  }
+  return token.tenant_access_token;
+}
+
+const APP_INFO = '/open-apis/application/v6/applications/me';
+
+// What an app has: its name, online version, bot, granted scopes, card
+// callbacks, and the events of its online version (null when there is none,
+// or it cannot be read). get(pathname, query) resolves with the response's
+// { code, msg, data }; the app's own information has to be readable.
+export async function readApp(get) {
+  const info = await get(APP_INFO, { lang: 'zh_cn' });
+  const app = info.code === 0 ? info.data?.app : null;
+  if (!app) throw new Error(`reading the app failed: code=${info.code} ${info.msg ?? ''}`.trim());
+  const bot = await get('/open-apis/bot/v3/info', {});
+  let events = null;
+  if (app.online_version_id && app.app_id) {
+    const version = await get(`/open-apis/application/v6/applications/${app.app_id}/app_versions/${app.online_version_id}`,
+      { lang: 'zh_cn', user_id_type: 'open_id' });
+    const infos = version.code === 0 ? version.data?.app_version?.event_infos : null;
+    if (Array.isArray(infos)) events = infos.map(({ event_type: type }) => type).filter(Boolean);
+  }
   return {
+    appId: app.app_id ?? null,
+    name: app.app_name ?? null,
     online: Boolean(app.online_version_id),
     pendingReview: Boolean(app.unaudit_version_id),
-    botActive: bot.code === 0 && bot.bot?.activate_status === 2,
-    botName: bot.bot?.app_name ?? null,
+    botActive: bot.code === 0 && bot.data?.activate_status === 2,
+    botName: bot.code === 0 ? bot.data?.app_name ?? null : null,
     granted: (app.scopes ?? []).map(({ scope, token_types: tokenTypes }) => ({ scope, tokenTypes: tokenTypes ?? [] })),
+    callbacks: { type: app.callback_info?.callback_type ?? null, items: app.callback_info?.subscribed_callbacks ?? [] },
+    events,
   };
+}
+
+async function openApi(fetchImpl, brand, token, pathname, query) {
+  const search = new URLSearchParams(query).toString();
+  const response = await fetchImpl(`${openApiBase(brand)}${pathname}${search ? `?${search}` : ''}`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = await response.json().catch(() => ({ code: -1, msg: `HTTP ${response.status} without JSON` }));
+  // The bot info answers with `bot` where the others have `data`.
+  return { code: body.code, msg: body.msg, data: body.data ?? body.bot };
+}
+
+// readApp with the App Secret in hand (or the token it was just checked
+// with). Rejects with LarkCredentialsError when the credentials are refused.
+export async function inspectApp(app, { fetchImpl = globalThis.fetch, token = null } = {}) {
+  const bearer = token ?? await tenantToken(app, { fetchImpl });
+  return readApp((pathname, query) => openApi(fetchImpl, app.brand, bearer, pathname, query));
 }
 
 // Requested scopes the platform did not grant, per token type.
@@ -104,4 +153,28 @@ export function missingScopes(scopes, granted) {
     tenant: scopes.tenant.filter((scope) => !has(scope, 'tenant')),
     user: scopes.user.filter((scope) => !has(scope, 'user')),
   };
+}
+
+// What the app lacks of the request: scopes per token type, the message
+// event (null when the online version could not be read) and the card
+// callback, which counts only on the long connection.
+export function missingConfig(scopes, inspected) {
+  const { type, items } = inspected.callbacks;
+  return {
+    scopes: missingScopes(scopes, inspected.granted),
+    events: inspected.events ? EVENTS.filter((event) => !inspected.events.includes(event)) : null,
+    callbacks: CALLBACKS.filter((callback) => type !== 'websocket' || !items.includes(callback)),
+  };
+}
+
+export function lacksAny(missing) {
+  return missing.scopes.tenant.length + missing.scopes.user.length + (missing.events?.length ?? 0) + missing.callbacks.length > 0;
+}
+
+// The user scopes to ask the owner for: those the app has, when it has any.
+// The authorization cannot grant a scope the app was not given.
+export function grantedUserScopes(scopes, inspected) {
+  const missing = new Set(inspected ? missingScopes(scopes, inspected.granted).user : []);
+  const granted = scopes.user.filter((scope) => !missing.has(scope));
+  return granted.length ? granted : scopes.user;
 }

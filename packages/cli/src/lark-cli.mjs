@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 
 // The lark-cli calls setup needs: write the bot profile, authorize the owner
-// as a user (the second QR code), read who authorized, and send a greeting.
+// as a user (the second QR code), read who authorized, send a greeting, list
+// which app each profile uses, and read an app's settings as its bot.
 // Profiles go into the user's own lark-cli config, where the daemon reads them.
 
 const SCRUBBED = ['LARKSUITE_CLI_PROFILE', 'LARKSUITE_CLI_APP_ID', 'LARKSUITE_CLI_APP_SECRET',
@@ -88,6 +89,25 @@ export class LarkCli {
     const result = await this.run(['--profile', profile, 'auth', 'login', '--device-code', deviceCode, '--json'],
       { timeoutMs: 15 * 60_000 });
     if (result.code !== 0) throw new Error(`lark-cli authorization did not finish: ${failure(result)}`);
+  }
+
+  // Every profile with its app: [{ name, appId }]; none when it cannot be read.
+  async profiles() {
+    const result = await this.run(['profile', 'list'], { timeoutMs: 15_000 });
+    const listed = result.code === 0 ? parseJson(result.stdout) : null;
+    return Array.isArray(listed)
+      ? listed.filter((entry) => typeof entry?.name === 'string' && typeof entry?.appId === 'string')
+        .map(({ name, appId }) => ({ name, appId }))
+      : [];
+  }
+
+  // A GET as the profile's bot, for readApp: { code, msg, data }.
+  async get({ profile, pathname, query = {} }) {
+    const result = await this.run(['--profile', profile, 'api', 'GET', pathname, '--params', JSON.stringify(query), '--as', 'bot'],
+      { timeoutMs: 30_000 });
+    const body = parseJson(result.stdout);
+    if (body?.ok === true) return { code: 0, data: body.data };
+    return { code: body?.error?.code ?? -1, msg: body?.error?.message ?? failure(result) };
   }
 
   async userOpenId({ profile }) {

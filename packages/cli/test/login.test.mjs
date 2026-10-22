@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { loginCommand } from '../src/login.mjs';
 import { Prompter } from '../src/prompt.mjs';
+import { larkScopes } from '../src/setup.mjs';
 
 function agent(home, id, overrides = {}) {
   return {
@@ -117,4 +118,89 @@ test('failed Telegram verification resumes the existing instance and reports the
   m.options.connect.telegram = async () => { throw new Error('invalid API key'); };
   await assert.rejects(loginCommand(['telegram'], m.options), /invalid API key/);
   assert.deepEqual(m.calls, [['stop', 'wa'], ['restart', 'wa']]);
+});
+
+// A lark-cli that answers as an app with a few of permission.json's scopes, until
+// `updated` is written next to it; it records what it is asked.
+function fakeLarkCli(dir) {
+  const bin = path.join(dir, 'lark-cli');
+  const { tenant, user } = larkScopes();
+  const few = { tenant: tenant.slice(0, 3), user: user.slice(0, 2) };
+  fs.writeFileSync(bin, `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const here = path.dirname(process.argv[1]);
+const args = process.argv.slice(2);
+fs.appendFileSync(path.join(here, 'calls.log'), JSON.stringify(args) + '\\n');
+const updated = fs.existsSync(path.join(here, 'updated'));
+const pending = fs.existsSync(path.join(here, 'pending'));
+const scopes = updated ? ${JSON.stringify({ tenant, user })} : ${JSON.stringify(few)};
+const out = (value) => process.stdout.write(JSON.stringify(value));
+const at = args.indexOf('api');
+if (at >= 0) {
+  const target = args[at + 2];
+  if (target.endsWith('/applications/me')) {
+    out({ ok: true, data: { app: { app_id: 'cli_old', app_name: 'Old', online_version_id: 'oav_1', unaudit_version_id: pending ? 'oav_2' : '',
+      scopes: [...scopes.tenant.map((scope) => ({ scope, token_types: ['tenant'] })), ...scopes.user.map((scope) => ({ scope, token_types: ['user'] }))],
+      callback_info: { callback_type: 'websocket', subscribed_callbacks: ['card.action.trigger'] } } } });
+  } else if (target.includes('/app_versions/')) {
+    out({ ok: true, data: { app_version: { event_infos: [{ event_type: 'im.message.receive_v1' }] } } });
+  } else {
+    out({ ok: true, data: { activate_status: 2, app_name: 'Old' } });
+  }
+} else if (args.includes('--no-wait')) {
+  out({ verification_uri_complete: 'https://accounts.feishu.cn/oauth?code=1', device_code: 'dc' });
+}
+`, { mode: 0o755 });
+  const calls = () => fs.readFileSync(path.join(dir, 'calls.log'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  return { bin, few, calls };
+}
+
+test('Feishu login checks the app first; its owner adds what it lacks with one scan, then authorizes', async (t) => {
+  const m = machine(t, (home) => [agent(home, 'haha')], { answers: ['y'] });
+  const lark = fakeLarkCli(m.home);
+  m.options.env.LARK_CLI_BIN = lark.bin;
+  let asked;
+  m.options.connect.register = async (options) => {
+    asked = options;
+    fs.writeFileSync(path.join(m.home, 'updated'), '');
+    return { client_id: 'cli_old', client_secret: 's', user_info: { open_id: 'ou_owner' } };
+  };
+  assert.equal(await loginCommand(['lark'], m.options), 0);
+  assert.equal(asked.appId, 'cli_old');
+  assert.equal('createOnly' in asked, false);
+  const output = m.written();
+  const { tenant, user } = larkScopes();
+  assert.match(output, new RegExp(`有 ${tenant.length - 3 + user.length - 2} 个权限没开通`));
+  assert.match(output, /扫码把缺的补上？要你是这个应用的所有者或管理员/);
+  assert.match(output, /平台已确认[\s\S]*权限核对通过/);
+  const calls = lark.calls();
+  assert.ok(calls.every((args) => args[0] === '--profile' && args[1] === 'vika-haha'));
+  assert.ok(calls.filter((args) => args.includes('api')).every((args) => args.at(-2) === '--as' && args.at(-1) === 'bot'));
+  const login = calls.find((args) => args.includes('--no-wait'));
+  assert.equal(login[login.indexOf('--scope') + 1], larkScopes().user.join(' '), 'after the update every user scope is there');
+  assert.match(output, /vika-haha 已重新授权/);
+  assert.deepEqual(m.calls, [], 'the running instance is not restarted');
+});
+
+test('Feishu login without the update asks the owner only for the user scopes the app has', async (t) => {
+  const m = machine(t, (home) => [agent(home, 'haha')], { answers: ['n'] });
+  const lark = fakeLarkCli(m.home);
+  m.options.env.LARK_CLI_BIN = lark.bin;
+  m.options.connect.register = async () => { throw new Error('not asked for'); };
+  assert.equal(await loginCommand(['lark'], m.options), 0);
+  const login = lark.calls().find((args) => args.includes('--no-wait'));
+  assert.equal(login[login.indexOf('--scope') + 1], lark.few.user.join(' '));
+});
+
+test('Feishu login with a version under review says the scan would withdraw it, and does not scan by default', async (t) => {
+  const m = machine(t, (home) => [agent(home, 'haha')], { answers: [''] });
+  const lark = fakeLarkCli(m.home);
+  fs.writeFileSync(path.join(m.home, 'pending'), '');
+  m.options.env.LARK_CLI_BIN = lark.bin;
+  m.options.connect.register = async () => { throw new Error('not asked for'); };
+  assert.equal(await loginCommand(['lark'], m.options), 0);
+  assert.match(m.written(), /应用有一个版本正在审核：扫码补齐时，飞书会先撤回它再提交新版本，审批要重新排队。/);
+  assert.match(m.written(), /扫码把缺的补上？要你是这个应用的所有者或管理员 \[y\/N\]/);
+  assert.match(m.written(), /vika-haha 已重新授权/);
 });
