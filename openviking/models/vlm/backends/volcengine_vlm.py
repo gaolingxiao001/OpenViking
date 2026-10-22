@@ -68,13 +68,6 @@ class VolcEngineVLM(OpenAIVLM):
         if not self.model:
             self.model = "doubao-seed-2-0-lite-260428"
 
-    def _apply_extra_body(self, kwargs: Dict[str, Any]) -> None:
-        extra_body = dict(self.extra_request_body)
-        if self.do_sample is not None:
-            extra_body["do_sample"] = self.do_sample
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-
     def _parse_tool_calls(self, message) -> List[ToolCall]:
         """Parse tool calls from VolcEngine response message."""
         tool_calls = []
@@ -219,7 +212,8 @@ class VolcEngineVLM(OpenAIVLM):
             "thinking": {"type": "disabled" if not effective_thinking else "enabled"},
             "extra_headers": build_volcengine_request_headers(self.extra_headers),
         }
-        self._apply_extra_body(kwargs)
+        if self.extra_request_body:
+            kwargs["extra_body"] = dict(self.extra_request_body)
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
         if effective_thinking and self.reasoning_effort is not None:
@@ -268,7 +262,8 @@ class VolcEngineVLM(OpenAIVLM):
             "thinking": {"type": "disabled" if not effective_thinking else "enabled"},
             "extra_headers": build_volcengine_request_headers(self.extra_headers),
         }
-        self._apply_extra_body(kwargs)
+        if self.extra_request_body:
+            kwargs["extra_body"] = dict(self.extra_request_body)
         if effective_max_tokens is not None:
             kwargs["max_tokens"] = effective_max_tokens
         if effective_thinking and reasoning_effort is not None:
@@ -450,7 +445,8 @@ class VolcEngineVLM(OpenAIVLM):
             "thinking": {"type": "disabled" if not effective_thinking else "enabled"},
             "extra_headers": build_volcengine_request_headers(self.extra_headers),
         }
-        self._apply_extra_body(kwargs)
+        if self.extra_request_body:
+            kwargs["extra_body"] = dict(self.extra_request_body)
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
         if tools:
@@ -500,7 +496,8 @@ class VolcEngineVLM(OpenAIVLM):
             "thinking": {"type": "disabled" if not effective_thinking else "enabled"},
             "extra_headers": build_volcengine_request_headers(self.extra_headers),
         }
-        self._apply_extra_body(kwargs)
+        if self.extra_request_body:
+            kwargs["extra_body"] = dict(self.extra_request_body)
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
         if tools:

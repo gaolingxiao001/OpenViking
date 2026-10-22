@@ -350,7 +350,7 @@ class TestOpenAIVLMClientRetries:
         assert call_kwargs["max_retries"] == 0
 
     @patch("volcenginesdkarkruntime.Ark")
-    def test_volcengine_sync_completion_passes_do_sample(self, mock_ark_class):
+    def test_volcengine_sync_completion_does_not_set_extra_body_by_default(self, mock_ark_class):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content="ok"), finish_reason="stop")]
         mock_response.usage = None
@@ -363,17 +363,18 @@ class TestOpenAIVLMClientRetries:
                 "api_key": "sk-test",
                 "api_base": "https://ark.cn-beijing.volces.com/api/v3",
                 "model": "doubao-seed-2-1-pro-260915",
-                "do_sample": False,
             }
         )
 
         assert vlm.get_completion("hello") == "ok"
 
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["extra_body"]["do_sample"] is False
+        assert "extra_body" not in call_kwargs
 
     @patch("volcenginesdkarkruntime.AsyncArk")
-    async def test_volcengine_async_completion_passes_do_sample(self, mock_async_ark_class):
+    async def test_volcengine_async_completion_does_not_set_extra_body_by_default(
+        self, mock_async_ark_class
+    ):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock(message=MagicMock(content="ok"), finish_reason="stop")]
         mock_response.usage = None
@@ -386,14 +387,13 @@ class TestOpenAIVLMClientRetries:
                 "api_key": "sk-test",
                 "api_base": "https://ark.cn-beijing.volces.com/api/v3",
                 "model": "doubao-seed-2-1-pro-260915",
-                "do_sample": False,
             }
         )
 
         assert await vlm.get_completion_async("hello") == "ok"
 
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-        assert call_kwargs["extra_body"]["do_sample"] is False
+        assert "extra_body" not in call_kwargs
 
     @pytest.mark.parametrize(
         ("status_code", "message", "expected_kind"),
@@ -924,39 +924,6 @@ class TestVLMConfigExtraRequestBody:
 
         result = config._build_vlm_config_dict()
         assert result["extra_request_body"] == {"think": False}
-
-    def test_vlm_config_accepts_do_sample_as_first_class_field(self):
-        from openviking_cli.utils.config.vlm_config import VLMConfig
-
-        config = VLMConfig(
-            model="doubao-seed-2-1-pro-260915",
-            provider="volcengine",
-            api_key="sk-test",
-            api_base="https://ark.cn-beijing.volces.com/api/v3",
-            do_sample=False,
-        )
-
-        config._migrate_legacy_config()
-        assert config.providers["volcengine"]["do_sample"] is False
-
-        result = config._build_vlm_config_dict()
-        assert result["do_sample"] is False
-
-    def test_vlm_config_do_sample_merges_with_extra_request_body(self):
-        from openviking_cli.utils.config.vlm_config import VLMConfig
-
-        config = VLMConfig(
-            model="doubao-seed-2-1-pro-260915",
-            provider="volcengine",
-            api_key="sk-test",
-            api_base="https://ark.cn-beijing.volces.com/api/v3",
-            do_sample=False,
-            extra_request_body={"seed": 7},
-        )
-
-        result = config._build_vlm_config_dict()
-        assert result["do_sample"] is False
-        assert result["extra_request_body"] == {"seed": 7}
 
     def test_vlm_config_accepts_flat_extra_request_body(self):
         from openviking_cli.utils.config.vlm_config import VLMConfig

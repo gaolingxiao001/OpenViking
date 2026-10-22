@@ -212,7 +212,6 @@ def _vlm_snapshot(config: Any | None) -> dict[str, Any]:
         "model": getattr(config, "model", None),
         "temperature": getattr(config, "temperature", None),
         "max_tokens": getattr(config, "max_tokens", None),
-        "do_sample": getattr(config, "do_sample", None),
         "api_key_configured": bool(getattr(config, "api_key", None)),
     }
 

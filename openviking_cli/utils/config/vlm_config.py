@@ -84,10 +84,6 @@ class VLMCredential(BaseModel):
     extra_request_body: Optional[Dict[str, Any]] = RuntimeField(
         default=None, description="Extra JSON body fields"
     )
-    do_sample: Optional[bool] = RuntimeField(
-        default=None,
-        description="Whether provider-side sampling should be enabled when supported",
-    )
     reasoning_effort: Optional[str] = RuntimeField(
         default=None,
         description="Reasoning effort for OpenAI-compatible reasoning models",
@@ -198,11 +194,6 @@ class VLMConfig(BaseModel):
     max_tokens: Optional[int] = Field(
         default=None,
         description="Maximum tokens for VLM completion output (None = provider default)",
-    )
-
-    do_sample: Optional[bool] = Field(
-        default=None,
-        description="Whether provider-side sampling should be enabled when supported",
     )
 
     thinking: bool = Field(default=False, description="Enable thinking mode for VolcEngine models")
@@ -362,7 +353,6 @@ class VLMConfig(BaseModel):
             or self.api_base
             or self.extra_headers
             or self.extra_request_body
-            or self.do_sample is not None
             or self.reasoning_effort
             or self.keepalive_expiry is not None
             or self.forward_api_key is not None
@@ -385,8 +375,6 @@ class VLMConfig(BaseModel):
                 and "extra_request_body" not in self.providers[self.provider]
             ):
                 self.providers[self.provider]["extra_request_body"] = self.extra_request_body
-            if self.do_sample is not None and "do_sample" not in self.providers[self.provider]:
-                self.providers[self.provider]["do_sample"] = self.do_sample
             if self.reasoning_effort and "reasoning_effort" not in self.providers[self.provider]:
                 self.providers[self.provider]["reasoning_effort"] = self.reasoning_effort
             if (
@@ -427,11 +415,6 @@ class VLMConfig(BaseModel):
                 extra_request_body=(
                     primary_cfg.get("extra_request_body") or self.extra_request_body
                 ),
-                do_sample=(
-                    primary_cfg.get("do_sample")
-                    if primary_cfg.get("do_sample") is not None
-                    else self.do_sample
-                ),
                 reasoning_effort=(primary_cfg.get("reasoning_effort") or self.reasoning_effort),
                 keepalive_expiry=(
                     primary_cfg.get("keepalive_expiry")
@@ -461,11 +444,6 @@ class VLMConfig(BaseModel):
                 extra_headers=backup_cfg.get("extra_headers") or self.backup.extra_headers,
                 extra_request_body=(
                     backup_cfg.get("extra_request_body") or self.backup.extra_request_body
-                ),
-                do_sample=(
-                    backup_cfg.get("do_sample")
-                    if backup_cfg.get("do_sample") is not None
-                    else self.backup.do_sample
                 ),
                 reasoning_effort=(
                     backup_cfg.get("reasoning_effort") or self.backup.reasoning_effort
@@ -510,11 +488,6 @@ class VLMConfig(BaseModel):
                         extra_request_body=(
                             provider_cfg.get("extra_request_body") or self.extra_request_body
                         ),
-                        do_sample=(
-                            provider_cfg.get("do_sample")
-                            if provider_cfg.get("do_sample") is not None
-                            else self.do_sample
-                        ),
                         reasoning_effort=(
                             provider_cfg.get("reasoning_effort") or self.reasoning_effort
                         ),
@@ -551,8 +524,6 @@ class VLMConfig(BaseModel):
                 cred.extra_headers = self.extra_headers
             if not cred.extra_request_body:
                 cred.extra_request_body = self.extra_request_body
-            if cred.do_sample is None:
-                cred.do_sample = self.do_sample
             if not cred.reasoning_effort:
                 cred.reasoning_effort = self.reasoning_effort
             if cred.keepalive_expiry is None:
@@ -608,8 +579,6 @@ class VLMConfig(BaseModel):
             config["extra_headers"] = self.extra_headers
         if self.extra_request_body and "extra_request_body" not in config:
             config["extra_request_body"] = self.extra_request_body
-        if self.do_sample is not None and "do_sample" not in config:
-            config["do_sample"] = self.do_sample
         if self.reasoning_effort and "reasoning_effort" not in config:
             config["reasoning_effort"] = self.reasoning_effort
         if self.keepalive_expiry is not None and "keepalive_expiry" not in config:
@@ -641,8 +610,6 @@ class VLMConfig(BaseModel):
             config["extra_headers"] = cred.extra_headers
         if cred.extra_request_body:
             config["extra_request_body"] = cred.extra_request_body
-        if cred.do_sample is not None:
-            config["do_sample"] = cred.do_sample
         if cred.reasoning_effort:
             config["reasoning_effort"] = cred.reasoning_effort
         if cred.keepalive_expiry is not None:
@@ -775,7 +742,6 @@ class VLMConfig(BaseModel):
             "max_tokens": (
                 credential.max_tokens if credential.max_tokens is not None else self.max_tokens
             ),
-            "do_sample": credential.do_sample if credential.do_sample is not None else self.do_sample,
             "api_version": credential.api_version,
             "media": self.media.model_dump(),
         }
@@ -812,11 +778,6 @@ class VLMConfig(BaseModel):
             "provider": name,
             "thinking": self.thinking,
             "max_tokens": self.max_tokens,
-            "do_sample": (
-                config.get("do_sample")
-                if config and config.get("do_sample") is not None
-                else self.do_sample
-            ),
             "api_version": self.api_version,
             "media": self.media.model_dump(),
         }

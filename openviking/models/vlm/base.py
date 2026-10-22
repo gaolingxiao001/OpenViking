@@ -74,7 +74,6 @@ class VLMBase(ABC):
         self.max_retries = config.get("max_retries", 3)
         self.timeout = config.get("timeout", 600.0)
         self.max_tokens = config.get("max_tokens")
-        self.do_sample = config.get("do_sample")
         self.extra_headers = config.get("extra_headers")
         self.extra_request_body = dict(config.get("extra_request_body") or {})
         self.thinking = config.get("thinking", False)
