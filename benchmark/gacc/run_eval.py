@@ -21,19 +21,11 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution fallba
     from benchmark.gacc import adapters, core, records, report
 
 
-def _config_to_dict(config: Any) -> dict[str, Any]:
-    if hasattr(config, "model_dump"):
-        return config.model_dump(mode="python")
-    if isinstance(config, dict):
-        return dict(config)
-    raise TypeError(f"unsupported VLM config type: {type(config).__name__}")
-
-
 def load_vlm_config(args: argparse.Namespace):
     from openviking_cli.utils.config import VLMConfig, get_openviking_config
 
     base = get_openviking_config().vlm
-    config = VLMConfig.model_validate(_config_to_dict(base))
+    config = VLMConfig.model_validate(base.model_dump(mode="python"))
 
     if args.temperature is not None:
         config.temperature = args.temperature
@@ -98,8 +90,6 @@ async def answer_question(
         repeat_index=repeat_index,
         question_id=question.question_id,
     )
-    if core.reusable(path, model):
-        return path
     meta = {
         "type": "answer",
         "model": model,
@@ -137,8 +127,6 @@ async def judge_answer(
         repeat_index=repeat_index,
         question_id=question.question_id,
     )
-    if core.reusable(path, model):
-        return path
     meta = {
         "type": "judgment",
         "model": model,
@@ -176,21 +164,13 @@ async def judge_answer(
 def _vlm_snapshot(config: Any | None) -> dict[str, Any]:
     if config is None:
         return {}
-    provider = getattr(config, "provider", None) or getattr(config, "default_provider", None)
-    if provider is None:
-        resolver = getattr(config, "_resolve_provider_name", None)
-        if callable(resolver):
-            try:
-                provider = resolver()
-            except Exception:
-                provider = None
     return {
-        "provider": provider,
-        "api_base": getattr(config, "api_base", None),
-        "model": getattr(config, "model", None),
-        "temperature": getattr(config, "temperature", None),
-        "max_tokens": getattr(config, "max_tokens", None),
-        "api_key_configured": bool(getattr(config, "api_key", None)),
+        "provider": config.provider,
+        "api_base": config.api_base,
+        "model": config.model,
+        "temperature": config.temperature,
+        "max_tokens": config.max_tokens,
+        "api_key_configured": bool(config.api_key),
     }
 
 
@@ -228,7 +208,7 @@ def build_compression_adapter(args: argparse.Namespace, compressor: Any, root: P
     raise ValueError(f"unsupported adapter: {args.adapter}")
 
 
-def _print_summary(metrics: dict[str, Any], output: Path) -> None:
+def _print_summary(metrics: dict[str, Any], output: Path, reports_dir: Path) -> None:
     print("\n=== GACC-Bench summary ===")
     for condition, data in metrics.get("conditions", {}).items():
         overall = data["overall"]
@@ -236,12 +216,15 @@ def _print_summary(metrics: dict[str, Any], output: Path) -> None:
             f"{condition:<18} questions={overall['correct']}/{overall['evaluated']}/"
             f"{overall['planned']} accuracy={overall['accuracy']}"
         )
+    variance = metrics.get("variance", {})
+    if variance.get("repeated_questions"):
+        print(f"baseline variance: {json.dumps(variance)}")
     print(
         json.dumps(
             {
                 "sqlite": str(output / "gacc.sqlite"),
-                "metrics": str(output / "reports" / "metrics.json"),
-                "html": str(output / "reports" / "report.html"),
+                "metrics": str(reports_dir / "metrics.json"),
+                "html": str(reports_dir / "report.html"),
             },
             ensure_ascii=False,
         )
@@ -349,6 +332,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    artifacts_root = root / "runs" / core.safe_name(args.run_id)
+    artifacts_root.mkdir(parents=True, exist_ok=False)
     compressor = load_vlm_config(args)
     reader = load_vlm_config(args)
     judge = load_vlm_config(args)
@@ -378,21 +363,50 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         flush=True,
                     )
                     for ratio in args.compression_ratios:
-                        compression = await adapter.compress(
-                            adapters.CompressionRequest(
-                                bundle=bundle,
-                                target_ratio=ratio,
-                                run_id=args.run_id,
-                                repeat_index=repeat_index,
-                            )
-                        )
+                        condition = core.target_condition_name(ratio)
                         compression_path = (
-                            root
+                            artifacts_root
                             / "compressions"
-                            / compression.condition
+                            / condition
                             / f"r{repeat_index}"
                             / f"{core.uid('compression', bundle.goal_id, ratio, repeat_index)}.json"
                         )
+                        started = time.perf_counter()
+                        try:
+                            compression = await adapter.compress(
+                                adapters.CompressionRequest(
+                                    bundle=bundle,
+                                    target_ratio=ratio,
+                                    run_id=args.run_id,
+                                    repeat_index=repeat_index,
+                                )
+                            )
+                        except Exception as exc:
+                            core.write_json(
+                                compression_path,
+                                core.failure("compression", {"goal_id": bundle.goal_id}, exc),
+                            )
+                            for question in bundle.questions:
+                                row = {
+                                    "run_id": args.run_id,
+                                    "dataset": bundle.dataset,
+                                    "context_id": bundle.context_id,
+                                    "goal_id": bundle.goal_id,
+                                    "question_id": question.question_id,
+                                    "condition": condition,
+                                    "target_ratio": ratio,
+                                    "adapter": args.adapter,
+                                    "repeat_index": repeat_index,
+                                    "answer_status": "failed",
+                                    "judge_status": "failed",
+                                    "error": f"compression: {exc}",
+                                    "latency_ms": (time.perf_counter() - started) * 1000,
+                                    "artifact_paths": {"compression": str(compression_path)},
+                                }
+                                records.record_result(conn, row)
+                                rows.append(row)
+                            print(f"  {condition}: compression failed: {exc}", flush=True)
+                            continue
                         core.write_json(
                             compression_path,
                             {
@@ -409,26 +423,31 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                 "finished_at": core.stamp(),
                             },
                         )
+                        correct = 0
                         for question in bundle.questions:
-                            rows.append(
-                                await _run_question(
-                                    conn=conn,
-                                    root=root,
-                                    run_id=args.run_id,
-                                    reader=reader,
-                                    judge=judge,
-                                    bundle=bundle,
-                                    question=question,
-                                    compression=compression,
-                                    repeat_index=repeat_index,
-                                )
+                            row = await _run_question(
+                                conn=conn,
+                                root=artifacts_root,
+                                run_id=args.run_id,
+                                reader=reader,
+                                judge=judge,
+                                bundle=bundle,
+                                question=question,
+                                compression=compression,
+                                repeat_index=repeat_index,
                             )
+                            rows.append(row)
+                            correct += row["grade"] == "CORRECT"
+                        print(
+                            f"  {compression.condition}: {correct}/{len(bundle.questions)}",
+                            flush=True,
+                        )
             metrics = records.summarize_results(conn, run_id=args.run_id)
-        reports_dir = root / "reports"
+        reports_dir = artifacts_root / "reports"
         core.write_json(reports_dir / "metrics.json", {**info, **metrics})
         core.write_jsonl(reports_dir / "results.jsonl", rows)
         report.write_html_report(reports_dir / "report.html", metrics)
-        _print_summary(metrics, root)
+        _print_summary(metrics, root, reports_dir)
         return {**metrics, "run_id": args.run_id, "output": str(root)}
     finally:
         await adapter.close()
@@ -461,16 +480,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated target ratios; -1 means no compression",
     )
     parser.add_argument(
-        "--budgets",
-        default=None,
-        help="Deprecated comma-separated retention percentages; use --compression-ratios",
-    )
-    parser.add_argument(
         "--adapter",
         choices=("ov", adapters.CodexLocalSummaryAdapter.name),
         default="ov",
     )
-    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=None)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--sample-size", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
@@ -481,6 +495,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the configured VLM temperature; use 0 for deterministic evals",
     )
     args = parser.parse_args(normalized_argv)
+    if args.repeats is None:
+        args.repeats = 3 if args.smoke else 1
     if args.limit < 0:
         parser.error("--limit must be >= 0")
     if args.repeats <= 0:
@@ -488,10 +504,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.sample_size <= 0:
         parser.error("--sample-size must be > 0")
     try:
-        if args.compression_ratios is None and args.budgets is not None:
-            args.compression_ratios = ",".join(
-                f"{ratio:g}" for ratio in core.parse_budgets(args.budgets)
-            )
         args.compression_ratios = core.parse_target_ratios(args.compression_ratios or "-1,0.5,0.3")
     except ValueError as exc:
         parser.error(str(exc))

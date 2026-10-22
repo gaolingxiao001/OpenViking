@@ -7,6 +7,7 @@ Session as Context: Sessions integrated into L0/L1/L2 system.
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import json
 import re
@@ -1183,6 +1184,7 @@ class Session:
             "original_message_ids": [message.id for message in original_messages],
             "archived_message_ids": [message.id for message in archived_messages],
             "retained_message_ids": [message.id for message in retained_messages],
+            "retained_message_hash": self._message_state_hash(retained_messages),
             "keep_recent_count": keep_recent_count,
             "retention_mode": retention_mode or "",
             "keep_recent_turn_count": keep_recent_turn_count,
@@ -1201,6 +1203,17 @@ class Session:
             },
             lease_ref=lease_ref,
         )
+
+    @staticmethod
+    def _message_state_hash(messages: List[Message]) -> str:
+        # created_at may be normalized on JSONL round-trip; hash semantic state.
+        payload = [
+            {key: value for key, value in message.to_dict().items() if key != "created_at"}
+            for message in messages
+        ]
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
     async def _write_phase1_ready_marker(
         self,
@@ -1299,6 +1312,11 @@ class Session:
             phase1_applied = live_ids[
                 : len(retained_ids)
             ] == retained_ids and not archived_only_ids.intersection(live_ids)
+            expected_hash = marker.get("retained_message_hash")
+            if expected_hash:
+                phase1_applied = phase1_applied and (
+                    self._message_state_hash(live_messages[: len(retained_ids)]) == expected_hash
+                )
             if not phase1_applied:
                 await self._write_failed_marker(
                     archive_uri,
@@ -3573,6 +3591,8 @@ class Session:
                 )
             return overview
 
+        if not overview.strip():
+            raise RuntimeError("empty summary response")
         overview_tokens = estimate_text_tokens(overview)
         if overview_tokens <= summary_tokens:
             return _ArchiveSummaryResult(
@@ -3596,6 +3616,7 @@ class Session:
             output_language,
             summary_tokens=summary_tokens,
         )
+        self._validate_summary_budget(rewritten, summary_tokens)
         return _ArchiveSummaryResult(
             overview=rewritten,
             checkpoint_summaries=checkpoint_summaries,
@@ -3607,6 +3628,15 @@ class Session:
                 pre_rewrite_tokens=overview_tokens,
             ),
         )
+
+    @staticmethod
+    def _validate_summary_budget(overview: str, summary_tokens: int) -> None:
+        if summary_tokens <= 0:
+            return
+        if not overview.strip():
+            raise RuntimeError("empty summary retry response")
+        if estimate_text_tokens(overview) > summary_tokens:
+            raise RuntimeError("summary retry exceeds summary_tokens budget")
 
     async def _fallback_generate_wm_creation(
         self,
@@ -3644,7 +3674,9 @@ class Session:
             )
         else:
             response = await vlm.get_completion_async(prompt)
-        return str(response or "")
+        overview = str(response or "")
+        self._validate_summary_budget(overview, summary_tokens)
+        return overview
 
     async def _write_to_agfs_async(
         self,

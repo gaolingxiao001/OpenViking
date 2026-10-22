@@ -150,7 +150,59 @@ def test_oversized_latest_turn_keeps_anchor_and_atomic_raw_tail():
     assert plan.checkpoint_source_message_ids == archived_ids[1:]
 
 
-def test_oversized_legacy_assistant_only_turn_archives_without_checkpoint():
+def test_single_oversized_text_step_archives_original_and_retains_tail():
+    source = "early fact " * 1000 + "TAIL_FACT"
+    messages = [
+        _message("u1", "user", "answer questions"),
+        _message("a1", "assistant", source),
+    ]
+
+    plan = plan_retention(messages, keep_recent_turn_count=1, token_budget=100)
+
+    assert [message.id for message in plan.archive_messages] == ["u1", "a1"]
+    assert plan.archive_messages[1].content == source
+    assert [message.id for message in plan.retained_messages] == ["u1", "a1"]
+    assert plan.retained_messages[1].content.endswith("TAIL_FACT")
+    assert plan.retained_messages[1].content != source
+    assert plan.estimated_active_tokens <= 100
+    assert not plan.budget_exceeded
+    assert not plan.partial_turn
+    assert messages[1].content == source
+
+
+@pytest.mark.parametrize("prefix", [[], [_message("a0", "assistant", "earlier step")]])
+def test_oversized_final_step_is_bounded_with_multiple_steps(prefix):
+    messages = [
+        _message("u1", "user", "question"),
+        *prefix,
+        _message("a1", "assistant", "x" * 4000 + "TAIL"),
+    ]
+
+    plan = plan_retention(messages, keep_recent_turn_count=10_000, token_budget=100)
+
+    assert plan.estimated_active_tokens <= 100
+    assert plan.retained_messages[-1].content.endswith("TAIL")
+    assert plan.archive_messages[-1].content == "x" * 4000 + "TAIL"
+
+
+def test_combined_anchor_and_final_overflow_is_bounded():
+    messages = [_message("u1", "user", "u" * 300), _message("a1", "assistant", "a" * 200)]
+
+    plan = plan_retention(messages, keep_recent_turn_count=10_000, token_budget=100)
+
+    assert plan.has_archive_work
+    assert plan.estimated_active_tokens <= 100
+    assert [message.id for message in plan.retained_messages] == ["u1", "a1"]
+
+
+def test_single_assistant_without_anchor_retains_bounded_tail():
+    messages = [_message("a1", "assistant", "x" * 4000 + "TAIL")]
+    plan = plan_retention(messages, keep_recent_turn_count=10_000, token_budget=100)
+    assert plan.retained_messages[-1].content.endswith("TAIL")
+    assert plan.estimated_active_tokens <= 100
+
+
+def test_oversized_legacy_assistant_only_turn_keeps_tail_without_checkpoint():
     messages = [
         _message("a1", "assistant", "A" * 1000),
         _message("a2", "assistant", "B" * 1000),
@@ -165,7 +217,9 @@ def test_oversized_legacy_assistant_only_turn_archives_without_checkpoint():
     )
 
     assert [message.id for message in plan.archive_messages] == ["a1", "a2", "a3"]
-    assert plan.retained_messages == []
+    assert [message.id for message in plan.retained_messages] == ["a3"]
+    assert plan.estimated_active_tokens <= 150
+    assert plan.retained_messages[0].content.endswith("C" * 100)
     assert plan.turn_anchor is None
     assert plan.checkpoint_source_message_ids == []
     assert plan.partial_turn is False

@@ -124,7 +124,10 @@ async def test_oversized_legacy_assistant_only_commit_completes_without_checkpoi
 
     assert task["status"] == "completed"
     assert context["latest_archive_overview"]
-    assert context["messages"] == []
+    assert len(context["messages"]) == 1
+    assert context["messages"][0]["role"] == "assistant"
+    assert context["messages"][0]["parts"][0]["text"].endswith("2" * 100)
+    assert context["stats"]["activeTokens"] <= 150
     archive_meta = json.loads(
         await session._viking_fs.read_file(
             f"{result['archive_uri']}/.meta.json",

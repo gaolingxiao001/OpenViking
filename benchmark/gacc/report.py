@@ -36,10 +36,11 @@ def _bar(value: Any) -> str:
 
 def _condition_rows(metrics: Mapping[str, Any]) -> str:
     rows: list[str] = []
-    for condition, data in metrics.get("conditions", {}).items():
+    for method, condition, data in _comparisons(metrics):
         overall = data["overall"]
         rows.append(
             "<tr>"
+            f"<td>{html.escape(method)}</td>"
             f"<td><code>{html.escape(condition)}</code></td>"
             f"<td>{overall['correct']}/{overall['planned']}</td>"
             f"<td>{_pct(overall['accuracy'])}</td>"
@@ -53,12 +54,13 @@ def _condition_rows(metrics: Mapping[str, Any]) -> str:
 
 def _dataset_rows(metrics: Mapping[str, Any]) -> str:
     rows: list[str] = []
-    for condition, data in metrics.get("conditions", {}).items():
+    for method, condition, data in _comparisons(metrics):
         for dataset, summary in data.get("datasets", {}).items():
             if summary["planned"] == 0:
                 continue
             rows.append(
                 "<tr>"
+                f"<td>{html.escape(method)}</td>"
                 f"<td><code>{html.escape(condition)}</code></td>"
                 f"<td>{html.escape(dataset)}</td>"
                 f"<td>{summary['correct']}/{summary['planned']}</td>"
@@ -67,6 +69,12 @@ def _dataset_rows(metrics: Mapping[str, Any]) -> str:
                 "</tr>"
             )
     return "\n".join(rows)
+
+
+def _comparisons(metrics: Mapping[str, Any]):
+    for method, data in metrics.get("methods", {}).items():
+        for condition, summary in data["conditions"].items():
+            yield method, condition, summary
 
 
 def write_html_report(path: str | Path, metrics: Mapping[str, Any]) -> Path:
@@ -106,14 +114,19 @@ def write_html_report(path: str | Path, metrics: Mapping[str, Any]) -> Path:
   </div>
   <h2>Condition Comparison</h2>
   <table>
-    <thead><tr><th>Condition</th><th>Correct / Planned</th><th>Accuracy</th><th>Chart</th><th>Avg Actual Ratio</th><th>Avg Final Tokens</th></tr></thead>
+    <thead><tr><th>Method</th><th>Condition</th><th>Correct / Planned</th><th>Accuracy</th><th>Chart</th><th>Avg Actual Ratio</th><th>Avg Final Tokens</th></tr></thead>
     <tbody>{_condition_rows(metrics)}</tbody>
   </table>
   <h2>Dataset Subsets</h2>
   <table>
-    <thead><tr><th>Condition</th><th>Dataset</th><th>Correct / Planned</th><th>Accuracy</th><th>Chart</th></tr></thead>
+    <thead><tr><th>Method</th><th>Condition</th><th>Dataset</th><th>Correct / Planned</th><th>Accuracy</th><th>Chart</th></tr></thead>
     <tbody>{_dataset_rows(metrics)}</tbody>
   </table>
+  <h2>Baseline Repeat Variance</h2>
+  <p>Repeated questions: {_fmt(metrics.get("variance", {}).get("repeated_questions"))};
+  answer changes: {_fmt(metrics.get("variance", {}).get("answer_changed_questions"))};
+  grade changes: {_fmt(metrics.get("variance", {}).get("grade_changed_questions"))};
+  recommended repeats: {_fmt(metrics.get("variance", {}).get("recommended_repeats"))}.</p>
   <h2>Raw Metrics</h2>
   <pre>{payload}</pre>
 </body>

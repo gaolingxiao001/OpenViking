@@ -1656,6 +1656,35 @@ async def test_turn_budget_commit_archives_complete_old_turn_and_keeps_latest_us
     assert result["budget_exceeded"] is False
 
 
+async def test_commit_single_oversized_step_persists_bounded_live_tail(client):
+    session = client(session_id="single_step_tail_budget_test")
+    await session.ensure_exists()
+    source = "early fact " * 1000 + "TAIL_FACT"
+    session.add_message("user", [TextPart("answer questions")])
+    session.add_message("assistant", [TextPart(source)])
+
+    result = await session.commit_async(
+        retention_mode="turn_budget",
+        keep_recent_turn_count=1,
+        retained_message_token_budget=100,
+        summary_tokens=400,
+        memory_policy={
+            "working_memory": {"enabled": False},
+            "self": {"enabled": False},
+            "peer": {"enabled": False},
+        },
+    )
+    archived = await session._archives.read_messages(result["archive_uri"])
+    live = await session._read_live_messages_strict()
+
+    assert result["archived"] is True
+    assert result["budget_exceeded"] is False
+    assert archived[-1].content == source
+    assert live[-1].content.endswith("TAIL_FACT")
+    assert live[-1].content != source
+    assert sum(message.estimated_tokens for message in live) <= 100
+
+
 async def test_concurrent_stale_session_instances_use_one_authoritative_phase1_snapshot(
     client,
 ):
@@ -1983,6 +2012,7 @@ async def test_interrupted_phase1_recovers_when_root_rewrite_is_durable(
         retention_mode=None,
         keep_recent_turn_count=0,
         retained_message_token_budget=0,
+        summary_tokens=0,
         min_raw_tail_steps=1,
     )
     await session._write_to_agfs_async(messages=[original[1]])
@@ -2035,6 +2065,7 @@ async def test_interrupted_phase1_before_root_rewrite_becomes_failed(
         retention_mode=None,
         keep_recent_turn_count=0,
         retained_message_token_budget=0,
+        summary_tokens=0,
         min_raw_tail_steps=1,
     )
 
@@ -2047,6 +2078,81 @@ async def test_interrupted_phase1_before_root_rewrite_becomes_failed(
     assert states[0].state == "failed"
     assert failed["error"] == "Phase 1 has no QueueFS work to resume"
     assert [message["id"] for message in context["messages"]] == ["u1"]
+
+
+@pytest.mark.parametrize("rewritten", ["", "x" * 1000])
+async def test_summary_retry_rejects_empty_or_over_budget_result(monkeypatch, rewritten):
+    session = Session(viking_fs=None)
+    monkeypatch.setattr(
+        session, "_fallback_generate_wm_creation", AsyncMock(return_value=rewritten)
+    )
+    with pytest.raises(RuntimeError):
+        await session._enforce_summary_token_budget(
+            formatted_messages="source",
+            messages=[],
+            prior_overview="",
+            output_language="en",
+            overview="x" * 1000,
+            summary_tokens=10,
+        )
+
+
+async def test_summary_creation_rejects_empty_response():
+    session = Session(viking_fs=None)
+    with pytest.raises(RuntimeError, match="empty"):
+        await session._enforce_summary_token_budget(
+            formatted_messages="source",
+            messages=[],
+            prior_overview="",
+            output_language="en",
+            overview="",
+            summary_tokens=10,
+        )
+
+
+async def test_update_fallback_obeys_summary_budget(monkeypatch):
+    session = Session(viking_fs=None)
+    vlm = SimpleNamespace(
+        is_available=lambda: True,
+        get_completion_async=AsyncMock(return_value="x" * 1000),
+    )
+    session._vlm_resolver = SimpleNamespace(get_vlm=AsyncMock(return_value=vlm))
+    with pytest.raises(RuntimeError, match="budget"):
+        await session._generate_archive_summary_async(
+            [_text_message("u1", "user", "new fact")],
+            latest_archive_overview="# Working Memory\n\n## Session Title\nPrior",
+            summary_tokens=10,
+        )
+
+
+async def test_phase1_does_not_accept_untruncated_live_body(client, monkeypatch):
+    from openviking.session.retention import plan_retention
+
+    session = client(session_id="phase1_truncated_body_test")
+    await session.ensure_exists()
+    original = [
+        _text_message("u1", "user", "question"),
+        _text_message("a1", "assistant", "x" * 4000),
+    ]
+    plan = plan_retention(original, keep_recent_turn_count=10_000, token_budget=100)
+    await session._write_to_agfs_async(messages=original)
+    archive_uri = await _write_archive(session, 1, plan.archive_messages)
+    await session._write_phase1_marker(
+        archive_uri,
+        queue_message={"task_id": "synthetic"},
+        original_messages=original,
+        archived_messages=plan.archive_messages,
+        retained_messages=plan.retained_messages,
+        keep_recent_count=0,
+        retention_mode="turn_budget",
+        keep_recent_turn_count=10_000,
+        retained_message_token_budget=100,
+        summary_tokens=400,
+        min_raw_tail_steps=1,
+    )
+    monkeypatch.setattr(get_task_tracker(), "has_work", AsyncMock(return_value=True))
+
+    assert not await session._ensure_phase1_ready(archive_uri)
 
 
 async def test_stale_worker_uses_lock_snapshot_memory_policy_for_queue_message(

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmark.gacc import adapters, core, records, report
+from benchmark.gacc import adapters, core, records, report, run_eval
 from benchmark.gacc.run_eval import _effective_config, build_compression_adapter, parse_args
 from openviking.session.retention import RETENTION_MODE_TURN_BUDGET
 
@@ -125,16 +125,11 @@ def test_load_gacc_jsonl_rejects_unknown_dataset(tmp_path):
         core.load_gacc_jsonl(path)
 
 
-def test_parse_budgets_and_budget_tokens_are_percent_based():
-    assert core.parse_budgets("5,10,33") == (0.05, 0.10, 0.33)
-
+def test_budget_tokens_uses_source_ratio():
     bundle = core.GACCBundle.from_mapping(_row())
     source_tokens = core.count_tokens(bundle.context)
 
     assert core.budget_tokens(bundle, 0.10) == max(1, int(source_tokens * 0.10))
-
-    with pytest.raises(ValueError, match="range 1-100"):
-        core.parse_budgets("0,10")
 
 
 def test_parse_target_ratios_supports_no_compression_baseline():
@@ -152,24 +147,26 @@ def test_parse_target_ratios_supports_no_compression_baseline():
 def test_artifact_paths_are_stable_and_condition_specific(tmp_path):
     bundle = core.GACCBundle.from_mapping(_row())
     question = bundle.questions[0]
-
-    memory = core.memory_path(tmp_path, 0.05, bundle)
-    compressed_answer = core.answer_path(tmp_path, "5%", 0.05, question.question_id)
-    full_answer = core.answer_path(tmp_path, "full_context", None, question.question_id)
-
-    assert memory == core.memory_path(tmp_path, 0.05, bundle)
-    assert "5%" in str(memory)
+    compressed_answer = run_eval.answer_artifact_path(
+        tmp_path,
+        condition="ratio_0_3",
+        ratio=0.3,
+        repeat_index=1,
+        question_id=question.question_id,
+    )
+    full_answer = run_eval.answer_artifact_path(
+        tmp_path,
+        condition="no_compression",
+        ratio=-1,
+        repeat_index=1,
+        question_id=question.question_id,
+    )
     assert compressed_answer != full_answer
-    assert full_answer.parent.name == "full_context"
+    assert full_answer.parent.parent.name == "no_compression"
 
 
 @pytest.mark.asyncio
-async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
-    def fail_compression_prompt(*args, **kwargs):
-        raise AssertionError("ov adapter must not use the local GACC compression prompt")
-
-    monkeypatch.setattr(core, "build_compression_prompt", fail_compression_prompt)
-
+async def test_ov_compression_adapter_uses_session_retention_path():
     class FakeVLM:
         model = "fake-model"
         calls = []
@@ -280,7 +277,7 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
         for part in message["parts"]
     )
     assert session.commit_kwargs["retention_mode"] == RETENTION_MODE_TURN_BUDGET
-    assert session.commit_kwargs["keep_recent_turn_count"] == 0
+    assert session.commit_kwargs["keep_recent_turn_count"] == 10_000
     target_tokens = core.budget_tokens(bundle, 0.5)
     retained_budget = max(1, int(target_tokens * 0.2))
     summary_budget = max(1, target_tokens - retained_budget)
@@ -293,7 +290,7 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
     assert compressed.token_metrics["summary_tokens"] == core.count_tokens("summary alpha beta")
     assert compressed.token_metrics["retained_tokens"] == core.count_tokens("tail gamma")
     assert compressed.effective_options["retention"]["retained_budget_ratio"] == 0.2
-    assert compressed.effective_options["retention"]["keep_recent_turn_count"] == 0
+    assert compressed.effective_options["retention"]["keep_recent_turn_count"] == 10_000
     assert compressed.effective_options["retention"]["summary_budget_ratio"] == 0.8
     assert compressed.effective_options["retention"]["summary_tokens"] == summary_budget
     assert compressed.effective_options["output_contract"] == "summary_plus_retained"
@@ -311,6 +308,80 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
         "estimated_active_tokens": 2,
         "budget_exceeded": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_ov_compression_adapter_keeps_live_messages_when_commit_has_no_archive():
+    class FakeVLM:
+        model = "fake-model"
+
+        async def get_completion_async(self, **kwargs):
+            raise AssertionError("ov adapter must not call the compressor VLM directly")
+
+    class FakeSession:
+        def __init__(self):
+            self._archives = SimpleNamespace(read_overview=self._read_overview)
+
+        async def add_messages_async(self, messages):
+            return []
+
+        async def commit_async(self, **kwargs):
+            return {
+                "status": "skipped",
+                "task_id": None,
+                "archive_uri": None,
+                "archived": False,
+                "reason": "all_within_keep_window",
+                "estimated_active_tokens": 123,
+                "budget_exceeded": True,
+            }
+
+        async def _read_live_messages_strict(self):
+            return [
+                SimpleNamespace(
+                    to_dict=lambda: {
+                        "role": "assistant",
+                        "parts": [{"type": "text", "text": "SOURCE_CONTEXT:\nlarge tail"}],
+                    }
+                )
+            ]
+
+        async def _read_overview(self, archive_uri):
+            raise AssertionError("no archive overview should be read without archive_uri")
+
+    async def session_factory(request, session_id, memory_policy):
+        return FakeSession()
+
+    bundle = core.GACCBundle.from_mapping(_row())
+    adapter = adapters.OVCompressionAdapter(
+        FakeVLM(),
+        model="fake-model",
+        session_factory=session_factory,
+    )
+
+    compressed = await adapter.compress(
+        adapters.CompressionRequest(
+            bundle=bundle,
+            target_ratio=0.3,
+            run_id="run-1",
+            repeat_index=1,
+        )
+    )
+
+    assert compressed.final_messages == [
+        {"role": "assistant", "content": "SOURCE_CONTEXT:\nlarge tail"}
+    ]
+    assert compressed.effective_options["compressed"]["summary"] == ""
+    assert compressed.effective_options["compressed"]["retained"] == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "text": "SOURCE_CONTEXT:\nlarge tail"}],
+        }
+    ]
+    assert compressed.effective_options["compressed"]["commit"]["archive_uri"] is None
+    assert compressed.effective_options["compressed"]["commit"]["reason"] == (
+        "all_within_keep_window"
+    )
 
 
 def test_ov_session_messages_preserve_locomo_turns():
@@ -335,10 +406,32 @@ def test_ov_session_messages_preserve_locomo_turns():
         "8:00 pm on 9 May, 2023",
     ]
     assert messages[0]["parts"][0].text == (
-        "LoCoMo goal: Answer questions about the LoCoMo conversation.\n\n[Alice]: Hi Bob"
+        "LoCoMo goal: Answer questions about the LoCoMo conversation.\n\n"
+        "session_1 (1:56 pm on 8 May, 2023)\n[Alice]: Hi Bob"
     )
-    assert messages[1]["parts"][0].text.startswith("[Bob]: Hello Alice")
+    assert "[Bob]: Hello Alice" in messages[1]["parts"][0].text
     assert "SOURCE_CONTEXT" not in messages[1]["parts"][0].text
+
+
+def test_ov_session_messages_keep_gacc_context_as_single_assistant_step():
+    bundle = core.GACCBundle.from_mapping(
+        {
+            **_row(),
+            "context": "\n".join(f"fact {index}: {'x' * 80}" for index in range(120)),
+        }
+    )
+
+    messages = adapters.OVCompressionAdapter._session_messages(bundle)
+
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert [message["message_kind"] for message in messages] == [
+        "user_query",
+        "assistant_step",
+    ]
+    assert "GACC goal" in messages[0]["parts"][0].text
+    assert messages[1]["parts"][0].text.startswith("SOURCE_CONTEXT:\n")
+    assert "SOURCE_CONTEXT_CHUNK" not in messages[1]["parts"][0].text
+    assert "fact 119:" in messages[1]["parts"][0].text
 
 
 def test_sqlite_record_layer_tracks_repeats_and_conditions(tmp_path):
@@ -587,66 +680,25 @@ def test_html_report_renders_condition_comparison(tmp_path):
     assert "Loong" in html
 
 
-def test_report_summarizes_full_and_compressed_conditions(tmp_path):
-    bundles = [
-        core.GACCBundle.from_mapping(
-            _row(
-                questions=[
-                    {
-                        "question_id": "q1",
-                        "question": "Q1",
-                        "gold_answer": "A1",
-                    },
-                    {
-                        "question_id": "q2",
-                        "question": "Q2",
-                        "gold_answer": "A2",
-                    },
-                ]
-            )
+def test_sqlite_reports_all_questions_correct_goal_accuracy(tmp_path):
+    with records.connect(tmp_path / "records.sqlite") as conn:
+        for question_id, grade in [("q1", "CORRECT"), ("q2", "INCORRECT")]:
+            records.record_result(conn, _result_row(question_id=question_id, grade=grade))
+        summary = records.summarize_results(conn)["conditions"]["ratio_0_3"]["overall"]
+    assert summary["accuracy"] == 0.5
+    assert summary["macro_accuracy"] == 0.0
+
+
+def test_macro_accuracy_counts_conditions_as_separate_evaluations(tmp_path):
+    with records.connect(tmp_path / "records.sqlite") as conn:
+        records.record_result(conn, _result_row())
+        records.record_result(
+            conn,
+            _result_row(condition="no_compression", target_ratio=-1, grade="INCORRECT"),
         )
-    ]
-
-    core.write_json(
-        core.memory_path(tmp_path, 0.05, bundles[0]),
-        {
-            "status": "ok",
-            "retained_tokens": 3,
-            "budget_tokens": 4,
-            "source_tokens": 8,
-        },
-    )
-    for condition, ratio, grades in [
-        ("full_context", None, ["CORRECT", "CORRECT"]),
-        ("5%", 0.05, ["CORRECT", "INCORRECT"]),
-    ]:
-        for question, grade in zip(bundles[0].questions, grades, strict=True):
-            core.write_json(
-                core.judgment_path(tmp_path, condition, question.question_id),
-                {
-                    "status": "ok",
-                    "grade": grade,
-                    "condition": condition,
-                    "ratio": ratio,
-                    "question_id": question.question_id,
-                },
-            )
-
-    report = core.build_report(
-        tmp_path,
-        bundles,
-        budgets=(0.05,),
-        include_full_context=True,
-        metadata={"compressor_model": "ov-wm"},
-    )
-
-    assert report["goals"] == 1
-    assert report["questions"] == 2
-    assert report["conditions"]["full_context"]["overall"]["micro_accuracy"] == 1.0
-    assert report["conditions"]["full_context"]["overall"]["macro_accuracy"] == 1.0
-    assert report["conditions"]["5%"]["overall"]["micro_accuracy"] == 0.5
-    assert report["conditions"]["5%"]["overall"]["macro_accuracy"] == 0.0
-    assert report["compression_usage"]["5%"]["valid"] == 1
+        summary = records.summarize_results(conn)["overall"]
+    assert summary["goals_planned"] == 2
+    assert summary["macro_accuracy"] == 0.5
 
 
 def test_extract_judge_grade_accepts_json_and_rejects_bad_values():
@@ -661,3 +713,256 @@ def test_extract_judge_grade_accepts_json_and_rejects_bad_values():
 
     with pytest.raises(ValueError, match="invalid judge grade"):
         core.extract_judge_grade('{"grade":"PARTIAL"}')
+
+
+def test_locomo_filters_adversarial_questions_without_renumbering(tmp_path):
+    row = _locomo_row()
+    row["qa"] = [
+        {"category": 5, "question": "Unanswerable?"},
+        {"category": "5", "question": "Also unanswerable?"},
+        {"category": 1, "question": "How many?", "answer": 0},
+    ]
+    path = tmp_path / "locomo.json"
+    path.write_text("\n  " + json.dumps([row]), encoding="utf-8")
+
+    bundle = core.load_gacc_jsonl(path)[0]
+
+    assert [(q.question_id, q.gold_answer) for q in bundle.questions] == [("conv-26_qa2", "0")]
+
+
+def test_locomo_dates_are_visible_in_compression_messages():
+    bundle = core.GACCBundle.from_mapping(_locomo_row())
+    messages = adapters.OVCompressionAdapter._session_messages(bundle)
+
+    assert "8 May, 2023" in messages[0]["parts"][0].text
+    assert "9 May, 2023" in messages[-1]["parts"][0].text
+
+
+@pytest.mark.asyncio
+async def test_codex_local_keeps_only_real_user_turns_for_locomo():
+    bundle = core.GACCBundle.from_mapping(_locomo_row())
+    vlm = SimpleNamespace(get_completion_async=_short_summary)
+    adapter = adapters.CodexLocalSummaryAdapter(vlm)
+
+    result = await adapter.compress(adapters.CompressionRequest(bundle, 0.9, "test", 1))
+
+    retained = result.final_messages[1:]
+    assert retained and all(message["role"] == "user" for message in retained)
+    assert "Bob is waving" not in core.final_messages_to_context(retained)
+    prompt = adapter._build_compaction_prompt(bundle)
+    assert "<ASSISTANT_MESSAGE>" in prompt
+    assert "8 May, 2023" in prompt
+
+
+async def _short_summary(**kwargs):
+    return "short"
+
+
+@pytest.mark.asyncio
+async def test_codex_local_rejects_over_budget_retry():
+    async def oversized(**kwargs):
+        return "x" * 1000
+
+    adapter = adapters.CodexLocalSummaryAdapter(SimpleNamespace(get_completion_async=oversized))
+    with pytest.raises(RuntimeError, match="budget"):
+        await adapter._complete_summary("prompt", 10)
+
+
+@pytest.mark.asyncio
+async def test_ov_missing_archive_summary_is_not_a_success():
+    async def missing_overview(archive_uri):
+        return ""
+
+    async def live():
+        return []
+
+    session = SimpleNamespace(
+        _archives=SimpleNamespace(read_overview=missing_overview),
+        _read_live_messages_strict=live,
+    )
+    adapter = adapters.OVCompressionAdapter(None)
+    with pytest.raises(RuntimeError, match="summary"):
+        await adapter._read_compressed_artifacts(session, {"archive_uri": "viking://archive"})
+
+
+@pytest.mark.asyncio
+async def test_answer_and_judge_do_not_reuse_previous_calls(tmp_path):
+    answers = iter(["old answer", "new answer"])
+    judgments = iter(['{"grade":"CORRECT"}', '{"grade":"INCORRECT"}'])
+
+    async def reader_call(**kwargs):
+        return next(answers)
+
+    async def judge_call(**kwargs):
+        return next(judgments)
+
+    bundle = core.GACCBundle.from_mapping(_row())
+    question = bundle.questions[0]
+    compression = await adapters.CodexLocalSummaryAdapter(None).compress(
+        adapters.CompressionRequest(bundle, -1, "test", 1)
+    )
+    for _ in range(2):
+        path = await run_eval.answer_question(
+            SimpleNamespace(get_completion_async=reader_call),
+            "model",
+            bundle,
+            question,
+            compression,
+            tmp_path,
+            repeat_index=1,
+        )
+        judgment = await run_eval.judge_answer(
+            SimpleNamespace(get_completion_async=judge_call),
+            "model",
+            bundle,
+            question,
+            compression,
+            tmp_path,
+            repeat_index=1,
+            answer_path=path,
+        )
+
+    assert core.read_json(path)["answer"] == "new answer"
+    assert core.read_json(judgment)["grade"] == "INCORRECT"
+
+
+def _result_row(**overrides):
+    return {
+        "run_id": "r1",
+        "dataset": "Loong",
+        "context_id": "c1",
+        "goal_id": "g1",
+        "question_id": "q1",
+        "condition": "ratio_0_3",
+        "target_ratio": 0.3,
+        "adapter": "ov",
+        "repeat_index": 1,
+        "answer_status": "ok",
+        "judge_status": "ok",
+        "grade": "CORRECT",
+        **overrides,
+    }
+
+
+def test_records_survive_later_failure(tmp_path):
+    path = tmp_path / "records.sqlite"
+    with pytest.raises(RuntimeError):
+        with records.connect(path) as conn:
+            records.record_run(conn, {"run_id": "r1"})
+            records.record_result(conn, _result_row())
+            raise RuntimeError("later failure")
+
+    with records.connect(path) as conn:
+        assert records.summarize_results(conn)["overall"]["planned"] == 1
+        assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 1
+
+
+def test_report_separates_methods_and_filters_runs(tmp_path):
+    with records.connect(tmp_path / "records.sqlite") as conn:
+        for run_id, adapter, grade in [
+            ("r1", "ov", "CORRECT"),
+            ("r2", "codex-local-summary", "INCORRECT"),
+        ]:
+            records.record_run(conn, {"run_id": run_id})
+            records.record_result(conn, _result_row(run_id=run_id, adapter=adapter, grade=grade))
+        metrics = records.summarize_results(conn)
+        filtered = records.summarize_results(conn, run_id="r1")
+
+    assert metrics["methods"]["ov"]["conditions"]["ratio_0_3"]["overall"]["accuracy"] == 1
+    assert (
+        metrics["methods"]["codex-local-summary"]["conditions"]["ratio_0_3"]["overall"]["accuracy"]
+        == 0
+    )
+    assert [row["run_id"] for row in filtered["runs"]] == ["r1"]
+    rendered = report.write_html_report(tmp_path / "report.html", metrics).read_text()
+    assert "<td>ov</td>" in rendered
+    assert "<td>codex-local-summary</td>" in rendered
+
+
+def test_smoke_defaults_to_three_repeats(tmp_path):
+    args = parse_args(["--input", str(tmp_path / "input.jsonl"), "--smoke"])
+    assert args.repeats == 3
+
+
+def test_smoke_reports_answer_and_grade_variation(tmp_path):
+    with records.connect(tmp_path / "records.sqlite") as conn:
+        for index, answer, grade in [(1, "yes", "CORRECT"), (2, "no", "INCORRECT")]:
+            records.record_result(
+                conn,
+                _result_row(
+                    condition="no_compression",
+                    target_ratio=-1,
+                    repeat_index=index,
+                    answer=answer,
+                    grade=grade,
+                ),
+            )
+        variance = records.summarize_results(conn)["variance"]
+    assert variance["grade_changed_questions"] == 1
+    assert variance["answer_changed_questions"] == 1
+    assert variance["recommended_repeats"] == 5
+
+
+@pytest.mark.asyncio
+async def test_runner_records_compression_failure_and_continues(tmp_path, monkeypatch):
+    path = _write_jsonl(tmp_path / "input.jsonl", [_row()])
+    args = parse_args(
+        [
+            "--input",
+            str(path),
+            "--output",
+            str(tmp_path / "output"),
+            "--run-id",
+            "test",
+            "--compression-ratios",
+            "0.3,-1",
+        ]
+    )
+    vlm = SimpleNamespace(
+        model="test",
+        provider="openai",
+        api_base=None,
+        temperature=0,
+        max_tokens=None,
+        api_key=None,
+        is_available=lambda: True,
+        get_completion_async=_short_summary,
+    )
+    monkeypatch.setattr(run_eval, "load_vlm_config", lambda args: vlm)
+
+    class FailingAdapter(adapters.CodexLocalSummaryAdapter):
+        async def compress(self, request):
+            if request.target_ratio != -1:
+                raise RuntimeError("compression failure")
+            return await super().compress(request)
+
+    monkeypatch.setattr(run_eval, "build_compression_adapter", lambda *args: FailingAdapter(vlm))
+    monkeypatch.setattr(core, "extract_judge_grade", lambda response: ("CORRECT", ""))
+
+    metrics = await run_eval.run(args)
+
+    assert metrics["overall"]["planned"] == 2
+    assert metrics["overall"]["failed"] == 1
+    assert metrics["overall"]["correct"] == 1
+    assert (args.output / "runs" / "test" / "reports" / "metrics.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_ov_session_uses_benchmark_temperature(tmp_path):
+    from openviking_cli.utils.config import VLMConfig, get_openviking_config
+
+    config = VLMConfig.model_validate(get_openviking_config().vlm.model_dump(mode="python"))
+    config.temperature = 0.123
+    adapter = adapters.OVCompressionAdapter(config, state_root=tmp_path / "ov")
+    request = adapters.CompressionRequest(
+        core.GACCBundle.from_mapping(_row()), 0.3, "temperature-test", 1
+    )
+    try:
+        session = await adapter._create_session(
+            request, session_id="temperature-test", memory_policy=adapter._MEMORY_POLICY
+        )
+        effective = await session._get_vlm_config()
+        assert effective.temperature == pytest.approx(0.123)
+    finally:
+        await adapter.close()
+        config.close()

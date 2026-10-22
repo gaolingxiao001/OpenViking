@@ -173,8 +173,9 @@ class TestCommit:
             messages,
             latest_archive_overview="",
             checkpoint_requests=None,
+            summary_tokens=0,
         ):
-            del checkpoint_requests
+            del checkpoint_requests, summary_tokens
             working_memory_batches.append([message.id for message in messages])
             return f"{latest_archive_overview}\n{messages[0].id}"
 

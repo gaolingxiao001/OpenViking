@@ -149,6 +149,8 @@ def _message_tokens(messages: Iterable[Message]) -> int:
 def _truncate_message_group(
     messages: List[Message],
     token_budget: int,
+    *,
+    head_ratio: float = 0.75,
 ) -> tuple[List[Message], List[str]]:
     """Return a virtual atomic group that fits ``token_budget``.
 
@@ -203,7 +205,7 @@ def _truncate_message_group(
         remaining = max(0, token_budget - used)
         if remaining <= 0:
             break
-        fitted = truncate_text_to_token_budget(original, remaining)
+        fitted = truncate_text_to_token_budget(original, remaining, head_ratio=head_ratio)
         setattr(part, attribute, fitted)
 
     # Record every cleared/shortened slot, including older fields that received
@@ -231,6 +233,7 @@ def fit_active_messages_to_budget(
     messages: List[Message],
     *,
     token_budget: int,
+    head_ratio: float = 0.75,
 ) -> ActiveMessageBudgetPlan:
     """Build a strict, non-destructive active-message view under a token budget.
 
@@ -275,7 +278,9 @@ def fit_active_messages_to_budget(
         if group_tokens > remaining:
             if not allow_truncate or remaining <= 0:
                 return False
-            chosen, group_truncated = _truncate_message_group(group, remaining)
+            chosen, group_truncated = _truncate_message_group(
+                group, remaining, head_ratio=head_ratio
+            )
             if not chosen:
                 return False
 
@@ -380,6 +385,19 @@ def _partial_latest_turn_plan(
     anchor = latest_turn.anchor
     steps = latest_turn.steps
     min_tail = max(1, int(min_raw_tail_steps or 0)) if steps else 0
+    mandatory_tokens = int(anchor.estimated_tokens or 0) if anchor is not None else 0
+    mandatory_tokens += sum(step.estimated_tokens for step in steps[-min_tail:]) if min_tail else 0
+    if mandatory_tokens > token_budget or anchor is None:
+        # Persist a budgeted view but archive the complete originals first.
+        # Reuse the same atomic tool-pair truncation as context assembly.
+        retained = fit_active_messages_to_budget(
+            latest_turn.messages, token_budget=token_budget, head_ratio=0.0
+        )
+        return RetentionPlan(
+            archive_messages=_flatten_turns([*older_turns, latest_turn]),
+            retained_messages=retained.messages,
+            estimated_active_tokens=retained.estimated_tokens,
+        )
 
     retained_steps: List[AssistantStep] = list(steps[-min_tail:]) if min_tail else []
     retained_tokens = int(anchor.estimated_tokens or 0) if anchor is not None else 0
@@ -447,9 +465,9 @@ def plan_retention(
 ) -> RetentionPlan:
     """Plan Turn-aware retention under both a turn count and token budget.
 
-    Oldest complete turns are archived first. If the newest turn alone exceeds
-    the budget, its user anchor and an atomic suffix of assistant steps remain
-    live while early steps become checkpoint sources.
+    Oldest complete turns are archived first. If the newest turn exceeds the
+    budget, early steps become checkpoint sources. An oversized anchor/final
+    step is stored as a bounded view after archiving its complete original.
     """
     keep_recent_turn_count = max(0, int(keep_recent_turn_count or 0))
     token_budget = max(0, int(token_budget or 0))
@@ -472,14 +490,6 @@ def plan_retention(
     older_turns = turns[:selected_start]
     latest_turn = retained_turns[-1]
     if latest_turn.estimated_tokens > token_budget:
-        if latest_turn.anchor is None:
-            # A legacy assistant-only prefix has no stable User anchor for a
-            # partial-Turn checkpoint. Archive it as a complete unit so Phase 2
-            # can summarize it without producing an invalid checkpoint plan.
-            return RetentionPlan(
-                archive_messages=_flatten_turns([*older_turns, latest_turn]),
-                retained_messages=[],
-            )
         return _partial_latest_turn_plan(
             older_turns,
             latest_turn,

@@ -59,12 +59,11 @@ CREATE INDEX IF NOT EXISTS idx_results_dataset ON results(run_id, dataset);
 def connect(path: str | Path) -> Iterator[sqlite3.Connection]:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, isolation_level=None)
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(SCHEMA)
         yield conn
-        conn.commit()
     finally:
         conn.close()
 
@@ -144,6 +143,14 @@ def _summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
     ratios = [row["actual_ratio"] for row in rows if row["actual_ratio"] is not None]
     final_tokens = [row["final_tokens"] for row in rows if row["final_tokens"] is not None]
     source_tokens = [row["source_tokens"] for row in rows if row["source_tokens"] is not None]
+    goals: dict[tuple[str, str, str, str, int], list[sqlite3.Row]] = {}
+    for row in rows:
+        key = (row["run_id"], row["adapter"], row["condition"], row["goal_id"], row["repeat_index"])
+        goals.setdefault(key, []).append(row)
+    correct_goals = sum(
+        all(row["judge_status"] == "ok" and row["grade"] == "CORRECT" for row in group)
+        for group in goals.values()
+    )
     return {
         "planned": planned,
         "evaluated": evaluated,
@@ -152,9 +159,51 @@ def _summary(rows: list[sqlite3.Row]) -> dict[str, Any]:
         "failed": failed,
         "accuracy": correct / planned if planned else None,
         "evaluated_accuracy": correct / evaluated if evaluated else None,
+        "goals_planned": len(goals),
+        "goals_correct": correct_goals,
+        "macro_accuracy": correct_goals / len(goals) if goals else None,
         "average_actual_ratio": sum(ratios) / len(ratios) if ratios else None,
         "average_final_tokens": sum(final_tokens) / len(final_tokens) if final_tokens else None,
         "average_source_tokens": sum(source_tokens) / len(source_tokens) if source_tokens else None,
+    }
+
+
+def _condition_summaries(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    return {
+        condition: {
+            "overall": _summary([row for row in rows if row["condition"] == condition]),
+            "datasets": {
+                dataset: _summary(
+                    [
+                        row
+                        for row in rows
+                        if row["condition"] == condition and row["dataset"] == dataset
+                    ]
+                )
+                for dataset in sorted({row["dataset"] for row in rows})
+            },
+        }
+        for condition in sorted({row["condition"] for row in rows})
+    }
+
+
+def _variance(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    questions: dict[tuple[str, str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        if row["condition"] == "no_compression":
+            questions.setdefault((row["run_id"], row["adapter"], row["question_id"]), []).append(
+                row
+            )
+    repeated = [group for group in questions.values() if len(group) > 1]
+    complete = [group for group in repeated if all(row["judge_status"] == "ok" for row in group)]
+    changed_grades = sum(len({row["grade"] for row in group}) > 1 for group in complete)
+    changed_answers = sum(len({row["answer"] for row in group}) > 1 for group in complete)
+    return {
+        "repeated_questions": len(repeated),
+        "evaluated_questions": len(complete),
+        "grade_changed_questions": changed_grades,
+        "answer_changed_questions": changed_answers,
+        "recommended_repeats": (5 if changed_grades else 3) if complete else None,
     }
 
 
@@ -165,8 +214,7 @@ def summarize_results(conn: sqlite3.Connection, *, run_id: str | None = None) ->
         where = "WHERE run_id = ?"
         params = (run_id,)
     rows = list(conn.execute(f"SELECT * FROM results {where}", params))
-    conditions = sorted({row["condition"] for row in rows})
-    datasets = sorted({row["dataset"] for row in rows})
+    methods = sorted({row["adapter"] for row in rows})
     return {
         "runs": [
             {
@@ -176,23 +224,17 @@ def summarize_results(conn: sqlite3.Connection, *, run_id: str | None = None) ->
                 "seed": row["seed"],
                 "effective_config": json.loads(row["effective_config_json"] or "{}"),
             }
-            for row in conn.execute("SELECT * FROM runs ORDER BY created_at")
+            for row in conn.execute(f"SELECT * FROM runs {where} ORDER BY created_at", params)
         ],
         "overall": _summary(rows),
-        "conditions": {
-            condition: {
-                "overall": _summary([row for row in rows if row["condition"] == condition]),
-                "datasets": {
-                    dataset: _summary(
-                        [
-                            row
-                            for row in rows
-                            if row["condition"] == condition and row["dataset"] == dataset
-                        ]
-                    )
-                    for dataset in datasets
-                },
+        "conditions": _condition_summaries(rows) if len(methods) <= 1 else {},
+        "methods": {
+            method: {
+                "conditions": _condition_summaries(
+                    [row for row in rows if row["adapter"] == method]
+                )
             }
-            for condition in conditions
+            for method in methods
         },
+        "variance": _variance(rows),
     }
