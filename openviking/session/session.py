@@ -3290,8 +3290,6 @@ class Session:
                         else {"type": "function", "function": {"name": "create_working_memory"}}
                     ),
                 }
-                if summary_tokens > 0:
-                    create_kwargs["max_tokens"] = summary_tokens
                 response = await vlm.get_completion_async(
                     **create_kwargs,
                 )
@@ -3310,30 +3308,28 @@ class Session:
                 working_memory = args.get("working_memory")
                 if not isinstance(working_memory, str) or not working_memory.strip():
                     raise ValueError("create_working_memory.working_memory is empty")
-                return _ArchiveSummaryResult(
+                checkpoint_summaries = wm.parse_required_checkpoint_summaries(
+                    args,
+                    len(checkpoint_requests),
+                )
+                return await self._enforce_summary_token_budget(
+                    formatted_messages=formatted,
+                    messages=messages,
+                    prior_overview=latest_archive_overview or "",
+                    output_language=output_language,
                     overview=working_memory,
-                    checkpoint_summaries=wm.parse_required_checkpoint_summaries(
-                        args,
-                        len(checkpoint_requests),
-                    ),
-                    summary_metrics=self._summary_budget_metrics(
-                        working_memory,
-                        summary_tokens,
-                    ),
+                    summary_tokens=summary_tokens,
+                    checkpoint_summaries=checkpoint_summaries,
                 )
-            if summary_tokens > 0:
-                overview = await vlm.get_completion_async(
-                    prompt=prompt,
-                    max_tokens=summary_tokens,
-                )
-                return _ArchiveSummaryResult(
-                    overview=str(overview or ""),
-                    summary_metrics=self._summary_budget_metrics(
-                        str(overview or ""),
-                        summary_tokens,
-                    ),
-                )
-            return await vlm.get_completion_async(prompt)
+            overview = await vlm.get_completion_async(prompt)
+            return await self._enforce_summary_token_budget(
+                formatted_messages=formatted,
+                messages=messages,
+                prior_overview=latest_archive_overview or "",
+                output_language=output_language,
+                overview=str(overview or ""),
+                summary_tokens=summary_tokens,
+            )
 
         # -------- Branch 2: has prior WM v2 -> tool_call incremental update --------
         wm.wm_debug(f"branch=UPDATE (prior WM={len(latest_archive_overview)}B)")

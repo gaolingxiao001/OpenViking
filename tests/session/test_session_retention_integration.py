@@ -757,7 +757,7 @@ async def test_wm_creation_returns_two_products_in_one_model_call(
     assert result.checkpoint_summaries == ("Queried the service and found pool saturation.",)
     assert len(calls) == 1
     assert calls[0]["tools"][0]["function"]["name"] == "create_working_memory"
-    assert calls[0]["max_tokens"] == 128
+    assert "max_tokens" not in calls[0]
     assert '<checkpoint_source index="0">' in calls[0]["prompt"]
     assert calls[0]["prompt"].count("queried the service") == 1
     assert "secret-anchor-id" not in calls[0]["prompt"]
