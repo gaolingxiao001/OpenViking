@@ -23,7 +23,7 @@ function validManifest() {
       VIKA_LOG_LEVEL: 'info',
       VIKA_DRY_RUN: 'false',
       VIKA_TRAEX_EFFORT: 'medium',
-      TEAM_TASK_BOARD_URL: '',
+      VIKA_IGNORED_SENDER_IDS: '',
     },
     agents: [
       {
@@ -87,7 +87,7 @@ test('loads any number of agents from one absolute deployment manifest', () => {
       VIKA_LOG_LEVEL: 'info',
       VIKA_DRY_RUN: 'false',
       VIKA_TRAEX_EFFORT: 'medium',
-      TEAM_TASK_BOARD_URL: '',
+      VIKA_IGNORED_SENDER_IDS: '',
     });
     assert.deepEqual(deployment.agents.map(({ id }) => id), ['alpha', 'beta', 'gamma']);
     assert.equal(selectDeploymentAgent(deployment).id, 'beta');
@@ -131,7 +131,7 @@ test('system environment overrides manifest daemon env while agent identity stay
 
     assert.equal(env.VIKA_LOG_LEVEL, 'debug');
     assert.equal(env.VIKA_DRY_RUN, 'false');
-    assert.equal(env.TEAM_TASK_BOARD_URL, '');
+    assert.equal(env.VIKA_IGNORED_SENDER_IDS, '');
     assert.equal(env.ARK_API_KEY, 'system-only-secret');
     assert.equal(env.VIKA_PORT, '3738');
     assert.equal(env.VIKA_LARK_PROFILE, 'cli_alpha');
@@ -377,6 +377,38 @@ test('explicit silence is opt-in per instance and always pinned in the daemon en
   withManifest(broken, (manifestPath) => {
     assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /agents\[0\]\.explicitSilence must be a boolean/);
   });
+});
+
+test('an instance names a shipped role or its own role file, and keeps natural writing unless it turns it off', () => {
+  const manifest = validManifest();
+  manifest.agents[0].role = 'assistant';
+  manifest.agents[1].role = '/srv/vika/roles/beta.md';
+  manifest.agents[1].naturalWriting = false;
+  withManifest(manifest, (manifestPath) => {
+    const env = { VIKA_CONFIG: manifestPath, VIKA_ROLE: 'qa', VIKA_NATURAL_WRITING: 'false' };
+    const deployment = loadDeploymentManifest(env);
+    assert.equal(selectDeploymentAgent(deployment, 'alpha').naturalWriting, true);
+    applyDeploymentAgentEnv(env, deployment, 'alpha');
+    assert.equal(env.VIKA_ROLE, 'assistant');
+    assert.equal(env.VIKA_NATURAL_WRITING, 'true');
+    applyDeploymentAgentEnv(env, deployment, 'beta');
+    assert.equal(env.VIKA_ROLE, '/srv/vika/roles/beta.md');
+    assert.equal(env.VIKA_NATURAL_WRITING, 'false');
+    // No role: neither the shell's nor another instance's leaks in.
+    applyDeploymentAgentEnv(env, deployment, 'gamma');
+    assert.equal(env.VIKA_ROLE, undefined);
+  });
+  for (const [field, value, message] of [
+    ['role', 'pirate', /agents\[0\]\.role must be colleague, assistant, qa or an absolute path/],
+    ['role', 'roles/mine.md', /agents\[0\]\.role must be colleague, assistant, qa or an absolute path/],
+    ['naturalWriting', 'no', /agents\[0\]\.naturalWriting must be a boolean/],
+  ]) {
+    const broken = validManifest();
+    broken.agents[0][field] = value;
+    withManifest(broken, (manifestPath) => {
+      assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), message);
+    });
+  }
 });
 
 test('rejects unknown and missing manifest fields instead of guessing', () => {

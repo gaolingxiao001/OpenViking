@@ -316,7 +316,7 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     VIKA_CONFIG: '/safe-home/custom/config.json',
     VIKA_LOG_LEVEL: 'debug',
     ARK_API_KEY: 'system-only-secret',
-    TEAM_TASK_BOARD_URL: '',
+    VIKA_IGNORED_SENDER_IDS: '',
   }), {
     HOME: '/safe-home',
     PATH: '/safe-bin',
@@ -325,7 +325,7 @@ test('PM2 control commands discard metadata inherited from a managed caller', ()
     VIKA_CONFIG: '/safe-home/custom/config.json',
     VIKA_LOG_LEVEL: 'debug',
     ARK_API_KEY: 'system-only-secret',
-    TEAM_TASK_BOARD_URL: '',
+    VIKA_IGNORED_SENDER_IDS: '',
   });
 });
 

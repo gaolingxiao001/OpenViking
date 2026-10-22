@@ -2,15 +2,12 @@ import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   claudeBin: 'claude',
   claudeModel: 'sonnet',
   claudeEffort: 'medium',

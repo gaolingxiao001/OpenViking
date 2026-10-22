@@ -2,7 +2,6 @@ import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { managedPiBin, PI_VERSION, PI_MCP_EXTENSION, PI_MCP_STATUS } from '../src/pi-runtime.mjs';
 import { assembleConversationPolicy } from '../src/conversation-policy.mjs';
@@ -13,10 +12,8 @@ import {
 } from '../src/pi.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   piBin: 'pi',
   piModel: 'openai/gpt-4o',
   piEffort: 'medium',

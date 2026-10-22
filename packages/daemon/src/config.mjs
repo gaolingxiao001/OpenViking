@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundledLarkCli } from './lark-cli-bin.mjs';
 import { managedPiBin } from './pi-runtime.mjs';
+import { resolveRolePromptPath } from './conversation-policy.mjs';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 export const moduleDir = path.resolve(sourceDir, '..');
@@ -25,6 +26,23 @@ function boolEnv(name, fallback) {
   if (['1', 'true', 'yes', 'on'].includes(raw.toLowerCase())) return true;
   if (['0', 'false', 'no', 'off'].includes(raw.toLowerCase())) return false;
   throw new Error(`${name} must be a boolean`);
+}
+
+// VIKA_ROLE: a role shipped under agent/roles, or the absolute path of the
+// owner's own role file. Unset, the agent runs on the Core's defaults alone.
+function rolePromptEnv(promptDir) {
+  const role = (process.env.VIKA_ROLE ?? '').trim();
+  if (!role) return '';
+  if (!path.isAbsolute(role) && !/^[a-z][a-z0-9-]{0,31}$/.test(role)) {
+    throw new Error('VIKA_ROLE must be a role name or an absolute path');
+  }
+  const filePath = resolveRolePromptPath(role, promptDir);
+  let info = null;
+  try { info = fs.statSync(filePath); } catch {}
+  if (!info?.isFile()) {
+    throw new Error(path.isAbsolute(role) ? 'VIKA_ROLE names a file that does not exist' : `VIKA_ROLE ${role} is not a known role`);
+  }
+  return filePath;
 }
 
 function csvEnv(name) {
@@ -184,13 +202,11 @@ export function getConfig() {
     lockPath: path.join(dataDir, 'daemon.lock'),
     tempDir: path.join(dataDir, 'tmp'),
     workspace,
-    systemPromptPath: path.join(promptDir, 'system-prompt.md'),
+    promptDir,
+    rolePromptPath: rolePromptEnv(promptDir),
+    // On by default; agents[].naturalWriting: false turns it off.
+    naturalWriting: boolEnv('VIKA_NATURAL_WRITING', true),
     openVikingConfigPath: (process.env.OPENVIKING_CLI_CONFIG_FILE || '').trim(),
-    openVikingIdentityEnabled: boolEnv('VIKA_OV_IDENTITY', false),
-    harnessPromptPath: path.join(promptDir, 'harness.md'),
-    openVikingPromptPath: path.join(promptDir, 'openviking.md'),
-    meetingAudioPromptPath: path.join(promptDir, 'meeting-audio.md'),
-    teamTaskBoardUrl: process.env.TEAM_TASK_BOARD_URL || '',
     agentName: process.env.VIKA_AGENT_NAME || process.env.VIKA_INSTANCE_ID || 'Agent',
     instanceId: process.env.VIKA_INSTANCE_ID || '',
     upgradeTarget: process.env.VIKA_UPGRADE_TARGET || process.env.VIKA_INSTANCE_ID || '',

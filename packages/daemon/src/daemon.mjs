@@ -20,7 +20,6 @@ import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import { OVUnavailableError } from './ov-connection.mjs';
-import { loadOpenVikingIdentity } from './openviking.mjs';
 import { TimerConnector, TimerRepository } from './timers.mjs';
 import {
   MeetingPlugin,
@@ -102,19 +101,6 @@ export class PersonalAgentDaemon {
     } catch (error) {
       this.logger.warn('activity_persist_failed', { kind, error: safeError(error) });
       return false;
-    }
-  }
-
-  // Opt-in (VIKA_OV_IDENTITY). Every runtime assembles its policy from
-  // this.config, so the read happens once, before the first runtime exists. A
-  // failed read only leaves the identity section out.
-  async loadOpenVikingIdentity(client) {
-    if (!this.config.openVikingIdentityEnabled) return;
-    try {
-      this.config.openVikingIdentity = await loadOpenVikingIdentity(this.config, { client });
-      this.logger.info('ov_identity_loaded', { found: Boolean(this.config.openVikingIdentity.text) });
-    } catch (error) {
-      this.logger.warn('ov_identity_unavailable', { error: safeError(error) });
     }
   }
 
@@ -225,7 +211,6 @@ export class PersonalAgentDaemon {
         logger: this.logger.child({ component: 'action-api' }),
       });
 
-      await this.loadOpenVikingIdentity(ovClient);
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           this.meeting?.onTurnFailed(info);
@@ -260,6 +245,7 @@ export class PersonalAgentDaemon {
         logger: this.logger,
         runtime: this.agentRuntime,
         recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
+        isOwner: (event) => this.connectors.isOwner(event),
         isStopping: () => this.shuttingDown,
       });
       this.harness = new Harness({
@@ -299,6 +285,7 @@ export class PersonalAgentDaemon {
           const card = settledChoiceCard(event);
           if (card) return this.connectors.updateCard(event.parentId, card);
         },
+        isOwner: (event) => this.connectors.isOwner(event),
         isStopping: () => this.shuttingDown,
       });
       // Checks at each successful turn's end that every input it consumed got a

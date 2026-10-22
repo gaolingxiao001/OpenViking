@@ -11,7 +11,6 @@ const CONTROL_ENV_MAX_BYTES = 262_144;
 const DEPLOYMENT_MANIFEST_MAX_BYTES = 1_048_576;
 const TOP_LEVEL_FIELDS = Object.freeze(['version', 'defaultInstance', 'env', 'agents']);
 const DAEMON_ENV_FIELDS = Object.freeze([
-  'TEAM_TASK_BOARD_URL',
   'LARK_CLI_BIN',
   'CODEX_BIN',
   'TRAEX_BIN',
@@ -28,7 +27,6 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'VIKA_MAX_EVENT_BYTES',
   'VIKA_MAX_EVENT_AGE_MS',
   'VIKA_IDLE_REACTION_AFTER_MS',
-  'VIKA_OV_IDENTITY',
   'VIKA_RETENTION_MS',
   'VIKA_CODEX_EFFORT',
   'VIKA_TRAEX_EFFORT',
@@ -68,12 +66,17 @@ const AGENT_FIELDS = Object.freeze([
   'ovConfig',
   'ovAutoRecall',
   'explicitSilence',
+  'role',
+  'naturalWriting',
   'model',
   'volcSessionId',
   'volcEnvironmentId',
   'meetingAudio',
   'emailAccounts',
 ]);
+// The roles shipped with the release (packages/daemon/agent/roles/<name>.md).
+// An instance names one of them, or the absolute path of its own role file.
+const ROLE_PRESETS = Object.freeze(['colleague', 'assistant', 'qa']);
 // Each mailbox is its own email Connector instance; the id is how the model
 // and the logs tell them apart.
 const EMAIL_INSTANCE_ID = /^email-[a-z0-9][a-z0-9-]{0,39}$/;
@@ -271,6 +274,9 @@ function parseAgent(value, index) {
   if (value.explicitSilence !== undefined && typeof value.explicitSilence !== 'boolean') {
     throw new Error(`${label}.explicitSilence must be a boolean`);
   }
+  if (value.naturalWriting !== undefined && typeof value.naturalWriting !== 'boolean') {
+    throw new Error(`${label}.naturalWriting must be a boolean`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -283,12 +289,21 @@ function parseAgent(value, index) {
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     ovAutoRecall: value.ovAutoRecall ?? false,
     explicitSilence: value.explicitSilence ?? false,
+    role: manifestRole(value.role, `${label}.role`),
+    naturalWriting: value.naturalWriting ?? true,
     model,
     volcSessionId,
     volcEnvironmentId,
     meetingAudio,
     emailAccounts: Object.freeze(emailAccounts),
   });
+}
+
+function manifestRole(value, label) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string' && ROLE_PRESETS.includes(value)) return value;
+  if (typeof value === 'string' && path.isAbsolute(value.trim())) return manifestAbsolutePath(value, label);
+  throw new Error(`${label} must be ${ROLE_PRESETS.join(', ')} or an absolute path`);
 }
 
 function manifestEmailAccounts(value, label) {
@@ -465,6 +480,9 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
   Object.assign(env, openVikingAgentEnv(agent));
   // Always set, so neither the shell nor another instance's value leaks in.
   env.VIKA_EXPLICIT_SILENCE = agent.explicitSilence ? 'true' : 'false';
+  env.VIKA_NATURAL_WRITING = agent.naturalWriting ? 'true' : 'false';
+  if (agent.role) env.VIKA_ROLE = agent.role;
+  else delete env.VIKA_ROLE;
   env.VIKA_CHANNEL = agent.channel;
   env.VIKA_CONNECTORS_JSON = JSON.stringify(agent.connectors);
   if (agent.emailAccounts.length > 0) env.VIKA_EMAIL_ACCOUNTS_JSON = JSON.stringify(agent.emailAccounts);
@@ -517,6 +535,7 @@ module.exports = {
   AGENT_FIELDS,
   INSTANCE_ID,
   RESERVED_INSTANCE_IDS,
+  ROLE_PRESETS,
   CONTROL_ENV_MAX_BYTES,
   DAEMON_ENV_FIELDS,
   DAEMON_SECRET_ENV_FIELDS,

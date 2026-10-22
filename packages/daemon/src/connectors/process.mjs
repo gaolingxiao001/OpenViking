@@ -430,6 +430,12 @@ export class ConnectorManager {
     return this.connectors.get(id)?.owner ?? null;
   }
 
+  // Whether an event's sender is the owner its Connector reported at check.
+  isOwner(event) {
+    const owner = this.owner(event?.connectorInstance ?? event?.source);
+    return Boolean(owner && event.senderId && owner.id === event.senderId);
+  }
+
   get subscriptionRunning() {
     return this.connectors.size > 0
       && [...this.connectors.values()].every((connector) => connector.subscriptionRunning);

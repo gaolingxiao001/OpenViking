@@ -12,9 +12,12 @@ const require = createRequire(import.meta.url);
 const {
   INSTANCE_ID,
   RESERVED_INSTANCE_IDS,
+  ROLE_PRESETS,
   loadDeploymentManifest,
   resolveDeploymentManifestPath,
 } = require('../../../deployment-config.cjs');
+
+export { ROLE_PRESETS };
 
 export const WEB_PORT = 3737;
 const FIRST_INSTANCE_PORT = 3738;

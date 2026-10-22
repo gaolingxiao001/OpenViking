@@ -6,11 +6,9 @@ import { CodexAgent } from '../src/codex.mjs';
 import { TraexAgent } from '../src/traex.mjs';
 import { Store } from '../src/store.mjs';
 import { executeCommand } from '../src/commands.mjs';
-import { fileURLToPath } from 'node:url';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const config = { cognitionMaxChars: 120000, workspace: '/tmp/vika-test',
-  systemPromptPath: fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url)) };
+const config = { cognitionMaxChars: 120000, workspace: '/tmp/vika-test' };
 
 function fixture(t, { runtimeId = 'codex', claudeFactory } = {}) {
   const store = new Store(':memory:', logger);
