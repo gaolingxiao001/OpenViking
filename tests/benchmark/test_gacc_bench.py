@@ -3,7 +3,7 @@ import json
 import pytest
 
 from benchmark.gacc import adapters, core, records, report
-from benchmark.gacc.run_eval import _effective_config
+from benchmark.gacc.run_eval import _effective_config, parse_args
 from openviking.session.retention import RETENTION_MODE_TURN_BUDGET
 
 
@@ -268,15 +268,15 @@ def test_effective_config_records_vlm_params_without_secret_values():
             "repeats": 2,
             "seed": 42,
             "smoke": False,
-            "provider": None,
-            "api_base": None,
-            "max_tokens": None,
-            "temperature": None,
         },
     )()
 
     config = _effective_config(args, FakeConfig(), FakeConfig(), FakeConfig())
 
+    assert "provider" not in config
+    assert "api_base" not in config
+    assert "max_tokens" not in config
+    assert "temperature" not in config
     assert config["vlm"]["reader"]["provider"] == "openai"
     assert config["vlm"]["reader"]["api_base"] == "https://example.test/v1"
     assert config["vlm"]["reader"]["model"] == "reader-model"
@@ -284,6 +284,39 @@ def test_effective_config_records_vlm_params_without_secret_values():
     assert config["vlm"]["reader"]["max_tokens"] == 4096
     assert config["vlm"]["reader"]["api_key_configured"] is True
     assert "secret" not in json.dumps(config)
+
+
+def test_run_eval_cli_exposes_temperature_as_only_model_control(tmp_path):
+    args = parse_args(
+        [
+            "--input",
+            str(tmp_path / "gacc.jsonl"),
+            "--temperature",
+            "0",
+        ]
+    )
+
+    assert args.temperature == 0
+    for removed_name in (
+        "provider",
+        "model",
+        "api_base",
+        "api_key",
+        "max_tokens",
+        "compressor_provider",
+        "compressor_model",
+        "compressor_api_base",
+        "compressor_api_key",
+        "reader_provider",
+        "reader_model",
+        "reader_api_base",
+        "reader_api_key",
+        "judge_provider",
+        "judge_model",
+        "judge_api_base",
+        "judge_api_key",
+    ):
+        assert not hasattr(args, removed_name)
 
 
 def test_smoke_sampling_is_seeded_and_uses_no_compression_only():

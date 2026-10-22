@@ -78,10 +78,14 @@ samples a few rows, repeats them, and forces the no-compression baseline
   --seed 42
 ```
 
-## Model Overrides
+## Model Settings
 
-By default, compressor, reader and judge all use the configured OpenViking VLM.
-Use shared overrides for all roles:
+Compressor, reader and judge all use the configured OpenViking VLM from
+`ov.conf`. Keep provider, base URL, API key, model and token limits in the
+normal OpenViking config so benchmark commands stay repeatable and easy to
+copy.
+
+For deterministic evals, the runner exposes only `--temperature`:
 
 ```bash
 .venv/bin/python -m benchmark.gacc.run_eval \
@@ -90,16 +94,12 @@ Use shared overrides for all roles:
   --limit 10 \
   --compression-ratios -1,0.5,0.3 \
   --repeats 1 \
-  --provider openai \
-  --api-base "$OPENAI_BASE_URL" \
-  --api-key "$OPENAI_API_KEY" \
-  --model "$MODEL" \
   --temperature 0
 ```
 
-Or set a role independently with `--compressor-model`, `--reader-model`,
-`--judge-model`, plus matching `--*-provider`, `--*-api-base` and `--*-api-key`
-flags when needed.
+The SQLite run metadata still records the actual provider, model, temperature,
+max tokens and whether an API key was configured, but it never stores secret
+values.
 
 ## Full Runs
 

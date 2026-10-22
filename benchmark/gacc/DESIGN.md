@@ -51,7 +51,7 @@ TAU2 更适合看端到端 Agent 任务成功率，但执行路径有随机性�
 
 Eval 配置与注意事项：
 
-- 模型参数：暴露 provider、base URL、model、temperature、max tokens 等，并记录实际生效配置。
+- 模型接入配置统一复用 OpenViking 配置；评测 CLI 只暴露核心生成控制项 `temperature`，并记录实际生效的 provider、model、temperature、max tokens 等配置快照但不记录 secret。
 - 隔离 OV 状态：每次 eval 使用独立 user / session / storage，关闭或清理自动记忆，避免记忆提炼污染后续评测。
 - 压缩方法可插拔：`target_ratio` 只定义期望 `final_messages` 的总 token 比例；summary、retained、recent user questions 的预算拆分由各 compressor adapter 自己实现。
 - 默认 adapter 使用 OV，并预留 Codex local / remote。

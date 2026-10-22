@@ -21,13 +21,6 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution fallba
     from benchmark.gacc import adapters, core, records, report
 
 
-def _str_or_none(value: str | None) -> str | None:
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
-
-
 def _config_to_dict(config: Any) -> dict[str, Any]:
     if hasattr(config, "model_dump"):
         return config.model_dump(mode="python")
@@ -36,27 +29,12 @@ def _config_to_dict(config: Any) -> dict[str, Any]:
     raise TypeError(f"unsupported VLM config type: {type(config).__name__}")
 
 
-def load_vlm_config(args: argparse.Namespace, *, role: str):
+def load_vlm_config(args: argparse.Namespace):
     from openviking_cli.utils.config import VLMConfig, get_openviking_config
 
     base = get_openviking_config().vlm
     config = VLMConfig.model_validate(_config_to_dict(base))
 
-    provider = _str_or_none(getattr(args, f"{role}_provider", None)) or _str_or_none(args.provider)
-    model = _str_or_none(getattr(args, f"{role}_model", None)) or _str_or_none(args.model)
-    api_base = _str_or_none(getattr(args, f"{role}_api_base", None)) or _str_or_none(args.api_base)
-    api_key = _str_or_none(getattr(args, f"{role}_api_key", None)) or _str_or_none(args.api_key)
-
-    if provider is not None:
-        config.provider = provider
-    if model is not None:
-        config.model = model
-    if api_base is not None:
-        config.api_base = api_base
-    if api_key is not None:
-        config.api_key = api_key
-    if args.max_tokens is not None:
-        config.max_tokens = args.max_tokens
     if args.temperature is not None:
         config.temperature = args.temperature
     return config
@@ -235,10 +213,6 @@ def _effective_config(
             "reader": _vlm_snapshot(reader),
             "judge": _vlm_snapshot(judge),
         },
-        "provider": args.provider,
-        "api_base": args.api_base,
-        "max_tokens": args.max_tokens,
-        "temperature": args.temperature,
     }
 
 
@@ -363,9 +337,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    compressor = load_vlm_config(args, role="compressor")
-    reader = load_vlm_config(args, role="reader")
-    judge = load_vlm_config(args, role="judge")
+    compressor = load_vlm_config(args)
+    reader = load_vlm_config(args)
+    judge = load_vlm_config(args)
     if not compressor.is_available():
         raise RuntimeError("compressor VLM is not configured")
     if not reader.is_available():
@@ -489,22 +463,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sample-size", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--provider")
-    parser.add_argument("--model")
-    parser.add_argument("--api-base")
-    parser.add_argument("--api-key")
-    parser.add_argument("--max-tokens", type=int)
-    parser.add_argument("--temperature", type=float)
-    for role in ("compressor", "reader", "judge"):
-        parser.add_argument(f"--{role}-provider")
-        parser.add_argument(f"--{role}-model")
-        parser.add_argument(f"--{role}-api-base")
-        parser.add_argument(f"--{role}-api-key")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        help="Override the configured VLM temperature; use 0 for deterministic evals",
+    )
     args = parser.parse_args(normalized_argv)
     if args.limit < 0:
         parser.error("--limit must be >= 0")
-    if args.max_tokens is not None and args.max_tokens <= 0:
-        parser.error("--max-tokens must be > 0")
     if args.repeats <= 0:
         parser.error("--repeats must be > 0")
     if args.sample_size <= 0:
