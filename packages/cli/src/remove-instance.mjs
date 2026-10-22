@@ -61,7 +61,7 @@ export async function removeInstance({ prompter, manifest, configPath, env, cont
       fs.copyFileSync(configPath, `${configPath}.bak`);
       fs.unlinkSync(configPath);
     } else {
-      writeManifest(configPath, next);
+      writeManifest(configPath, next, { expected: manifest });
     }
     saved = true;
     prompter.success(t(`实例 ${agent.id} 已删除，原配置备份在 ${configPath}.bak；数据和凭据已保留。`,

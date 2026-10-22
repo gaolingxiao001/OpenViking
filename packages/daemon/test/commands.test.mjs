@@ -95,6 +95,8 @@ describe('parseCommand', () => {
     assert.deepEqual(parseCommand('/M gpt-5.5'), { name: 'model', arg: 'gpt-5.5' });
     assert.deepEqual(parseCommand('/eff high'), { name: 'effort', arg: 'high' });
     assert.deepEqual(parseCommand('/run claude'), { name: 'runtime', arg: 'claude' });
+    assert.deepEqual(parseCommand(' /primary STATUS '), { name: 'primary', arg: 'STATUS' });
+    assert.deepEqual(parseCommand('/p'), { name: 'primary', arg: '' });
   });
 
   it('keeps everything after the command token as one arg', () => {
@@ -119,6 +121,7 @@ describe('commandCandidate', () => {
   it('never accepts slash commands in group chats, mentioned or not', () => {
     assert.equal(commandCandidate(chatEvent({ chatType: 'group', content: '/help', mentions: [] })), null);
     assert.equal(commandCandidate(chatEvent({ chatType: 'group', content: '/help' })), null);
+    assert.equal(commandCandidate(chatEvent({ chatType: 'group', content: '/primary' })), null);
     const mentions = [{ key: '@_user_1', name: 'Zayn', id: 'ou_bot12345678' }];
     assert.equal(
       commandCandidate(chatEvent({ chatType: 'group', content: '@_user_1 /new', mentions })),
@@ -140,6 +143,18 @@ describe('matchPrefix', () => {
 });
 
 describe('executeCommand', () => {
+  it('dispatches primary commands without reading or changing the runtime', async () => {
+    const command = parseCommand('/primary status');
+    const outcome = { ok: true, text: '当前主 IM：飞书（lark）' };
+    assert.deepEqual(await executeCommand(command, null, { primary: (parsed) => {
+      assert.deepEqual(parsed, command);
+      return outcome;
+    } }), outcome);
+    assert.equal((await executeCommand(command, null)).ok, false);
+    const help = await executeCommand(parseCommand('/help'), fakeCodex());
+    assert.match(help.text, /\/primary status/);
+  });
+
   it('uses the resolved default model for effort instead of the catalog union', async () => {
     const agent = fakeCodex({ model: '', resolvedModel: 'gpt-active', listModels: async () => [
       { id: 'gpt-active', efforts: ['medium', 'high', 'max', 'ultra'] },

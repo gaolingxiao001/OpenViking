@@ -17,6 +17,7 @@ try {
   applyDeploymentDaemonEnv(process.env, deployment);
   applyDeploymentAgentEnv(process.env, deployment);
   config = getConfig();
+  config.manifestPath = deployment.manifestPath;
 } catch (error) {
   process.stderr.write(`${JSON.stringify({
     time: new Date().toISOString(),

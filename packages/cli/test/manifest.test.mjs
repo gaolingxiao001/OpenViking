@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { updateManifest } from '../../daemon/src/deployment-manifest.mjs';
+import { InstanceLock } from '../../daemon/src/lock.mjs';
 import {
   allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, withInstance, writeManifest,
 } from '../src/manifest.mjs';
@@ -80,6 +82,25 @@ test('setup refuses to build on a manifest that does not load', (t) => {
   fs.writeFileSync(path.join(home, '.vika', 'config.json'), '{"version": 2}');
   assert.throws(() => readManifest({ HOME: home }), /version must be 1/);
   assert.deepEqual(readManifest({ HOME: path.join(home, 'nobody') }).value, null);
+});
+
+test('setup cannot overwrite a live primary change from a stale snapshot, and writers share a lock', (t) => {
+  const filePath = path.join(tempHome(t), 'config.json');
+  const first = withInstance(null, agent('primary', { connectors: ['lark', 'telegram'] }));
+  writeManifest(filePath, first, { expected: null });
+  updateManifest(filePath, (value) => { value.agents[0].channel = 'telegram'; });
+  const current = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  assert.throws(() => writeManifest(filePath, first, { expected: first }), /配置已被其他操作修改/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), current);
+  const lock = new InstanceLock(`${filePath}.lock`);
+  lock.acquire();
+  try {
+    assert.throws(() => writeManifest(filePath, first), /already|another/);
+    assert.throws(() => updateManifest(filePath, () => assert.fail('must not edit')), /already|another/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), current);
+  } finally { lock.release(); }
+  writeManifest(filePath, first, { expected: current });
+  assert.deepEqual(JSON.parse(fs.readFileSync(filePath, 'utf8')), first);
 });
 
 test('Slack can be primary or secondary; Ark is rejected', (t) => {

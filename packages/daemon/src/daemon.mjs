@@ -5,6 +5,7 @@ import { ProcessRegistry } from './process-utils.mjs';
 import { AgentRuntime } from './agent-runtime.mjs';
 import { Harness } from './harness.mjs';
 import { executeCommand } from './commands.mjs';
+import { executePrimaryCommand } from './primary-channel.mjs';
 import { ConnectorManager } from './connectors/process.mjs';
 import { ActionService } from './actions/service.mjs';
 import { startActionApi, stopActionApi } from './actions/api.mjs';
@@ -393,7 +394,11 @@ export class PersonalAgentDaemon {
     });
     let outcome;
     try {
-      outcome = await executeCommand(command, this.agentRuntime);
+      outcome = await executeCommand(command, this.agentRuntime, {
+        primary: (parsed) => executePrimaryCommand(parsed, {
+          event, config: this.config, connectors: this.connectors,
+        }),
+      });
     } catch (error) {
       outcome = { ok: false, text: `命令执行失败：${safeError(error)}` };
     }

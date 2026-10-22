@@ -12,7 +12,7 @@ Connector worker (protocol 0.2 NDJSON; Lark 长连接、Slack Socket Mode 或微
   → harness.mjs handleConnectorEvent(入站管线:标准事件校验 → 可选扩展处理 →
       deterministicFilter → slash 识别 → ingest 去重落库 → burst/直送)
   → event.mjs normalizeEvent + deterministicFilter(通用 kind/subject/content，聊天与回复字段可选)
-  → commands.mjs(`/` 开头 = 本机 slash 命令:/new /help /runtime /model /effort,
+  → commands.mjs(`/` 开头 = 本机 slash 命令:/new /help /runtime /model /effort /primary,
       前缀匹配,daemon 直接执行并经 ActionService.replyToEvent 回信,不进 runtime 也不进 history)
   → store.mjs ingest(SQLite 按来源实例+事件 ID 去重,connector_events 表分配 seq)
   → AgentRuntime.submit(formatInboundLine 压缩成一行；非聊天保留 kind/event/subject)
@@ -75,6 +75,8 @@ vika status / vika logs <id> / vika restart [id]
 - **关机排水与 mid-turn 会话降级**:shutdown 先有界等待活跃 turn 完成(≤12s,预算含在 shutdownTimeoutMs 内)再杀 backend;若仍在 turn 中被杀,runtime 会 `store.markOwnedSessionUnresumable` 把已存 session durably 降级,下次启动开 fresh session + OV context,而不是 resume。原因:resume 被 mid-turn 打断的 transcript 时 Claude CLI 会给悬空 tool call 补拒绝标记,消息历史被改写,整个 prompt cache 前缀按 cache-write 价全量重写(2026-08 实测单实例一天烧掉 ~9M write tokens);codex 同理还有重复输入风险。
 - **OV context**:fresh native session 只接 OV archive overview + live messages；同一 native session 不再注入 journal delta。SQLite journal 仅为投递账本和同步 outbox；不得恢复为模型历史来源。
 - **steer 语义(已知且接受)**:`turn/steer` RPC 成功只代表 codex 收下了消息,实际注入要等当前推理步(reasoning + tool call)结束,还有约 6s 每轮的注入开销。所以 turn 进行中来的消息,竞态窗口约一个模型步(10-15s),模型正在发的回复拦不住。除非明确要求改成 turn/interrupt + 合并重发,否则不要"修"这个。
+
+- **主 IM 热切换**:`/primary` 将入站 Connector 设为主 IM，`/primary status` 只读查看；两个命令均限该 Connector 已绑定 owner 的私聊。`commands.mjs` 在读取 runtime snapshot 之前分派，`primary-channel.mjs` 验证身份、连接、主动文本投递能力和 owner 路由。`main.mjs` 将实际加载的 `manifestPath` 传入 daemon；按 `instanceId` 修改 `agents[].channel`，成功后原地更新共享 `config.channel`，ActionService 后续通知立即使用新路由，无须重启或切 session。`deployment-manifest.mjs` 是 CLI/Core 共用的配置写入器：短时文件锁、完整校验、0600 临时文件 + rename；命令锁内读取最新配置，仅修改本实例，setup/removal 保存时校验读取时的快照，防止覆盖并发修改。已有审批保持原 IM。
 
 ## 约定
 

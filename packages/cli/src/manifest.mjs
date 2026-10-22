@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { list, t } from './i18n.mjs';
+import { writeManifest as saveManifest } from '../../daemon/src/deployment-manifest.mjs';
+export { validateManifest } from '../../daemon/src/deployment-manifest.mjs';
 
 // Setup edits ~/.vika/config.json as plain JSON, and only ever saves a file
 // that the daemon's own loader accepts.
@@ -111,27 +113,12 @@ export function withChangedInstance(manifest, agent, env = {}) {
   return next;
 }
 
-function stage(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  try {
-    loadDeploymentManifest({ VIKA_CONFIG: temporary, HOME: os.homedir() });
-  } catch (error) {
-    fs.rmSync(temporary, { force: true });
+export function writeManifest(filePath, value, options) {
+  try { return saveManifest(filePath, value, options); } catch (error) {
+    if (error.code === 'manifest_conflict') {
+      error.message = t('实例配置已被其他操作修改，请重新运行 vika setup。', 'The instance configuration changed elsewhere; run vika setup again.');
+    }
     throw error;
   }
-  return temporary;
-}
-
-// Throws what the daemon's loader would reject, without touching the file.
-export function validateManifest(filePath, value) {
-  fs.rmSync(stage(filePath, value), { force: true });
-}
-
-export function writeManifest(filePath, value) {
-  const temporary = stage(filePath, value);
-  if (fs.existsSync(filePath)) fs.copyFileSync(filePath, `${filePath}.bak`);
-  fs.renameSync(temporary, filePath);
 }
 

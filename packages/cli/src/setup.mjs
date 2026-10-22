@@ -1376,7 +1376,7 @@ async function setupFlow({
   writeRoleFile(state, id);
 
   fs.mkdirSync(state.workspace, { recursive: true, mode: 0o700 });
-  writeManifest(configPath, manifestWith(agent));
+  writeManifest(configPath, manifestWith(agent), { expected: manifest });
   pendingOV.delete(agent.ovConfig);
   if (ov && agent.ovConfig !== current?.ovConfig) saveOVConnection(ov, { env, homeDir });
   for (const mailbox of mail.removed) fs.rmSync(mailbox.config, { force: true });
