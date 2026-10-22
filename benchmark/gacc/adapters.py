@@ -119,9 +119,14 @@ class OVCompressionAdapter:
             memory_policy=self._MEMORY_POLICY,
         )
         await self._wait_for_commit(session, commit)
-        context = await session.get_session_context(token_budget=target_tokens)
-        final_messages = self._context_to_final_messages(context)
+        compressed = await self._read_compressed_artifacts(session, commit)
+        final_messages = self._compressed_to_final_messages(compressed)
         final_text = core.final_messages_to_context(final_messages)
+        summary_tokens = core.count_tokens(compressed["summary"])
+        retained_text = "\n\n".join(
+            message["content"] for message in self._retained_to_final_messages(compressed["retained"])
+        )
+        retained_tokens = core.count_tokens(retained_text)
         final_tokens = core.count_tokens(final_text)
         return CompressionResult(
             condition=condition,
@@ -132,18 +137,17 @@ class OVCompressionAdapter:
                 "target_tokens": target_tokens,
                 "retained_budget_tokens": retained_budget_tokens,
                 "summary_budget_tokens": summary_budget_tokens,
+                "summary_tokens": summary_tokens,
+                "retained_tokens": retained_tokens,
                 "final_tokens": final_tokens,
                 "target_ratio": request.target_ratio,
                 "actual_ratio": final_tokens / source_tokens if source_tokens else None,
-                "estimated_context_tokens": context.get("estimatedTokens"),
-                "active_tokens": context.get("stats", {}).get("activeTokens"),
-                "archive_tokens": context.get("stats", {}).get("archiveTokens"),
             },
             effective_options={
                 **base_options,
                 "mode": "ov_session_retention",
                 "budget_owner": "openviking_session",
-                "output_contract": "final_messages",
+                "output_contract": "summary_plus_retained",
                 "retention": {
                     "mode": RETENTION_MODE_TURN_BUDGET,
                     "keep_recent_turn_count": 1,
@@ -154,9 +158,9 @@ class OVCompressionAdapter:
                     "min_raw_tail_steps": 1,
                 },
                 "commit": self._compact_commit_result(commit),
-                "context_stats": context.get("stats", {}),
+                "compressed": compressed,
             },
-            raw_response=str(context.get("latest_archive_overview") or ""),
+            raw_response=compressed["summary"],
         )
 
     async def close(self) -> None:
@@ -225,11 +229,6 @@ class OVCompressionAdapter:
                 "parts": [TextPart("SOURCE_CONTEXT:\n" + bundle.context)],
                 "message_kind": "assistant_step",
             },
-            {
-                "role": "assistant",
-                "parts": [TextPart("Context ingestion complete.")],
-                "message_kind": "assistant_step",
-            },
         ]
 
     async def _wait_for_commit(self, session: Any, commit: dict[str, Any]) -> None:
@@ -252,19 +251,43 @@ class OVCompressionAdapter:
             error = getattr(task, "error", "") or getattr(task, "result", "")
             raise RuntimeError(f"OpenViking session commit failed: {status} {error}")
 
-    @staticmethod
-    def _context_to_final_messages(context: dict[str, Any]) -> list[dict[str, str]]:
+    async def _read_compressed_artifacts(
+        self,
+        session: Any,
+        commit: dict[str, Any],
+    ) -> dict[str, Any]:
+        archive_uri = commit.get("archive_uri")
+        if not archive_uri:
+            raise RuntimeError("OpenViking commit did not return an archive_uri")
+        retained_messages = await session._read_live_messages_strict()
+        summary = await session._archives.read_overview(archive_uri)
+        return {
+            "summary": str(summary or ""),
+            "retained": [message.to_dict() for message in retained_messages],
+            "commit": self._compact_commit_result(commit),
+        }
+
+    @classmethod
+    def _compressed_to_final_messages(cls, compressed: dict[str, Any]) -> list[dict[str, str]]:
         final_messages: list[dict[str, str]] = []
-        overview = str(context.get("latest_archive_overview") or "").strip()
-        if overview:
+        summary = str(compressed.get("summary") or "").strip()
+        if summary:
             final_messages.append(
                 {
                     "role": "assistant",
-                    "content": "OpenViking latest_archive_overview:\n" + overview,
+                    "content": "OpenViking summary:\n" + summary,
                 }
             )
-        for message in context.get("messages") or []:
-            content = OVCompressionAdapter._message_content(message)
+        final_messages.extend(cls._retained_to_final_messages(compressed.get("retained") or []))
+        if not final_messages:
+            raise RuntimeError("OpenViking compression artifacts are empty after compression")
+        return final_messages
+
+    @classmethod
+    def _retained_to_final_messages(cls, retained: list[dict[str, Any]]) -> list[dict[str, str]]:
+        final_messages: list[dict[str, str]] = []
+        for message in retained:
+            content = cls._message_content(message)
             if content:
                 final_messages.append(
                     {
@@ -272,8 +295,6 @@ class OVCompressionAdapter:
                         "content": content,
                     }
                 )
-        if not final_messages:
-            raise RuntimeError("OpenViking session context is empty after compression")
         return final_messages
 
     @staticmethod

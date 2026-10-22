@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,7 +107,7 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
             self.session_id = session_id
             self.added_messages = None
             self.commit_kwargs = None
-            self.context_budget = None
+            self._archives = SimpleNamespace(read_overview=self._read_overview)
 
         async def add_messages_async(self, messages):
             self.added_messages = messages
@@ -123,25 +124,21 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
             }
 
         async def get_session_context(self, token_budget):
-            self.context_budget = token_budget
-            return {
-                "latest_archive_overview": "summary alpha beta",
-                "messages": [
-                    {
+            raise AssertionError("adapter must read explicit OV compression artifacts")
+
+        async def _read_live_messages_strict(self):
+            return [
+                SimpleNamespace(
+                    to_dict=lambda: {
                         "role": "user",
                         "parts": [{"type": "text", "text": "tail gamma"}],
                     }
-                ],
-                "estimatedTokens": core.count_tokens("summary alpha beta tail gamma"),
-                "stats": {
-                    "totalArchives": 1,
-                    "includedArchives": 0,
-                    "droppedArchives": 0,
-                    "failedArchives": 0,
-                    "activeTokens": core.count_tokens("tail gamma"),
-                    "archiveTokens": core.count_tokens("summary alpha beta"),
-                },
-            }
+                )
+            ]
+
+        async def _read_overview(self, archive_uri):
+            assert archive_uri == "viking://archive/test"
+            return "summary alpha beta"
 
     created = []
 
@@ -182,7 +179,7 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
 
     assert compressed.condition == "ratio_0_5"
     assert compressed.final_messages == [
-        {"role": "assistant", "content": "OpenViking latest_archive_overview:\nsummary alpha beta"},
+        {"role": "assistant", "content": "OpenViking summary:\nsummary alpha beta"},
         {"role": "user", "content": "tail gamma"},
     ]
     assert compressed.token_metrics["target_ratio"] == 0.5
@@ -200,6 +197,12 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
     }
     assert session.added_messages[0]["role"] == "user"
     assert "GACC goal" in session.added_messages[0]["parts"][0].text
+    assert len(session.added_messages) == 2
+    assert all(
+        "Context ingestion complete." not in part.text
+        for message in session.added_messages
+        for part in message["parts"]
+    )
     assert session.commit_kwargs["retention_mode"] == RETENTION_MODE_TURN_BUDGET
     target_tokens = core.budget_tokens(bundle, 0.5)
     retained_budget = max(1, int(target_tokens * 0.2))
@@ -207,13 +210,29 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
     assert session.commit_kwargs["retained_message_token_budget"] == retained_budget
     assert session.commit_kwargs["summary_tokens"] == summary_budget
     assert session.commit_kwargs["enable_working_memory"] is True
-    assert session.context_budget == target_tokens
     assert compressed.token_metrics["target_tokens"] == target_tokens
     assert compressed.token_metrics["retained_budget_tokens"] == retained_budget
     assert compressed.token_metrics["summary_budget_tokens"] == summary_budget
+    assert compressed.token_metrics["summary_tokens"] == core.count_tokens("summary alpha beta")
+    assert compressed.token_metrics["retained_tokens"] == core.count_tokens("tail gamma")
     assert compressed.effective_options["retention"]["retained_budget_ratio"] == 0.2
     assert compressed.effective_options["retention"]["summary_budget_ratio"] == 0.8
     assert compressed.effective_options["retention"]["summary_tokens"] == summary_budget
+    assert compressed.effective_options["output_contract"] == "summary_plus_retained"
+    assert compressed.effective_options["compressed"]["summary"] == "summary alpha beta"
+    assert compressed.effective_options["compressed"]["retained"] == [
+        {
+            "role": "user",
+            "parts": [{"type": "text", "text": "tail gamma"}],
+        }
+    ]
+    assert compressed.effective_options["compressed"]["commit"] == {
+        "status": "skipped",
+        "task_id": None,
+        "archive_uri": "viking://archive/test",
+        "estimated_active_tokens": 2,
+        "budget_exceeded": False,
+    }
 
 
 def test_sqlite_record_layer_tracks_repeats_and_conditions(tmp_path):
