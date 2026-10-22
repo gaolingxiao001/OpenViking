@@ -528,6 +528,16 @@ test('changing an instance lists every setting; only the ones opened change', as
   }
 });
 
+test('changing an instance runtime saves the setup selector before restarting it', async (t) => {
+  //                    change runtime Pi save
+  const h = harness(t, ['2',    '4',    '3', '10']);
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, model: 'pi' }]);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
+  assert.match(h.written(), /运行时：codex: → pi/);
+});
+
 test('a new instance takes a shipped role by what it is for', async (t) => {
   //                   name  role:assistant  workspace  runtime IMs  confirm
   const h = harness(t, ['',  '2',            '',        '1',    '2', 'y']);
