@@ -190,8 +190,7 @@ export async function upgradeTarget(target, {
 } = {}) {
   // The manifest is read on every request, so an instance added since the
   // updater started is already a valid target.
-  const targets = loadTargets();
-  assertUpgradeTarget(target, targets);
+  assertUpgradeTarget(target, loadTargets());
   const deployLock = path.join(path.dirname(path.resolve(releaseLink)), 'deploy.lock');
   try {
     await mkdir(deployLock, { mode: 0o700 });
@@ -200,6 +199,10 @@ export async function upgradeTarget(target, {
     throw error;
   }
   try {
+    // Setup may remove an instance while this request is acquiring the lock.
+    // Use only the configuration observed after we own it.
+    const targets = loadTargets();
+    assertUpgradeTarget(target, targets);
     const publication = await publishReleaseImpl({
       baseDir: path.dirname(path.resolve(releaseLink)),
       ...publishOptions,

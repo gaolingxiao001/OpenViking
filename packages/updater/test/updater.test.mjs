@@ -503,6 +503,27 @@ test('upgradeTarget rejects inherited object property names as targets', async (
   await assert.rejects(upgradeTarget('toString'), /target must be one of/);
 });
 
+test('upgradeTarget rechecks the target after acquiring the deploy lock', async () => {
+  const fixture = await fixtureRelease();
+  const original = process.env.VIKA_UPDATER_TARGETS_JSON;
+  let published = false;
+  try {
+    const pending = upgradeTarget('sally', {
+      releaseLink: fixture.releaseLink,
+      publishReleaseImpl: async () => { published = true; throw new Error('should not publish'); },
+    });
+    // mkdir yields; removal can finish before the upgrade acquires its lock.
+    const next = JSON.parse(original);
+    delete next.sally;
+    process.env.VIKA_UPDATER_TARGETS_JSON = JSON.stringify(next);
+    await assert.rejects(pending, /target must be one of/);
+    assert.equal(published, false);
+    await mkdir(path.join(path.dirname(fixture.releaseLink), 'deploy.lock'));
+  } finally {
+    process.env.VIKA_UPDATER_TARGETS_JSON = original;
+  }
+});
+
 test('upgradeTarget shares the deploy lock with the installer', async () => {
   const fixture = await fixtureRelease();
   await mkdir(path.join(path.dirname(fixture.releaseLink), 'deploy.lock'));
