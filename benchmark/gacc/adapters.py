@@ -111,7 +111,7 @@ class OVCompressionAdapter:
         await session.add_messages_async(self._session_messages(bundle))
         commit = await session.commit_async(
             retention_mode=RETENTION_MODE_TURN_BUDGET,
-            keep_recent_turn_count=1,
+            keep_recent_turn_count=0,
             retained_message_token_budget=retained_budget_tokens,
             summary_tokens=summary_budget_tokens,
             min_raw_tail_steps=1,
@@ -150,7 +150,7 @@ class OVCompressionAdapter:
                 "output_contract": "summary_plus_retained",
                 "retention": {
                     "mode": RETENTION_MODE_TURN_BUDGET,
-                    "keep_recent_turn_count": 1,
+                    "keep_recent_turn_count": 0,
                     "retained_budget_ratio": self._RETAINED_BUDGET_RATIO,
                     "retained_message_token_budget": retained_budget_tokens,
                     "summary_budget_ratio": self._SUMMARY_BUDGET_RATIO,

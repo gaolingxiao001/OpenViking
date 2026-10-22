@@ -204,6 +204,7 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
         for part in message["parts"]
     )
     assert session.commit_kwargs["retention_mode"] == RETENTION_MODE_TURN_BUDGET
+    assert session.commit_kwargs["keep_recent_turn_count"] == 0
     target_tokens = core.budget_tokens(bundle, 0.5)
     retained_budget = max(1, int(target_tokens * 0.2))
     summary_budget = max(1, target_tokens - retained_budget)
@@ -216,6 +217,7 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
     assert compressed.token_metrics["summary_tokens"] == core.count_tokens("summary alpha beta")
     assert compressed.token_metrics["retained_tokens"] == core.count_tokens("tail gamma")
     assert compressed.effective_options["retention"]["retained_budget_ratio"] == 0.2
+    assert compressed.effective_options["retention"]["keep_recent_turn_count"] == 0
     assert compressed.effective_options["retention"]["summary_budget_ratio"] == 0.8
     assert compressed.effective_options["retention"]["summary_tokens"] == summary_budget
     assert compressed.effective_options["output_contract"] == "summary_plus_retained"
