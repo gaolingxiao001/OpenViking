@@ -321,6 +321,101 @@ describe('global Codex/Claude hard switch', () => {
     }
   });
 
+  it('reconciles a setup runtime change from config into an existing database', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-config-reconcile-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    store.initializeCognition('codex', 'token-before-setup');
+    const selected = [];
+    const persisted = [];
+    const runtime = new AgentRuntime({
+      initialModel: 'pi',
+      cognitionMaxChars: 120_000,
+    }, store, quietLogger, {
+      persistRuntimePreference: (target) => persisted.push(target),
+      codexFactory: () => {
+        selected.push('codex');
+        return backend('codex');
+      },
+      piFactory: (options) => {
+        selected.push('pi');
+        return backend('pi', options);
+      },
+    });
+    try {
+      await runtime.start();
+      assert.deepEqual(selected, ['pi']);
+      assert.deepEqual(persisted, [], 'config already contains the desired runtime');
+      assert.equal(runtime.runtime, 'pi');
+      assert.equal(store.getCognitionState().runtime, 'pi');
+      assert.notEqual(store.getCognitionState().authorityToken, 'token-before-setup');
+      assert.equal(store.getGlobalSession().runtime, 'pi');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('persists a live runtime choice before committing its SQLite authority', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-persist-choice-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    store.initializeCognition('codex', 'old-token');
+    const order = [];
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      persistRuntimePreference: async (target) => {
+        assert.equal(target, 'pi');
+        assert.equal(store.getCognitionState().runtime, 'codex');
+        assert.equal(runtime.runtime, 'codex');
+        order.push('config');
+      },
+      codexFactory: (options) => backend('codex', options),
+      piFactory: (options) => backend('pi', options),
+    });
+    try {
+      await runtime.start();
+      const result = await runtime.transition({ kind: 'select-runtime', runtime: 'pi' });
+      order.push('sqlite');
+      assert.equal(result.runtimeChanged, true);
+      assert.deepEqual(order, ['config', 'sqlite']);
+      assert.equal(runtime.runtime, 'pi');
+      assert.equal(store.getCognitionState().runtime, 'pi');
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the old runtime authoritative when persisting a live choice fails', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-persist-failure-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    store.initializeCognition('codex', 'old-token');
+    let staged;
+    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+      persistRuntimePreference: () => { throw new Error('manifest write failed'); },
+      codexFactory: (options) => backend('codex', options),
+      piFactory: (options) => {
+        staged = backend('pi', options);
+        return staged;
+      },
+    });
+    try {
+      await runtime.start();
+      const before = store.getCognitionState();
+      await assert.rejects(
+        runtime.transition({ kind: 'select-runtime', runtime: 'pi' }),
+        /manifest write failed/,
+      );
+      assert.equal(runtime.runtime, 'codex');
+      assert.deepEqual(store.getCognitionState(), before);
+      assert.equal(staged.state.connected, false);
+    } finally {
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('reports the root model idle while only an external tool or subagent is running', () => {
     const runtime = new AgentRuntime({}, {}, quietLogger);
     runtime.backend = backend('codex');

@@ -22,6 +22,7 @@ import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import { OVUnavailableError } from './ov-connection.mjs';
 import { TimerConnector, TimerRepository } from './timers.mjs';
+import { updateRuntimePreference } from './runtime-preference.mjs';
 import {
   MeetingPlugin,
 } from './meeting/index.mjs';
@@ -238,6 +239,9 @@ export class PersonalAgentDaemon {
             warnIfSilenceInert(this.config, runtime, this.logger);
           }
         },
+        persistRuntimePreference: this.config.manifestPath && this.config.instanceId
+          ? (runtime) => updateRuntimePreference(this.config, runtime)
+          : null,
       });
       this.failurePolicy = new FailurePolicy({
         config: this.config,
