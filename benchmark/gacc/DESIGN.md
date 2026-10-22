@@ -39,6 +39,10 @@ TAU2 更适合看端到端 Agent 任务成功率，但执行路径有随机性�
 - `gold_answer` 或 `original_gold_answer`
 
 官方 GACC-Bench 数据不放进 OpenViking 仓库，运行时传入路径。
+解析层额外接受 `LoCoMo` 和 `LoCoMo-*` / `locomo_*` 子集名，并在记录与报告里保留子集分组。
+LoCoMo 使用原始 `conversation.session_N` + `qa[]` 结构：每个 session message 解析成一个
+turn，`speaker_a -> user`、`speaker_b -> assistant`，保留 speaker 前缀和 session 时间；不把整段
+conversation 塞进一个 synthetic assistant `SOURCE_CONTEXT`。
 
 ## 2. Eval 层
 
@@ -53,6 +57,7 @@ Eval 配置与注意事项：
 
 - 模型接入配置统一复用 OpenViking 配置；评测 CLI 只暴露核心生成控制项 `temperature`，并记录实际生效的 provider、model、temperature、max tokens 等配置快照但不记录 secret。
 - 隔离 OV 状态：每次 eval 使用独立 user / session / storage，关闭或清理自动记忆，避免记忆提炼污染后续评测。
+- 写入 OV 时，GACC 样本仍写 goal + source context；LoCoMo 样本按解析出的多轮 turns 写成真实 `user_query` / `assistant_step`。
 - 压缩方法可插拔：`target_ratio` 定义期望 `final_messages` 的总 token 比例；OV adapter 使用 20% raw retained budget + 80% `summary_tokens`。`summary_tokens` 是 OV Working Memory 的硬预算：增量更新后如果超过阈值，不继续 append，直接 full rewrite 生成完整 summary 替换旧 summary。
 - `codex-local-summary` adapter 用相同的 20% retained tail + 80% summary budget 和相同的 `summary + retained` reader 输入形态，只把 summary 生成 prompt 换成 Codex local compact prompt，用来对比摘要质量。
 - 默认 adapter 使用 OV。

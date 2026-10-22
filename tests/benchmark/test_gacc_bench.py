@@ -34,6 +34,39 @@ def _row(*, goal_id="goal-1", context_id="ctx-1", questions=None, dataset="Loong
     }
 
 
+def _locomo_row():
+    return {
+        "dataset": "locomo_multisession",
+        "context_id": "conv-26",
+        "sample_id": "conv-26",
+        "conversation": {
+            "speaker_a": "Alice",
+            "speaker_b": "Bob",
+            "session_1": [
+                {"speaker": "Alice", "text": "Hi Bob"},
+                {
+                    "speaker": "Bob",
+                    "text": "Hello Alice",
+                    "blip_caption": "Bob is waving",
+                },
+            ],
+            "session_1_date_time": "1:56 pm on 8 May, 2023",
+            "session_2": [
+                {"speaker": "Alice", "text": "Remember the cafe plan?"},
+            ],
+            "session_2_date_time": "8:00 pm on 9 May, 2023",
+        },
+        "qa": [
+            {
+                "question": "Who said hello?",
+                "answer": "Bob",
+                "category": "1",
+                "evidence": ["D1:2"],
+            }
+        ],
+    }
+
+
 def test_load_gacc_jsonl_validates_required_shape(tmp_path):
     path = _write_jsonl(tmp_path / "gacc.jsonl", [_row()])
 
@@ -47,6 +80,49 @@ def test_load_gacc_jsonl_validates_required_shape(tmp_path):
     bad = _write_jsonl(tmp_path / "bad.jsonl", [{**_row(), "goal_id": ""}])
     with pytest.raises(ValueError, match="missing goal_id"):
         core.load_gacc_jsonl(bad)
+
+
+def test_load_gacc_jsonl_accepts_locomo_dataset_subsets(tmp_path):
+    path = _write_jsonl(
+        tmp_path / "locomo.jsonl",
+        [
+            _row(goal_id="goal-1", context_id="ctx-1", dataset="LoCoMo"),
+            _row(goal_id="goal-2", context_id="ctx-2", dataset="locomo_multisession"),
+        ],
+    )
+
+    bundles = core.load_gacc_jsonl(path)
+
+    assert [bundle.dataset for bundle in bundles] == ["LoCoMo", "LoCoMo-multisession"]
+
+
+def test_load_gacc_jsonl_builds_locomo_multiturn_conversation(tmp_path):
+    path = _write_jsonl(tmp_path / "locomo.jsonl", [_locomo_row()])
+
+    bundle = core.load_gacc_jsonl(path)[0]
+
+    assert bundle.dataset == "LoCoMo-multisession"
+    assert bundle.context_id == "conv-26"
+    assert bundle.goal_id == "conv-26"
+    assert bundle.goal == "Answer questions about the LoCoMo conversation."
+    assert [question.question_id for question in bundle.questions] == ["conv-26_qa0"]
+    assert bundle.questions[0].gold_answer == "Bob"
+    assert [turn.role for turn in bundle.turns] == ["user", "assistant", "user"]
+    assert [turn.speaker for turn in bundle.turns] == ["Alice", "Bob", "Alice"]
+    assert [turn.session_key for turn in bundle.turns] == ["session_1", "session_1", "session_2"]
+    assert bundle.turns[0].content == "[Alice]: Hi Bob"
+    assert bundle.turns[1].content == (
+        "[Bob]: Hello Alice\n(attached image; image description: Bob is waving)"
+    )
+    assert "session_1 (1:56 pm on 8 May, 2023)" in bundle.context
+    assert "[Bob]: Hello Alice" in bundle.context
+
+
+def test_load_gacc_jsonl_rejects_unknown_dataset(tmp_path):
+    path = _write_jsonl(tmp_path / "bad-dataset.jsonl", [_row(dataset="unknown-bench")])
+
+    with pytest.raises(ValueError, match="unsupported dataset"):
+        core.load_gacc_jsonl(path)
 
 
 def test_parse_budgets_and_budget_tokens_are_percent_based():
@@ -235,6 +311,34 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
         "estimated_active_tokens": 2,
         "budget_exceeded": False,
     }
+
+
+def test_ov_session_messages_preserve_locomo_turns():
+    bundle = core.GACCBundle.from_mapping(_locomo_row())
+
+    messages = adapters.OVCompressionAdapter._session_messages(bundle)
+
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+    assert [message["message_kind"] for message in messages] == [
+        "user_query",
+        "assistant_step",
+        "user_query",
+    ]
+    assert [message["turn_id"] for message in messages] == [
+        "session_1:0",
+        "session_1:1",
+        "session_2:0",
+    ]
+    assert [message["created_at"] for message in messages] == [
+        "1:56 pm on 8 May, 2023",
+        "1:56 pm on 8 May, 2023",
+        "8:00 pm on 9 May, 2023",
+    ]
+    assert messages[0]["parts"][0].text == (
+        "LoCoMo goal: Answer questions about the LoCoMo conversation.\n\n[Alice]: Hi Bob"
+    )
+    assert messages[1]["parts"][0].text.startswith("[Bob]: Hello Alice")
+    assert "SOURCE_CONTEXT" not in messages[1]["parts"][0].text
 
 
 def test_sqlite_record_layer_tracks_repeats_and_conditions(tmp_path):

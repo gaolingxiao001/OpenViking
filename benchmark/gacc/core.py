@@ -36,8 +36,9 @@ DATASET_ALIASES = {
     "LCB": "LCB",
     "SWE-agent": "SWE",
     "SWE": "SWE",
+    "LoCoMo": "LoCoMo",
 }
-DATASET_ORDER = ("LBv2", "HELMET", "L-Eval", "Loong", "MB", "LCB", "SWE")
+DATASET_ORDER = ("LBv2", "HELMET", "L-Eval", "Loong", "MB", "LCB", "SWE", "LoCoMo")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,16 @@ class GACCQuestion:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationTurn:
+    role: str
+    content: str
+    speaker: str
+    session_key: str
+    message_index: int
+    created_at: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class GACCBundle:
     dataset: str
     context_id: str
@@ -69,13 +80,22 @@ class GACCBundle:
     goal_id: str
     goal: str
     questions: tuple[GACCQuestion, ...]
+    turns: tuple[ConversationTurn, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any], *, line_no: int = 1) -> "GACCBundle":
-        for key in ("dataset", "context_id", "context", "goal_id", "goal", "questions"):
+        dataset_name = value.get("dataset")
+        if dataset_name in (None, "") and _looks_like_locomo(value):
+            dataset_name = "LoCoMo"
+        if dataset_name in (None, ""):
+            raise ValueError(f"line {line_no} missing dataset")
+        dataset = normalize_dataset(str(dataset_name))
+        if dataset.startswith("LoCoMo") and _looks_like_locomo(value):
+            return _locomo_bundle_from_mapping(value, dataset=dataset, line_no=line_no)
+
+        for key in ("context_id", "context", "goal_id", "goal", "questions"):
             if key not in value or value.get(key) in (None, ""):
                 raise ValueError(f"line {line_no} missing {key}")
-        dataset = normalize_dataset(str(value["dataset"]))
         raw_questions = value["questions"]
         if not isinstance(raw_questions, list) or not raw_questions:
             raise ValueError(f"line {line_no} questions must be a non-empty list")
@@ -89,6 +109,7 @@ class GACCBundle:
             goal_id=str(value["goal_id"]),
             goal=str(value["goal"]),
             questions=questions,
+            turns=(),
         )
 
 
@@ -97,18 +118,226 @@ def stamp() -> str:
 
 
 def normalize_dataset(name: str) -> str:
+    stripped = name.strip()
     try:
-        return DATASET_ALIASES[name]
+        return DATASET_ALIASES[stripped]
     except KeyError as exc:
+        if stripped.lower() == "locomo":
+            return "LoCoMo"
+        match = re.match(r"(?i)^locomo[-_\s]+(.+)$", stripped)
+        if match:
+            subset = re.sub(r"[-_\s]+", "-", match.group(1).strip())
+            if subset:
+                return f"LoCoMo-{subset}"
         raise ValueError(f"unsupported dataset: {name}") from exc
 
 
-def load_gacc_jsonl(path: str | Path, limit: int | None = None) -> list[GACCBundle]:
-    path = Path(path)
-    bundles: list[GACCBundle] = []
-    goal_ids: set[str] = set()
-    question_ids: set[str] = set()
+def ordered_datasets(bundles: Iterable["GACCBundle"]) -> tuple[str, ...]:
+    present = {bundle.dataset for bundle in bundles}
+    ordered = [dataset for dataset in DATASET_ORDER if dataset in present]
+    ordered.extend(sorted(present.difference(ordered)))
+    return tuple(ordered)
+
+
+def _looks_like_locomo(value: Mapping[str, Any]) -> bool:
+    return isinstance(value.get("conversation"), Mapping) and isinstance(value.get("qa"), list)
+
+
+def _locomo_bundle_from_mapping(
+    value: Mapping[str, Any],
+    *,
+    dataset: str,
+    line_no: int,
+) -> GACCBundle:
+    context_id = str(value.get("context_id") or value.get("sample_id") or "").strip()
+    if not context_id:
+        raise ValueError(f"line {line_no} missing context_id")
+    goal_id = str(value.get("goal_id") or context_id).strip()
+    goal = str(value.get("goal") or "Answer questions about the LoCoMo conversation.").strip()
+    turns = _locomo_turns(value, line_no=line_no)
+    questions = _locomo_questions(value, context_id=context_id, line_no=line_no)
+    context = _locomo_context(value, context_id=context_id, turns=turns)
+    return GACCBundle(
+        dataset=dataset,
+        context_id=context_id,
+        context=context,
+        goal_id=goal_id,
+        goal=goal,
+        questions=questions,
+        turns=turns,
+    )
+
+
+def _locomo_questions(
+    value: Mapping[str, Any],
+    *,
+    context_id: str,
+    line_no: int,
+) -> tuple[GACCQuestion, ...]:
+    raw_questions = value.get("qa")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        raise ValueError(f"line {line_no} qa must be a non-empty list")
+    questions: list[GACCQuestion] = []
+    for index, item in enumerate(raw_questions):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"line {line_no} qa item {index} must be an object")
+        question_id = str(item.get("question_id") or f"{context_id}_qa{index}").strip()
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer", item.get("gold_answer", "")) or "").strip()
+        questions.append(
+            GACCQuestion.from_mapping(
+                {
+                    "question_id": question_id,
+                    "question": question,
+                    "gold_answer": answer,
+                },
+                line_no=line_no,
+            )
+        )
+    return tuple(questions)
+
+
+def _locomo_turns(
+    value: Mapping[str, Any],
+    *,
+    line_no: int,
+) -> tuple[ConversationTurn, ...]:
+    conversation = value.get("conversation")
+    if not isinstance(conversation, Mapping):
+        raise ValueError(f"line {line_no} conversation must be an object")
+    speaker_a = str(conversation.get("speaker_a") or "").strip()
+    speaker_b = str(conversation.get("speaker_b") or "").strip()
+    turns: list[ConversationTurn] = []
+    for session_key in _locomo_session_keys(conversation):
+        messages = conversation.get(session_key)
+        if not isinstance(messages, list):
+            raise ValueError(f"line {line_no} {session_key} must be a list")
+        created_at = str(conversation.get(f"{session_key}_date_time") or "").strip()
+        for message_index, message in enumerate(messages):
+            if not isinstance(message, Mapping):
+                raise ValueError(f"line {line_no} {session_key}[{message_index}] must be an object")
+            speaker = str(message.get("speaker") or "").strip()
+            role = _locomo_role(message, speaker=speaker, speaker_a=speaker_a, speaker_b=speaker_b)
+            content = _locomo_turn_content(message, speaker=speaker)
+            if not content:
+                continue
+            turns.append(
+                ConversationTurn(
+                    role=role,
+                    content=content,
+                    speaker=speaker,
+                    session_key=session_key,
+                    message_index=message_index,
+                    created_at=created_at,
+                )
+            )
+    if not turns:
+        raise ValueError(f"line {line_no} conversation has no messages")
+    return tuple(turns)
+
+
+def _locomo_session_keys(conversation: Mapping[str, Any]) -> list[str]:
+    def session_number(key: str) -> int:
+        try:
+            return int(key.split("_", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    return sorted(
+        (
+            key
+            for key, value in conversation.items()
+            if key.startswith("session_")
+            and not key.endswith("_date_time")
+            and isinstance(value, list)
+        ),
+        key=session_number,
+    )
+
+
+def _locomo_role(
+    message: Mapping[str, Any],
+    *,
+    speaker: str,
+    speaker_a: str,
+    speaker_b: str,
+) -> str:
+    raw_role = str(message.get("role") or "").strip()
+    if raw_role in {"user", "assistant"}:
+        return raw_role
+    if speaker and speaker == speaker_b:
+        return "assistant"
+    return "user"
+
+
+def _locomo_turn_content(message: Mapping[str, Any], *, speaker: str) -> str:
+    text = str(message.get("text") or message.get("content") or "").strip()
+    chunks: list[str] = []
+    if text:
+        chunks.append(f"[{speaker}]: {text}" if speaker else text)
+    caption = str(message.get("blip_caption") or message.get("image_description") or "").strip()
+    if caption:
+        chunks.append(f"(attached image; image description: {caption})")
+    for image_url in _normalize_locomo_image_urls(message.get("img_url")):
+        chunks.append(f"(attached image; image URL: {image_url})")
+    return "\n".join(chunks).strip()
+
+
+def _normalize_locomo_image_urls(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return [str(value)]
+
+
+def _locomo_context(
+    value: Mapping[str, Any],
+    *,
+    context_id: str,
+    turns: tuple[ConversationTurn, ...],
+) -> str:
+    conversation = value.get("conversation")
+    speaker_a = ""
+    speaker_b = ""
+    if isinstance(conversation, Mapping):
+        speaker_a = str(conversation.get("speaker_a") or "").strip()
+        speaker_b = str(conversation.get("speaker_b") or "").strip()
+    lines = [f"LoCoMo conversation: {context_id}"]
+    if speaker_a or speaker_b:
+        speakers = " & ".join(speaker for speaker in (speaker_a, speaker_b) if speaker)
+        lines.append(f"Speakers: {speakers}")
+    current_session = None
+    for turn in turns:
+        if turn.session_key != current_session:
+            lines.append("")
+            header = turn.session_key
+            if turn.created_at:
+                header = f"{header} ({turn.created_at})"
+            lines.append(header)
+            current_session = turn.session_key
+        lines.append(turn.content)
+    return "\n".join(lines).strip()
+
+
+def _iter_input_rows(path: Path) -> Iterable[tuple[int, Mapping[str, Any]]]:
     with path.open("r", encoding="utf-8", newline="") as stream:
+        first = stream.read(1)
+        stream.seek(0)
+        if first == "[":
+            try:
+                payload = json.load(stream)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON: {exc}") from exc
+            if not isinstance(payload, list):
+                raise ValueError("input JSON must be an array")
+            for index, item in enumerate(payload, start=1):
+                if not isinstance(item, Mapping):
+                    raise ValueError(f"JSON item {index} must be an object")
+                yield index, item
+            return
         for line_no, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
@@ -116,17 +345,28 @@ def load_gacc_jsonl(path: str | Path, limit: int | None = None) -> list[GACCBund
                 item = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid JSON at line {line_no}: {exc}") from exc
-            bundle = GACCBundle.from_mapping(item, line_no=line_no)
-            if bundle.goal_id in goal_ids:
-                raise ValueError(f"duplicate goal_id: {bundle.goal_id}")
-            goal_ids.add(bundle.goal_id)
-            for question in bundle.questions:
-                if question.question_id in question_ids:
-                    raise ValueError(f"duplicate question_id: {question.question_id}")
-                question_ids.add(question.question_id)
-            bundles.append(bundle)
-            if limit and len(bundles) >= limit:
-                break
+            if not isinstance(item, Mapping):
+                raise ValueError(f"line {line_no} must be a JSON object")
+            yield line_no, item
+
+
+def load_gacc_jsonl(path: str | Path, limit: int | None = None) -> list[GACCBundle]:
+    path = Path(path)
+    bundles: list[GACCBundle] = []
+    goal_ids: set[str] = set()
+    question_ids: set[str] = set()
+    for line_no, item in _iter_input_rows(path):
+        bundle = GACCBundle.from_mapping(item, line_no=line_no)
+        if bundle.goal_id in goal_ids:
+            raise ValueError(f"duplicate goal_id: {bundle.goal_id}")
+        goal_ids.add(bundle.goal_id)
+        for question in bundle.questions:
+            if question.question_id in question_ids:
+                raise ValueError(f"duplicate question_id: {question.question_id}")
+            question_ids.add(question.question_id)
+        bundles.append(bundle)
+        if limit and len(bundles) >= limit:
+            break
     if not bundles:
         raise ValueError("input JSONL is empty")
     return bundles
@@ -548,7 +788,7 @@ def build_report(
         rows = _judgment_rows(root, bundles, condition)
         by_dataset = {
             dataset: summarize([(row, bundle) for row, bundle in rows if bundle.dataset == dataset])
-            for dataset in DATASET_ORDER
+            for dataset in ordered_datasets(bundles)
         }
         output["conditions"][condition] = {
             "benchmarks": by_dataset,

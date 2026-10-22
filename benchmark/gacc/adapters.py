@@ -264,7 +264,8 @@ class OVCompressionAdapter:
         final_text = core.final_messages_to_context(final_messages)
         summary_tokens = core.count_tokens(compressed["summary"])
         retained_text = "\n\n".join(
-            message["content"] for message in self._retained_to_final_messages(compressed["retained"])
+            message["content"]
+            for message in self._retained_to_final_messages(compressed["retained"])
         )
         retained_tokens = core.count_tokens(retained_text)
         final_tokens = core.count_tokens(final_text)
@@ -351,6 +352,9 @@ class OVCompressionAdapter:
 
     @staticmethod
     def _session_messages(bundle: core.GACCBundle) -> list[dict[str, Any]]:
+        if bundle.turns:
+            return OVCompressionAdapter._locomo_session_messages(bundle)
+
         goal = (
             "GACC goal:\n"
             f"{bundle.goal}\n\n"
@@ -370,6 +374,24 @@ class OVCompressionAdapter:
                 "message_kind": "assistant_step",
             },
         ]
+
+    @staticmethod
+    def _locomo_session_messages(bundle: core.GACCBundle) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for index, turn in enumerate(bundle.turns):
+            content = turn.content
+            if index == 0:
+                content = f"LoCoMo goal: {bundle.goal}\n\n{content}"
+            message: dict[str, Any] = {
+                "role": turn.role,
+                "parts": [TextPart(content)],
+                "message_kind": "user_query" if turn.role == "user" else "assistant_step",
+                "turn_id": f"{turn.session_key}:{turn.message_index}",
+            }
+            if turn.created_at:
+                message["created_at"] = turn.created_at
+            messages.append(message)
+        return messages
 
     async def _wait_for_commit(self, session: Any, commit: dict[str, Any]) -> None:
         task_id = commit.get("task_id")

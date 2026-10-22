@@ -51,6 +51,17 @@ Each row must contain:
 - `goal`
 - `questions[]` with `question_id`, `question` and `gold_answer`
 
+Supported `dataset` values include the official GACC-Bench subsets plus
+`LoCoMo` and `LoCoMo-*` / `locomo_*` subset names.
+
+LoCoMo rows may use the native JSON shape with `conversation.session_N` and
+`qa[]` instead of GACC's single `context` string. In that case the loader builds
+one benchmark sample per conversation, preserves the original multi-turn
+`user` / `assistant` message order (`speaker_a -> user`, `speaker_b ->
+assistant`), and derives the reader context from those turns. The OV adapter
+writes those turns as real session messages before committing, so LoCoMo is not
+flattened into one synthetic assistant `SOURCE_CONTEXT` message.
+
 ## Smoke Test
 
 Validate the input schema and compression-ratio settings without model calls:
