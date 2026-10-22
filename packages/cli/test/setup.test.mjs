@@ -13,6 +13,7 @@ import { connectTelegram } from '../src/telegram.mjs';
 import { TelegramState } from '../../daemon/src/telegram/state.mjs';
 import { configureOpenViking } from '../src/ov-setup.mjs';
 import { detectOpenViking, savedOVConfigPath } from '../src/ov.mjs';
+import { updateManifest } from '../../daemon/src/deployment-manifest.mjs';
 
 const RUNTIMES = [
   { id: 'codex', label: 'Codex', model: 'codex:', bin: '/opt/codex/bin/codex', binEnv: 'CODEX_BIN', available: true, note: '已登录' },
@@ -384,6 +385,17 @@ test('adding Slack to an existing instance pastes tokens for the new IM only and
   assert.match(h.written(), /接入Slack（需要建 App、两个 token 和私聊口令绑定）/);
   assert.match(h.written(), /接下来接入：Slack 建 App \+ 两个 token \+ 私聊口令绑定/);
   assert.match(h.written(), /\/invite/);
+});
+
+test('setup detects a primary command that changed the manifest while it was connecting an IM', async (t) => {
+  const h = harness(t, ['2', '5', '1,4', '7', '2', '10']);
+  const before = existing(h, { connectors: ['lark', 'slack'] });
+  h.options.connect.telegram = async () => {
+    updateManifest(path.join(h.home, '.vika', 'config.json'), (value) => { value.agents[0].channel = 'slack'; });
+  };
+  await assert.rejects(setupCommand(h.options), /配置已被其他操作修改/);
+  assert.deepEqual(h.manifest().agents, [{ ...before, channel: 'slack' }]);
+  assert.deepEqual(h.calls, [], 'does not restart with a stale setup snapshot');
 });
 
 test('mixed Telegram setup describes each authorization method and keeps email available', async (t) => {
