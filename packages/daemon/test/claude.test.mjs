@@ -2,15 +2,12 @@ import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { ClaudeAgent, sanitizeClaudeEnv } from '../src/claude.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   claudeBin: 'claude',
   claudeModel: 'sonnet',
   claudeEffort: 'medium',
@@ -184,6 +181,180 @@ function harness({ loggedIn = true, store = makeStore(), agentOptions = {}, help
 }
 
 describe('ClaudeAgent persistent stream-json runtime', () => {
+  it('classifies only model-specific startup exits for default-model recovery', async () => {
+    for (const [detail, modelError] of [['Invalid model: claude-retired\n', true],
+      ['Authentication failed: invalid API key\n', false], ['Unsupported model reasoning effort: minimal\n', false],
+      ['Model claude-sonnet is unavailable due to a network error\n', false]]) {
+      const { agent } = harness();
+      agent._spawn = () => {
+        const child = new FakeChild();
+        queueMicrotask(() => {
+          child.emit('spawn');
+          child.stderr.emit('data', detail);
+          child.finish(1);
+        });
+        return child;
+      };
+      await assert.rejects(agent._spawnPersistent(), (error) => {
+        assert.equal(error.code === 'MODEL_UNAVAILABLE', modelError);
+        assert.doesNotMatch(error.message, /invalid API key|claude-retired/);
+        return true;
+      });
+      await agent.stop();
+    }
+  });
+
+  it('omits the effort CLI override when the selected model has no effort control', async () => {
+    const { agent, calls } = harness({ agentOptions: { effort: '' } });
+    try {
+      await agent.start();
+      const args = calls.find((call) => call.args.includes('--print')).args;
+      assert.equal(args.includes('--effort'), false);
+      assert.equal(agent.appliedEffort, '');
+    } finally { await agent.stop(); }
+  });
+
+  it('discovers versioned models and effort capabilities without sending a prompt', async () => {
+    const { agent, persistent } = harness();
+    await agent.start();
+    try {
+      const child = persistent[0];
+      const pending = agent.listModels();
+      const concurrent = agent.listModels();
+      const request = JSON.parse(child.writes[0]);
+      assert.equal(request.type, 'control_request');
+      assert.equal(request.request.subtype, 'initialize');
+      child.feed({ type: 'control_response', response: { subtype: 'success', request_id: request.request_id,
+        response: { models: [
+          { value: 'sonnet', resolvedModel: 'claude-sonnet-5-5', displayName: 'Sonnet 5.5', supportsEffort: true, supportedEffortLevels: ['low', 'high'] },
+          { value: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5', supportsEffort: false },
+          { value: 'disabled', disabled: true },
+        ] } } });
+      const models = await pending;
+      assert.deepEqual(await concurrent, models);
+      assert.equal(models.length, 2);
+      assert.equal(agent.resolvedModel, 'claude-sonnet-5-5');
+      assert.deepEqual(models[0].efforts, ['low', 'high']);
+      assert.deepEqual(models[1].efforts, []);
+      assert.deepEqual(await agent.listModels(), models);
+      assert.equal(child.writes.length, 1);
+      assert.equal(agent.turnInProgress, false);
+      assert.equal(agent.sessionInitialized, false);
+    } finally { await agent.stop(); }
+  });
+
+  it('releases model discovery on disconnect and never invents a static catalog', async () => {
+    const { agent } = harness({ agentOptions: { sessionPersistence: false } });
+    await agent.start();
+    const pending = agent.listModels();
+    await agent.stop();
+    assert.deepEqual(await pending, []);
+    assert.equal(agent.pendingControl.size, 0);
+  });
+
+  it('defers model changes until the next input and resumes the same initialized session', async () => {
+    const { agent, calls, persistent, store } = harness();
+    await agent.start();
+    const child = persistent[0];
+    const id = agent.threadId;
+    agent.deliver('active input', 7);
+    child.feed({ type: 'system', subtype: 'init', session_id: id, model: 'claude-sonnet-5-5' });
+    agent.setModel('opus');
+    agent.deliver('correction', 8);
+    assert.equal(child.exitCode, null);
+    assert.equal(agent.appliedModel, 'sonnet');
+    child.feed({ type: 'result', subtype: 'success' });
+    const before = store.global();
+    agent.deliver('next input');
+    await waitFor(() => persistent.length === 2 && !agent.settingsUpdate);
+    const args = calls.at(-1).args;
+    assert.equal(args[args.indexOf('--model') + 1], 'opus');
+    assert.equal(args[args.indexOf('--resume') + 1], id);
+    assert.equal(agent.threadId, id);
+    assert.deepEqual(store.global(), before);
+    assert.equal(agent.appliedModel, 'opus');
+    persistent[1].feed({ type: 'result', subtype: 'success' });
+    await agent.stop();
+  });
+
+  it('applies effort after the active turn by resuming the same session and preserving queued input order', async () => {
+    const { agent, calls, persistent, store, failures } = harness();
+    await agent.start();
+    const oldChild = persistent[0];
+    const sessionId = agent.threadId;
+    agent.deliver('current request', 7);
+    oldChild.feed({ type: 'system', subtype: 'init', session_id: sessionId });
+    agent.setEffort('high');
+    agent.deliver('live correction', 8);
+    assert.equal(persistent.length, 1);
+    assert.equal(agent.appliedEffort, 'medium');
+    assert.equal(oldChild.exitCode, null);
+    oldChild.feed({ type: 'result', subtype: 'success' });
+    const before = store.global();
+
+    agent.deliver('next request');
+    agent.deliver('next correction');
+    await waitFor(() => persistent.length === 2 && !agent.settingsUpdate);
+    const args = calls.at(-1).args;
+    assert.equal(args[args.indexOf('--resume') + 1], sessionId);
+    assert.equal(args[args.indexOf('--effort') + 1], 'high');
+    assert.equal(agent.threadId, sessionId);
+    assert.equal(agent.appliedEffort, 'high');
+    assert.deepEqual(store.global(), before);
+    assert.deepEqual(persistent[1].writes.map((line) => JSON.parse(line).message.content[0].text),
+      ['next request', 'next correction']);
+    assert.equal(failures.length, 0);
+    persistent[1].feed({ type: 'result', subtype: 'success' });
+    await agent.stop();
+  });
+
+  it('changes effort before the first prompt without resuming a nonexistent transcript', async () => {
+    const { agent, calls, persistent } = harness();
+    await agent.start();
+    const sessionId = agent.threadId;
+    agent.setEffort('high');
+    agent.setEffort('xhigh');
+    agent.deliver('first input', 7);
+    await waitFor(() => persistent.length === 2 && !agent.settingsUpdate);
+    const args = calls.at(-1).args;
+    assert.equal(args.includes('--resume'), false);
+    assert.equal(args[args.indexOf('--session-id') + 1], sessionId);
+    assert.equal(args[args.indexOf('--effort') + 1], 'xhigh');
+    assert.match(JSON.parse(persistent[1].writes[0]).message.content[0].text, /earlier question/);
+    persistent[1].feed({ type: 'result', subtype: 'success' });
+    await agent.stop();
+  });
+
+  it('reports queued input when effort reconfiguration fails without retiring the session', async () => {
+    const { agent, failures, store } = harness({ agentOptions: { sessionPersistence: false } });
+    await agent.start();
+    const sessionId = agent.threadId;
+    const epoch = agent.cognitionEpoch;
+    agent._replaceProcess = async () => { throw new Error('effort process startup failed'); };
+    agent.setEffort('high');
+    agent.deliver('waiting input', 7, 'receipt-effort');
+    await agent.settingsUpdate;
+    assert.equal(agent.threadId, sessionId);
+    assert.equal(agent.cognitionEpoch, epoch);
+    assert.equal(agent.appliedEffort, 'medium');
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].receiptIds, ['receipt-effort']);
+    assert.match(failures[0].error, /effort process startup failed/);
+    assert.equal(store.activities.some((event) => event.kind === 'agent.session_rotated'), false);
+    await agent.stop();
+  });
+
+  it('stops an effort respawn before queued input can start', async () => {
+    const { agent, persistent } = harness();
+    await agent.start();
+    agent.setEffort('high');
+    agent.deliver('waiting input', 7, 'receipt-stop');
+    await agent.stop();
+    assert.equal(agent.child, null);
+    assert.equal(persistent.length, 2);
+    assert.ok(persistent.every((child) => child.exitCode !== null && child.writes.length === 0));
+  });
+
   it('refuses a CLI without unattended permission handling before starting a session', async () => {
     const { agent, persistent } = harness({ help: helpFlags.replace('--permission-prompts', '') });
     await assert.rejects(agent.start(), /missing required flag --permission-prompts/);

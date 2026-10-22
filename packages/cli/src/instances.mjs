@@ -15,6 +15,7 @@ export const IM_LABELS = Object.freeze({
   get email() { return t('邮箱', 'Email'); },
   telegram: 'Telegram',
   qq: 'QQ',
+  slack: 'Slack',
 });
 
 // The primary IM (`channel`) is where the bot reaches the owner unasked.

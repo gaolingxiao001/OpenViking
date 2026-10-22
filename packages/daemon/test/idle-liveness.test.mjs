@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
+import { ActionService } from '../src/actions/service.mjs';
 import { IdleLivenessExtension } from '../src/extensions/idle-liveness.mjs';
+import { Store } from '../src/store.mjs';
+import { fakeConnectors } from './action-fixture.mjs';
+import { chatEvent } from './event-fixture.mjs';
+
+const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function harness({ thresholdMs = 600_000, enabled = true } = {}) {
   let now = 0;
@@ -55,5 +64,26 @@ describe('idle liveness UX hint', () => {
     const state = harness({ enabled: false });
     state.advance(1_000_000);
     assert.equal(state.extension.beforeInbound({}, { seq: 14 }), null);
+  });
+});
+
+describe('idle liveness and explicit silence', () => {
+  it('keeps the idle window open after stay_silent, and closes it after a delivery', async (t) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'idle-silence-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quiet);
+    t.after(() => { store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+    store.initializeCognition('codex', 'token');
+    const state = harness();
+    const service = new ActionService({
+      config: { workspace: directory, tempDir: directory, maxReplyChars: 1_000, channel: 'lark', explicitSilence: true },
+      store, connectors: fakeConnectors(), liveness: state.extension, logger: quiet,
+    });
+    store.ingest(chatEvent({ messageId: 'om_idle12345678', chatId: 'oc_idle12345678' }));
+    state.advance(601_000);
+    await service.call('stay_silent', { decision_id: 'message:om_idle12345678' }, { authority: 'token' });
+    assert.deepEqual(state.extension.beforeInbound({}, { seq: 20 }), { idleForMs: 601_000 });
+    await service.call('send_message', { chat_id: 'oc_idle12345678', markdown: 'hi', decision_id: 'message:om_idle12345678' },
+      { authority: 'token' });
+    assert.equal(state.extension.beforeInbound({}, { seq: 21 }), null);
   });
 });

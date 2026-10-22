@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundledLarkCli } from './lark-cli-bin.mjs';
 import { managedPiBin } from './pi-runtime.mjs';
+import { resolveRolePromptPath } from './conversation-policy.mjs';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 export const moduleDir = path.resolve(sourceDir, '..');
@@ -25,6 +26,23 @@ function boolEnv(name, fallback) {
   if (['1', 'true', 'yes', 'on'].includes(raw.toLowerCase())) return true;
   if (['0', 'false', 'no', 'off'].includes(raw.toLowerCase())) return false;
   throw new Error(`${name} must be a boolean`);
+}
+
+// VIKA_ROLE: a role shipped under agent/roles, or the absolute path of the
+// owner's own role file. Unset, the agent runs on the Core's defaults alone.
+function rolePromptEnv(promptDir) {
+  const role = (process.env.VIKA_ROLE ?? '').trim();
+  if (!role) return '';
+  if (!path.isAbsolute(role) && !/^[a-z][a-z0-9-]{0,31}$/.test(role)) {
+    throw new Error('VIKA_ROLE must be a role name or an absolute path');
+  }
+  const filePath = resolveRolePromptPath(role, promptDir);
+  let info = null;
+  try { info = fs.statSync(filePath); } catch {}
+  if (!info?.isFile()) {
+    throw new Error(path.isAbsolute(role) ? 'VIKA_ROLE names a file that does not exist' : `VIKA_ROLE ${role} is not a known role`);
+  }
+  return filePath;
 }
 
 function csvEnv(name) {
@@ -116,10 +134,10 @@ export function getConfig() {
   );
   const host = process.env.VIKA_HOST || '127.0.0.1';
   assertLoopbackHost(host);
-  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin', 'telegram', 'qq']);
+  const channel = enumEnv('VIKA_CHANNEL', 'lark', ['lark', 'weixin', 'telegram', 'slack', 'qq']);
   const configuredConnectors = jsonStringArrayEnv('VIKA_CONNECTORS_JSON');
   const connectors = configuredConnectors.length > 0 ? [...new Set(configuredConnectors)] : [channel];
-  if (connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram', 'qq'].includes(connector))) {
+  if (connectors.some((connector) => !['lark', 'weixin', 'email', 'telegram', 'slack', 'qq'].includes(connector))) {
     throw new Error('VIKA_CONNECTORS_JSON contains an unsupported connector');
   }
   if (!connectors.includes(channel)) {
@@ -184,13 +202,11 @@ export function getConfig() {
     lockPath: path.join(dataDir, 'daemon.lock'),
     tempDir: path.join(dataDir, 'tmp'),
     workspace,
-    systemPromptPath: path.join(promptDir, 'system-prompt.md'),
+    promptDir,
+    rolePromptPath: rolePromptEnv(promptDir),
+    // On by default; agents[].naturalWriting: false turns it off.
+    naturalWriting: boolEnv('VIKA_NATURAL_WRITING', true),
     openVikingConfigPath: (process.env.OPENVIKING_CLI_CONFIG_FILE || '').trim(),
-    openVikingIdentityEnabled: boolEnv('VIKA_OV_IDENTITY', false),
-    harnessPromptPath: path.join(promptDir, 'harness.md'),
-    openVikingPromptPath: path.join(promptDir, 'openviking.md'),
-    meetingAudioPromptPath: path.join(promptDir, 'meeting-audio.md'),
-    teamTaskBoardUrl: process.env.TEAM_TASK_BOARD_URL || '',
     agentName: process.env.VIKA_AGENT_NAME || process.env.VIKA_INSTANCE_ID || 'Agent',
     instanceId: process.env.VIKA_INSTANCE_ID || '',
     upgradeTarget: process.env.VIKA_UPGRADE_TARGET || process.env.VIKA_INSTANCE_ID || '',
@@ -200,6 +216,7 @@ export function getConfig() {
     actionSocketPath: path.join(dataDir, 'actions.sock'),
     actionMcpPath: path.join(sourceDir, 'actions', 'mcp.mjs'),
     larkCliBin: process.env.LARK_CLI_BIN || bundledLarkCli(),
+    slackCliBin: process.env.SLACK_CLI_BIN || undefined,
     emailAccounts,
     weixinLongPollTimeoutMs: intEnv('VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS', 35_000, {
       min: 5_000,
@@ -252,7 +269,14 @@ export function getConfig() {
       min: 0,
       max: 604_800_000,
     }),
+    // Opt-in per instance (agents[].explicitSilence): the stay_silent tool, the
+    // decisions ledger and the turn-end decision check. Off, the daemon offers
+    // the same tools and assembles the same policy text as without them.
+    explicitSilence: boolEnv('VIKA_EXPLICIT_SILENCE', false),
     historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
+    // Replies to bot messages in one chat/thread with no person writing there
+    // before the safety fuse holds further ones; 0 turns the fuse off.
+    botReplyFuse: intEnv('VIKA_BOT_REPLY_FUSE', 20, { min: 0, max: 1_000 }),
     cognitionMaxChars: intEnv('VIKA_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
     retentionMs: intEnv('VIKA_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
     dryRun: boolEnv('VIKA_DRY_RUN', false),

@@ -2,7 +2,6 @@ import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { managedPiBin, PI_VERSION, PI_MCP_EXTENSION, PI_MCP_STATUS } from '../src/pi-runtime.mjs';
 import { assembleConversationPolicy } from '../src/conversation-policy.mjs';
@@ -13,10 +12,8 @@ import {
 } from '../src/pi.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   piBin: 'pi',
   piModel: 'openai/gpt-4o',
   piEffort: 'medium',
@@ -202,6 +199,145 @@ function harness({ config = baseConfig, store = makeStore(), agentOptions = {}, 
 }
 
 describe('PiAgent persistent rpc runtime', () => {
+  it('changes models between turns and waits for model and effort acknowledgement in the same session', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    const id = agent.threadId;
+    agent.deliver('active input', 7);
+    agent.setModel('anthropic/claude-sonnet');
+    assert.equal(parsedWrites(child).some((request) => request.type === 'set_model'), false);
+    child.feed({ type: 'agent_settled' });
+    await waitFor(() => !agent.turnActive);
+    agent.deliver('next input');
+    const model = parsedWrites(child).at(-1);
+    assert.equal(model.type, 'set_model');
+    assert.equal(model.provider, 'anthropic');
+    assert.equal(model.modelId, 'claude-sonnet');
+    child.feed({ type: 'response', id: model.id, command: 'set_model', success: true });
+    await waitFor(() => parsedWrites(child).at(-1).type === 'set_thinking_level');
+    const effort = parsedWrites(child).at(-1);
+    assert.equal(parsedWrites(child).filter((request) => request.type === 'prompt').length, 1);
+    child.feed({ type: 'response', id: effort.id, command: effort.type, success: true });
+    await agent.settingsUpdate;
+    assert.equal(parsedWrites(child).at(-1).type, 'prompt');
+    assert.equal(agent.threadId, id);
+    assert.equal(persistent.length, 1);
+    assert.equal(agent.appliedModel, 'anthropic/claude-sonnet');
+    assert.deepEqual(failures, []);
+    child.feed({ type: 'agent_settled' });
+    await waitFor(() => !agent.turnActive);
+    await agent.stop();
+  });
+
+  it('resolves the default Pi model from state before listing its capabilities', async () => {
+    const { agent, persistent } = harness({ agentOptions: { model: '' } });
+    await agent.start();
+    const child = persistent[0];
+    const pending = agent.listModels();
+    const state = parsedWrites(child).at(-1);
+    assert.equal(state.type, 'get_state');
+    child.feed({ type: 'response', id: state.id, success: true, data: { model: { provider: 'openai', id: 'gpt-test' } } });
+    await waitFor(() => parsedWrites(child).at(-1).type === 'get_available_models');
+    const catalog = parsedWrites(child).at(-1);
+    child.feed({ type: 'response', id: catalog.id, success: true, data: { models: [{ provider: 'openai', id: 'gpt-test', reasoning: true }] } });
+    assert.equal((await pending)[0].id, agent.resolvedModel);
+    assert.equal(agent.resolvedModel, 'openai/gpt-test');
+    await agent.stop();
+  });
+
+  it('applies effort between turns through RPC and waits for acknowledgement before the next prompt', async () => {
+    const { agent, persistent, store, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    const sessionId = agent.threadId;
+    agent.deliver('current request', 7);
+    agent.setEffort('high');
+    agent.deliver('live correction', 8);
+    assert.equal(parsedWrites(child).some((command) => command.type === 'set_thinking_level'), false);
+    child.feed({ type: 'agent_settled' });
+    const before = store.global();
+    agent.deliver('next request');
+    agent.deliver('next correction');
+    const update = parsedWrites(child).at(-1);
+    assert.equal(update.type, 'set_thinking_level');
+    assert.equal(update.level, 'high');
+    assert.equal(parsedWrites(child).filter((command) => command.type === 'prompt').length, 1);
+    child.feed({ type: 'response', id: update.id, command: update.type, success: true });
+    await agent.settingsUpdate;
+    const next = parsedWrites(child).at(-1);
+    assert.equal(next.type, 'prompt');
+    assert.equal(next.message, 'next request\nnext correction');
+    assert.equal(agent.appliedEffort, 'high');
+    assert.equal(agent.threadId, sessionId);
+    assert.deepEqual(store.global(), before);
+    assert.equal(persistent.length, 1);
+    assert.equal(parsedWrites(child).some((command) => command.type === 'abort'), false);
+    assert.equal(failures.length, 0);
+    child.feed({ type: 'agent_settled' });
+    await agent.stop();
+  });
+
+  it('reports a rejected effort update and can retry in the same session', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    const sessionId = agent.threadId;
+    agent.setEffort('high');
+    agent.deliver('waiting input', 7, 'receipt-effort');
+    const update = parsedWrites(child).at(-1);
+    child.feed({ type: 'response', id: update.id, command: update.type, success: false, error: 'effort rejected' });
+    await agent.settingsUpdate;
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].receiptIds, ['receipt-effort']);
+    assert.match(failures[0].error, /effort rejected/);
+    assert.equal(parsedWrites(child).some((command) => command.type === 'prompt'), false);
+    assert.equal(agent.appliedEffort, 'medium');
+    agent.deliver('retry input', 7);
+    const retry = parsedWrites(child).at(-1);
+    child.feed({ type: 'response', id: retry.id, command: retry.type, success: true });
+    await agent.settingsUpdate;
+    assert.equal(parsedWrites(child).at(-1).type, 'prompt');
+    assert.equal(agent.threadId, sessionId);
+    assert.equal(persistent.length, 1);
+    child.feed({ type: 'agent_settled' });
+    await agent.stop();
+  });
+
+  it('coalesces effort changes during an RPC before releasing queued input', async () => {
+    const { agent, persistent } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.setEffort('high');
+    agent.deliver('waiting input', 7);
+    const first = parsedWrites(child).at(-1);
+    agent.setEffort('xhigh');
+    child.feed({ type: 'response', id: first.id, command: first.type, success: true });
+    await waitFor(() => parsedWrites(child).at(-1).level === 'xhigh');
+    assert.equal(parsedWrites(child).some((command) => command.type === 'prompt'), false);
+    const second = parsedWrites(child).at(-1);
+    child.feed({ type: 'response', id: second.id, command: second.type, success: true });
+    await agent.settingsUpdate;
+    assert.equal(agent.appliedEffort, 'xhigh');
+    assert.equal(parsedWrites(child).filter((command) => command.type === 'prompt').length, 1);
+    child.feed({ type: 'agent_settled' });
+    await agent.stop();
+  });
+
+  it('cancels a pending effort RPC on stop without delivering or losing its queued receipt', async () => {
+    const { agent, persistent, failures } = harness();
+    await agent.start();
+    const child = persistent[0];
+    agent.setEffort('high');
+    agent.deliver('waiting input', 7, 'receipt-stop');
+    await agent.stop();
+    assert.equal(agent.child, null);
+    assert.equal(agent.settingsUpdate, null);
+    assert.equal(parsedWrites(child).some((command) => command.type === 'prompt'), false);
+    assert.equal(failures.length, 1);
+    assert.deepEqual(failures[0].receiptIds, ['receipt-stop']);
+  });
+
   it('preflights, starts pi --mode rpc, and prefixes the first real turn', async () => {
     const { agent, calls, persistent, store } = harness();
     await agent.start();

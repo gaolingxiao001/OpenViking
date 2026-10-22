@@ -12,9 +12,12 @@ const require = createRequire(import.meta.url);
 const {
   INSTANCE_ID,
   RESERVED_INSTANCE_IDS,
+  ROLE_PRESETS,
   loadDeploymentManifest,
   resolveDeploymentManifestPath,
 } = require('../../../deployment-config.cjs');
+
+export { ROLE_PRESETS };
 
 export const WEB_PORT = 3737;
 const FIRST_INSTANCE_PORT = 3738;
@@ -41,6 +44,15 @@ export function readManifest(env = process.env) {
   if (!fs.existsSync(filePath)) return { path: filePath, value: null };
   loadDeploymentManifest({ ...env, VIKA_CONFIG: filePath });
   return { path: filePath, value: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
+}
+
+export function availableInstanceOvConfig(env, id, reserved = new Set()) {
+  const base = path.join(vikaHome(env), 'ov', id);
+  let target = `${base}.json`;
+  for (let suffix = 2; reserved.has(target) || fs.existsSync(target); suffix += 1) {
+    target = `${base}-${suffix}.json`;
+  }
+  return target;
 }
 
 export function instanceIdProblem(id, manifest) {

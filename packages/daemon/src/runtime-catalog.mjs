@@ -38,6 +38,8 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      // Where model actions go: the Core agent tools (MCP), or the Worker's lark-cli.
+      agentTools: 'core',
     },
   }),
   traex: runtimeDefinition({
@@ -53,6 +55,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     },
   }),
   claude: runtimeDefinition({
@@ -62,12 +65,13 @@ export const RUNTIME_CATALOG = Object.freeze({
     models: ['sonnet', 'opus', 'haiku', 'fable'],
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     capabilities: {
-      modelCatalog: 'static',
+      modelCatalog: 'dynamic',
       effortControl: 'selectable',
       activeInput: 'steer',
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     },
   }),
   volc: runtimeDefinition({
@@ -84,6 +88,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'single-conversation',
       outputOwnership: 'runtime',
       sessionAuthority: 'rotate',
+      agentTools: 'lark-cli',
     },
   }),
   pi: runtimeDefinition({
@@ -99,6 +104,7 @@ export const RUNTIME_CATALOG = Object.freeze({
       scopePolicy: 'any',
       outputOwnership: 'runtime',
       sessionAuthority: 'preserve-process',
+      agentTools: 'core',
     },
   }),
 });
@@ -114,6 +120,42 @@ export function getRuntimeDefinition(runtimeOrAlias) {
     ? RUNTIME_ALIASES[runtimeOrAlias]
     : runtimeOrAlias;
   return Object.hasOwn(RUNTIME_CATALOG, id) ? RUNTIME_CATALOG[id] : null;
+}
+
+// Resolve the selected model before consulting capabilities. Never combine
+// efforts from unrelated models (or fall back from an explicit empty list).
+export function currentModelEntry({ runtime, model, resolvedModel, models = [] }) {
+  const selected = models.find((entry) => entry.id === model);
+  if (selected) return selected;
+  const resolved = models.find((entry) => entry.id === resolvedModel
+    || (entry.resolvedModel && [model, resolvedModel].includes(entry.resolvedModel)));
+  if (resolved) return resolved;
+  if (resolvedModel) return undefined;
+  if (!model || model === getRuntimeDefinition(runtime)?.canonicalDefault) {
+    return models.find((entry) => entry.isDefault);
+  }
+  return undefined;
+}
+
+export function supportedModelEfforts(snapshot) {
+  return currentModelEntry(snapshot)?.efforts ?? [];
+}
+
+// undefined means discovery did not establish capabilities; '' explicitly
+// disables the override for a model that has no effort control.
+export function compatibleModelEffort(entry, effort) {
+  if (!entry || entry.effortsKnown === false || !Array.isArray(entry.efforts)) return undefined;
+  if (!entry.efforts.length) return '';
+  if (entry.efforts.includes(effort)) return effort;
+  if (entry.efforts.includes(entry.defaultEffort)) return entry.defaultEffort;
+  return entry.efforts.includes('medium') ? 'medium' : entry.efforts[0];
+}
+
+export function isModelUnavailableError(error) {
+  if (error?.code === 'MODEL_UNAVAILABLE') return true;
+  const message = error?.message ?? '';
+  if (/\b(?:effort|thinking level|reasoning level|authentication|unauthorized|credentials|API key|network|connection|timed out|timeout|service (?:is )?unavailable)\b/i.test(message)) return false;
+  return /\b(?:unknown|invalid|unsupported|unavailable) model\b|\bmodel\b[^\n]{0,180}\b(?:not found|does not exist|not available|not supported|is unavailable|may not exist)\b/i.test(message);
 }
 
 export function isDirectRuntimeAlias(value) {
@@ -166,10 +208,9 @@ export function modelMatchesRuntime(model, runtimeOrAlias) {
   const definition = getRuntimeDefinition(runtimeOrAlias);
   if (!definition) return false;
   const owner = staticModelRuntime(model);
-  // Dynamic catalogs (Codex, Pi) share the unowned leftover; static catalogs
-  // only match ids they published. Otherwise `pi:openai/gpt-4o` cannot see
-  // the live Pi list and unprefixed live ids look like Codex names.
-  if (definition.capabilities.modelCatalog === 'dynamic') {
+  // Legacy configuration inference keeps Claude's known aliases. Interactive
+  // model selection instead uses the active runtime's live catalog exclusively.
+  if (definition.capabilities.modelCatalog === 'dynamic' && definition.id !== 'claude') {
     return owner === null || owner === definition.id;
   }
   return owner === definition.id;
@@ -203,7 +244,7 @@ export function resolveRuntimeModelTarget(value, currentRuntime = null) {
     return { runtime: owner, model: selector.model, canonical: selector.model };
   }
   const current = getRuntimeDefinition(currentRuntime);
-  if (current?.capabilities.modelCatalog === 'dynamic') {
+  if (current?.capabilities.modelCatalog === 'dynamic' && current.id !== 'claude') {
     return {
       runtime: current.id,
       model: selector.model,

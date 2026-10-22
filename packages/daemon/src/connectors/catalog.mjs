@@ -1,6 +1,7 @@
 import { WEIXIN_CHANNEL_VERSION } from '../weixin/api.mjs';
 import { TELEGRAM_VERSION } from '../telegram/api.mjs';
 import { QQ_VERSION } from '../qq/api.mjs';
+import { SLACK_VERSION } from '../slack/api.mjs';
 import { connectorManifest } from './protocol.mjs';
 
 const EMPTY_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false });
@@ -28,6 +29,18 @@ const MANIFESTS = Object.freeze({
       'message.reply': { content: ['markdown', 'file'] },
     },
     queries: ['message.media'], auth_schema: EMPTY_SCHEMA, config_schema: EMPTY_SCHEMA,
+  }),
+  // A workspace-internal Slack app over Socket Mode. Replies thread like
+  // Lark's; Slack has no idempotency key, so an uncertain send stays blocked.
+  slack: connectorManifest({
+    name: 'slack', version: SLACK_VERSION, capabilities: ['events', 'actions'],
+    actions: {
+      'message.send': { content: ['markdown', 'file'], mentions: true },
+      'message.reply': { content: ['markdown', 'file'], mentions: true, thread: true },
+      'message.react': {},
+      'message.retract': {},
+    },
+    queries: ['message.media', 'chat.members.list', 'chat.list', 'chat.messages', 'thread.messages'], auth_schema: EMPTY_SCHEMA, config_schema: EMPTY_SCHEMA,
   }),
   lark: connectorManifest({
     name: 'lark',

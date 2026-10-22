@@ -6,13 +6,17 @@ import { loginWeixin } from '../../daemon/src/weixin/auth.mjs';
 import { WeixinState } from '../../daemon/src/weixin/state.mjs';
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { managedPiBin } from '../../daemon/src/pi-runtime.mjs';
+import { resolveRolePromptPath } from '../../daemon/src/conversation-policy.mjs';
 import { LarkCli } from './lark-cli.mjs';
-import { createApp, inspectApp, missingScopes } from './lark-app.mjs';
 import {
-  WEB_PORT, allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand, vikaHome,
-  withChangedInstance, withInstance, writeManifest,
+  LarkCredentialsError, grantedUserScopes, inspectApp, lacksAny, missingConfig, scanApp, tenantToken,
+} from './lark-app.mjs';
+import {
+  ROLE_PRESETS, WEB_PORT, allocatePort, availableInstanceOvConfig, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand,
+  vikaHome, withChangedInstance, withInstance, writeManifest,
 } from './manifest.mjs';
 import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
+import { configureOpenViking, prepareInstanceOpenViking, saveOVConnection } from './ov-setup.mjs';
 import { detectRuntimes, which } from './runtimes.mjs';
 import { showScan } from './qr.mjs';
 import { restartCommand, startCommand } from './control.mjs';
@@ -26,14 +30,15 @@ import { GoBack } from './prompt.mjs';
 import { IM_LABELS, connectorsOf, imList, primaryMeaning } from './instances.mjs';
 import { connectTelegram } from './telegram.mjs';
 import { connectQQ } from './qq.mjs';
+import { connectSlack } from './slack.mjs';
 
 // `vika setup`: add an instance, or change one. A new instance is asked
 // question by question; a change is a list of every setting with its current
 // value, where the owner opens the ones to change and saves. Then the QR scans
 // (only for a newly connected IM), then the manifest is written and the
-// instance (re)started. Nothing is saved until all scans succeed, so an
-// aborted setup leaves things as they were. It is also the one place that
-// connects an IM; `vika login` only renews.
+// instance (re)started. A new instance's OV config is prepared and checked
+// before IM setup, then removed on cancellation until its manifest is saved.
+// It is also the one place that connects an IM; `vika login` only renews.
 
 const PERMISSIONS = new URL('../../../permission.json', import.meta.url);
 
@@ -62,9 +67,69 @@ const imChoices = () => [
     hint: t('IMAP/SMTP；新邮件提醒和回信确认发到主渠道', 'IMAP/SMTP; new-mail alerts and reply approvals go to the primary channel') },
   { label: 'Telegram', value: 'telegram',
     hint: t('官方 Bot API；需要 @BotFather 创建 Bot 和 token', 'official Bot API; needs a bot and its token from @BotFather') },
+  { label: 'Slack', value: 'slack',
+    hint: t('工作区里自建的 Slack App（Socket Mode）；需要粘贴两个 token', 'an app in your own Slack workspace (Socket Mode); paste two tokens') },
   { label: 'QQ', value: 'qq',
     hint: t('腾讯官方机器人；需要 AppID / AppSecret 和本人私聊验证码', 'official Tencent bot; needs AppID / AppSecret and a private-chat verification code') },
 ];
+
+// IMs connected by pasting tokens rather than scanning a code.
+const TOKEN_IMS = ['telegram', 'slack', 'qq'];
+
+// Where the Feishu/Lark bot app comes from. A scan can only pick an app the
+// scanner owns or administers, and a test tenant cannot scan at all; then the
+// App ID and App Secret are typed in, and the app's settings are the owner's
+// to complete in the developer console.
+const larkSources = () => [
+  { value: 'create', label: t('扫码新建一个机器人', 'Scan to create a new bot'),
+    hint: t('一次扫码建好应用、开好权限并发布', 'one scan makes the app, grants its permissions and publishes it') },
+  { value: 'select', label: t('扫码选择已有的机器人', 'Scan to pick an existing bot'),
+    hint: t('你是所有者或管理员的应用；缺的权限和事件在确认页补上', 'an app you own or administer; what it lacks is added on the confirm page') },
+  { value: 'manual', label: t('手动填 App ID 和 App Secret', 'Enter the App ID and App Secret'),
+    hint: t('不是所有者或管理员、在测试企业等扫不了码时；缺的配置要去开放平台补',
+      'when a scan cannot be used (not an owner or administrator, a test tenant); what the app lacks is added in the developer console') },
+];
+
+// How the instance gets its Feishu/Lark app: `keep` the one it has, or one
+// of larkSources. None without Feishu.
+function larkSource(state, current) {
+  if (!state.connectors.includes('lark')) return null;
+  if (state.larkApp) return state.larkApp.source;
+  return current && connectorsOf(current).includes('lark') ? 'keep' : 'create';
+}
+
+// The app as the settings list and the summaries show it.
+function larkAppShown(state, current) {
+  const source = larkSource(state, current);
+  if (source === 'manual' && state.larkApp?.app) return t(`应用 ${state.larkApp.app.appId}`, `the app ${state.larkApp.app.appId}`);
+  if (source === 'keep') return t('现在的应用', 'the current app');
+  return larkSources().find(({ value }) => value === source)?.label ?? t('没有接', 'none');
+}
+
+// An app made elsewhere may already be someone's receiver. Picking one by
+// scan changes it, on the platform's confirm page: the page adds what it
+// lacks and publishes, withdrawing a version under review first (seen in the
+// page's own code), and an app with a webhook keeps it.
+function existingAppNotes(source) {
+  const { tenant, user } = larkScopes();
+  return [
+    ...(source === 'select' ? [t(
+      `扫码后飞书的确认页会列出要给它补的权限（最多 ${tenant.length + user.length} 个）、消息事件和卡片回调，确认后发布一个新版本（企业可能要管理员审核）；它要是有版本正在审核，会先被撤回。不确认就什么都不改。`,
+      `After the scan, Feishu/Lark's confirm page lists what it will add (up to ${tenant.length + user.length} permissions, the message event and the card callback); confirming publishes a new version (an organization may need admin approval), and a version under review is withdrawn first. Nothing changes unless you confirm.`,
+    )] : []),
+    t('同一个飞书应用不能两处同时收消息：长连接每条消息只随机推给其中一个连接，确认它没被别的程序（OpenClaw、botmux、另一台机器上的 Vika）用着。',
+      'One Feishu/Lark app cannot receive messages in two places: the long connection hands each message to one of its connections at random, so make sure no other program (OpenClaw, botmux, Vika on another machine) uses it.'),
+    t('Vika 只接用长连接接收消息的机器人：用 webhook 的，先在开放平台「事件与回调」把事件和回调都改成长连接（原来的服务随之收不到），再来接。',
+      'Vika only takes bots that receive over the long connection: for one on a webhook, first switch its events and callbacks to the long connection under Events & Callbacks in the developer console (the webhook service then stops getting them).'),
+  ];
+}
+
+// Vika receives over the long connection only. No API tells how an app's
+// events arrive; its callbacks on a webhook say it has one.
+const webhookRefusal = () => t(
+  '这个机器人的卡片回调走 webhook，事件多半也是，Vika 接不了：在开放平台「事件与回调」把事件和回调都改成长连接（原来用 webhook 的服务就收不到了）再来接它，或者换一个机器人。',
+  'This bot\'s card callbacks go to a webhook, and its events most likely do too, so Vika cannot take it: switch both to the long connection under Events & Callbacks in the developer console (the webhook service then stops getting them) and connect it again, or pick another bot.',
+);
 
 const ims = (state) => state.connectors.filter((connector) => connector !== 'email');
 
@@ -107,11 +172,16 @@ function initialState({ id, env, homeDir, current, runtimes, kept }) {
     id,
     dataDir: current?.dataDir ?? path.join(vikaHome(env), 'data', id),
     displayName: current?.displayName ?? 'Vika',
+    // A shipped role by name, or the absolute path of the owner's own file;
+    // roleSeed is the role a new file of theirs starts from (written on save).
+    role: current ? current.role ?? null : ROLE_PRESETS[0],
+    roleSeed: null,
     workspace: current?.workspace ?? path.join(homeDir, 'vika-workspace', id),
     runtime: kept ?? runtimes.find((runtime) => runtime.available && (!current || runtime.model === current.model)),
     connectors,
     channel: current?.channel ?? connectors[0],
-    useOv: current?.ovConfig ? 'keep' : false,
+    ovConfig: current?.ovConfig,
+    larkApp: null,
     mail: { kept: current ? mailboxesOf(current) : [], added: [], updated: new Map(), removed: [] },
   };
 }
@@ -134,7 +204,7 @@ async function askName({ prompter, current }, state) {
   const hasLark = current && connectorsOf(current).includes('lark');
   state.displayName = await prompter.text(hasLark
     ? t('机器人名字（已经建好的飞书应用名不会跟着改）', 'Bot name (the Feishu/Lark app made before keeps its name)')
-    : t('机器人名字（也是飞书应用名，@它时用这个名字）', 'Bot name (also the Feishu/Lark app name, to @mention it by)'), {
+    : t('机器人名字（新建的飞书应用也叫这个，@它时用这个名字）', 'Bot name (a new Feishu/Lark app is named so too, to @mention it by)'), {
     label: t('机器人名字', 'Bot name'),
     initial: state.displayName,
     validate: (value) => (value.length > 40 ? t('最多 40 个字符', 'At most 40 characters') : null),
@@ -152,6 +222,67 @@ async function askWorkspace({ prompter, env, homeDir }, state) {
       return null;
     },
   }), homeDir));
+}
+
+// What each shipped role is for, as setup offers it.
+const ROLE_CHOICES = () => ({
+  colleague: {
+    label: t('AI 同事', 'AI colleague'),
+    hint: t('你的 AI 分身：在工作群里像你一样答疑、跟进，和同事及其他 bot 协作', 'your AI counterpart: answers and follows up in work chats as you would, with colleagues and other bots'),
+  },
+  assistant: {
+    label: t('个人助理', 'Personal assistant'),
+    hint: t('只为你工作：记事、提醒，主动把值得知道的事告诉你', 'works for you alone: remembers, reminds, and tells you what is worth knowing'),
+  },
+  qa: {
+    label: t('答疑助手', 'Q&A assistant'),
+    hint: t('在答疑群里查证后把问题讲明白，注意隐私，无关的话题不接', 'answers questions in Q&A groups after checking the sources, guards privacy, skips what is off-topic'),
+  },
+});
+
+const customRole = (role) => Boolean(role) && path.isAbsolute(role);
+
+function roleShown(state, homeDir) {
+  if (!state.role) return t('没有设置（只用默认规则）', 'none (default rules only)');
+  return customRole(state.role) ? shortenHome(state.role, homeDir) : ROLE_CHOICES()[state.role].label;
+}
+
+async function askRole({ prompter, env, homeDir }, state) {
+  const choices = ROLE_CHOICES();
+  const options = [
+    ...ROLE_PRESETS.map((name) => ({ ...choices[name], value: name })),
+    { label: t('自己写 prompt', 'My own prompt'), hint: t('用你指定的 Markdown 文件，可以从上面任一个角色改起', 'a Markdown file of yours, which can start from any role above'), value: 'custom' },
+  ];
+  const at = customRole(state.role) ? options.length - 1 : Math.max(0, ROLE_PRESETS.indexOf(state.role));
+  const choice = await prompter.select(t('它的角色', 'Its role'), options, { initial: at, label: t('角色', 'Role') });
+  if (choice !== 'custom') {
+    state.role = choice;
+    state.roleSeed = null;
+    return;
+  }
+  const initial = customRole(state.role) ? state.role : path.join(vikaHome(env), 'roles', `${state.id}.md`);
+  const file = path.resolve(expandHome(await prompter.text(t('角色 prompt 文件（Markdown）', 'Role prompt file (Markdown)'), {
+    label: t('角色文件', 'Role file'),
+    initial: shortenHome(initial, homeDir),
+    validate: (value) => {
+      const resolved = path.resolve(expandHome(value, homeDir));
+      return fs.existsSync(resolved) && !fs.statSync(resolved).isFile() ? t('这不是一个文件', 'That is not a file') : null;
+    },
+  }), homeDir));
+  state.role = file;
+  state.roleSeed = fs.existsSync(file) ? null : await prompter.select(
+    t('这个文件还没有。先用哪个角色的 prompt 填上？之后可以随便改', 'That file does not exist yet. Start it from which role? Change it freely afterwards'),
+    [...ROLE_PRESETS.map((name) => ({ label: choices[name].label, value: name })), { label: t('空白', 'Blank'), value: '' }],
+    { label: t('从哪个角色开始', 'Start from') },
+  );
+}
+
+// A role file of the owner's own, begun from a shipped role (or blank).
+function writeRoleFile({ role, roleSeed }, id) {
+  if (roleSeed === null || fs.existsSync(role)) return;
+  const note = `<!-- ${roleSeed ? `Started from Vika's "${roleSeed}" role. ` : ''}This is ${id}'s role: edit it freely, then run vika restart ${id}. Comments like this one are not sent to the model. -->\n\n`;
+  fs.mkdirSync(path.dirname(role), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(role, `${note}${roleSeed ? fs.readFileSync(resolveRolePromptPath(roleSeed), 'utf8') : ''}`, { mode: 0o600 });
 }
 
 async function askRuntime({ prompter, runtimes, kept }, state) {
@@ -186,8 +317,9 @@ function dropMailboxes(state) {
 }
 
 // One more mailbox. In the change menu, giving up on it goes back to the list.
-async function addMailbox({ prompter, env, connect, menu }, state) {
+async function addMailbox({ prompter, env, connect, menu, checkOV }, state) {
   let account;
+  await checkOV();
   try {
     account = await connect.email({ prompter, taken: mailboxList(state).map(addressOf) });
   } catch (error) {
@@ -214,15 +346,52 @@ async function askIms(ctx, state) {
     connectors = await ctx.prompter.multiselect(t('接入哪些 IM', 'Which IMs to connect'), choices,
       { initial: choices.map(({ value }, index) => (state.connectors.includes(value) ? index : -1)).filter((index) => index >= 0) });
     if (connectors.some((connector) => connector !== 'email')) break;
-    ctx.prompter.warn(t('邮箱不能单独接：新邮件提醒和回信确认要发到飞书、微信、Telegram 或 QQ，再选一个。',
-      'Email cannot be the only one: its alerts and reply approvals go to Feishu/Lark, WeChat, Telegram or QQ, so pick one of those too.'));
+    ctx.prompter.warn(t('邮箱不能单独接：新邮件提醒和回信确认要发到飞书、微信、Telegram、Slack 或 QQ，再选一个。',
+      'Email cannot be the only one: its alerts and reply approvals go to Feishu/Lark, WeChat, Telegram, Slack or QQ, so pick one of those too.'));
   }
   const hadEmail = state.connectors.includes('email');
+  const hadLark = state.connectors.includes('lark');
   state.connectors = connectors;
   if (hadEmail && !connectors.includes('email')) dropMailboxes(state);
-  // When changing an instance, a newly ticked mailbox is connected right away.
+  if (!connectors.includes('lark')) state.larkApp = null;
+  // When changing an instance, a newly ticked mailbox is connected right away,
+  // and a newly ticked Feishu asks where its app comes from.
   if (ctx.menu && !hadEmail && connectors.includes('email')) await addMailboxes(ctx, state);
+  if (ctx.menu && !hadLark && connectors.includes('lark')) await orElse(() => askLarkApp(ctx, state), true);
   if (ctx.menu) keepChannel(ctx, state);
+}
+
+// Where the Feishu/Lark app comes from: a scan, or the App ID and App Secret
+// typed in and checked here, like a mailbox. An instance that has Feishu
+// can keep its app. Giving up on typing them asks again where it comes from.
+async function askLarkApp(ctx, state) {
+  const { prompter, current } = ctx;
+  if (!state.connectors.includes('lark')) {
+    if (ctx.menu) note(ctx, t('没有接飞书：先在「接入的 IM」里勾上飞书', 'Feishu/Lark is not connected: tick it in Connected IMs first'));
+    return;
+  }
+  const connected = Boolean(current && connectorsOf(current).includes('lark'));
+  const choices = [
+    ...(connected ? [{ value: 'keep', label: t('不换，用现在的应用', 'Keep the current app') }] : []),
+    ...larkSources(),
+  ];
+  const mark = prompter.mark();
+  for (;;) {
+    const source = await prompter.select(t('飞书机器人', 'Feishu/Lark bot'), choices,
+      { initial: Math.max(0, choices.findIndex(({ value }) => value === larkSource(state, current))) });
+    if (source !== 'manual') {
+      state.larkApp = source === 'keep' ? null : { source };
+      break;
+    }
+    try {
+      state.larkApp = { source, app: await enterApp(ctx, { previous: state.larkApp?.app }) };
+      break;
+    } catch (error) {
+      if (!(error instanceof GoBack)) throw error;
+      prompter.rewind(mark);
+    }
+  }
+  if (state.larkApp && state.larkApp.source !== 'create') for (const text of existingAppNotes(state.larkApp.source)) note(ctx, text);
 }
 
 // The primary IM is its own question, Feishu unless it is left out; with a
@@ -240,29 +409,6 @@ async function askChannel(ctx, state) {
   if (ctx.menu) {
     note(ctx, t(`只接了${IM_LABELS[state.channel]}，主渠道只能是它；要换，先在「接入的 IM」里多接一个`,
       `Only ${IM_LABELS[state.channel]} is connected, so it is the primary channel; to change that, connect another IM first`));
-  }
-}
-
-// 'keep' leaves the instance's OpenViking config as it is.
-// Nothing to ask without a usable OpenViking: the machine check said so
-// already, and the change list says why.
-async function askOv(ctx, state) {
-  const { prompter, ov, current } = ctx;
-  const question = t('OpenViking（跨会话记忆）', 'OpenViking (memory across sessions)');
-  if (current?.ovConfig) {
-    state.useOv = await prompter.select(question, [
-      { label: t('继续使用', 'Keep using it'), value: 'keep' },
-      { label: t('不用了', 'Stop using it'), value: false },
-    ], { initial: state.useOv ? 0 : 1 });
-  } else if (ov?.usable) {
-    state.useOv = await prompter.select(question, [
-      { label: t('使用本机检测到的 OpenViking', 'Use the OpenViking found on this machine'), value: true, hint: `${ov.url}${ov.user ? `  user=${ov.user}` : ''}` },
-      { label: current ? t('不用', 'No') : t('跳过', 'Skip'), value: false },
-    ], { initial: !current || state.useOv ? 0 : 1 });
-  } else if (ov) {
-    note(ctx, t(`OpenViking（${ov.url}）用不了：${ov.reason}`, `OpenViking (${ov.url}) is unusable: ${ov.reason}`));
-  } else if (ctx.menu) {
-    note(ctx, t('这台机器上没有检测到 OpenViking', 'No OpenViking found on this machine'));
   }
 }
 
@@ -284,6 +430,7 @@ async function askMailboxes(ctx, state) {
     if (choice.kind === 'done') break;
     if (choice.kind === 'add') await addMailbox(ctx, state);
     if (choice.kind === 'update') {
+      await ctx.checkOV();
       try {
         const account = await ctx.connect.email({ prompter: ctx.prompter, fixed: choice.mailbox.account,
           taken: mailboxList(state).filter((mailbox) => mailbox !== choice.mailbox).map(addressOf) });
@@ -309,14 +456,18 @@ async function askMailboxes(ctx, state) {
 
 const SETTINGS = [
   { key: 'displayName', label: () => t('机器人名字', 'Bot name'), ask: askName, shown: (state) => state.displayName },
+  { key: 'role', label: () => t('角色', 'Role'), ask: askRole, shown: (state, { homeDir }) => roleShown(state, homeDir) },
   { key: 'workspace', label: () => t('工作目录', 'Workspace'), ask: askWorkspace, shown: (state, { homeDir }) => shortenHome(state.workspace, homeDir) },
   { key: 'runtime', label: () => t('Agent 运行时', 'Agent runtime'), ask: askRuntime,
     shown: (state) => (state.runtime.kept ? state.runtime.model : state.runtime.label) },
   { key: 'ims', label: () => t('接入的 IM', 'Connected IMs'), ask: askIms, shown: (state) => imList(state.connectors) },
+  { key: 'larkApp', label: () => t('飞书应用', 'Feishu/Lark app'), ask: askLarkApp,
+    shown: (state, { current }) => larkAppShown(state, current) },
   { key: 'channel', label: () => t('主渠道', 'Primary channel'), ask: askChannel, shown: (state) => IM_LABELS[state.channel] },
   { key: 'mailboxes', label: () => t('邮箱', 'Mailboxes'), ask: askMailboxes,
     shown: (state) => (mailboxList(state).length ? list(mailboxList(state).map(addressOf)) : t('没有接', 'none')) },
-  { key: 'ov', label: () => 'OpenViking', ask: askOv, shown: (state) => (state.useOv ? t('使用', 'on') : t('不用', 'off')) },
+  { key: 'ovConfig', label: () => 'OpenViking', ask: (ctx) => ctx.editOV(),
+    shown: (state, { homeDir }) => shortenHome(state.ovConfig, homeDir) },
 ];
 
 const mailChanged = (state) => state.mail.added.length + state.mail.updated.size + state.mail.removed.length > 0;
@@ -433,29 +584,72 @@ function returnToLast(prompter, steps, run) {
   prompter.rewind(run.marks[run.at], { whole: true });
 }
 
-// If the confirmation never arrives, the app may still exist: its App ID and
-// App Secret (developer console → 凭证与基础信息) let setup carry on.
-async function manualApp(prompter) {
-  prompter.write(t('\n  在飞书开放平台打开刚创建的应用 →「凭证与基础信息」，复制下面两项：\n',
-    '\n  In the Feishu/Lark developer console, open the app just created → Credentials & Basic Info, and copy these two:\n'));
-  const appId = await prompter.text('App ID', { validate: (value) => (/^cli_[0-9a-z]+$/.test(value) ? null : t('App ID 以 cli_ 开头', 'An App ID starts with cli_')) });
-  const appSecret = await prompter.secret('App Secret');
-  const brand = await prompter.select(t('租户', 'Tenant'), [
-    { label: t('飞书', 'Feishu'), value: 'feishu' }, { label: t('Lark（国际版）', 'Lark (international)'), value: 'lark' },
-  ]);
-  return { appId, appSecret, brand, ownerOpenId: null };
+// The App ID and App Secret (developer console → 凭证与基础信息), asked until
+// the platform accepts them. Declining to type them again is GoBack.
+// `created`: the app was just made by a scan whose confirmation never came.
+async function enterApp({ prompter, fetchImpl = globalThis.fetch }, { previous = null, created = false } = {}) {
+  prompter.write(created
+    ? t('\n  在飞书开放平台打开刚创建的应用 →「凭证与基础信息」，复制下面两项：\n',
+      '\n  In the Feishu/Lark developer console, open the app just created → Credentials & Basic Info, and copy these two:\n')
+    : t('\n  在飞书开放平台打开要用的应用 →「凭证与基础信息」，复制下面两项：\n',
+      '\n  In the Feishu/Lark developer console, open the app to use → Credentials & Basic Info, and copy these two:\n'));
+  const brands = [{ label: t('飞书', 'Feishu'), value: 'feishu' }, { label: t('Lark（国际版）', 'Lark (international)'), value: 'lark' }];
+  let last = previous;
+  for (;;) {
+    const appId = await prompter.text('App ID', { initial: last?.appId ?? '',
+      validate: (value) => (/^cli_[0-9a-z]+$/.test(value) ? null : t('App ID 以 cli_ 开头', 'An App ID starts with cli_')) });
+    const appSecret = await prompter.secret('App Secret');
+    const brand = await prompter.select(t('租户', 'Tenant'), brands, { initial: last?.brand === 'lark' ? 1 : 0 });
+    const app = { appId, appSecret, brand, ownerOpenId: null };
+    const spinning = prompter.spin(t('核对 App ID 和 App Secret', 'Checking the App ID and App Secret'));
+    let token;
+    try {
+      token = await tenantToken(app, { fetchImpl });
+      spinning.succeed(t('App ID 和 App Secret 没问题', 'The App ID and App Secret check out'));
+    } catch (error) {
+      spinning.fail(!(error instanceof LarkCredentialsError)
+        ? t(`连不上飞书开放平台：${error.message}`, `Could not reach the developer platform: ${error.message}`)
+        : t(`平台不认这组凭证（${error.message}）：App ID 或 App Secret 不对，或者租户选错了`,
+          `The platform refused them (${error.message}): the App ID or App Secret is wrong, or the tenant is`));
+      last = app;
+      if (!await prompter.confirm(t('重新输入？', 'Try again?'))) throw new GoBack();
+      continue;
+    }
+    // Settings that cannot be read are checked no further here.
+    const inspected = await inspectApp(app, { fetchImpl, token }).catch(() => null);
+    if (inspected?.callbacks.type !== 'webhook') return app;
+    prompter.warn(webhookRefusal());
+    last = app;
+    if (!await prompter.confirm(t('换一个应用？', 'Use another app?'))) throw new GoBack();
+  }
 }
 
-// canGoBack: ← while the code waits stops the registration (nothing is made
-// before the scan is confirmed) and rejects with GoBack.
-export async function registerApp({ plan, prompter, scopes, debug, register = null, canGoBack = false }) {
+const scanTitles = {
+  create: (minutes) => t(`第 1 次扫码：用飞书 App 扫码，创建机器人应用（${minutes} 分钟内有效）`,
+    `Scan 1 of 2: scan with the Feishu/Lark app to create the bot app (valid for ${minutes} minutes)`),
+  select: (minutes) => t(`第 1 次扫码：用飞书 App 扫码，选择已有的机器人应用（${minutes} 分钟内有效）`,
+    `Scan 1 of 2: scan with the Feishu/Lark app to pick an existing bot app (valid for ${minutes} minutes)`),
+  update: (minutes, appId) => t(`用飞书 App 扫码，给应用 ${appId} 补上缺的权限和事件（${minutes} 分钟内有效）`,
+    `Scan with the Feishu/Lark app to add what ${appId} lacks (valid for ${minutes} minutes)`),
+};
+
+// One scan for the app: `create` or `select` (see scanApp), or `update` the
+// app `appId`. canGoBack: ← while the code waits stops the registration
+// (nothing changes before the scan is confirmed) and rejects with GoBack.
+// While a create or select waits, m switches to typing the App ID and Secret;
+// while an update waits, s skips it and resolves with null.
+export async function registerApp({
+  plan, prompter, scopes, debug, register = null, canGoBack = false, mode = 'create', appId = null, fetchImpl = globalThis.fetch,
+}) {
   const controller = new AbortController();
   let scan = null;
   let wantManual;
   const manual = new Promise((resolve) => { wantManual = resolve; });
   let wantBack;
   const back = new Promise((resolve) => { wantBack = resolve; });
-  const created = createApp({
+  const created = scanApp({
+    mode,
+    appId,
     name: plan.displayName,
     description: t('Vika：把本机的 coding agent 接进飞书', 'Vika: the coding agent on your computer, in Feishu/Lark'),
     scopes,
@@ -466,10 +660,9 @@ export async function registerApp({ plan, prompter, scopes, debug, register = nu
       scan = showScan(prompter, {
         url,
         where: IM_LABELS.lark,
-        title: t(`第 1 次扫码：用飞书 App 扫码，创建机器人应用（${Math.round(expiresIn / 60)} 分钟内有效）`,
-          `Scan 1 of 2: scan with the Feishu/Lark app to create the bot app (valid for ${Math.round(expiresIn / 60)} minutes)`),
-        stopKey: 'm',
-        stopLabel: t('手动填 App ID', 'enter the App ID by hand'),
+        title: scanTitles[mode](Math.round(expiresIn / 60), appId),
+        ...(mode === 'update' ? { stopKey: 's', stopLabel: t('跳过', 'skip') }
+          : { stopKey: 'm', stopLabel: t('手动填 App ID', 'enter the App ID by hand') }),
         onBack: canGoBack ? () => wantBack() : null,
       });
       scan.pressed.then((pressed) => { if (pressed) wantManual(); });
@@ -491,7 +684,8 @@ export async function registerApp({ plan, prompter, scopes, debug, register = nu
     scan?.stop();
     scan = null;
     if (winner.back) throw new GoBack();
-    return await manualApp(prompter);
+    if (mode === 'update') return null;
+    return await enterApp({ prompter, fetchImpl }, { created: mode === 'create' });
   } finally {
     scan?.stop();
   }
@@ -510,20 +704,19 @@ async function step(prompter, text, run, done = text) {
   }
 }
 
-export async function connectLark({ plan, prompter, larkCli, fetchImpl, profile, debug = false, canGoBack = false }) {
-  const scopes = larkScopes();
-  prompter.section(IM_LABELS.lark);
-  // Only the first code can be gone back from: once it is confirmed the app exists.
-  const app = await registerApp({ plan, prompter, scopes, debug, canGoBack });
-  prompter.success(t(`已创建应用 ${app.appId}`, `Created the app ${app.appId}`));
-  const inspected = await step(prompter, t('核对应用的权限和版本', 'Checking the app\'s permissions and version'),
-    () => inspectApp(app, { fetchImpl }), t('应用信息已读取', 'App checked'));
-  const missing = missingScopes(scopes, inspected.granted);
+// What the app lacks of what Vika needs, said once each; resolves with it.
+// `manual`: the app was not set up by a scan, so how its events arrive
+// (which no API tells) is left for the owner to check.
+export function reportApp(prompter, scopes, inspected, { manual = false } = {}) {
+  const missing = missingConfig(scopes, inspected);
   if (!inspected.online) {
     prompter.warn(t('应用还没有上线版本，可能在等管理员审核；审核通过后机器人才能收消息，不用重新 setup。',
       'The app has no live version yet, perhaps awaiting admin approval; the bot gets messages once it is approved, with no need to run setup again.'));
+  } else if (inspected.pendingReview) {
+    prompter.info(t('应用有一个新版本在等管理员审核：下面缺的可能就在里面，审核通过后生效。',
+      'A new version of the app awaits admin approval: what is missing below may be in it, and takes effect once approved.'));
   }
-  const absent = [...missing.tenant, ...missing.user];
+  const absent = [...missing.scopes.tenant, ...missing.scopes.user];
   if (absent.length) {
     const some = list(absent.slice(0, 8));
     prompter.warn(t(`有 ${absent.length} 个权限没开通，相关功能会不可用：${some}${absent.length > 8 ? ' 等' : ''}`,
@@ -532,11 +725,81 @@ export async function connectLark({ plan, prompter, larkCli, fetchImpl, profile,
     prompter.success(t(`权限核对通过：${scopes.tenant.length} 个机器人权限、${scopes.user.length} 个用户权限`,
       `Permissions check out: ${scopes.tenant.length} bot and ${scopes.user.length} user scopes`));
   }
+  if (missing.events?.length) {
+    prompter.warn(t(`没有订阅接收消息事件（${list(missing.events)}）：机器人收不到消息`,
+      `The message event (${list(missing.events)}) is not subscribed: the bot gets no messages`));
+  }
+  // No API tells how events arrive; callbacks on a webhook say the app has one.
+  if (inspected.callbacks.type === 'webhook') {
+    prompter.warn(t('应用的卡片回调走 webhook，事件多半也是：这样 Vika 收不到消息，卡片按钮也没反应。在开放平台「事件与回调」把事件和回调都改成长连接（原来用 webhook 的服务就收不到了）',
+      'The app\'s card callbacks go to a webhook, and its events most likely do too: then Vika gets no messages and card buttons do nothing. Switch both to the long connection under Events & Callbacks in the developer console (the webhook service then stops getting them)'));
+  } else if (missing.callbacks.length) {
+    prompter.warn(t(`卡片回调（${list(missing.callbacks)}）没有用长连接订阅：卡片上的按钮点了没反应`,
+      `The card callback (${list(missing.callbacks)}) is not subscribed over the long connection: card buttons do nothing`));
+  }
+  if (manual) {
+    prompter.info(t('事件走长连接还是 webhook 读不到：在开放平台「事件与回调 → 事件配置」确认是长连接，用 webhook 的话机器人收不到消息',
+      'Whether events come over the long connection or a webhook cannot be read: check Events & Callbacks → Event configuration in the developer console says long connection, or the bot gets no messages'));
+  }
+  return missing;
+}
+
+// Another instance on this machine receiving with the same app gets each
+// message or misses it at random. Allowed after a warning (a reinstall, a
+// move); declining goes back to the questions.
+async function confirmUnshared({ prompter, larkCli, appId, others }) {
+  const profiles = others.length ? await larkCli.profiles().catch(() => []) : [];
+  const sharing = others.filter((other) => profiles.some(({ name, appId: used }) => name === other.profile && used === appId));
+  if (!sharing.length) return;
+  const names = list(sharing.map(({ id, displayName }) => t(`${displayName}（${id}）`, `${displayName} (${id})`)));
+  prompter.warn(t(`实例 ${names}也在用应用 ${appId}：同时运行时，每条消息只会随机推给其中一个实例。`,
+    `Instance ${names} uses the app ${appId} too: while both run, each message goes to just one of them, at random.`));
+  if (!await prompter.confirm(t('仍然用这个应用？', 'Use this app anyway?'), false)) throw new GoBack();
+}
+
+// The app from `source`: a scan, or `app` typed in with the questions. It is
+// checked against what Vika needs, written to the lark-cli profile, and the
+// owner authorizes as a user (the second scan). `others` are the machine's
+// other instances with Feishu. Resolves with { profile, ownerOpenId, name },
+// name being the app's own, when it could be read.
+export async function connectLark({
+  plan, prompter, larkCli, fetchImpl, profile, source = 'create', app: typed = null, others = [], debug = false, canGoBack = false, register = null,
+}) {
+  const scopes = larkScopes();
+  prompter.section(IM_LABELS.lark);
+  // Only the first code can be gone back from: once it is confirmed the app exists.
+  const app = typed ?? await registerApp({ plan, prompter, scopes, debug, canGoBack, mode: source, fetchImpl, register });
+  // A scan always says who confirmed it; an app without that was typed in.
+  const manual = !app.ownerOpenId;
+  prompter.success(source === 'create' && !typed ? t(`已创建应用 ${app.appId}`, `Created the app ${app.appId}`)
+    : t(`用应用 ${app.appId}`, `Using the app ${app.appId}`));
+  let inspected = null;
+  try {
+    inspected = await step(prompter, t('核对应用的权限、事件和版本', 'Checking the app\'s permissions, events and version'),
+      () => inspectApp(app, { fetchImpl }), t('应用信息已读取', 'App checked'));
+  } catch (error) {
+    if (error instanceof LarkCredentialsError) throw error;
+    prompter.warn(t(`读不到应用的配置，跳过核对：${error.message}`, `The app's settings could not be read, so they are not checked: ${error.message}`));
+  }
+  // Refused before anything is written: back to the questions, for another bot.
+  if (inspected?.callbacks.type === 'webhook') {
+    prompter.warn(webhookRefusal());
+    throw new GoBack();
+  }
+  await confirmUnshared({ prompter, larkCli, appId: app.appId, others });
+  if (inspected && lacksAny(reportApp(prompter, scopes, inspected, { manual }))) {
+    prompter.info(manual
+      ? t('缺的在飞书开放平台给应用补上；你是应用的所有者或管理员的话，也可以之后运行 vika login lark 扫码补齐',
+        'Add what is missing in the developer console; if you own or administer the app, vika login lark can add it with a scan later')
+      : t('之后运行 vika login lark 可以扫码补齐', 'vika login lark can add it with a scan later'));
+  }
   await larkCli.configureProfile({ profile, ...app });
-  const login = await larkCli.beginUserLogin({ profile, scopes: scopes.user });
+  const login = await larkCli.beginUserLogin({ profile, scopes: grantedUserScopes(scopes, inspected) });
   const scan = showScan(prompter, {
     url: login.url, where: IM_LABELS.lark, label: t('等待授权', 'Waiting for authorization'),
-    title: t('第 2 次扫码：授权 Vika 以你的身份读消息（用于搜索和读历史）', 'Scan 2 of 2: let Vika read messages as you (for search and history)'),
+    title: source === 'manual'
+      ? t('扫码授权 Vika 以你的身份读消息（用于搜索和读历史）', 'Scan to let Vika read messages as you (for search and history)')
+      : t('第 2 次扫码：授权 Vika 以你的身份读消息（用于搜索和读历史）', 'Scan 2 of 2: let Vika read messages as you (for search and history)'),
   });
   try {
     await larkCli.finishUserLogin({ profile, deviceCode: login.deviceCode });
@@ -550,7 +813,7 @@ export async function connectLark({ plan, prompter, larkCli, fetchImpl, profile,
       'The two scans came from different Feishu/Lark accounts; the bot takes the second as its owner.'));
   }
   prompter.success(t('飞书已接好', 'Feishu/Lark is connected'));
-  return { profile, ownerOpenId };
+  return { profile, ownerOpenId, name: inspected?.botName ?? inspected?.name ?? null };
 }
 
 // canGoBack: ← while the code waits stops the login before anything is bound
@@ -642,6 +905,82 @@ export const weixinFirstMessage = () => t(
   'Send the bot a message on WeChat first (say "hi"): until then it cannot reach you there, not even with new-mail alerts.',
 );
 
+// How messages reach the bot is the one thing no API tells (the long
+// connection, the message event, a published version, no other receiver),
+// so the owner writes to it and the instance's own activity feed (loopback
+// /api/activity) shows whether that arrived. The listener notes where the
+// feed stands when made; wait(signal) resolves true once a Feishu/Lark
+// message arrives after that, false when the signal aborts.
+export async function larkMessageListener({ port, fetchImpl = globalThis.fetch, intervalMs = 2_000 }) {
+  const feed = async (query) => {
+    const response = await fetchImpl(`http://127.0.0.1:${port}/api/activity?${query}`, { signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return (await response.json()).activities ?? [];
+  };
+  const latest = async () => (await feed('limit=1'))[0]?.id ?? 0;
+  let cursor = await latest().catch(() => null);
+  const pause = (signal) => new Promise((resolve) => {
+    const timer = setTimeout(resolve, intervalMs);
+    signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+  return {
+    async wait(signal) {
+      while (!signal.aborted) {
+        try {
+          // Without a starting point, what is there already does not count.
+          if (cursor === null) cursor = await latest();
+          else {
+            const activities = await feed(`after=${cursor}&limit=100`);
+            if (activities.some(({ kind, metadata }) => ['message.received', 'message.ignored'].includes(kind) && metadata?.source === 'lark')) return true;
+            cursor = Math.max(cursor, ...activities.map(({ id }) => id));
+          }
+        } catch { /* Not answering yet; ask again. */ }
+        await pause(signal);
+      }
+      return false;
+    },
+  };
+}
+
+const receivingChecklist = (id, vika) => [
+  t('开放平台「事件与回调」里，事件订阅方式是长连接，并订阅了接收消息（im.message.receive_v1）',
+    'Under Events & Callbacks in the developer console, events come over the long connection and the message event (im.message.receive_v1) is subscribed'),
+  t('改过配置后创建了版本并发布（企业可能在等管理员审核）', 'After a change, a version was created and published (an organization may be awaiting admin approval)'),
+  t('这个应用没有同时被别的程序（OpenClaw、botmux、另一台机器上的 Vika）用长连接收消息', 'No other program (OpenClaw, botmux, Vika on another machine) receives with this app over the long connection'),
+  t(`运行 ${vika} logs ${id} 看飞书连接有没有报错`, `Run ${vika} logs ${id} for errors in the Feishu/Lark connection`),
+];
+
+// The owner replies on Feishu/Lark and setup waits to see it arrive, a few
+// minutes at most; s skips. Resolves true when it arrived.
+async function confirmReceiving({ prompter, listener, greeted, name, id, vika, timeoutMs = 180_000 }) {
+  prompter.info(greeted
+    ? t('在飞书里回它一句（说什么都行），确认它收得到你的消息', 'Reply to it on Feishu/Lark (anything will do) to check it gets your messages')
+    : t(`在飞书里搜「${name}」给它发一句，确认它收得到你的消息`, `Search for "${name}" on Feishu/Lark and message it, to check it gets your messages`));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let skipped = false;
+  const spinning = prompter.spin(t('等你的消息（按 s 跳过）', 'Waiting for your message (s skips)'));
+  const watch = prompter.watchKey('s');
+  watch.pressed.then((pressed) => { if (pressed) { skipped = true; controller.abort(); } });
+  let arrived;
+  try {
+    arrived = await listener.wait(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    watch.stop();
+  }
+  if (arrived) {
+    spinning.succeed(t('收到你的消息了，飞书这条路是通的', 'Your message arrived: Feishu/Lark gets through'));
+    return true;
+  }
+  spinning.stop();
+  if (skipped) prompter.info(t('跳过了；之后它要是收不到你的消息，按下面查：', 'Skipped; if it does not get your messages later, check:'));
+  else prompter.warn(t(`${Math.round(timeoutMs / 60_000)} 分钟没等到你的消息。它发得出、收不到，按下面查：`, `No message in ${Math.round(timeoutMs / 60_000)} minutes. It can send but not receive; check:`));
+  receivingChecklist(id, vika).forEach((line, index) => prompter.write(`    ${index + 1}. ${line}\n`));
+  prompter.write(t('    修好后不用重新 setup，直接给它发消息就行。\n', '    Once fixed, no need to run setup again: just message it.\n'));
+  return false;
+}
+
 // What the bot says on Feishu when it is newly connected; on the primary IM,
 // also that it reaches the owner there.
 function greeting({ name, newInstance, primary }) {
@@ -658,10 +997,9 @@ function greeting({ name, newInstance, primary }) {
 const found = (labels) => t(`找到 ${list(labels)}`, `Found ${list(labels)}`);
 
 // What the machine offers, in one line, once the check is done.
-function foundLine(runtimes, ov) {
+function foundLine(runtimes) {
   const ready = runtimes.filter((runtime) => runtime.available).map((runtime) => runtime.label);
-  const memory = ov?.usable ? t('OpenViking 可用', 'OpenViking ready') : ov ? t('OpenViking 暂不可用', 'OpenViking unavailable') : t('没有 OpenViking', 'no OpenViking');
-  return ready.length ? `${found(ready)} · ${memory}` : `${t('还没有能用的 agent', 'No usable agent yet')} · ${memory}`;
+  return ready.length ? found(ready) : t('还没有能用的 agent', 'No usable agent yet');
 }
 
 // Until some runtime can run: say why each cannot, and offer to log the
@@ -709,18 +1047,22 @@ function table(prompter, title, rows) {
   prompter.write(`\n${title}${t('：', ':')}\n${rows.map(([key, value]) => `  ${padEnd(key, keyWidth)}  ${value}`).join('\n')}\n`);
 }
 
-const SCANS = { lark: 2, weixin: 1 };
+// Feishu/Lark is one scan when the app is typed in: only the owner's authorization.
+const scansOf = (im, larkSource) => (im === 'lark' ? (larkSource === 'manual' ? 1 : 2) : 1);
 
-function connectionSteps(prompter, connectors, { saving = false } = {}) {
+function connectionSteps(prompter, connectors, { saving = false, larkSource = 'create' } = {}) {
   if (!connectors.length) return;
-  const credentials = connectors.some((im) => ['telegram', 'qq'].includes(im));
-  const steps = connectors.map((im) => (im === 'qq'
-    ? t('QQ AppID / AppSecret + 私聊验证码绑定', 'QQ AppID / AppSecret + private-chat verification code')
-    : im === 'telegram' ? t('Telegram Bot token + Start 绑定', 'Telegram bot token + Start')
-    : t(`${IM_LABELS[im]} ${SCANS[im]} 次`, `${IM_LABELS[im]} ${SCANS[im]} ${SCANS[im] === 1 ? 'scan' : 'scans'}`)));
+  const telegram = connectors.some((im) => TOKEN_IMS.includes(im));
+  const steps = connectors.map((im) => {
+    if (im === 'telegram') return t('Telegram Bot token + Start 绑定', 'Telegram bot token + Start');
+    if (im === 'qq') return t('QQ AppID / AppSecret + 私聊验证码绑定', 'QQ AppID / AppSecret + private-chat verification code');
+    if (im === 'slack') return t('Slack 建 App + 两个 token + 私聊口令绑定', 'Slack app + two tokens + a code in a direct message');
+    const scans = scansOf(im, larkSource);
+    return t(`${IM_LABELS[im]} ${scans} 次`, `${IM_LABELS[im]} ${scans} ${scans === 1 ? 'scan' : 'scans'}`);
+  });
   prompter.info(t(
-    `接下来${credentials ? '接入' : '扫码'}：${steps.join('，')}${saving ? `；${credentials ? '全部验证成功' : '扫完'}才保存配置` : ''}`,
-    `Next, ${credentials ? 'connecting' : 'scanning'}: ${steps.join(', ')}${saving ? `; nothing is saved until ${credentials ? 'all of it checks out' : 'the scans are done'}` : ''}`,
+    `接下来${telegram ? '接入' : '扫码'}：${steps.join('，')}${saving ? `；${telegram ? '全部验证成功' : '扫完'}才保存实例` : ''}`,
+    `Next, ${telegram ? 'connecting' : 'scanning'}: ${steps.join(', ')}${saving ? `; the instance is saved after ${telegram ? 'all of it checks out' : 'the scans are done'}` : ''}`,
   ));
 }
 
@@ -751,10 +1093,13 @@ export async function setupCommand(options = {}) {
   prompter.pageTop = () => live?.top() ?? null;
   try {
     for (;;) {
+      const pendingOV = new Set();
       try {
-        return await setupFlow({ ...options, live, memo });
+        return await setupFlow({ ...options, live, memo, pendingOV });
       } catch (error) {
         if (!(error instanceof StartOver)) throw error;
+      } finally {
+        for (const file of pendingOV) fs.rmSync(file, { force: true });
       }
     }
   } finally {
@@ -770,26 +1115,29 @@ async function setupFlow({
   homeDir = os.homedir(),
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
-  connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, qq: connectQQ, email: askEmail, greet, pi: loginPi },
+  configureOV = configureOpenViking,
+  connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, slack: connectSlack, qq: connectQQ, email: askEmail, greet, pi: loginPi },
   control = { start: startCommand, restart: restartCommand, autostart: autostartCommand },
+  listen = larkMessageListener,
   allocate = allocatePort,
   live = null,
   memo = {},
+  pendingOV = new Set(),
 }) {
   const out = (text) => prompter.write(text);
   const vika = vikaCommand(env);
-  if (!memo.detected) {
+  if (!memo.runtimes) {
     if (!prompter.fancy) out(t('Vika setup：添加或修改这台机器上的 agent 实例。\n\n', 'Vika setup: add or change the agent instances on this machine.\n\n'));
-    memo.detected = await step(prompter, t('看看这台机器上有哪些 agent', 'Looking for agents on this machine'), () => Promise.all([
-      detect.runtimes({ env }),
-      detect.openViking({ env, homeDir, fetchImpl }),
-    ]), ([runtimesFound, memory]) => foundLine(runtimesFound, memory));
+    memo.runtimes = await step(prompter, t('看看这台机器上有哪些 agent', 'Looking for agents on this machine'),
+      () => detect.runtimes({ env }), foundLine);
     memo.mark = prompter.mark();
   } else {
     prompter.rewind(memo.mark);
   }
-  let [runtimes] = memo.detected;
-  const [, ov] = memo.detected;
+  let runtimes = memo.runtimes;
+  // The connection this run chose (a new instance's, or a changed one), kept
+  // for the next instance once the manifest is saved.
+  let ov = null;
   const { path: configPath, value: manifest } = readManifest(env);
   // ← and → move between the questions, until the scans begin.
   prompter.navigable = prompter.tty;
@@ -797,13 +1145,62 @@ async function setupFlow({
   if (!current) {
     runtimes = await ensureRuntime({ prompter, env, detect, connect, live }, runtimes);
     if (!runtimes) return 1;
-    memo.detected = [runtimes, ov];
+    memo.runtimes = runtimes;
   }
   const kept = keptRuntime(current, runtimes);
   const others = manifest?.agents?.length > 0;
-  const ctx = { prompter, out, env, homeDir, runtimes, ov, current, connect, kept, menu: Boolean(current), startOver: others, notes: [] };
+  const ctx = { prompter, out, env, homeDir, fetchImpl, runtimes, current, connect, kept, menu: Boolean(current), startOver: others, notes: [] };
   const state = initialState({ id: current?.id ?? suggestInstanceId(manifest), env, homeDir, current, runtimes, kept });
   const port = current ? current.port : await allocate(manifest);
+  ctx.editOV = async () => {
+    const detected = await configureOV({ prompter, env, homeDir, fetchImpl, detect: detect.openViking,
+      preferredConfigPath: state.ovConfig, title: `OpenViking · ${current.id}`, canGoBack: true,
+      leaveTo: t('返回实例设置', 'Back to instance settings') });
+    const pending = new Set();
+    try {
+      const target = await prepareInstanceOpenViking({
+        agent: { ...current, ovConfig: state.ovConfig }, detected, pending, env, homeDir, fetchImpl,
+        detect: detect.openViking, reserved: new Set(manifest.agents.map(({ ovConfig }) => ovConfig)),
+      });
+      if (target !== state.ovConfig && pendingOV.has(state.ovConfig)) {
+        fs.rmSync(state.ovConfig, { force: true });
+        pendingOV.delete(state.ovConfig);
+      }
+      for (const file of pending) pendingOV.add(file);
+      pending.clear();
+      if (target !== state.ovConfig) ov = detected;
+      state.ovConfig = target;
+    } finally {
+      for (const file of pending) fs.rmSync(file, { force: true });
+    }
+  };
+  // The instance's own OV config, written for this name and this connection;
+  // going back to change either writes it again.
+  let prepared = null;
+  const checkOV = async () => {
+    const checked = await detect.openViking({ env, homeDir, fetchImpl, configPath: state.ovConfig });
+    if (!checked?.usable) {
+      throw new Error(t(`OpenViking（${state.id}）不可用：${checked?.reason ?? '检查失败'}。请恢复服务后再接入 IM。`,
+        `OpenViking (${state.id}) is unavailable: ${checked?.reason ?? 'check failed'}. Restore the service before connecting IMs.`));
+    }
+    return checked;
+  };
+  ctx.checkOV = checkOV;
+  const prepareOV = () => step(prompter, t('准备并验证实例的 OpenViking 配置', 'Preparing and checking this instance’s OpenViking config'), async () => {
+    if (prepared?.id !== state.id || prepared?.ov !== ov) {
+      for (const file of pendingOV) fs.rmSync(file, { force: true });
+      pendingOV.clear();
+      state.ovConfig = availableInstanceOvConfig(env, state.id, new Set(manifest?.agents.map(({ ovConfig }) => ovConfig)));
+      writeInstanceOvConfig({ detected: ov, instanceId: state.id, target: state.ovConfig, exclusive: true });
+      pendingOV.add(state.ovConfig);
+      prepared = { id: state.id, ov };
+    }
+    await checkOV();
+  }, t('OpenViking 已就绪，接下来接入 IM', 'OpenViking is ready; next, connect your IMs'));
+  // The section heading comes from the wizard; ← goes back to 要做什么, if there was a choice.
+  const chooseOV = async () => {
+    ov = await configureOV({ prompter, env, homeDir, fetchImpl, detect: detect.openViking, title: null, canGoBack: others, previous: ov });
+  };
 
   // The instance as the manifest will hold it.
   const build = (emailAccounts = mailPlan(state).list) => {
@@ -817,15 +1214,20 @@ async function setupFlow({
       workspace: state.workspace,
       model: state.runtime.model,
     };
+    if (state.role) agent.role = state.role;
+    else delete agent.role;
     if (state.connectors.includes('lark')) agent.profile = current?.profile ?? `vika-${state.id}`;
     else delete agent.profile;
-    const ovConfig = state.useOv === 'keep' ? current.ovConfig
-      : state.useOv ? path.join(vikaHome(env), 'ov', `${state.id}.json`) : null;
-    if (ovConfig) agent.ovConfig = ovConfig;
-    else delete agent.ovConfig;
+    agent.ovConfig = state.ovConfig;
+    agent.ovAutoRecall = current?.ovAutoRecall ?? false;
     if (emailAccounts.length) agent.emailAccounts = emailAccounts;
     else delete agent.emailAccounts;
     return agent;
+  };
+  // The IMs this run connects: the new ones, and Feishu again for another app.
+  const toConnect = () => {
+    const before = current ? connectorsOf(current) : [];
+    return ims(state).filter((im) => !before.includes(im) || (im === 'lark' && larkSource(state, current) !== 'keep'));
   };
   const pinned = () => (state.runtime.binEnv && state.runtime.bin ? { [state.runtime.binEnv]: state.runtime.bin } : {});
   const manifestWith = (agent) => (current
@@ -864,14 +1266,16 @@ async function setupFlow({
       : imList(ims(state));
     table(prompter, t(`将添加实例 ${state.id}`, `New instance ${state.id}`), [
       [t('机器人', 'Bot'), `${state.displayName} · ${state.runtime.label}`],
+      [t('角色', 'Role'), roleShown(state, homeDir)],
       [t('消息渠道', 'Channels'), channels],
+      ...(larkSource(state, null) ? [[t('飞书机器人', 'Feishu/Lark bot'), larkAppShown(state, null)]] : []),
       ...(addresses.length ? [[t('邮箱', 'Email'), list(addresses)]] : []),
-      [t('记忆', 'Memory'), state.useOv ? 'OpenViking' : t('不使用 OpenViking', 'no OpenViking')],
+      [t('记忆', 'Memory'), 'OpenViking'],
       [t('工作目录', 'Workspace'), shortenHome(state.workspace, homeDir)],
       [t('数据目录', 'Data'), shortenHome(state.dataDir, homeDir)],
     ]);
-    connectionSteps(prompter, ims(state), { saving: true });
-    const go = ims(state).some((im) => ['telegram', 'qq'].includes(im)) ? t('开始接入？', 'Start connecting?')
+    connectionSteps(prompter, ims(state), { saving: true, larkSource: larkSource(state, null) });
+    const go = ims(state).some((im) => TOKEN_IMS.includes(im)) ? t('开始接入？', 'Start connecting?')
       : ims(state).length ? t('开始扫码？', 'Start scanning?') : t('保存并启动？', 'Save and start?');
     if (await prompter.confirm(go)) return null;
     prompter.info(t(`什么都没保存；准备好了再运行 ${vika} setup。`, `Nothing was saved; run ${vika} setup when you are ready.`));
@@ -879,9 +1283,11 @@ async function setupFlow({
   };
 
   const steps = current ? [] : [
-    { section: { title: t('机器人', 'Bot'), step: 1, total: 3 }, ask: askId }, { ask: askName }, { ask: askWorkspace }, { ask: askRuntime },
-    { section: { title: t('消息渠道和记忆', 'Channels and memory'), step: 2, total: 3 }, ask: askIms }, { ask: askChannel }, { ask: askOv }, { ask: askMail },
-    { section: { title: t('确认', 'Confirm'), step: 3, total: 3 }, ask: confirmNew },
+    { section: { title: t('OpenViking 记忆', 'OpenViking memory'), step: 1, total: 4 }, ask: chooseOV },
+    { section: { title: t('机器人', 'Bot'), step: 2, total: 4 }, ask: askId }, { ask: askName }, { ask: askRole }, { ask: askWorkspace }, { ask: askRuntime },
+    { ask: prepareOV },
+    { section: { title: t('消息渠道', 'Channels'), step: 3, total: 4 }, ask: askIms }, { ask: askChannel }, { ask: askLarkApp }, { ask: askMail },
+    { section: { title: t('确认', 'Confirm'), step: 4, total: 4 }, ask: confirmNew },
   ];
   const run = {};
   const page = {};
@@ -892,22 +1298,20 @@ async function setupFlow({
   let plan;
   let lark = null;
   // The questions, then the codes to scan. ← while a code waits to be
-  // scanned comes back to the questions, as nothing exists yet; once a scan
-  // is confirmed (a Feishu app made, a Weixin account bound) it cannot.
+  // scanned comes back to the questions; its pending OV config can still be
+  // removed. Once a scan is confirmed (an app made, an account bound) it cannot.
   for (;;) {
     prompter.navigable = prompter.tty;
     if (current) {
-      const describe = () => describeChanges(current, build(), mailPlan(state), homeDir);
+      const describe = () => describeChanges(current, build(), mailPlan(state), homeDir, state);
       if (!await editInstance(ctx, state, { describe, check: () => problem(build()), before: original, page })) return 0;
       out(`\n${t(`将修改 ${current.displayName}（${current.id}）：`, `Changing ${current.displayName} (${current.id}):`)}\n${describe().map((change) => `  ${change}\n`).join('')}`);
-      const added = ims(state).filter((im) => !connectorsOf(current).includes(im));
-      connectionSteps(prompter, added);
+      connectionSteps(prompter, toConnect(), { larkSource: larkSource(state, current) });
     } else if (await wizard(ctx, state, steps, run) === DECLINED) {
       return 1;
     }
     prompter.navigable = false;
-    const before = current ? connectorsOf(current) : [];
-    newIms = ims(state).filter((im) => !before.includes(im));
+    newIms = toConnect();
 
     // The release's own lark-cli, unless the manifest or environment pins another.
     larkCliBin = state.connectors.includes('lark')
@@ -919,14 +1323,28 @@ async function setupFlow({
     }
     agent = build();
     plan = { id: state.id, displayName: state.displayName, dataDir: state.dataDir };
+    // Answers and mailbox setup can take a while: check again before the
+    // first QR scan or bot token, using the actual instance identity.
+    if (newIms.length) await checkOV();
     // A code to scan needs the whole screen; the boat comes back afterwards.
     if (newIms.length) live?.release();
     try {
       lark = newIms.includes('lark')
         ? await connect.lark({
           plan, prompter, larkCli: new LarkCli(larkCliBin), fetchImpl, profile: agent.profile, debug: Boolean(env.VIKA_DEBUG), canGoBack: prompter.tty,
+          source: larkSource(state, current), app: state.larkApp?.app ?? null,
+          others: (manifest?.agents ?? []).filter((other) => other.id !== state.id && other.profile),
         })
         : null;
+      // People @ the bot by its app's name, so that is the default; an owner
+      // who has called it something else for long may keep that.
+      if (lark?.name && lark.name !== state.displayName && lark.name.length <= 40
+        && await prompter.confirm(t(`这个机器人在飞书里叫「${lark.name}」，Vika 里也这么叫它？（选否就还叫「${state.displayName}」）`,
+          `This bot is called "${lark.name}" on Feishu/Lark; call it that in Vika too? (No keeps "${state.displayName}")`))) {
+        state.displayName = lark.name;
+        plan.displayName = lark.name;
+        agent = build();
+      }
       let bound = Boolean(lark);
       if (newIms.includes('weixin')) {
         await connect.weixin({ plan, prompter, canGoBack: prompter.tty && !bound });
@@ -934,6 +1352,10 @@ async function setupFlow({
       }
       if (newIms.includes('telegram')) {
         await connect.telegram({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
+        bound = true;
+      }
+      if (newIms.includes('slack')) {
+        await connect.slack({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
         bound = true;
       }
       if (newIms.includes('qq')) await connect.qq({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
@@ -947,12 +1369,14 @@ async function setupFlow({
   }
   live?.resume();
   const id = state.id;
-  if (state.useOv === true) writeInstanceOvConfig({ detected: ov, instanceId: id, target: agent.ovConfig });
   const mail = mailPlan(state);
   for (const { config, account } of mail.write) writeEmailAccount(config, account);
+  writeRoleFile(state, id);
 
   fs.mkdirSync(state.workspace, { recursive: true, mode: 0o700 });
   writeManifest(configPath, manifestWith(agent));
+  pendingOV.delete(agent.ovConfig);
+  if (ov && agent.ovConfig !== current?.ovConfig) saveOVConnection(ov, { env, homeDir });
   for (const mailbox of mail.removed) fs.rmSync(mailbox.config, { force: true });
 
   prompter.section(current ? t('重启', 'Restart') : t('启动', 'Start'));
@@ -985,6 +1409,9 @@ async function setupFlow({
     }
   }
   let greeted = false;
+  // Only someone at a terminal can write to the bot while setup waits; where
+  // the feed stood before the hello, so a quick reply still counts.
+  const listener = lark && prompter.tty ? await listen({ port, fetchImpl }) : null;
   if (lark) {
     const text = greeting({ name: state.displayName, newInstance: !current, primary: state.channel === 'lark' });
     const spinning = prompter.spin(t('在飞书里跟你打个招呼', 'Saying hello on Feishu/Lark'));
@@ -993,19 +1420,27 @@ async function setupFlow({
       (error) => spinning.warn(t(`飞书打招呼的消息没发出去：${error.message}`, `The hello on Feishu/Lark did not go out: ${error.message}`)),
     );
   }
+  const received = listener
+    ? await confirmReceiving({ prompter, listener, greeted, name: state.displayName, id, vika })
+    : false;
   if (!current && prompter.tty && control.autostart && !autostartEnabled({ homeDir })) await offerAutostart({ prompter, env, homeDir, control, vika });
 
   // What to do next, one line per thing; on Weixin the owner has to write first.
   const next = [];
   if (lark) {
-    next.push([IM_LABELS.lark, greeted ? t('私聊里它已经跟你打了招呼，直接回它', 'It said hello in your chat; just reply')
-      : t(`在飞书里搜「${state.displayName}」，给它发消息`, `Search for "${state.displayName}" and message it`)]);
+    next.push([IM_LABELS.lark, received ? t('已经收到你的消息，接着聊就行', 'Your message got through; carry on there')
+      : greeted ? t('私聊里它已经跟你打了招呼，直接回它', 'It said hello in your chat; just reply')
+        : t(`在飞书里搜「${state.displayName}」，给它发消息`, `Search for "${state.displayName}" and message it`)]);
   }
   if (newIms.includes('weixin')) {
     next.push([IM_LABELS.weixin, t('先给它发一句「你好」，在那之前它没法主动找你', 'Say "hi" to it first; until then it cannot reach you')]);
   }
   if (newIms.includes('telegram')) next.push(['Telegram', t('在刚绑定的 Bot 私聊中发一条任务', 'Message the bot you just bound')]);
   if (newIms.includes('qq')) next.push(['QQ', t('在刚绑定的机器人私聊中发一条任务', 'Message the bot you just bound')]);
+  if (newIms.includes('slack')) {
+    next.push(['Slack', t('私聊机器人发任务；要它参与频道，在频道里 /invite 它；命令前加个空格（ /new）',
+      'Message the bot directly; /invite it to channels it should join; put a space before commands ( /new)')]);
+  }
   if (!current) {
     next.push([t('控制台', 'Console'), t(`http://127.0.0.1:${WEB_PORT}  每一轮在做什么都在这里`, `http://127.0.0.1:${WEB_PORT}  what every turn did`)]);
     if (env.SSH_CONNECTION) {
@@ -1047,22 +1482,31 @@ async function offerAutostart({ prompter, env, homeDir, control, vika }) {
 }
 
 // What a change to an instance does, one line each, for the confirmation.
-function describeChanges(before, after, mailboxes, homeDir) {
+function describeChanges(before, after, mailboxes, homeDir, state) {
   const changes = [];
   const was = connectorsOf(before);
+  if (before.ovConfig !== after.ovConfig) changes.push(t('更新 OpenViking 连接', 'Update the OpenViking connection'));
   if (before.displayName !== after.displayName) changes.push(`${t('机器人名字：', 'Bot name: ')}${before.displayName} → ${after.displayName}`);
+  if (before.role !== after.role) {
+    const shown = (agent) => roleShown(agent, homeDir);
+    changes.push(t(`角色：${shown(before)} → ${shown(after)}（模型会开一次新的会话）`, `Role: ${shown(before)} → ${shown(after)} (the model starts a new session)`));
+  }
   if (before.workspace !== after.workspace) {
     const move = `${shortenHome(before.workspace, homeDir)} → ${shortenHome(after.workspace, homeDir)}`;
     changes.push(t(`工作目录：${move}（模型会开一次新的会话）`, `Workspace: ${move} (the model starts a new session)`));
   }
   if (before.model !== after.model) changes.push(`${t('运行时：', 'Runtime: ')}${before.model} → ${after.model}`);
-  for (const im of ['lark', 'weixin', 'telegram', 'qq']) {
+  for (const im of ['lark', 'weixin', 'telegram', 'slack', 'qq']) {
     if (!was.includes(im) && after.connectors.includes(im)) {
       changes.push(im === 'qq' ? t('接入QQ（需要 AppID / AppSecret 和私聊验证码）', 'Connect QQ (needs AppID / AppSecret and a private-chat verification code)')
         : im === 'telegram' ? t(`接入${IM_LABELS[im]}（需要 Bot token 和 Start 绑定）`, `Connect ${IM_LABELS[im]} (needs a bot token and Start)`)
-        : t(`接入${IM_LABELS[im]}（需要扫码）`, `Connect ${IM_LABELS[im]} (needs a scan)`));
+        : im === 'slack' ? t(`接入${IM_LABELS[im]}（需要建 App、两个 token 和私聊口令绑定）`, `Connect ${IM_LABELS[im]} (needs an app, two tokens and a code)`)
+          : t(`接入${IM_LABELS[im]}（需要扫码）`, `Connect ${IM_LABELS[im]} (needs a scan)`));
     }
     if (was.includes(im) && !after.connectors.includes(im)) changes.push(t(`不再接${IM_LABELS[im]}`, `Disconnect ${IM_LABELS[im]}`));
+  }
+  if (was.includes('lark') && !['keep', null].includes(larkSource(state, before))) {
+    changes.push(t(`换飞书应用：${larkAppShown(state, before)}（需要扫码）`, `Another Feishu/Lark app: ${larkAppShown(state, before)} (needs a scan)`));
   }
   if ((before.channel ?? was[0]) !== after.channel) {
     changes.push(`${t('主渠道：', 'Primary channel: ')}${IM_LABELS[before.channel ?? was[0]]} → ${IM_LABELS[after.channel]}`);
@@ -1071,9 +1515,6 @@ function describeChanges(before, after, mailboxes, homeDir) {
   for (const address of mailboxes.updated) changes.push(t(`更新邮箱 ${address} 的密码`, `New password for ${address}`));
   for (const mailbox of mailboxes.removed) {
     changes.push(t(`移除邮箱 ${addressOf(mailbox)}（删掉保存的密码）`, `Remove mailbox ${addressOf(mailbox)} (its saved password is deleted)`));
-  }
-  if (Boolean(before.ovConfig) !== Boolean(after.ovConfig)) {
-    changes.push(after.ovConfig ? t('开始使用 OpenViking', 'Start using OpenViking') : t('不再使用 OpenViking', 'Stop using OpenViking'));
   }
   return changes;
 }

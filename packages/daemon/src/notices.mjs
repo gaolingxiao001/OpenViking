@@ -19,6 +19,7 @@ export class FailurePolicy {
     logger,
     runtime,
     recordActivity,
+    isOwner = () => false,
     isStopping = () => false,
   }) {
     this.config = config;
@@ -27,6 +28,7 @@ export class FailurePolicy {
     this.logger = logger;
     this.runtime = runtime;
     this.recordActivity = recordActivity;
+    this.isOwner = isOwner;
     this.isStopping = isStopping;
     // scopeKey -> { summary, atMs } of the last delivered failure notice.
     // Repeats of the same error stay muted until a turn for that conversation
@@ -86,7 +88,10 @@ export class FailurePolicy {
     this.fallbackInProgress = true;
     this.lastFallbackAtMs = now;
     try {
-      await this.runtime.transition({ kind: 'select-model', selector: model });
+      const result = await this.runtime.transition({
+        kind: 'select-runtime', runtime: 'codex', model, expectedRuntime: 'claude',
+      });
+      if (result.ok === false) throw new Error(result.reason || 'runtime switch failed');
     } catch (switchError) {
       this.recordActivity('agent.fallback', {
         summary: safeError(switchError),
@@ -113,7 +118,7 @@ export class FailurePolicy {
     // Redeliver the failed turn to the fallback runtime. A failure of the retry
     // surfaces through the normal onTurnFailed path (runtime is codex now).
     this.runtime.submit(rows.map((row) => eventDeliveryItem(row, row.seq, {
-      text: formatInboundLine(row, null, { replyTo: resolveReplyTarget(this.store, row) }),
+      text: formatInboundLine(row, null, { owner: this.isOwner(row), replyTo: resolveReplyTarget(this.store, row) }),
       seq: row.seq,
     })));
     return true;

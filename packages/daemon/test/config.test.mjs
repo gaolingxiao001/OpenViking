@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { getConfig, projectDir } from '../src/config.mjs';
 import { managedPiBin } from '../src/pi-runtime.mjs';
-import { assembleConversationPolicy as loadSystemPrompt } from '../src/conversation-policy.mjs';
 
 const saved = new Map();
 
@@ -39,6 +38,24 @@ describe('configuration safety', { concurrency: false }, () => {
     assert.equal(config.channel, 'telegram');
     assert.deepEqual(config.connectors, ['telegram', 'weixin']);
     assert.equal(config.telegramToken, undefined);
+  });
+  it('accepts Slack and a bot reply fuse that defaults to 20 and can be turned off', () => {
+    setEnv('VIKA_CHANNEL', 'slack');
+    setEnv('VIKA_CONNECTORS_JSON', '["slack","lark"]');
+    setEnv('VIKA_BOT_REPLY_FUSE', undefined);
+    const config = getConfig();
+    assert.equal(config.channel, 'slack');
+    assert.equal(config.botReplyFuse, 20);
+    setEnv('VIKA_BOT_REPLY_FUSE', '0');
+    assert.equal(getConfig().botReplyFuse, 0);
+    setEnv('VIKA_BOT_REPLY_FUSE', '-1');
+    assert.throws(() => getConfig(), /VIKA_BOT_REPLY_FUSE/);
+  });
+  it('keeps explicit silence off unless the instance opts in', () => {
+    setEnv('VIKA_EXPLICIT_SILENCE', undefined);
+    assert.equal(getConfig().explicitSilence, false);
+    setEnv('VIKA_EXPLICIT_SILENCE', 'true');
+    assert.equal(getConfig().explicitSilence, true);
   });
   it('keeps meeting audio entirely disabled unless explicitly configured', () => {
     setEnv('VIKA_MEETING_AUDIO_ENABLED', 'false');
@@ -193,73 +210,42 @@ describe('configuration safety', { concurrency: false }, () => {
   });
 });
 
-describe('release-owned system prompt', () => {
-  it('loads the single prompt file and substitutes release configuration', () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-'));
-    const systemPromptPath = path.join(directory, 'system-prompt.md');
-    const empty = path.join(directory, 'empty.md');
-    fs.writeFileSync(systemPromptPath, 'policy\n\n{{TEAM_TASK_BOARD_URL}}\n\n{{AGENT_NAME}}\n\n{{VIKA_UPGRADE_TARGET}}\n');
-    fs.writeFileSync(empty, '');
-    try {
-      const text = loadSystemPrompt({
-        systemPromptPath,
-        openVikingPromptPath: empty,
-        openVikingConfigPath: path.join(directory, 'ovcli.conf'),
-        harnessPromptPath: empty,
-        teamTaskBoardUrl: 'https://board.example',
-        agentName: '斯斯',
-        upgradeTarget: 'sisi',
-      });
-      assert.match(text, /^policy\n\nhttps:\/\/board\.example\n\n斯斯\n\nsisi/);
-      assert.match(text, /<context-workdir>/);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('adds meeting capability policy only when the feature is enabled', () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-prompt-audio-'));
-    const systemPromptPath = path.join(directory, 'system-prompt.md');
-    const empty = path.join(directory, 'empty.md');
-    fs.writeFileSync(systemPromptPath, 'base\n');
-    fs.writeFileSync(empty, '');
-    try {
-      const baseConfig = {
-        systemPromptPath,
-        openVikingPromptPath: empty,
-        openVikingConfigPath: path.join(directory, 'ovcli.conf'),
-        harnessPromptPath: empty,
-      };
-      const withoutAudio = loadSystemPrompt({ ...baseConfig, meetingAudio: null });
-      assert.match(withoutAudio, /^base/);
-      assert.match(withoutAudio, /<context-workdir>/);
-      assert.doesNotMatch(withoutAudio, /no implicit delivery target/);
-      assert.match(
-        loadSystemPrompt({ ...baseConfig, meetingAudio: {} }),
-        /no implicit delivery target/,
-      );
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('adds the mail rules only when a mailbox is connected, on Lark and Weixin alike', () => {
-    const rules = /^# Email$/m;
-    assert.doesNotMatch(loadSystemPrompt({ connectors: ['lark'] }), rules);
-    for (const connectors of [['lark', 'email'], ['weixin', 'email']]) {
-      const policy = loadSystemPrompt({ connectors });
-      assert.match(policy, rules);
-      assert.match(policy, /You never send mail\./);
-      assert.match(policy, /A non-chat event reaches people only through the owner/);
-    }
-    assert.match(loadSystemPrompt({ connectors: ['weixin', 'email'] }), /^# Weixin conversation policy/);
-  });
-
-  it('configures one release prompt with no mutable kernel paths', () => {
+describe('release-owned prompts and the instance role', () => {
+  it('reads every prompt from the release and has no mutable kernel paths', () => {
     const config = getConfig();
-    assert.match(config.systemPromptPath, /agent\/system-prompt\.md$/);
+    assert.equal(config.promptDir, path.join(projectDir, 'packages', 'daemon', 'agent'));
+    assert.equal(config.rolePromptPath, '');
+    assert.equal(config.naturalWriting, true);
     assert.equal('kernelInnerPath' in config, false);
     assert.equal('kernelOuterPath' in config, false);
     assert.equal('kernelOuterDataPath' in config, false);
+  });
+
+  it('resolves VIKA_ROLE to a shipped role or the owner\'s own file', () => {
+    setEnv('VIKA_ROLE', 'assistant');
+    assert.equal(getConfig().rolePromptPath, path.join(projectDir, 'packages', 'daemon', 'agent', 'roles', 'assistant.md'));
+
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-role-'));
+    const own = path.join(directory, 'role.md');
+    fs.writeFileSync(own, 'You answer questions about the garden.\n');
+    try {
+      setEnv('VIKA_ROLE', own);
+      assert.equal(getConfig().rolePromptPath, own);
+      setEnv('VIKA_ROLE', path.join(directory, 'missing.md'));
+      assert.throws(() => getConfig(), /VIKA_ROLE names a file that does not exist/);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+    setEnv('VIKA_ROLE', 'pirate');
+    assert.throws(() => getConfig(), /VIKA_ROLE pirate is not a known role/);
+    setEnv('VIKA_ROLE', '../roles/qa');
+    assert.throws(() => getConfig(), /VIKA_ROLE must be a role name or an absolute path/);
+  });
+
+  it('turns natural writing off only when asked', () => {
+    setEnv('VIKA_NATURAL_WRITING', 'false');
+    assert.equal(getConfig().naturalWriting, false);
+    setEnv('VIKA_NATURAL_WRITING', 'maybe');
+    assert.throws(() => getConfig(), /VIKA_NATURAL_WRITING must be a boolean/);
   });
 });

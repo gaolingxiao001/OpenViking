@@ -1,1 +1,0 @@
-Daemon-authenticated: lark-cli profile is {{LARK_PROFILE}}. Shell lark-cli commands inherit this profile through LARKSUITE_CLI_PROFILE. Never pass --profile and never override or unset that environment variable.

@@ -2,185 +2,225 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { CodexAgent } from '../src/codex.mjs';
 import {
+  DEFAULT_PROMPT_DIR,
   assembleConversationPolicy,
   assembleVolcConversationPolicy,
+  assembleVolcSelfHostedConversationPolicy,
+  resolveRolePromptPath,
+  rolePrompt,
 } from '../src/conversation-policy.mjs';
 
-function writePrompt(name, body) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-policy-'));
-  const filePath = path.join(directory, name);
+const { ROLE_PRESETS } = createRequire(import.meta.url)('../../../deployment-config.cjs');
+
+const read = (name) => fs.readFileSync(path.join(DEFAULT_PROMPT_DIR, name), 'utf8');
+const role = (name) => resolveRolePromptPath(name);
+
+function withRoleFile(body, callback) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-role-'));
+  const filePath = path.join(directory, 'role.md');
   fs.writeFileSync(filePath, body);
-  return { directory, filePath };
+  try {
+    return callback(filePath);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 }
 
-const defaultSystemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
-
 describe('conversation policy assemble', () => {
-  it('gives QQ its owner routing, passive reply limits and proactive restrictions in single and mixed sessions', () => {
+  it('assembles one Core for every connector set, with a section per connector in use', () => {
+    const order = ['## Lark', '## Slack', '## Weixin', '## Telegram', '## QQ', '## Email'];
+    for (const connectors of [['lark'], ['weixin'], ['telegram', 'email'], ['slack'], ['qq'], ['qq', 'email'], ['slack', 'qq'], ['lark', 'slack', 'weixin', 'telegram', 'qq', 'email']]) {
+      const text = assembleConversationPolicy({ connectors, agentName: 'Vee' });
+      const label = connectors.join('+');
+      assert.ok(text.startsWith('# Operating policy\n'), label);
+      assert.match(text, /## Events from other sources/, label);
+      assert.match(text, /## OpenViking memory/, label);
+      const present = order.filter((heading) => new RegExp(`^${heading}$`, 'm').test(text));
+      assert.deepEqual(present, order.filter((heading) => connectors.includes(heading.slice(3).toLowerCase())), label);
+      assert.deepEqual(present.map((heading) => text.indexOf(`\n${heading}\n`)), present.map((heading) => text.indexOf(`\n${heading}\n`)).sort((a, b) => a - b), label);
+    }
+    // Lark's own rules stay with Lark.
+    const weixin = assembleConversationPolicy({ connectors: ['weixin'] });
+    assert.doesNotMatch(weixin, /lark-cli|ca_|om_|image_key/);
+    assert.match(assembleConversationPolicy({ connectors: ['lark'] }), /never pass `--profile`/);
+  });
+
+  it('keeps QQ owner routing and reply limits in single and mixed sessions', () => {
+    for (const connectors of [['qq'], ['qq', 'email'], ['lark', 'slack', 'telegram', 'qq']]) {
+      const text = assembleConversationPolicy({ connectors, rolePromptPath: role('assistant') });
+      assert.match(text, /^## QQ$/m);
+      assert.match(text, /source=qq/);
+      assert.match(text, /4000 characters/);
+      assert.match(text, /four passive replies/);
+      assert.match(text, /Never bypass a reply limit/);
+      assert.ok(text.indexOf('## QQ') < text.indexOf('## Role'));
+    }
     const single = assembleConversationPolicy({ connectors: ['qq', 'email'] });
-    assert.match(single, /# QQ conversation policy/);
-    assert.match(single, /4000 characters/);
-    assert.match(single, /four passive replies/);
-    assert.doesNotMatch(single, /lark-cli profile|voice transcript/);
-    const mixed = assembleConversationPolicy({ connectors: ['lark', 'telegram', 'qq'], systemPromptPath: defaultSystemPromptPath });
-    assert.match(mixed, /source=qq/); assert.match(mixed, /source=telegram/);
-    assert.match(mixed, /Never bypass a reply limit/);
+    assert.doesNotMatch(single, /lark-cli|voice transcript|^## (Slack|Telegram|Weixin)$/m);
+    assert.doesNotMatch(assembleConversationPolicy({ connectors: ['lark'] }), /^## QQ$/m);
   });
-  it('gives Telegram the supported tools and size limits in single and mixed connector sessions', () => {
-    const single = assembleConversationPolicy({ connectors: ['telegram', 'email'] });
-    assert.match(single, /# Telegram conversation policy/);
-    assert.match(single, /4096 characters/);
-    assert.match(single, /Core limit of 20 MiB/);
-    assert.match(single, /downloads are limited to 20 MB/);
-    assert.doesNotMatch(single, /lark-cli profile|voice transcript/);
-    const mixed = assembleConversationPolicy({ connectors: ['lark', 'telegram'], systemPromptPath: defaultSystemPromptPath });
-    assert.match(mixed, /source=telegram/);
-    assert.match(mixed, /cannot send to other contacts or groups/);
+
+  it('delivers only through the Core tools and keeps the final text internal', () => {
+    const text = assembleConversationPolicy({ connectors: ['lark', 'weixin'] });
+    assert.match(text, /`send_message`/);
+    assert.match(text, /never through a CLI or any other path/);
+    assert.match(text, /Your final answer text, your thinking, and anything outside tool calls are internal telemetry that nobody sees/);
+    assert.match(text, /If nothing is needed, call no delivery tool for it\./);
+    assert.match(text, /Notify only when the owner should know now; otherwise deliver nothing\./);
+    assert.doesNotMatch(text, /DELIVERED|NO_DELIVERY|do nothing and end the turn|standard agent protocol/);
   });
-  it('does not tell the agent to suppress final assistant output', () => {
-    const text = assembleConversationPolicy({
-      systemPromptPath: defaultSystemPromptPath,
+
+  it('fills in the instance name and upgrade target', () => {
+    const text = assembleConversationPolicy({ connectors: ['lark'], agentName: '斯斯', upgradeTarget: 'sisi' });
+    assert.match(text, /directly calls `斯斯`/);
+    assert.match(text, /`vika upgrade sisi`/);
+    assert.doesNotMatch(text, /\{\{[A-Z_]+\}\}/);
+  });
+
+  it('explains the authenticated owner marker', () => {
+    const text = assembleConversationPolicy({ connectors: ['lark'] });
+    assert.match(text, /`owner=1` means the daemon verified the sender as the owner/);
+    assert.match(text, /made only at the owner's request \(`owner=1`\) or in a chat the Role names/);
+  });
+
+  it('adds meeting audio only when the feature is on', () => {
+    assert.doesNotMatch(assembleConversationPolicy({ connectors: ['lark'] }), /## Meeting audio input/);
+    assert.match(assembleConversationPolicy({ connectors: ['lark'], meetingAudio: {} }), /## Meeting audio input/);
+  });
+
+  it('adds the mail rules only when a mailbox is connected', () => {
+    assert.doesNotMatch(assembleConversationPolicy({ connectors: ['lark'] }), /^## Email$/m);
+    for (const connectors of [['lark', 'email'], ['weixin', 'email']]) {
+      const text = assembleConversationPolicy({ connectors });
+      assert.match(text, /^## Email$/m);
+      assert.match(text, /You never send mail\./);
+    }
+  });
+
+  it('ships no deployment-specific chats or bots in the release prompts', () => {
+    const files = ['core.md', 'events.md', 'openviking.md', 'meeting-audio.md', 'natural-writing.md',
+      ...fs.readdirSync(path.join(DEFAULT_PROMPT_DIR, 'connectors')).map((name) => path.join('connectors', name)),
+      ...fs.readdirSync(path.join(DEFAULT_PROMPT_DIR, 'roles')).map((name) => path.join('roles', name))];
+    for (const name of files) {
+      assert.doesNotMatch(read(name), /oc_[0-9a-f]{8,}|OpenViking小助手|lark-daemon/, name);
+    }
+  });
+});
+
+describe('the instance role', () => {
+  it('ships exactly the presets the manifest accepts, each in English with its reply language', () => {
+    assert.deepEqual(fs.readdirSync(path.join(DEFAULT_PROMPT_DIR, 'roles')).sort(), ROLE_PRESETS.map((name) => `${name}.md`).sort());
+    for (const name of ROLE_PRESETS) {
+      const text = read(path.join('roles', `${name}.md`));
+      assert.match(text, /Reply in Chinese by default, or in the language/, name);
+      assert.match(text, /OpenViking memory/, name);
+      assert.doesNotMatch(text, /【|\{\{(?!AGENT_NAME\}\})/, name);
+    }
+    assert.match(read('roles/colleague.md'), /AI counterpart/);
+    assert.match(read('roles/assistant.md'), /would knowing it now change what they do next\?/);
+    assert.match(read('roles/qa.md'), /### Off-topic questions/);
+  });
+
+  it('goes after the Core, inside a Role section closed by its boundary', () => {
+    const text = assembleConversationPolicy({ connectors: ['lark'], agentName: 'Vee', rolePromptPath: role('assistant') });
+    const start = text.indexOf('\n## Role\n');
+    assert.ok(start > text.indexOf('## OpenViking memory'));
+    assert.match(text, /You are Vee, the owner's personal assistant\./);
+    assert.ok(text.indexOf('Role boundary:') > text.indexOf('### Voice', start));
+    assert.equal(text.split('\n## Role\n').length, 2);
+  });
+
+  it('reads the owner\'s own file, without its comments', () => {
+    withRoleFile('<!-- notes for whoever edits this -->\nYou are {{AGENT_NAME}}, the garden club\'s helper.\n', (filePath) => {
+      const text = assembleConversationPolicy({ connectors: ['weixin'], agentName: 'Fern', rolePromptPath: filePath });
+      assert.match(text, /## Role\n\nThe person who runs this agent wrote the text below\.[^\n]*\n\nYou are Fern, the garden club's helper\.\n\nRole boundary:/);
+      assert.doesNotMatch(text, /notes for whoever edits this/);
     });
-
-    assert.match(text, /Your final answer text, your thinking, and anything printed outside tool calls are internal telemetry/);
-    assert.match(text, /The only way any user sees anything is a successful delivery tool call/);
-    assert.match(text, /do not call a Lark delivery tool/);
-    assert.doesNotMatch(text, /standard agent protocol/);
-    assert.doesNotMatch(text, /DELIVERED/);
-    assert.doesNotMatch(text, /NO_DELIVERY/);
-    assert.doesNotMatch(text, /do nothing and end the turn/);
-  });
-
-  it('shares the MCP delivery policy across local runtimes and connector combinations', () => {
-    const base = { systemPromptPath: defaultSystemPromptPath };
-    const codex = assembleConversationPolicy({ ...base, connectors: ['lark', 'weixin'] });
-    assert.match(codex, /`send_message`/);
-    assert.match(codex, /never through `lark-cli`/);
-    assert.match(codex, /source=weixin/);
-    assert.doesNotMatch(codex, /send_lark_message|weixin-cli|Agent tools from bash/);
-
-    const weixin = assembleConversationPolicy({ ...base, connectors: ['weixin'] });
-    assert.match(weixin, /# Weixin conversation policy/);
-    assert.match(weixin, /`reply_message` with the inbound msg=/);
-    assert.match(weixin, /call `get_message_media`/);
-    assert.doesNotMatch(weixin, /Agent tools from bash|actions\/cli\.mjs/);
-  });
-
-  it('stitches base, OpenViking, optional meeting audio, and harness', () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-policy-all-'));
-    const files = {
-      systemPromptPath: path.join(directory, 'system-prompt.md'),
-      openVikingPromptPath: path.join(directory, 'openviking.md'),
-      harnessPromptPath: path.join(directory, 'harness.md'),
-      meetingAudioPromptPath: path.join(directory, 'meeting-audio.md'),
-      openVikingConfigPath: path.join(directory, 'ovcli.conf'),
-    };
-    fs.writeFileSync(files.systemPromptPath, 'base {{AGENT_NAME}}\n');
-    fs.writeFileSync(files.openVikingPromptPath, 'ov via skill and MCP\n');
-    fs.writeFileSync(files.harnessPromptPath, 'profile={{LARK_PROFILE}}\n');
-    fs.writeFileSync(files.meetingAudioPromptPath, 'meeting-audio plugin\n');
-    try {
-      const withoutAudio = assembleConversationPolicy({
-        ...files,
-        agentName: '斯斯',
-        profile: 'cli_alpha',
-      });
-      assert.match(withoutAudio, /base 斯斯/);
-      assert.match(withoutAudio, /ov via skill and MCP/);
-      assert.match(withoutAudio, /<context-workdir>/);
-      assert.match(withoutAudio, /only context workspace/);
-      assert.match(withoutAudio, /profile=cli_alpha/);
-      assert.doesNotMatch(withoutAudio, /meeting-audio plugin/);
-
-      const withAudio = assembleConversationPolicy({
-        ...files,
-        agentName: '斯斯',
-        profile: 'cli_alpha',
-        meetingAudio: {},
-      });
-      assert.match(withAudio, /meeting-audio plugin/);
-
-      // Without OpenViking configured, no OV section reaches the prompt.
-      const withoutOV = assembleConversationPolicy({ ...files, openVikingConfigPath: '', agentName: '斯斯', profile: 'cli_alpha' });
-      assert.match(withoutOV, /base 斯斯/);
-      assert.match(withoutOV, /profile=cli_alpha/);
-      assert.doesNotMatch(withoutOV, /ov via skill and MCP|<context-workdir>/);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('gives Volc inbound grammar plus persona, not the whole markdown file', () => {
-    const { directory, filePath } = writePrompt('system-prompt.md', [
-      '# Lark conversation policy',
-      '',
-      '## Message format',
-      '',
-      'irrelevant filler the Volc policy already covers on its own.',
-      '',
-      '## Persona and voice',
-      '',
-      'CANONICAL_PERSONA_MARKER: friendly and terse.',
-      '',
-    ].join('\n'));
-    try {
-      const text = assembleVolcConversationPolicy({
-        systemPromptPath: filePath,
-        agentName: 'Zayn',
-      });
-      assert.match(text, /Chat input format/);
-      assert.match(text, /source=github kind=issue.opened/);
-      assert.match(text, /visible @names/);
-      assert.match(text, /matching your injected identity/);
-      assert.doesNotMatch(text, /mention=me\|other\|mixed/);
-      assert.match(text, /## Persona and voice/);
-      assert.match(text, /CANONICAL_PERSONA_MARKER/);
-      assert.doesNotMatch(text, /irrelevant filler/);
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('injects the identity the daemon loaded, and nothing without one', () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-policy-id-'));
-    const files = {
-      systemPromptPath: path.join(directory, 'system-prompt.md'),
-      openVikingPromptPath: path.join(directory, 'openviking.md'),
-      harnessPromptPath: path.join(directory, 'empty.md'),
-    };
-    fs.writeFileSync(files.systemPromptPath, 'base\n');
-    fs.writeFileSync(files.openVikingPromptPath, 'ov plugin\n');
-    fs.writeFileSync(files.harnessPromptPath, '');
-    try {
-      const injected = assembleConversationPolicy({
-        ...files,
-        openVikingIdentity: { user: 'amy', uri: 'viking://user/amy/identity.md', text: '# I am Alice' },
-      });
-      assert.match(injected, /OpenViking identity/);
-      assert.match(injected, /viking:\/\/user\/amy\/identity\.md/);
-      assert.match(injected, /I am Alice/);
-      assert.match(injected, /Identity boundary:/);
-      assert.ok(
-        injected.indexOf('Identity boundary:') > injected.indexOf('I am Alice'),
-        'the routing boundary must follow untrusted identity prose',
-      );
-
-      for (const openVikingIdentity of [undefined, { user: 'amy', uri: 'viking://user/amy/identity.md', text: '' }]) {
-        assert.doesNotMatch(assembleConversationPolicy({ ...files, openVikingIdentity }), /OpenViking identity/);
-      }
-    } finally {
-      fs.rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('lets Volc degrade when the prompt file is missing', () => {
-    const text = assembleVolcConversationPolicy({
-      systemPromptPath: '/no/such/file/system-prompt.md',
+    withRoleFile('<!-- nothing yet -->\n', (filePath) => {
+      assert.equal(rolePrompt({ rolePromptPath: filePath }), '');
+      assert.doesNotMatch(assembleConversationPolicy({ rolePromptPath: filePath }), /## Role/);
     });
-    assert.match(text, /Chat input format/);
-    assert.doesNotMatch(text, /## Persona and voice/);
+  });
+
+  it('runs on the Core defaults without a role', () => {
+    const text = assembleConversationPolicy({ connectors: ['lark'] });
+    assert.doesNotMatch(text, /## Role/);
+    assert.match(text, /The Role decides when you speak\. Where it says nothing, use these defaults:/);
+    assert.match(text, /Reply in Chinese by default, or in the language the person wrote in\./);
+  });
+});
+
+describe('natural writing', () => {
+  it('follows the role unless the instance turns it off', () => {
+    const config = { connectors: ['lark'], rolePromptPath: role('colleague') };
+    const on = assembleConversationPolicy(config);
+    assert.ok(on.indexOf('## Natural writing') > on.indexOf('Role boundary:'));
+    assert.match(assembleConversationPolicy({ connectors: ['lark'] }), /## Natural writing/);
+    const off = assembleConversationPolicy({ ...config, naturalWriting: false });
+    assert.doesNotMatch(off, /## Natural writing/);
+    assert.equal(off, on.replace(`\n\n${read('natural-writing.md').trim()}`, ''));
+  });
+});
+
+describe('explicit silence is opt-in per instance', () => {
+  const base = { workspace: '/srv/vika/workspace', agentName: 'Tester', rolePromptPath: role('colleague') };
+  const sessions = [['lark'], ['lark', 'weixin', 'telegram', 'qq', 'email'], ['weixin'], ['telegram', 'email']]
+    .map((connectors) => ({ ...base, connectors }));
+  const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
+  const codexHash = (config) => new CodexAgent(config, {
+    getCognitionState: () => ({ runtime: 'codex', epoch: 1, authorityToken: 'token' }), getSetting: () => null,
+  }, quiet).policyHash;
+
+  it('assembles the same policy text and policyHash as without the tool when the switch is off', () => {
+    for (const config of sessions) {
+      const off = assembleConversationPolicy({ ...config, explicitSilence: false });
+      assert.equal(off, assembleConversationPolicy(config));
+      assert.equal(codexHash({ ...config, explicitSilence: false }), codexHash(config));
+      assert.notEqual(codexHash({ ...config, explicitSilence: true }), codexHash(config));
+      assert.doesNotMatch(off, /stay_silent|undecided/);
+    }
+  });
+
+  it('appends one explicit silence section, after the role, when the switch is on', () => {
+    const configs = [...sessions, { ...base, connectors: ['telegram'] }, { ...base, connectors: ['lark', 'weixin'], meetingAudio: {} },
+      { ...base, connectors: ['slack'], naturalWriting: false }, { connectors: ['weixin'] }];
+    for (const config of configs) {
+      const off = assembleConversationPolicy(config);
+      const on = assembleConversationPolicy({ ...config, explicitSilence: true });
+      const label = config.connectors.join('+');
+      assert.ok(on.startsWith(`${off}\n\n## Explicit silence\n`), label);
+      assert.equal(on.split('## Explicit silence').length, 2, label);
+      const section = on.slice(off.length);
+      assert.match(section, /call(?:ing)? `stay_silent` once with that line's `event=` as `decision_id`/, label);
+      assert.match(section, /need one decision, on the newest `event=`/, label);
+      assert.match(section, /`undecided=1` field means you ended your previous turn without deciding on that line\. Decide on it now, once: reply, or call `stay_silent`\. It is not a request to reply\./, label);
+      assert.match(section, /take precedence over anything above that says to stay silent/, label);
+      assert.match(section, /`decision_id` of `retract_message`/, label);
+    }
+  });
+});
+
+describe('Volc', () => {
+  it('gets the input grammar, the events section and the role, never the Core tools', () => {
+    const config = { agentName: 'Zayn', rolePromptPath: role('qa') };
+    for (const assemble of [assembleVolcConversationPolicy, assembleVolcSelfHostedConversationPolicy]) {
+      const text = assemble(config);
+      assert.match(text, /^## Inputs\n/);
+      assert.match(text, /"owner=1" means the daemon verified the sender as the owner/);
+      assert.match(text, /an @mention of Zayn/);
+      assert.match(text, /source=github kind=issue\.opened/);
+      assert.match(text, /otherwise deliver nothing/);
+      assert.match(text, /## Role\n/);
+      assert.match(text, /You are Zayn, a Q&A assistant\./);
+      assert.match(text, /## Natural writing/);
+      assert.doesNotMatch(text, /## Decisions and delivery|stay_silent/);
+      assert.equal(assemble({ ...config, explicitSilence: true }), text);
+    }
+    assert.match(assembleVolcSelfHostedConversationPolicy(config), /--idempotency-key <stable-key>/);
+    assert.doesNotMatch(assembleVolcConversationPolicy({}), /## Role/);
   });
 });

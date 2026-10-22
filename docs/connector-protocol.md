@@ -28,8 +28,9 @@ The Core starts a Connector and calls these operations in order:
    direct chat (Lark: the profile's logged-in user, `{ user_id: "ou_..." }`;
    Weixin: the account that scanned the login code, `{ chat_id }`;
    Telegram: the account verified by the one-time Start link, `{ chat_id }`;
-   QQ: the account verified by a fresh private challenge, `{ chat_id: userOpenid }`). A mailbox
-   reports none.
+   QQ: the account verified by the one-time private-chat code, `{ chat_id }`;
+   Slack: the person who sent the one-time code to the bot, `{ chat_id }` of
+   that direct message). A mailbox reports none.
 3. `start`: begin receiving events.
 4. `action`: execute a typed external action.
 5. `pause`: stop event intake while keeping actions available for Core shutdown draining.
@@ -109,7 +110,7 @@ should reuse `spec/check/discover/read` and `RECORD/SCHEMA/STATE` semantics.
 
 `connector` identifies the provider; `instance` identifies a configured source
 instance/account and is unique within a Core. Built-in chat connectors currently
-use `instance=lark`, `instance=weixin`, `instance=telegram`, or `instance=qq`. The source process authenticates both
+use `instance=lark`, `instance=weixin`, `instance=telegram`, `instance=slack`, or `instance=qq`. The source process authenticates both
 identities; input cannot select another Connector's identity.
 
 `id` is required and stable across retries. The Core deduplicates on
@@ -122,7 +123,10 @@ every delivery. Provider-native stable event ids are preferred when available.
 
 `occurred_at` is UTC epoch milliseconds. `subject.type` and `subject.id` are
 required; `actor`, `content.title`, `content.text`, and `content.attachments` are
-optional. Each attachment is a reference with `id` and `type`, not inline bytes.
+optional. `actor.name` is an optional display name as the Connector saw it: an
+untrusted label the Core shows as `from=` for connectors other than Lark (whose
+names come from the chat roster). An actor of type `bot` or `app` is another
+bot or app, shown to the model as `sender=bot`. Each attachment is a reference with `id` and `type`, not inline bytes.
 An event such as `reminder.due` can have no actor or text and still wake the agent.
 
 Chat events additionally carry optional structured fields:
@@ -143,6 +147,10 @@ Chat events additionally carry optional structured fields:
 }
 ```
 
+`conversation.external: true` marks a conversation that includes people from
+outside the owner's organization (a Slack Connect channel); the model sees it as
+`external=true`.
+
 A missing reply route means no automatic reply target exists; it does not mean
 that processing failed. A subject or actor id is never inferred to be a send
 target. Notifications to a different Connector need a configured or explicitly
@@ -153,8 +161,8 @@ markdown `content` body, through the same outbox as agent deliveries.
 Failure-notice muting uses the event scope, and its outbound history keeps the
 source, subject and action without inventing a chat.
 
-Lark's Connector decodes message, card-action, and meeting envelopes. Weixin and
-Telegram and QQ produce canonical chat events directly. The Core validates and
+Lark's Connector decodes message, card-action, and meeting envelopes. Weixin,
+Telegram, QQ and Slack produce canonical chat events directly. The Core validates and
 consumes only the fields above, plus optional typed extension `data`. Provider
 raw envelopes are not required, forwarded to the runtime, or persisted. A
 `provider_event` diagnostic field is ignored. Protocol 0.1 is rejected.
@@ -177,9 +185,15 @@ carries `event=`. A non-chat event that can itself be answered (a mail) carries
 its reply target as `msg=` as well:
 
 ```text
-[source=email instance=email-gmail kind=email.received msg=mail:3f2a9c1b:1:18475 event=imap:3f2a9c1b:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ body
+[source=email instance=email-gmail kind=email.received msg=mail:3f2a9c1b:1:18475 event=imap:3f2a9c1b:1:18475 subject=thread:gmail:1878… time=2026-10-13T08:17Z actor=email:alice@example.com] subject ⏎ From: … ⏎ [mail stored: viking://user/…/resources/emails/3f2a9c1b-1-18475/body.md; the first 500 of its 4210 characters are below] ⏎ [attachment 01 report.pdf (application/pdf, 1.2 MB): viking://…/attachments/01-report.pdf] ⏎ start of the body…
 ```
- An optional `instance=` is included when it differs from
+The email Connector stores each mail in the owner's private OpenViking area
+before it reports it, so a mail line carries links and the start of the text;
+the extension field `data.archive` records where, and the Core's `read_email`
+tool reads it back. This is the email Connector's own use of OpenViking, not
+the future `sync` capability.
+
+An optional `instance=` is included when it differs from
 `source=`. Tag values percent-encode whitespace, brackets and `%`, so an id
 copied from a tag decodes back to the exact id. Untrusted content is
 collapsed onto one physical line. Journal-to-OpenViking synchronization uses the
@@ -244,6 +258,17 @@ and the scope of the event it first resolved. The Connector defines what one
 subject is, for example whether the occurrences of a recurring calendar event
 share a subject (so a new occurrence makes the previous reminder stale) or each
 have their own.
+
+Another bot's message (actor type `bot` or `app`) is a decision like any other:
+whether and when to answer it is the model's judgment, with or without an `@`.
+Its line carries `sender=bot` and `bots_since_human=<n>`, the bot messages in that
+chat/thread since a person last wrote there. A safety fuse, not a working rule,
+stops runaway loops: with no person writing in a chat/thread, once the agent's
+text deliveries there have answered `VIKA_BOT_REPLY_FUSE` bot messages (default
+20; `0` turns it off), the next is refused with `bot_loop` and the owner is told
+once, privately, on the primary IM. A person's message there starts the count
+over. The messages of one decision's burst count once; reactions and notices to
+the owner do not count.
 
 Who a decision may reach is decided in one Core function, so routing rules
 (a source that may also post to a group, say) can be added there later. Today
@@ -315,13 +340,15 @@ Results report the delivered `message_id` and, where known, `chat_id`,
 
 ## Current actions
 
-| Operation | Lark | Weixin | Telegram | QQ | Email |
-| --- | --- | --- | --- | --- | --- |
-| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | markdown (plain text), file; verified owner only | plain text, file; verified owner, proactive quota | — |
-| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | as `message.send`, with quoted reply | plain text, file; passive quota, quote when indexed | markdown (plain text); owner approval on the primary IM |
-| `message.react`, `message.retract` | yes | — | — | — | — |
-| `message.media` (query) | download by image/file key | downloaded inbound media | lazy download by message ID | lazy download by message ID | — |
-| `chat.list`, `chat.messages`, `message.search`, `thread.messages` (queries) | yes | — | — | — | — |
+| Operation | Lark | Weixin | Telegram | Slack | QQ | Email |
+| --- | --- | --- | --- | --- | --- | --- |
+| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | markdown (plain text), file; verified owner only | markdown (as mrkdwn), file; mentions; to a channel the bot is in, or a DM | plain text, file; verified owner, proactive quota | — |
+| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | as `message.send`, with quoted reply | as `message.send`, into the target's thread | plain text, file; passive quota, quote when indexed | markdown (plain text); owner approval on the primary IM |
+| `message.react`, `message.retract` | yes | — | — | yes | — | — |
+| `message.media` (query) | download by image/file key | downloaded inbound media | lazy download by message ID | lazy download by message ID and file ID | lazy download by message ID | — |
+| `chat.list`, `chat.messages`, `thread.messages` (queries) | yes | — | — | bot identity, cursor pagination | — | — |
+| `chat.members.list` (query) | — | — | — | member IDs and optional profiles | — | — |
+| `message.search` (query) | yes | — | — | — | — | — |
 
 The Email Connector watches one mailbox's `INBOX` over IMAP, opened read-only
 (`EXAMINE`, `BODY.PEEK[]`): it never marks, moves or deletes mail. It starts
@@ -418,3 +445,81 @@ does not declare idempotency, so the existing Core outbox also blocks uncertain
 resends. `pause` aborts only receiving so shutdown deliveries can finish; `stop`
 also cancels actions and releases the lease. The primary-channel notification
 and numbered mail approval paths use the existing Core authorization rules.
+
+## Slack provider contract
+
+Slack uses one workspace-internal app per instance, created from the manifest
+`vika setup` prefills (Socket Mode on, token rotation off, bot scopes
+`chat:write reactions:write files:read files:write users:read
+channels:read groups:read im:read mpim:read
+channels:history groups:history im:history mpim:history`, bot events
+`message.channels message.groups message.im message.mpim`). An internal app keeps
+the Web API's ordinary rate limits; Slack throttles history reads for apps
+distributed outside the Marketplace. `app_mention` is not subscribed: the same
+message would arrive twice under different event ids. The bot token (`xoxb-`)
+calls the Web API; the app-level token (`xapp-`, `connections:write`) only opens
+Socket Mode connections. Both live in `<dataDir>/slack/state.sqlite3` (0600,
+directory 0700) with the owner, reply routes, display names and the receive
+queue, never in the manifest.
+
+Pairing checks that both tokens belong to one app (`auth.test` + `bots.info`
+against the Socket Mode hello) and binds the owner: whoever sends the one-time
+code to the bot in a direct message within five minutes. Everyone in the
+workspace may still talk to the bot, as on Lark.
+
+Socket Mode hands each envelope to one of the app's open connections, chosen at
+random, and reports no conflict. The first connection of a worker therefore
+checks `hello.num_connections`: another receiver (counted again after 15 s, for
+a connection of a crashed worker that Slack has not dropped yet) fails the
+worker. A local PID lease keeps setup and the worker apart. Connections are
+refreshed before Slack closes them (`disconnect` warning or refresh), and every
+30 minutes, new one first; `link_disabled` and authorization errors fail the
+worker.
+
+A relevant envelope is staged in the private queue and only then
+acknowledged; name lookups (`users.info`, cached for a day) and the Core
+delivery follow from the queue, so a slow lookup never delays the
+acknowledgement and a worker restart loses nothing it acknowledged. Slack's
+retries cover only a few minutes of downtime; there is no catch-up read yet.
+
+Only new messages are events: the bot's own posts (they come back as events),
+edits, deletions, joins and other subtypes are dropped before staging, so they
+can neither wake the model nor make a pending decision stale. Messages from
+other apps are kept as actor type `bot`. The event id is the message identity
+`<team>:<channel>:<ts>`, so redeliveries and overlapping connections deduplicate
+in the Core; the message id is `sl:<team>:<channel>:<ts>`. A thread reply carries
+`conversation.thread_id = thread_ts`, a scope of its own; a top-level message
+keeps the channel's. `im` is a `p2p` conversation, everything else `group`.
+Slack markup is rendered to text: mentions by display name (the bot itself as
+the agent's name), channel links and URLs; text a person typed stays literal.
+
+Basic queries run in the connector through the bundled official Slack CLI
+4.10.0 (`slack api --data`): `users.conversations`, `conversations.members`,
+`users.info`, `conversations.history`, and `conversations.replies`. CLI calls
+use an isolated temporary configuration and working directory, a filtered
+environment with only this instance's bot token, bounded output and a deadline;
+the worker registry tracks and terminates the child. CLI diagnostics never
+escape as raw error text. Binaries for Linux/macOS x64/arm64 are pinned by
+SHA-256 and bundled with their license. There is no personal user-token fallback.
+
+Each query returns one page with `has_more` and `next_cursor`. An empty filtered
+conversation page can still have a continuation. History is newest first;
+threads are oldest first and include the root on the first page. History
+keeps old/self posts and attachment references, but never stages new events
+or supplies decision authority. It caches reply/file routes in the connector.
+Message results include canonical `conversation` scope and a full `thread_id`
+(`sl:<team>:<channel>:<root-ts>`); the Core remembers bounded query routing
+context separately from its inbound ledger. Query errors leave reception and
+delivery running. Search and user-identity reads remain unsupported on Slack.
+
+Outbound Markdown is escaped and converted to mrkdwn, so model text cannot
+produce `<!channel>` or other control tokens; mentions the Core passed (ids, or
+names the connector resolves against the people it showed the model in that
+chat) become `<@U…>`. Text is at most 12,000 characters, link unfurling is off,
+and sends are serialized at about one per second per channel. Files go through
+`files.getUploadURLExternal` and `files.completeUploadExternal`; sharing is
+asynchronous, so the delivered message id may be unknown. Downloads and uploads
+accept only `slack.com` hosts and never follow redirects. Only explicit
+`ratelimited` responses with `Retry-After` are retried, at most twice; Slack has
+no idempotency key, so uncertain sends stay blocked in the outbox. A reaction
+maps the model's Lark emoji names to Slack's (`OnIt` → `eyes`).

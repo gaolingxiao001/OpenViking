@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { TraexAgent } from '../src/traex.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   traexBin: 'traecli',
   traexEffort: 'medium',
   workspace: '/tmp/vika-workspace',
@@ -130,7 +127,7 @@ describe('TraexAgent app-server backend', () => {
     assert.equal(spawnCalls[0].options.env.PERSONAL_AGENT_AUTHORITY, 'traex-token');
   });
 
-  it('uses TraeX thread config and stores effort for the next session', async () => {
+  it('applies TraeX effort on the next turn in the same thread', async () => {
     const store = makeStore();
     const { agent, children } = newAgent(store);
     agent.model = 'gpt-5.6-sol';
@@ -149,6 +146,14 @@ describe('TraexAgent app-server backend', () => {
     assert.equal(store.settings.traex_model, 'gpt-5.6-terra');
     agent.setEffort('xhigh');
     assert.equal(store.settings.traex_effort, 'xhigh');
+    child.feed({ method: 'turn/started', params: { turn: { id: 't1' } } });
+    child.feed({ method: 'turn/completed', params: { turn: { status: 'completed' } } });
+    agent.deliver('next turn');
+    const next = child.ofMethod('turn/start').at(-1);
+    assert.equal(next.params.effort, 'xhigh');
+    assert.equal(next.params.threadId, turn.params.threadId);
+    assert.equal(child.ofMethod('thread/start').length, 1);
+    assert.equal(child.ofMethod('turn/interrupt').length, 0);
   });
 
   it('lets persisted TraeX model setting override a fresh-start initial model', async () => {
@@ -184,7 +189,7 @@ describe('TraexAgent app-server backend', () => {
       },
     });
 
-    assert.deepEqual(await listing, [{ id: 'gpt-5.5', efforts: ['high'] }]);
+    assert.deepEqual(await listing, [{ id: 'gpt-5.5', effortsKnown: true, efforts: ['high'] }]);
   });
 
   it('publishes and records TraeX session ownership separately from Codex', async () => {

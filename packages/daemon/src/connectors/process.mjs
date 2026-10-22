@@ -46,8 +46,13 @@ function childConfig(config, instance) {
     tempDir: config.tempDir,
     profile: config.profile,
     larkCliBin: config.larkCliBin,
+    slackCliBin: config.slackCliBin,
     weixinLongPollTimeoutMs: config.weixinLongPollTimeoutMs,
+    // Slack shows a mention of the bot as this name, the one the prompt knows.
+    agentName: instance.type === 'slack' ? config.agentName ?? null : null,
     emailConfigFile: instance.emailConfigFile ?? null,
+    // A mailbox stores each mail in OV before reporting it.
+    openVikingConfigPath: instance.type === 'email' ? config.openVikingConfigPath || null : null,
     retentionMs: config.retentionMs,
     maxEventBytes: config.maxEventBytes,
     sendTimeoutMs: config.sendTimeoutMs,
@@ -423,6 +428,12 @@ export class ConnectorManager {
 
   owner(id) {
     return this.connectors.get(id)?.owner ?? null;
+  }
+
+  // Whether an event's sender is the owner its Connector reported at check.
+  isOwner(event) {
+    const owner = this.owner(event?.connectorInstance ?? event?.source);
+    return Boolean(owner && event.senderId && owner.id === event.senderId);
   }
 
   get subscriptionRunning() {

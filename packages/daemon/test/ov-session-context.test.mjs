@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { OVSessionClient, OVSessionContext } from '../src/ov-session-context.mjs';
 import { cognitionHistoryPrefix } from '../src/cognition.mjs';
+import { OVUnavailableError } from '../src/ov-connection.mjs';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
 function setup(t) {
@@ -137,4 +138,33 @@ test('OV HTTP client pins auth, disables auto commits, and redacts server errors
     assert.doesNotMatch(error.message, /secret-test-key|private content/);
     return true;
   });
+});
+
+test('runtime outages omit stale history, retain uncertain writes, and recover without duplicate capture', async (t) => {
+  const { service, store, client, epoch, append } = setup(t);
+  append('before outage');
+  await store.prepareOVContext(epoch);
+  const appendRemote = client.append.bind(client);
+  client.append = async (...args) => {
+    await appendRemote(...args);
+    throw new OVUnavailableError('timeout');
+  };
+  append('accepted remotely but timed out');
+  // An outage costs the history, never the message.
+  assert.deepEqual(await store.prepareOVContext(epoch), { messages: [], latest_archive_overview: '', archiveThroughSeq: 0 });
+  const pending = store.db.prepare('SELECT pending_seq FROM ov_session_sync').get().pending_seq;
+  assert.ok(pending);
+  const readRemote = client.read.bind(client);
+  client.read = async () => { throw new OVUnavailableError('offline'); };
+  await store.prepareOVContext(epoch);
+  assert.equal(cognitionHistoryPrefix(store, epoch, pending).text, '');
+  assert.equal(store.db.prepare('SELECT pending_seq FROM ov_session_sync').get().pending_seq, pending);
+  client.append = appendRemote;
+  client.read = readRemote;
+  await service.checkpoint(epoch);
+  await store.prepareOVContext(epoch);
+  assert.equal(client.writes, 2);
+  assert.match(cognitionHistoryPrefix(store, epoch, pending).text, /accepted remotely/);
+  client.messages[0].parts[0].text = 'corrupted';
+  await assert.rejects(store.prepareOVContext(epoch), /truncated/);
 });

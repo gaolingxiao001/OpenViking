@@ -11,6 +11,7 @@ import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy } from './notices.mjs';
+import { DecisionPolicy, warnIfSilenceInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
@@ -18,7 +19,8 @@ import { approvalNote } from './actions/approval.mjs';
 import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
 import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
-import { loadOpenVikingIdentity } from './openviking.mjs';
+import { OVUnavailableError } from './ov-connection.mjs';
+import { TimerConnector, TimerRepository } from './timers.mjs';
 import {
   MeetingPlugin,
 } from './meeting/index.mjs';
@@ -59,10 +61,15 @@ export class PersonalAgentDaemon {
     this.actions = null;
     this.actionApi = null;
     this.meeting = null;
+    this.timers = null;
+    this.timerConnector = null;
     this.liveness = null;
     this.roster = null;
     this.chatNames = null;
     this.failurePolicy = null;
+    this.decisionPolicy = null;
+    // The runtime explicit_silence_not_applied last checked, to warn once per switch.
+    this.silenceRuntime = null;
     this.httpServer = null;
     this.startedAt = Date.now();
     this.ready = false;
@@ -97,16 +104,23 @@ export class PersonalAgentDaemon {
     }
   }
 
-  // Opt-in (VIKA_OV_IDENTITY). Every runtime assembles its policy from
-  // this.config, so the read happens once, before the first runtime exists. A
-  // failed read only leaves the identity section out.
-  async loadOpenVikingIdentity(client) {
-    if (!this.config.openVikingIdentityEnabled) return;
+  // A config or credential OV rejects needs the owner, so startup stops. An
+  // OV that is not up yet (boot order, a blip during a restart) must not keep
+  // the instance down: pm2 gives up after a few quick exits, while messages
+  // can flow without history and OV sync retries once it is back.
+  async checkOpenViking(client) {
     try {
-      this.config.openVikingIdentity = await loadOpenVikingIdentity(this.config, { client });
-      this.logger.info('ov_identity_loaded', { found: Boolean(this.config.openVikingIdentity.text) });
+      await client.check();
     } catch (error) {
-      this.logger.warn('ov_identity_unavailable', { error: safeError(error) });
+      const status = error.httpStatus;
+      const rejected = !(error instanceof OVUnavailableError)
+        || (status >= 400 && status < 500 && status !== 408 && status !== 429);
+      if (rejected) throw error;
+      this.logger.warn('ov_unavailable_at_startup', { error: safeError(error) });
+      this.recordSystemActivity('system.ov_unavailable', {
+        summary: 'OpenViking 暂时连不上：先不带历史收发消息，恢复后自动同步',
+        status: 'DEGRADED',
+      });
     }
   }
 
@@ -116,17 +130,15 @@ export class PersonalAgentDaemon {
     this.lock.acquire();
     try {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
-      // Without OpenViking a fresh native session starts with no history.
-      const ovClient = this.ovClient
-        ?? (this.config.openVikingConfigPath ? new OVSessionClient(this.config.openVikingConfigPath) : null);
-      if (ovClient) {
-        this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
-          { canCommit: () => !this.connectors?.subscribed });
-      }
+      this.timers = new TimerRepository(this.store.db);
+      const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
+      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
+        { canCommit: () => !this.connectors?.subscribed });
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
         status: 'STARTING',
       }, 'starting');
+      await this.checkOpenViking(ovClient);
       this.runMaintenance();
 
       this.connectors = new ConnectorManager(
@@ -189,6 +201,8 @@ export class PersonalAgentDaemon {
         liveness: this.liveness,
         meetingEnabled: this.connectorIds.includes('lark'),
         ovClient,
+        timers: this.timers,
+        onTimersChanged: () => this.timerConnector?.wake(),
         logger: this.logger.child({ component: 'actions' }),
       });
       this.actionApi = await startActionApi({
@@ -197,7 +211,6 @@ export class PersonalAgentDaemon {
         logger: this.logger.child({ component: 'action-api' }),
       });
 
-      if (ovClient) await this.loadOpenVikingIdentity(ovClient);
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
         onTurnFailed: (info) => {
           this.meeting?.onTurnFailed(info);
@@ -209,13 +222,20 @@ export class PersonalAgentDaemon {
         onTurnSucceeded: (info) => {
           this.meeting?.onTurnSucceeded(info);
           this.failurePolicy.onTurnSucceeded(info);
+          this.decisionPolicy?.onTurnSucceeded(info);
         },
         onTurnAbandoned: (info) => {
           this.meeting?.onTurnAbandoned(info);
         },
         onAvailable: () => { this.harness?.onAvailable(); },
-        onAuthorityChanged: ({ authorityToken }) => {
+        onAuthorityChanged: ({ runtime, authorityToken }) => {
           this.meeting?.onAuthorityChanged(authorityToken);
+          // Fires at startup and on a /runtime switch; authority also rotates
+          // within a runtime, so warn only when the runtime changes.
+          if (runtime !== this.silenceRuntime) {
+            this.silenceRuntime = runtime;
+            warnIfSilenceInert(this.config, runtime, this.logger);
+          }
         },
       });
       this.failurePolicy = new FailurePolicy({
@@ -225,6 +245,7 @@ export class PersonalAgentDaemon {
         logger: this.logger,
         runtime: this.agentRuntime,
         recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
+        isOwner: (event) => this.connectors.isOwner(event),
         isStopping: () => this.shuttingDown,
       });
       this.harness = new Harness({
@@ -264,14 +285,30 @@ export class PersonalAgentDaemon {
           const card = settledChoiceCard(event);
           if (card) return this.connectors.updateCard(event.parentId, card);
         },
+        isOwner: (event) => this.connectors.isOwner(event),
         isStopping: () => this.shuttingDown,
       });
+      // Checks at each successful turn's end that every input it consumed got a
+      // decision (a delivery or stay_silent), with one reminder if not. Only on
+      // an instance with explicitSilence on.
+      this.decisionPolicy = this.config.explicitSilence ? new DecisionPolicy({
+        store: this.store,
+        harness: this.harness,
+        logger: this.logger.child({ component: 'decisions' }),
+        recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
+        isStopping: () => this.shuttingDown,
+      }) : null;
       this.meeting.attachHarness({
         runtime: this.agentRuntime,
         enqueueIngress: (action) => this.harness.enqueueIngress(action),
         flushBufferedIngress: () => this.harness.flushBufferedIngress(),
       });
       await this.agentRuntime.start();
+      this.timerConnector = new TimerConnector({
+        repository: this.timers,
+        submitEvent: (event) => this.harness.handleConnectorEvent(event),
+        logger: this.logger.child({ component: 'timer' }),
+      });
       this.meeting.onAuthorityChanged(this.store.getCognitionState().authorityToken);
       void this.meeting.start().catch((error) => {
         this.logger.warn('meeting_plugin_start_failed', { error: safeError(error) });
@@ -310,17 +347,15 @@ export class PersonalAgentDaemon {
       this.ready = true;
       this.chatNames.refresh();
       this.maintenanceTimer = setInterval(() => this.runMaintenance(), 86_400_000);
-      if (this.ovContext) {
-        this.ovSyncTimer = setInterval(() => {
-          if (this.shuttingDown || this.ovSyncBusy || this.harness.pendingIngress > 0 || this.agentRuntime.turnInProgress
-            || this.agentRuntime.state.queued > 0 || this.harness.groupBurst.pendingConversations > 0) return;
-          this.ovSyncBusy = true;
-          void this.ovContext.checkpoint(this.store.getCognitionState().epoch)
-            .catch(() => this.logger.warn('ov_session_sync_failed', { error: 'OV sync will retry; local transport cursor retained' }))
-            .finally(() => { this.ovSyncBusy = false; });
-        }, 5_000);
-        this.ovSyncTimer.unref();
-      }
+      this.ovSyncTimer = setInterval(() => {
+        if (this.shuttingDown || this.ovSyncBusy || this.harness.pendingIngress > 0 || this.agentRuntime.turnInProgress
+          || this.agentRuntime.state.queued > 0 || this.harness.groupBurst.pendingConversations > 0) return;
+        this.ovSyncBusy = true;
+        void this.ovContext.checkpoint(this.store.getCognitionState().epoch)
+          .catch(() => this.logger.warn('ov_session_sync_failed', { error: 'OV sync will retry; local transport cursor retained' }))
+          .finally(() => { this.ovSyncBusy = false; });
+      }, 5_000);
+      this.ovSyncTimer.unref();
       this.maintenanceTimer.unref();
       this.logger.info('daemon_ready', {
         address: this.config.httpEnabled ? `http://${this.config.host}:${this.config.port}` : 'disabled',
@@ -456,6 +491,7 @@ export class PersonalAgentDaemon {
       }, 'stopping');
       if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
       if (this.ovSyncTimer) clearInterval(this.ovSyncTimer);
+      this.timerConnector?.stop();
       this.ovContext?.stop();
       this.maintenanceTimer = null;
       registerNameResolver(null);

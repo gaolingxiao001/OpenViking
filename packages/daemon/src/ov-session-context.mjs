@@ -1,43 +1,17 @@
-import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { formatCognitionJournalLine } from './cognition.mjs';
+import { OVConnection, OVUnavailableError, readOVConfig } from './ov-connection.mjs';
 
 // OV owns summaries, archives and assembled context. SQLite retains only the
 // transport cursor/intent here; cognition_journal is the existing durable
 // delivery ledger and migration/sync outbox, never a prompt source.
-export class OVSessionClient {
-  constructor(configPath, { fetch: fetchImpl = globalThis.fetch, timeoutMs = 15_000 } = {}) {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    this.url = String(config.url || '').replace(/\/$/, '');
-    if (!/^https?:\/\//.test(this.url)) throw new Error('OpenViking URL is missing or invalid');
-    this.headers = { 'Content-Type': 'application/json' };
-    if (config.api_key) this.headers['X-API-Key'] = config.api_key;
-    for (const [key, header] of [['account', 'X-OpenViking-Account'], ['user', 'X-OpenViking-User'], ['agent', 'X-OpenViking-Agent']]) {
-      if (config[key]) this.headers[header] = config[key];
-    }
-    this.fetch = fetchImpl;
-    this.timeoutMs = timeoutMs;
+export class OVSessionClient extends OVConnection {
+  constructor(configPath, options) {
+    super(readOVConfig(configPath), options);
   }
 
   async request(route, body) {
-    let response;
-    try {
-      response = await this.fetch(`${this.url}/api/v1${route}`, {
-        method: body === undefined ? 'GET' : 'POST', headers: this.headers,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(this.timeoutMs), redirect: 'error',
-      });
-      const text = await response.text();
-      if (text.length > 8_000_000) throw new Error('response too large');
-      const data = JSON.parse(text);
-      if (!response.ok || data.status !== 'ok') throw new Error('OV request rejected');
-      return data.result;
-    } catch {
-      // Never expose auth headers, config contents, remote messages or URLs.
-      const error = new Error(`OpenViking session request failed${response ? ` (HTTP ${response.status})` : ' or timed out'}`);
-      error.httpStatus = response?.status;
-      throw error;
-    }
+    return (await this.json(`/api/v1${route}`, body)).result;
   }
 
   create(sessionId) {
@@ -71,7 +45,19 @@ export class OVSessionContext {
       commit_seq INTEGER NOT NULL DEFAULT 0, confirmed_seq INTEGER NOT NULL DEFAULT 0,
       commit_pending INTEGER NOT NULL DEFAULT 0, previous_overview TEXT, pending_confirm_seq INTEGER NOT NULL DEFAULT 0
     )`);
-    store.prepareOVContext = (epoch) => this.prepare(epoch);
+    store.prepareOVContext = async (epoch) => {
+      try {
+        return await this.prepare(epoch);
+      } catch (error) {
+        if (this.stopped || !(error instanceof OVUnavailableError)) throw error;
+        // Never reuse stale prefetched history after a failed sync. The local
+        // outbox/cursors remain intact, so the idle checkpoint can retry later.
+        const empty = { messages: [], latest_archive_overview: '', archiveThroughSeq: 0 };
+        this.contexts.set(epoch, empty);
+        this.logger.warn('ov_context_unavailable', { error: 'Continuing without OV history; sync will retry' });
+        return empty;
+      }
+    };
     store.getOVContext = (epoch) => this.contexts.get(epoch);
   }
 

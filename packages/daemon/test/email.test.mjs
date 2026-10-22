@@ -4,11 +4,19 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { ActionService } from '../src/actions/service.mjs';
+import { MailArchive, chunkOffset, needsChunks, readTarget } from '../src/email/archive.mjs';
 import { EmailClient, accountTag } from '../src/email/client.mjs';
 import { EmailState } from '../src/email/state.mjs';
 import { fetchAttributes, parseResponse } from '../src/email/imap.mjs';
 import { buildReply, htmlToText, isOwnMessageId, parseAddresses, parseMail, replyMessageId } from '../src/email/mime.mjs';
 import { normalizeEvent } from '../src/event.mjs';
+import { OVConnection } from '../src/ov-connection.mjs';
+import { OVSessionClient } from '../src/ov-session-context.mjs';
+import { formatInboundLine } from '../src/runtime-input.mjs';
+import { Store } from '../src/store.mjs';
+import { fakeConnectors } from './action-fixture.mjs';
+import { fakeOV } from './ov-server-fixture.mjs';
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 const ME = 'me@example.com';
@@ -168,7 +176,7 @@ function plainTls(options) {
   return socket;
 }
 
-async function setup(t, { mails = [], password = PASSWORD, gmail = true, instance = undefined } = {}) {
+async function setup(t, { mails = [], password = PASSWORD, gmail = true, instance = undefined, archive = null, attachmentWaitMs = undefined } = {}) {
   const imap = await fakeImap(t, { mails, gmail });
   const smtp = await fakeSmtp(t);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'email-'));
@@ -179,7 +187,7 @@ async function setup(t, { mails = [], password = PASSWORD, gmail = true, instanc
   const config = { emailConfigFile: configFile, dataDir: directory, retentionMs: 86_400_000, ...(instance ? { instance } : {}) };
   const clients = [];
   const start = async () => {
-    const client = new EmailClient(config, null, quiet, { connectTls: plainTls });
+    const client = new EmailClient(config, null, quiet, { connectTls: plainTls, archive, attachmentWaitMs });
     clients.push(client);
     await client.preflight();
     const events = [];
@@ -389,6 +397,233 @@ describe('email connector', () => {
   });
 });
 
+// A mail with a text body and the given parts after it.
+function multipartMail({ id = 'q3@example.com', text, parts }) {
+  const lines = ['From: Alice <alice@example.com>', `To: ${ME}`, 'Subject: Q3 report', `Message-ID: <${id}>`,
+    'Date: Tue, 13 Oct 2026 08:10:00 +0000', 'Content-Type: multipart/mixed; boundary="B"', '', '--B',
+    'Content-Type: text/plain; charset=utf-8', '', text];
+  for (const { headers, body } of parts) lines.push('--B', ...headers, '', body);
+  lines.push('--B--', '');
+  return Buffer.from(lines.join('\r\n'));
+}
+
+const file = (name, type, body, { inline = false, base64 = true } = {}) => ({
+  headers: [`Content-Type: ${type}`, `Content-Disposition: ${inline ? 'inline' : 'attachment'}; filename="${name}"`,
+    ...(base64 ? ['Content-Transfer-Encoding: base64'] : [])],
+  body: base64 ? Buffer.from(body, 'latin1').toString('base64') : body,
+});
+
+describe('mail in OpenViking', () => {
+  const ROOT = 'viking://user/owner/resources/emails';
+  const FOLDER = `${ROOT}/${TAG}-1-1`;
+  const TEXT = 'Revenue grew twelve percent. '.repeat(30).trim();
+  const q3 = () => multipartMail({ text: TEXT, parts: [
+    file('report.pdf', 'application/pdf', '%PDF-1.4 revenue'),
+    file('logo.png', 'image/png', '\x89PNG', { inline: true }),
+    file('invite.ics', 'text/calendar; charset=utf-8', 'BEGIN:VCALENDAR\r\nSUMMARY:Review\r\nEND:VCALENDAR', { base64: false }),
+    file('forwarded.eml', 'message/rfc822', 'From: Bob <bob@example.com>\r\nSubject: Original\r\n\r\nThe original note.', { base64: false }),
+    file('archive.zip', 'application/zip', 'PK\x03\x04'),
+    file('broken.pdf', 'application/pdf', 'not really a pdf'),
+  ] });
+  const storing = async (t, { slowParse = [], attachmentWaitMs } = {}) => {
+    const ov = await fakeOV(t, { failParse: ['broken.pdf'], slowParse });
+    const archive = new MailArchive(new OVConnection({ url: ov.url, user: 'owner' }), { pollMs: 5 });
+    return { ov, ...(await setup(t, { archive, attachmentWaitMs })) };
+  };
+  const reader = (t, { ov, config, event }) => {
+    const store = new Store(path.join(config.dataDir, 'vika.sqlite3'), quiet);
+    t.after(() => store.close());
+    store.initializeCognition('codex', 'token');
+    store.ingest(event);
+    const ovConfig = path.join(config.dataDir, 'ov.json');
+    fs.writeFileSync(ovConfig, JSON.stringify({ url: ov.url, user: 'owner' }));
+    const service = (ids) => new ActionService({ config: {}, store, connectors: fakeConnectors({ ids }),
+      ovClient: new OVSessionClient(ovConfig), logger: quiet });
+    const actions = service(['lark', 'email']);
+    return { service, actions, read: (input) => actions.call('read_email', input, { authority: 'token' }) };
+  };
+
+  it('stores the mail and its attachments before reporting where they are', async (t) => {
+    const { ov, imap, start } = await storing(t);
+    const { events } = await start();
+    imap.deliver(q3());
+    await until(() => events.length === 1);
+    const [event] = events;
+
+    // The runtime gets who wrote, where the mail is, and the start of the text.
+    const lines = event.content.split('\n');
+    assert.deepEqual(lines.slice(0, 3), ['From: Alice <alice@example.com>', `To: ${ME}`,
+      `[mail stored: ${FOLDER}/body.md; the first 500 of its ${TEXT.length} characters are below]`]);
+    assert.deepEqual(lines.slice(3, 8).map((line) => line.replace(/ \([^)]*\)/, '')), [
+      `[attachment 01 report.pdf: ${FOLDER}/attachments/01-report.pdf]`,
+      `[attachment 02 invite.ics: ${FOLDER}/attachments/02-invite.ics]`,
+      `[attachment 03 forwarded.eml: ${FOLDER}/attachments/03-forwarded.eml]`,
+      '[attachment 04 archive.zip: not stored, OpenViking does not read this type]',
+      '[attachment 05 broken.pdf: not stored, OpenViking could not read it]',
+    ]);
+    assert.equal(lines[3], `[attachment 01 report.pdf (application/pdf, 16 B): ${FOLDER}/attachments/01-report.pdf]`);
+    assert.deepEqual(lines.slice(8), ['', `${TEXT.slice(0, 500)}…`]);
+    assert.deepEqual(event.attachments, []);
+    assert.equal(event.data.archive.body, `${FOLDER}/body.md`);
+    assert.deepEqual(event.data.archive.attachments.map(({ id, status }) => [id, status]),
+      [['01', 'stored'], ['02', 'stored'], ['03', 'stored'], ['04', 'skipped'], ['05', 'failed']]);
+
+    // OV holds the whole mail, the parsed attachments and the text ones as written.
+    const body = ov.state.files.get(`${FOLDER}/body.md`);
+    assert.match(body, /^# Q3 report\n\n- From: Alice <alice@example\.com>\n- To: me@example\.com\n- Date: 2026-10-13T08:10:00\.000Z\n/);
+    assert.ok(body.includes(`- Message: mail:${TAG}:1:1`));
+    assert.ok(body.includes(`- 01 report.pdf (application/pdf, 16 B): ${FOLDER}/attachments/01-report.pdf`));
+    assert.ok(body.includes('- 1 inline image in the body, not stored'));
+    assert.ok(body.endsWith(`## Body\n\n${TEXT}\n`));
+    assert.equal(ov.state.files.get(`${FOLDER}/attachments/01-report.pdf/full/report.md`), 'parsed report.pdf: %PDF-1.4 revenue');
+    assert.equal(ov.state.files.get(`${FOLDER}/attachments/02-invite.ics/full/invite.txt`), 'BEGIN:VCALENDAR\r\nSUMMARY:Review\r\nEND:VCALENDAR');
+    assert.match(ov.state.files.get(`${FOLDER}/attachments/03-forwarded.eml/full/message.md`),
+      /^# Original\n\n- From: Bob <bob@example\.com>\n\nThe original note\.$/);
+
+    // Text first, then vectors only: nothing asks OV for an LLM summary.
+    const writes = ov.state.requests.filter(({ route }) => route === 'POST /api/v1/content/write');
+    assert.deepEqual(writes.map(({ body: { uri, mode, wait, processing_mode: processing } }) => [uri.slice(FOLDER.length), mode, wait, processing]), [
+      ['/attachments/02-invite.ics/full/invite.txt', 'replace', false, 'vectors_only'],
+      ['/attachments/03-forwarded.eml/full/message.md', 'replace', false, 'vectors_only'],
+      ['/body.md', 'replace', false, 'vectors_only'],
+    ]);
+    const added = ov.state.requests.filter(({ route }) => route === 'POST /api/v1/resources').map(({ body: request }) => request);
+    assert.deepEqual(added.map(({ to, source_name: name, wait, processing_mode: processing, args }) => [to, name, wait, processing, args]), [
+      [`${FOLDER}/attachments/01-report.pdf/full`, 'report.pdf', false, 'vectors_only', { parse_mode: 'no_split' }],
+      [`${FOLDER}/attachments/05-broken.pdf/full`, 'broken.pdf', false, 'vectors_only', { parse_mode: 'no_split' }],
+    ]);
+    assert.deepEqual([...ov.state.uploads.values()].map(({ name, type }) => [name, type]),
+      [['report.pdf', 'application/pdf'], ['broken.pdf', 'application/pdf']]);
+  });
+
+  it('reports the mail itself when OpenViking cannot take it', async (t) => {
+    const { ov, imap, start } = await storing(t);
+    ov.state.down = true;
+    const { events } = await start();
+    imap.deliver(q3());
+    await until(() => events.length === 1);
+    const [event] = events;
+    assert.equal(event.content, `From: Alice <alice@example.com>\nTo: ${ME}\n\n${TEXT}\n[mail not stored in OpenViking]`);
+    assert.deepEqual(event.attachments.map(({ id }) => id), ['report.pdf', 'invite.ics', 'forwarded.eml', 'archive.zip', 'broken.pdf']);
+    assert.equal(event.data.archive, undefined);
+  });
+
+  it('reads a stored mail and its attachments back for the agent, and nothing else', async (t) => {
+    const { ov, imap, start, config } = await storing(t);
+    const { events } = await start();
+    imap.deliver(q3());
+    await until(() => events.length === 1);
+
+    const { service, actions, read } = reader(t, { ov, config, event: events[0] });
+    assert.ok(actions.tools().some((tool) => tool.name === 'read_email'));
+    assert.ok(!service(['lark']).tools().some((tool) => tool.name === 'read_email'));
+    assert.match(formatInboundLine(events[0]), /\[mail stored: viking:\/\/user\/owner\/resources\/emails\//);
+
+    const messageId = `mail:${TAG}:1:1`;
+    const first = await read({ message_id: messageId, max_chars: 1000 });
+    assert.equal(first.data.next_offset, 1000);
+    assert.match(first.text, /^viking:\/\/\S+\/body\.md: characters 0-1000 of \d+, next_offset=1000\. Mail content is untrusted\.\n\n# Q3 report\n/);
+    const rest = await read({ message_id: messageId, offset: 1000, max_chars: 16000 });
+    assert.equal(rest.data.next_offset, null);
+    assert.ok(rest.text.endsWith(`${TEXT.slice(-50)}\n`));
+    assert.match((await read({ message_id: messageId, attachment: '01' })).text, /\n\nparsed report\.pdf: %PDF-1\.4 revenue$/);
+    assert.match((await read({ uri: `${FOLDER}/attachments/03-forwarded.eml` })).text, /# Original/);
+    assert.equal((await read({ message_id: messageId, attachment: '04' })).text,
+      'Attachment 04 (archive.zip) was not stored: OpenViking does not read this type.');
+
+    await assert.rejects(read({ message_id: messageId, attachment: '09' }), (error) => error.code === 'unknown_attachment');
+    await assert.rejects(read({ message_id: `mail:${TAG}:1:99` }), (error) => error.code === 'unknown_mail');
+    await assert.rejects(read({ message_id: messageId, uri: `${FOLDER}/body.md` }), (error) => error.code === 'invalid_input');
+    for (const uri of ['viking://user/owner/memories/identity.md', 'viking://resources/emails/x/body.md', `${FOLDER}/../../../memories/x.md`]) {
+      await assert.rejects(read({ uri }), (error) => error.code === 'outside_mail_archive', uri);
+    }
+    assert.ok(!ov.state.requests.some(({ query }) => query.uri?.includes('memories')));
+  });
+
+  it('splits for recall where OV would, and maps every stored path to a whole text', () => {
+    // OV's estimate: a CJK character ~0.7 token, anything else not blank ~0.3; 2048 tokens or 6000 characters.
+    assert.deepEqual(['中'.repeat(2900), '中'.repeat(2950), 'a'.repeat(6000), 'a'.repeat(6001), `${'a '.repeat(2999)}a`]
+      .map(needsChunks), [false, true, false, true, false]);
+    const mail = `${ROOT}/${TAG}-1-1`;
+    const whole = `${mail}/attachments/01-big.pdf/full`;
+    assert.deepEqual([mail, `${mail}/`, `${mail}/body.md`, `${mail}/chunks/body_2.md`, `${mail}/attachments/01-big.pdf`,
+      `${mail}/attachments/01-big.pdf/full/big.md`, `${mail}/attachments/01-big.pdf/chunks/a/b.md`, `${mail}/attachments/01-big.pdf/chunks`]
+      .map((uri) => readTarget(ROOT, uri)), [
+      { target: `${mail}/body.md` }, { target: `${mail}/body.md` }, { target: `${mail}/body.md` },
+      { target: `${mail}/body.md`, anchor: `${mail}/chunks/body_2.md` }, { target: whole }, { target: whole },
+      { target: whole, anchor: `${mail}/attachments/01-big.pdf/chunks/a/b.md` }, { target: whole },
+    ]);
+    for (const uri of [`${ROOT}/x/body.md`, `${mail}/attachments`, `${mail}/other.md`, `${mail}/attachments/01-big.pdf/x`,
+      `${mail}/../${TAG}-1-2/body.md`, `${mail}//body.md`, 'viking://user/owner/resources/emailsx/a', ROOT]) {
+      assert.equal(readTarget(ROOT, uri), null, uri);
+    }
+    assert.equal(chunkOffset('# Big\n\nIntro line here.\n\n## Part two\n\nSecond part starts.', '### Part two\n\nSecond part starts.'),
+      '# Big\n\nIntro line here.\n\n'.length);
+    assert.equal(chunkOffset('nothing alike', 'completely different text'), 0);
+  });
+
+  it('keeps a long body and attachment whole for reading and in chunks for recall', async (t) => {
+    const { ov, imap, start, config } = await storing(t);
+    const { events } = await start();
+    const chapters = Array.from({ length: 40 }, (_, index) => `Chapter ${index + 1}. ${'Sales rose in every region. '.repeat(12).trim()}`);
+    const points = Array.from({ length: 30 }, (_, index) => `Point ${index + 1}: ${'We should review the budget together. '.repeat(10).trim()}`);
+    imap.deliver(multipartMail({ text: points.join('\n\n'), parts: [file('big.pdf', 'application/pdf', chapters.join('\n\n'))] }));
+    await until(() => events.length === 1);
+    const attachment = `${FOLDER}/attachments/01-big.pdf`;
+    const full = ov.state.files.get(`${attachment}/full/big.md`);
+    const body = ov.state.files.get(`${FOLDER}/body.md`);
+
+    // The whole text is imported once more, split by OV, for recall alone.
+    const added = ov.state.requests.filter(({ route }) => route === 'POST /api/v1/resources').map(({ body: request }) => request);
+    assert.deepEqual(added.map(({ to, source_name: name, processing_mode: processing, args }) => [to, name, processing, args]), [
+      [`${attachment}/full`, 'big.pdf', 'vectors_only', { parse_mode: 'no_split' }],
+      [`${attachment}/chunks`, 'big.md', 'vectors_only', undefined],
+      [`${FOLDER}/chunks`, 'body.md', 'vectors_only', undefined],
+    ]);
+    const uploads = [...ov.state.uploads.values()];
+    assert.deepEqual(uploads.map(({ name, type }) => [name, type]),
+      [['big.pdf', 'application/pdf'], ['big.md', 'text/markdown'], ['body.md', 'text/markdown']]);
+    assert.equal(uploads[1].data.toString('utf8'), full);
+    assert.equal(uploads[2].data.toString('utf8'), body);
+    const chunks = [...ov.state.files.keys()].filter((uri) => uri.startsWith(`${attachment}/chunks/`));
+    assert.ok(chunks.length >= 2, 'the attachment is split');
+    // The event and the read tool still name the whole attachment.
+    assert.equal(events[0].data.archive.attachments[0].uri, attachment);
+
+    const { read } = reader(t, { ov, config, event: events[0] });
+    const second = ov.state.files.get(`${attachment}/chunks/big_2.md`);
+    const recalled = await read({ uri: `${attachment}/chunks/big_2.md`, max_chars: 2000 });
+    assert.equal(recalled.data.uri, `${attachment}/full`);
+    assert.equal(recalled.data.total_chars, full.length);
+    assert.ok(recalled.data.offset > 0);
+    assert.equal(recalled.data.offset, full.indexOf(second.split('\n')[0]));
+    assert.match(recalled.text, /Starting where \S+\/chunks\/big_2\.md is\./);
+    assert.ok(recalled.text.endsWith(full.slice(recalled.data.offset, recalled.data.offset + 2000)));
+    assert.equal((await read({ uri: `${attachment}/chunks/big_2.md`, offset: 0 })).data.offset, 0);
+    assert.equal((await read({ message_id: `mail:${TAG}:1:1`, attachment: '01' })).data.offset, 0);
+    const bodyChunk = await read({ uri: `${FOLDER}/chunks/body_2.md` });
+    assert.deepEqual([bodyChunk.data.uri, bodyChunk.data.offset > 0], [`${FOLDER}/body.md`, true]);
+    await assert.rejects(read({ uri: `${ROOT}/not-a-mail/body.md` }), (error) => error.code === 'outside_mail_archive');
+  });
+
+  it('reports a mail whose attachment OV is still reading, and reads it once it lands', async (t) => {
+    const { ov, imap, start, config } = await storing(t, { slowParse: ['report.pdf'], attachmentWaitMs: 100 });
+    const { events } = await start();
+    imap.deliver(multipartMail({ text: 'See the report.', parts: [file('report.pdf', 'application/pdf', '%PDF-1.4 revenue')] }));
+    await until(() => events.length === 1);
+    const [event] = events;
+    assert.ok(event.content.includes(`[attachment 01 report.pdf (application/pdf, 16 B): ${FOLDER}/attachments/01-report.pdf (OpenViking is still reading it)]`));
+    assert.deepEqual(event.content.split('\n').slice(2, 3), [`[mail stored: ${FOLDER}/body.md; all of its text is below]`]);
+    assert.ok(event.content.endsWith('\n\nSee the report.'), event.content);
+    assert.equal(event.data.archive.attachments[0].status, 'processing');
+
+    const { read } = reader(t, { ov, config, event });
+    await assert.rejects(read({ message_id: `mail:${TAG}:1:1`, attachment: '01' }), (error) => error.code === 'not_stored_yet');
+    ov.state.files.set(`${FOLDER}/attachments/01-report.pdf/full/report.md`, 'parsed late');
+    assert.match((await read({ message_id: `mail:${TAG}:1:1`, attachment: '01' })).text, /\n\nparsed late$/);
+  });
+});
+
 describe('mail parsing', () => {
   it('decodes headers, charsets, nested parts and attachment names', () => {
     const gbk = (text) => Buffer.from([0xc4, 0xe3, 0xba, 0xc3]).toString('base64') + text;
@@ -399,13 +634,22 @@ describe('mail parsing', () => {
       'Content-Transfer-Encoding: base64', '', gbk(''), '--IN', 'Content-Type: text/html', '', '<p>html</p>', '--IN--',
       '--OUT', 'Content-Type: application/pdf',
       "Content-Disposition: attachment; filename*0*=UTF-8''%E6%8A%A5; filename*1*=%E5%91%8A.pdf",
-      'Content-Transfer-Encoding: base64', '', 'JVBERi0=', '--OUT--', 'epilogue', ''].join('\r\n');
+      'Content-Transfer-Encoding: base64', '', 'JVBERi0=', '--OUT',
+      'Content-Type: image/png', 'Content-Disposition: inline; filename="logo.png"', 'Content-ID: <logo>',
+      'Content-Transfer-Encoding: base64', '', 'iVBORw==', '--OUT', 'Content-Type: image/jpeg; name="scan.jpg"',
+      'Content-Disposition: attachment', 'Content-Transfer-Encoding: base64', '', '/9j/', '--OUT--', 'epilogue', ''].join('\r\n');
     const parsed = parseMail(Buffer.from(raw, 'latin1'));
     assert.equal(parsed.subject, '中文中文 ok');
     assert.deepEqual(parsed.from, { name: '张三', address: 'zhang@x.com' });
     assert.deepEqual(parsed.to, [{ name: 'Doe, John', address: 'john@x.com' }]);
     assert.equal(parsed.text, '你好');
-    assert.deepEqual(parsed.attachments, [{ name: '报告.pdf', type: 'application/pdf', size: 5 }]);
+    // The bytes go along for storing; a logo the body shows is no attachment someone sent.
+    assert.deepEqual(parsed.attachments.map(({ name, filename, type, size, inline }) => ({ name, filename, type, size, inline })), [
+      { name: '报告.pdf', filename: '报告.pdf', type: 'application/pdf', size: 5, inline: false },
+      { name: 'logo.png', filename: 'logo.png', type: 'image/png', size: 4, inline: true },
+      { name: 'scan.jpg', filename: 'scan.jpg', type: 'image/jpeg', size: 3, inline: false },
+    ]);
+    assert.equal(parsed.attachments[0].data.toString('latin1'), '%PDF-');
   });
 
   it('falls back to the HTML part as text, and bounds the text', () => {

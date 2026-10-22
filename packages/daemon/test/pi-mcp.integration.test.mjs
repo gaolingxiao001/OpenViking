@@ -121,7 +121,6 @@ async function fixture(t, { conflict = false, dialogs = false } = {}) {
   const config = {
     piBin: managedPiBin(), piModel: 'fixture/fixture', piEffort: 'off', workspace,
     dataDir: path.join(root, 'data'), connectors: ['lark'], profile: 'fixture',
-    systemPromptPath: modulePath('../agent/system-prompt.md'),
     actionSocketPath: socketPath, actionMcpPath: modulePath('../src/actions/mcp.mjs'),
     sendTimeoutMs: 1000, cognitionMaxChars: 120_000,
   };

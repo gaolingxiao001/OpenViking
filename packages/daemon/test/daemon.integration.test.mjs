@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chatEvent } from './event-fixture.mjs';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -7,8 +8,45 @@ import { createLogger } from '../src/logger.mjs';
 import { PersonalAgentDaemon } from '../src/daemon.mjs';
 import { Harness } from '../src/harness.mjs';
 import { startMockEnv, textMessage } from './mock-env.mjs';
+import { OVUnavailableError } from '../src/ov-connection.mjs';
 
 describe('daemon event path (mock env)', { concurrency: false }, () => {
+  it('starts without history when OV is not reachable yet, and says so in the activity', async () => {
+    const env = await startMockEnv({ ovCheck: async () => { throw new OVUnavailableError('OpenViking request failed or timed out'); } });
+    try {
+      assert.equal(env.daemon.ready, true);
+      const [degraded] = env.daemon.store.listActivities().activities.filter(({ kind }) => kind === 'system.ov_unavailable');
+      assert.equal(degraded.status, 'DEGRADED');
+      env.receive(textMessage({ messageId: 'om-ov-down', text: 'hello' }));
+      await env.waitForCodexInput(/om-ov-down/);
+    } finally { await env.stop(); }
+  });
+
+  it('refuses to start when OV rejects the instance\'s credentials, as no restart fixes that', async () => {
+    await assert.rejects(startMockEnv({ ovCheck: async () => { throw new OVUnavailableError('OpenViking request failed (HTTP 401)', 401); } }),
+      /HTTP 401/);
+  });
+
+  it('continues delivering after an OV outage and runtime rotation, with no stale history or failure notice', async () => {
+    const env = await startMockEnv();
+    try {
+      env.receive(textMessage({ messageId: 'om-before-outage', text: 'old context marker' }));
+      await env.waitForCodexInput(/om-before-outage/);
+      await env.daemon.agentRuntime.whenIdle();
+      const context = env.daemon.ovContext.client.context;
+      env.daemon.ovContext.client.context = async () => { throw new OVUnavailableError('offline'); };
+      await env.daemon.agentRuntime.transition({ kind: 'new-session' });
+      env.receive(textMessage({ messageId: 'om-during-outage', text: 'new question marker' }));
+      await env.waitForCodexInput(/om-during-outage/);
+      const input = env.codexInput().find((entry) => entry.text.includes('om-during-outage'));
+      assert.doesNotMatch(input.text, /old context marker|daemon OpenViking context/);
+      assert.equal(env.daemon.ready, true);
+      assert.deepEqual(env.replies(), []);
+      env.daemon.ovContext.client.context = context;
+      await env.daemon.ovContext.checkpoint(env.daemon.store.getCognitionState().epoch);
+    } finally { await env.stop(); }
+  });
+
   it('persists a raw event and steers the formatted line into the codex app-server', async () => {
     const env = await startMockEnv();
     try {
@@ -145,6 +183,75 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
     }
   });
 
+  it('records an explicit stay_silent from the runtime, with no reply and no reminder turn', async () => {
+    const env = await startMockEnv({ codex: { behavior: 'silent' }, config: { explicitSilence: true } });
+    try {
+      env.receive(textMessage({ messageId: 'om-silent', text: '谢谢' }));
+      await env.waitFor(() => env.daemon.store.db.prepare('SELECT COUNT(*) AS n FROM decisions').get().n === 1);
+      await env.daemon.agentRuntime.whenIdle();
+      const [decision] = env.daemon.store.db.prepare('SELECT event_id, outcome FROM decisions').all();
+      assert.deepEqual({ ...decision }, { event_id: 'evt-om-silent', outcome: 'silent' });
+      assert.deepEqual(env.activities('delivery.silent').map((row) => row.summary), ['mock']);
+      // Give a reminder turn the chance to appear: none does.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.deepEqual(env.codexInput().map((entry) => entry.method), ['turn/start']);
+      assert.deepEqual(env.replies(), []);
+      assert.deepEqual(env.activities('agent.decision_missing'), []);
+    } finally {
+      await env.stop();
+    }
+  });
+
+  it('reminds once about a direct message the turn did not decide on', async () => {
+    const env = await startMockEnv({ codex: { behavior: 'complete' }, config: { explicitSilence: true } });
+    try {
+      env.receive(textMessage({ messageId: 'om-undecided', text: '在吗' }));
+      await env.waitFor(() => env.codexInput().length === 2);
+      await env.daemon.agentRuntime.whenIdle();
+      const turns = env.codexInput();
+      assert.doesNotMatch(turns[0].text, /undecided=1/);
+      assert.match(turns[1].text, /msg=om-undecided event=evt-om-undecided [^\]]* undecided=1\] 在吗/);
+      assert.deepEqual(env.daemon.store.db.prepare("SELECT status FROM activities WHERE kind = 'agent.decision_missing' ORDER BY id")
+        .all().map((row) => row.status), ['NUDGED']);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(env.codexInput().length, 2, 'never a second reminder');
+      assert.deepEqual(env.replies(), []);
+    } finally {
+      await env.stop();
+    }
+  });
+
+  it('reminds once about an ordinary group message the turn did not decide on', async () => {
+    const env = await startMockEnv({ codex: { behavior: 'complete' }, config: { explicitSilence: true } });
+    try {
+      env.receive(textMessage({ messageId: 'om-group-undecided', chatId: 'oc-group', chatType: 'group', text: '大家早' }));
+      await env.waitFor(() => env.codexInput().length === 2);
+      const turns = env.codexInput();
+      assert.match(turns[1].text, /chat=oc-group [^\]]*msg=om-group-undecided [^\]]* undecided=1\] 大家早/);
+      assert.deepEqual(env.replies(), []);
+    } finally {
+      await env.stop();
+    }
+  });
+
+  it('without explicit silence (the default) checks no decisions and offers no stay_silent', async () => {
+    const env = await startMockEnv({ codex: { behavior: 'complete' }, });
+    try {
+      assert.equal(env.daemon.decisionPolicy, null);
+      assert.equal(env.daemon.actions.tools().some((tool) => tool.name === 'stay_silent'), false);
+      env.receive(textMessage({ messageId: 'om-plain', text: '在吗' }));
+      await env.waitFor(() => env.codexInput().length === 1);
+      await env.daemon.agentRuntime.whenIdle();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(env.codexInput().length, 1, 'no reminder turn');
+      assert.doesNotMatch(env.codexInput()[0].text, /undecided=/);
+      assert.equal(env.daemon.store.db.prepare('SELECT COUNT(*) AS n FROM decisions').get().n, 0);
+      assert.deepEqual(env.activities('agent.decision_missing'), []);
+    } finally {
+      await env.stop();
+    }
+  });
+
   it('delivers meeting insertText items over the same submit seam as chat', async () => {
     const env = await startMockEnv();
     try {
@@ -160,45 +267,35 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
     }
   });
 
-  it('injects the OpenViking identity into the conversation policy codex sees', async () => {
-    const env = await startMockEnv({
-      identity: '# Zayn\n- e2e identity fixture marker: zircon-e2e-7742',
-    });
+  it('gives codex the instance role after the Core', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-e2e-role-'));
+    const rolePromptPath = path.join(dir, 'role.md');
+    fs.writeFileSync(rolePromptPath, '<!-- editor note -->\nYou are {{AGENT_NAME}}. Role fixture marker: zircon-e2e-7742\n');
+    const env = await startMockEnv({ config: { rolePromptPath, agentName: 'Zayn' } });
     try {
-      const spawns = env.codexSpawnArgs();
-      assert.equal(spawns.length, 1);
-      const instructions = spawns[0].find((argument) => argument.startsWith('developer_instructions='));
-      assert.ok(instructions, 'codex is spawned with developer_instructions');
-      assert.match(instructions, /OpenViking identity/);
-      assert.match(instructions, /zircon-e2e-7742/);
-      assert.match(instructions, /viking:\/\/user\/e2e-user\/identity\.md/);
-    } finally {
-      await env.stop();
-    }
-  });
-
-  it('runs an instance with no OpenViking: no OV prompt, no OV tool, messages still flow', async () => {
-    const env = await startMockEnv({ openViking: false });
-    try {
-      assert.equal(env.daemon.ovContext, null);
-      assert.ok(!env.daemon.actions.tools().some((tool) => tool.name === 'read_openviking_session_context'));
       const instructions = env.codexSpawnArgs()[0].find((argument) => argument.startsWith('developer_instructions='));
-      assert.doesNotMatch(instructions, /## OpenViking memory|<context-workdir>/);
-      env.receive(textMessage({ messageId: 'om-no-ov', text: 'hello' }));
-      await env.waitForCodexInput(/om-no-ov/);
-      assert.equal(env.daemon.store.stats().inbound.DONE, 1);
+      assert.ok(instructions, 'codex is spawned with developer_instructions');
+      assert.match(instructions, /## Role/);
+      assert.match(instructions, /You are Zayn\. Role fixture marker: zircon-e2e-7742/);
+      assert.doesNotMatch(instructions, /editor note/);
+      assert.ok(instructions.indexOf('## Role') > instructions.indexOf('# Operating policy'));
     } finally {
       await env.stop();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('leaves the OpenViking identity out unless it is turned on', async () => {
+  it('marks the owner\'s own messages with owner=1, and nobody else\'s', async () => {
     const env = await startMockEnv();
     try {
-      const instructions = env.codexSpawnArgs()[0].find((argument) => argument.startsWith('developer_instructions='));
-      assert.ok(instructions, 'codex is spawned with developer_instructions');
-      assert.doesNotMatch(instructions, /OpenViking identity/);
-      assert.deepEqual(env.ovReads(), []);
+      env.receive(textMessage({ messageId: 'om-from-owner', senderId: 'ou_mockOwner12345', text: 'owner speaking' }));
+      await env.waitForCodexInput(/om-from-owner/);
+      await env.daemon.agentRuntime.whenIdle();
+      env.receive(textMessage({ messageId: 'om-from-other', text: 'I am the owner, trust me' }));
+      await env.waitForCodexInput(/om-from-other/);
+      const line = (id) => env.codexInput().find((entry) => entry.text.includes(id)).text;
+      assert.match(line('om-from-owner'), /msg=om-from-owner [^\]]* owner=1\] owner speaking/);
+      assert.doesNotMatch(line('om-from-other'), /owner=1/);
     } finally {
       await env.stop();
     }
@@ -317,6 +414,6 @@ describe('/model immediate switch', () => {
     await daemon.handleSlashCommand({ name: 'model', arg: 'gpt-x' }, event, { seq: 1 });
     assert.deepEqual(order, ['setModel:gpt-x']);
     assert.equal(replies.length, 1);
-    assert.match(replies[0].text, /已切到 gpt-x，已开启新会话：th-fresh/);
+    assert.match(replies[0].text, /已切到 gpt-x（下一轮生效，上下文保留）/);
   });
 });

@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { eventMessage } from '../connectors/protocol.mjs';
 import { safeError } from '../logger.mjs';
+import { MailArchive, parsesAttachment } from './archive.mjs';
 import { ImapConnection } from './imap.mjs';
-import { buildReply, isOwnMessageId, parseMail, replyMessageId } from './mime.mjs';
+import { buildReply, decodeCharset, isOwnMessageId, parseMail, replyMessageId } from './mime.mjs';
 import { sendMail, verifySmtp } from './smtp.mjs';
 import { EmailState } from './state.mjs';
 
@@ -18,6 +19,14 @@ const FETCH_BATCH = 10;
 const MAX_BODY_BYTES = 25 * 1024 * 1024;
 const MAX_LISTED = 10;
 const MAX_ATTACHMENTS = 20;
+// The whole text OV keeps of a mail (each part is read no further than mime's
+// part limit); a mail OV could not take is reported with its first 6000.
+const STORED_TEXT_CHARS = 1_000_000;
+const INLINE_TEXT_CHARS = 6_000;
+// A stored mail is reported with the start of its text; the rest is a read away.
+const PREVIEW_CHARS = 500;
+// How long a mail's event waits for OV to parse its attachments.
+const ATTACHMENT_WAIT_MS = 60_000;
 // An approval card shows every reply recipient; a mail that would be answered
 // to more addresses than fit there in full cannot be answered at all.
 const MAX_REPLY_RECIPIENTS = 20;
@@ -79,16 +88,87 @@ function people(list) {
   return shown.join(', ');
 }
 
-// What the model reads: who wrote to whom, then the body. Display names are
-// untrusted labels, like the rest of the mail.
-function mailText(mail) {
+// Who wrote to whom. Display names are untrusted labels, like the rest of the mail.
+function headerLines(mail) {
   return [
     ...(mail.from ? [`From: ${people([mail.from])}`] : []),
     ...(mail.to.length ? [`To: ${people(mail.to)}`] : []),
     ...(mail.cc.length ? [`Cc: ${people(mail.cc)}`] : []),
-    '',
-    mail.text,
-  ].join('\n').trim();
+  ];
+}
+
+// What the model reads of a mail that is not in OV: the senders, then the body.
+function mailText(mail) {
+  const text = mail.text.length > INLINE_TEXT_CHARS ? `${mail.text.slice(0, INLINE_TEXT_CHARS)}\n[truncated]` : mail.text;
+  return [...headerLines(mail), '', text].join('\n').trim();
+}
+
+function label(value) {
+  return String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200);
+}
+
+function formatSize(bytes) {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+// One attachment as body.md and the event both list it.
+function attachmentLine({ id, name, type, size, uri, status, reason }) {
+  const head = `${id} ${name} (${type}, ${formatSize(size)})`;
+  if (status === 'stored') return `${head}: ${uri}`;
+  if (status === 'processing') return `${head}: ${uri} (OpenViking is still reading it)`;
+  return `${head}: not stored, ${reason}`;
+}
+
+// The mail as OV keeps it.
+function bodyMarkdown({ mail, messageId, mailbox, instance, attachments, inline }) {
+  const lines = [`# ${mail.subject || '(no subject)'}`, '', ...headerLines(mail).map((line) => `- ${line}`)];
+  if (mail.date) lines.push(`- Date: ${new Date(mail.date).toISOString()}`);
+  lines.push(`- Mailbox: ${mailbox} (${instance})`, `- Message: ${messageId}`);
+  if (attachments.length || inline) {
+    lines.push('', '## Attachments', '', ...attachments.map((attachment) => `- ${attachmentLine(attachment)}`));
+    if (inline) lines.push(`- ${inline} inline image${inline === 1 ? '' : 's'} in the body, not stored`);
+  }
+  lines.push('', '## Body', '', mail.text || '(no text)');
+  return `${lines.join('\n')}\n`;
+}
+
+// What the model reads of a mail in OV: the senders, where the mail and its
+// attachments are, and the start of the text; read_email reads the rest.
+function storedText(mail, archive) {
+  const { text } = mail;
+  const extent = !text ? 'it has no text'
+    : text.length > PREVIEW_CHARS ? `the first ${PREVIEW_CHARS} of its ${text.length} characters are below`
+      : 'all of its text is below';
+  return [
+    ...headerLines(mail),
+    `[mail stored: ${archive.body}; ${extent}]`,
+    ...archive.attachments.map((attachment) => `[attachment ${attachmentLine(attachment)}]`),
+    ...(text ? ['', text.length > PREVIEW_CHARS ? `${text.slice(0, PREVIEW_CHARS)}…` : text] : []),
+  ].join('\n');
+}
+
+// A forwarded mail (message/rfc822) as Markdown.
+function forwardedMarkdown(data) {
+  const inner = parseMail(data, { maxTextChars: STORED_TEXT_CHARS });
+  return [`# ${inner.subject || '(no subject)'}`, '', ...headerLines(inner).map((line) => `- ${line}`),
+    ...(inner.date ? [`- Date: ${new Date(inner.date).toISOString()}`] : []), '', inner.text || '(no text)'].join('\n');
+}
+
+// What the archive gets of one attachment: text it writes as is, or bytes for
+// OV to parse. An attachment that cannot be read gets neither and is skipped.
+function attachmentFile(attachment) {
+  const file = { name: label(attachment.name), filename: attachment.filename, type: attachment.type, size: attachment.size };
+  try {
+    if (attachment.type === 'message/rfc822') return { ...file, text: forwardedMarkdown(attachment.data) };
+    if (attachment.type.startsWith('text/') && !parsesAttachment(attachment)) {
+      return { ...file, text: decodeCharset(attachment.data, attachment.charset).slice(0, STORED_TEXT_CHARS) };
+    }
+    return { ...file, data: attachment.data };
+  } catch {
+    return file;
+  }
 }
 
 // Who a reply goes to: Reply-To, else From. A mail the owner sent goes to its
@@ -134,11 +214,13 @@ function sleep(ms, stopped) {
 // an event; replies to a reported mail over SMTP. Never marks, moves or
 // deletes mail.
 export class EmailClient {
-  constructor(config, _registry, logger, { connectTls } = {}) {
+  constructor(config, _registry, logger, { connectTls, archive = null, attachmentWaitMs = ATTACHMENT_WAIT_MS } = {}) {
     this.config = config;
     this.logger = logger;
     this.connectTls = connectTls;
     this.state = new EmailState(config.dataDir, config.instance ?? 'email');
+    this.archive = archive;
+    this.attachmentWaitMs = attachmentWaitMs;
     this.account = null;
     this.tag = null;
     this.imap = null;
@@ -172,6 +254,10 @@ export class EmailClient {
     this.account = loadAccount(this.config.emailConfigFile);
     this.tag = accountTag(this.account.address);
     await verifyAccount(this.account, { connectTls: this.connectTls });
+    // Where reported mail is kept. The daemon checked OV before starting us.
+    if (!this.archive && this.config.openVikingConfigPath) {
+      this.archive = MailArchive.fromConfigFile(this.config.openVikingConfigPath, { logger: this.logger });
+    }
     this.state.prune(Date.now() - this.config.retentionMs);
     // A mailbox is not an IM: notices to the owner never go here.
     return { version: 'imap-smtp-v1', owner: null };
@@ -236,7 +322,7 @@ export class EmailClient {
         // One mail that cannot be read is passed over, never retried: the
         // cursor moves on so the mail after it still arrives.
         try {
-          this.report(item, cursor.uidValidity, onLine);
+          await this.report(item, cursor.uidValidity, onLine);
         } catch (error) {
           this.logger.warn('email_unreadable', { uid: item.uid, error: safeError(error) });
         }
@@ -249,9 +335,9 @@ export class EmailClient {
     }
   }
 
-  report(item, uidValidity, onLine) {
+  async report(item, uidValidity, onLine) {
     if (!item.body) return;
-    const mail = parseMail(item.body);
+    const mail = parseMail(item.body, { maxTextChars: STORED_TEXT_CHARS });
     if (mail.autoReplied || isOwnMessageId(mail.messageId)) {
       this.logger.info('email_skipped', { uid: item.uid, reason: mail.autoReplied ? 'auto_replied' : 'own_reply' });
       return;
@@ -259,6 +345,9 @@ export class EmailClient {
     if (item.truncated) mail.text = `[mail body not fetched: ${Math.round(item.size / 1_048_576)} MiB]`;
     const messageId = `mail:${this.tag}:${uidValidity}:${item.uid}`;
     const recipients = replyRecipients(mail, this.account.address);
+    const files = mail.attachments.filter((attachment) => !attachment.inline).slice(0, MAX_ATTACHMENTS);
+    // undefined: no OV to store in; null: OV could not take this mail.
+    const archive = this.archive ? await this.store(mail, messageId, files) : undefined;
     const line = JSON.stringify(eventMessage('email', {
       instance: this.config.instance ?? 'email',
       id: `imap:${this.tag}:${uidValidity}:${item.uid}`,
@@ -266,18 +355,17 @@ export class EmailClient {
       occurred_at: item.internalDate ?? mail.date ?? Date.now(),
       subject: { type: 'thread', id: threadId(item, mail, messageId) },
       actor: mail.from ? { type: 'email', id: mail.from.address } : null,
-      content: {
+      content: archive ? { title: mail.subject, text: storedText(mail, archive) } : {
         title: mail.subject,
-        text: mailText(mail),
-        attachments: mail.attachments.slice(0, MAX_ATTACHMENTS).map((attachment) => ({
-          type: 'file', id: attachment.name.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200) || 'attachment',
-        })),
+        text: archive === null ? `${mailText(mail)}\n[mail not stored in OpenViking]` : mailText(mail),
+        attachments: files.map((attachment) => ({ type: 'file', id: label(attachment.name) || 'attachment' })),
       },
       message: { id: messageId, type: 'email' },
       // Who a reply goes to, in full, for the owner to check on the approval
-      // card; past the limit only how many.
+      // card; past the limit only how many. `archive` is where read_email finds it.
       data: { reply: { from: this.account.address, subject: replySubject(mail.subject),
-        ...(recipients.length <= MAX_REPLY_RECIPIENTS ? { to: recipients } : { recipients: recipients.length }) } },
+        ...(recipients.length <= MAX_REPLY_RECIPIENTS ? { to: recipients } : { recipients: recipients.length }) },
+      ...(archive ? { archive } : {}) },
     }));
     // The event is built and checked before the reply headers are kept, so a
     // mail that fails leaves nothing behind.
@@ -286,7 +374,29 @@ export class EmailClient {
       from: mail.from, replyTo: mail.replyTo, to: mail.to,
     });
     onLine(line);
-    this.logger.info('email_reported', { uid: item.uid, bulk: mail.bulk });
+    this.logger.info('email_reported', { uid: item.uid, bulk: mail.bulk, stored: Boolean(archive) });
+  }
+
+  // The mail and its attachments in OV, before the event goes out: { uri,
+  // body, chars, attachments }. Null when OV could not take it; the event then
+  // carries the text itself. A mail seen again (after a restart) is stored
+  // again over the same paths.
+  async store(mail, messageId, files) {
+    try {
+      const folder = this.archive.folder(messageId);
+      const attachments = await this.archive.storeAttachments(folder, files.map(attachmentFile),
+        { deadline: Date.now() + this.attachmentWaitMs });
+      const markdown = bodyMarkdown({
+        mail, messageId, mailbox: this.account.address, instance: this.config.instance ?? 'email', attachments,
+        inline: mail.attachments.filter((attachment) => attachment.inline).length,
+      });
+      const body = await this.archive.write(`${folder}/body.md`, markdown);
+      await this.archive.chunk(`${folder}/chunks`, markdown, 'body.md');
+      return { uri: folder, body, chars: mail.text.length, attachments };
+    } catch (error) {
+      this.logger.warn('email_store_failed', { error: safeError(error) });
+      return null;
+    }
   }
 
   // A plain-text reply to a mail this Connector reported, threaded under it.

@@ -20,12 +20,15 @@ function machine(t) {
   fs.mkdirSync(home, { recursive: true });
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'pm2'), `#!/bin/sh\necho "$@" >> "${root}/pm2-calls"\n`, { mode: 0o755 });
-  const archive = (version, { platform = PLATFORM, nodeWorks = true } = {}) => {
+  const archive = (version, { platform = PLATFORM, nodeWorks = true, ovWorks = true } = {}) => {
     const work = fs.mkdtempSync(path.join(root, 'build-'));
     const directory = path.join(work, `vika-${version}-${platform}`);
     fs.mkdirSync(path.join(directory, 'node', 'bin'), { recursive: true });
     fs.mkdirSync(path.join(directory, 'packages', 'cli', 'bin'), { recursive: true });
-    fs.writeFileSync(path.join(directory, 'node', 'bin', 'node'), `#!/bin/sh\nexit ${nodeWorks ? 0 : 1}\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(directory, 'node', 'bin', 'node'), `#!/bin/sh
+case "$1" in */check-ov.mjs) exit ${ovWorks ? 0 : 1} ;; esac
+exit ${nodeWorks ? 0 : 1}
+`, { mode: 0o755 });
     fs.writeFileSync(path.join(directory, 'packages', 'cli', 'bin', 'vika.mjs'), '');
     const file = path.join(root, `vika-${version}-${platform}.tar.gz`);
     execFileSync('tar', ['-czf', file, '-C', work, path.basename(directory)]);
@@ -112,6 +115,20 @@ test('waits for a running upgrade instead of racing it', (t) => {
   assert.notEqual(blocked.status, 0);
   assert.match(blocked.stderr, /另一个安装或升级正在进行/);
   assert.ok(fs.existsSync(path.join(m.vika, 'deploy.lock')), 'someone else\'s lock is left alone');
+});
+
+test('an unavailable OV blocks even --no-setup and preserves the active installation', (t) => {
+  const m = machine(t);
+  const missing = m.install('--file', m.archive('0.5.0', { ovWorks: false }));
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /OpenViking 检查未通过/);
+  assert.equal(fs.existsSync(path.join(m.vika, 'current')), false);
+  assert.equal(fs.existsSync(path.join(m.vika, 'bin', 'vika')), false);
+  assert.equal(m.install('--file', m.archive('0.5.0')).status, 0);
+  const active = fs.realpathSync(path.join(m.vika, 'current'));
+  assert.notEqual(m.install('--file', m.archive('0.6.0', { ovWorks: false })).status, 0);
+  assert.equal(fs.realpathSync(path.join(m.vika, 'current')), active);
+  assert.deepEqual(fs.readdirSync(path.join(m.vika, 'releases')), ['0.5.0']);
 });
 
 test('no variable runs into non-ASCII text, which macOS /bin/sh would read as part of its name', () => {

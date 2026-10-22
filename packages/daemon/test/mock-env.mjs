@@ -2,8 +2,8 @@
 // fake lark-cli (events fed dynamically through an NDJSON file) and a fake
 // codex app-server (scriptable turn outcome, records everything it is told).
 // OpenViking is a quiet fake client by default; pass { identity } to turn
-// identity injection on and serve that text from it, or { openViking: false }
-// to run an instance with no OV at all. No process.env mutation:
+// identity injection on and serve that text from it.
+// No process.env mutation:
 // every path the fake binaries need is embedded into the generated scripts.
 //
 // Operations, not plumbing:
@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getConfig, projectDir } from '../src/config.mjs';
 import { createLogger } from '../src/logger.mjs';
 import { PersonalAgentDaemon } from '../src/daemon.mjs';
@@ -122,11 +123,16 @@ function fakeLarkSource(dir) {
 
 // Fake codex app-server: newline JSON-RPC over stdio. Appends every turn input
 // to INPUT_LOG and its own argv to SPAWN_LOG; turn outcome is fixed per env:
-// 'complete' | 'fail' (with FAIL_BLOB) | 'ack-only'.
+// 'complete' | 'fail' (with FAIL_BLOB) | 'ack-only' | 'silent' (calls
+// stay_silent on the newest event= of the turn input over the daemon's agent
+// tool socket, as a real runtime's MCP adapter would, then completes).
+const ACTION_CLIENT = fileURLToPath(new URL('../src/actions/client.mjs', import.meta.url));
+
 function fakeCodexSource(dir, { behavior, failBlob }) {
   return `
     import fs from 'node:fs';
     import readline from 'node:readline';
+    import { actionEndpoint, callTool } from ${JSON.stringify(ACTION_CLIENT)};
     const INPUT_LOG = ${JSON.stringify(path.join(dir, 'codex-input.log'))};
     const SPAWN_LOG = ${JSON.stringify(path.join(dir, 'codex-spawns.ndjson'))};
     const BEHAVIOR = ${JSON.stringify(behavior)};
@@ -159,6 +165,15 @@ function fakeCodexSource(dir, { behavior, failBlob }) {
         send({ method: 'turn/started', params: { turn: { id: turnId } } });
         if (BEHAVIOR === 'complete') {
           send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
+        } else if (BEHAVIOR === 'silent') {
+          const decision = [...text.matchAll(/ event=(\\S+)/g)].at(-1)?.[1];
+          const done = () => send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
+          if (!decision) { done(); return; }
+          callTool(actionEndpoint('fake-codex'), 'stay_silent', { decision_id: decision, reason: 'mock' })
+            .then(done, (error) => {
+              fs.appendFileSync(INPUT_LOG, JSON.stringify({ method: 'tool-error', text: String(error.message) }) + '\\n');
+              done();
+            });
         } else if (BEHAVIOR === 'fail') {
           send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'failed', error: { message: FAIL_BLOB } } } });
         }
@@ -185,8 +200,7 @@ function readLines(file) {
 // Connector through files under `<dir>/data`.
 export async function startMockEnv({
   codex = {},
-  identity = null,
-  openViking = true,
+  ovCheck = async () => {},
   config: configOverrides = {},
   prepare = null,
 } = {}) {
@@ -202,11 +216,8 @@ export async function startMockEnv({
   }));
   fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
 
-  // OpenViking: identity injection stays off unless the test passes an
-  // identity, which the fake client then serves for the config's user.
   const openVikingConfigPath = path.join(dir, 'ov-config.json');
   fs.writeFileSync(openVikingConfigPath, JSON.stringify({ user: 'e2e-user' }));
-  const ovReads = [];
 
   const config = {
     ...getConfig(),
@@ -224,8 +235,7 @@ export async function startMockEnv({
     profile: 'test-profile',
     initialModel: '',
     claudeModel: '',
-    openVikingConfigPath: openViking ? openVikingConfigPath : '',
-    openVikingIdentityEnabled: identity !== null,
+    openVikingConfigPath,
     ignoredSenderIds: new Set(),
     port: 0,
     httpEnabled: false,
@@ -237,20 +247,16 @@ export async function startMockEnv({
     meetingAudio: null,
     ...configOverrides,
   };
-  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), openViking ? {
+  const daemon = new PersonalAgentDaemon(config, createLogger('error', { test: 'mock-env' }), {
     ovClient: {
+      check: ovCheck,
       messages: new Map(),
       async create(sessionId) { return { session_id: sessionId, uri: `viking://session/${sessionId}` }; },
       async append(id, message) { const rows = this.messages.get(id) || []; rows.push({ ...message, parts: [{ type: 'text', text: message.content }] }); this.messages.set(id, rows); },
       async context(id) { return { latest_archive_overview: '', messages: this.messages.get(id) || [], stats: { totalArchives: 0 } }; },
       async request() { return { pending_tokens: 0 }; },
-      async read(uri) {
-        ovReads.push(uri);
-        if (identity !== null && uri === 'viking://user/e2e-user/identity.md') return identity;
-        throw Object.assign(new Error('missing'), { httpStatus: 404 });
-      },
     },
-  } : {});
+  });
 
   const env = {
     dir,
@@ -271,11 +277,6 @@ export async function startMockEnv({
     // developer_instructions is a `-c` config override).
     codexSpawnArgs() {
       return readLines(path.join(dir, 'codex-spawns.ndjson')).map((line) => JSON.parse(line));
-    },
-
-    // Every URI the daemon read from the fake OV client.
-    ovReads() {
-      return [...ovReads];
     },
 
     // argv of every outbound lark-cli reply/send call.

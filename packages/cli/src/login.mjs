@@ -2,29 +2,78 @@ import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { restartCommand, stopCommand } from './control.mjs';
 import { connectTelegram } from './telegram.mjs';
 import { connectQQ } from './qq.mjs';
+import { connectSlack } from './slack.mjs';
 import { askEmail, mailboxesOf, writeEmailAccount } from './email.mjs';
 import { t } from './i18n.mjs';
 import { IM_LABELS, chooseInstance, loadInstances } from './instances.mjs';
 import { LarkCli } from './lark-cli.mjs';
+import { LarkRegistrationError, grantedUserScopes, lacksAny, readApp } from './lark-app.mjs';
 import { showScan } from './qr.mjs';
 import { which } from './runtimes.mjs';
-import { connectWeixin, larkScopes, weixinFirstMessage } from './setup.mjs';
+import { connectWeixin, larkScopes, registerApp, reportApp, weixinFirstMessage } from './setup.mjs';
 
-// `vika login <lark|weixin|email|telegram|qq> [instance]`: authorize again what an
-// instance already has, after a login expired or a password changed.
+// `vika login <lark|weixin|email|telegram|slack|qq> [instance]`: authorize again what an
+// instance already has, after a login expired or a password changed. For
+// Feishu/Lark it first checks the app has what Vika needs, and an owner or
+// administrator of the app can add what it lacks with one scan.
 // Connecting something new is `vika setup` (change the instance). The
 // instance may be left out when there is only one, and is chosen otherwise.
 
 const usage = () => t(
-  '用法：vika login <lark|weixin|email|telegram|qq> [实例]\n'
+  '用法：vika login <lark|weixin|email|telegram|slack|qq> [实例]\n'
   + '  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例。只有一个实例时可以不写实例名。\n',
-  'Usage: vika login <lark|weixin|email|telegram|qq> [instance]\n'
+  'Usage: vika login <lark|weixin|email|telegram|slack|qq> [instance]\n'
   + '  Authorize again after a login expired or a password changed; to connect a new IM, change the instance with vika setup. With one instance the name can be left out.\n',
 );
 
 function larkCliBin(env, deployment) {
   const bundled = bundledLarkCli();
   return env.LARK_CLI_BIN || deployment.env?.LARK_CLI_BIN || (bundled === 'lark-cli' ? which('lark-cli', env) : bundled);
+}
+
+// The app as its bot reads it, then what it lacks; one `update` scan adds
+// that, the platform's confirm page showing the change. Resolves with what
+// was read last, or null when the app's settings cannot be read.
+async function completeApp({ agent, prompter, larkCli, scopes, register }) {
+  const read = async () => {
+    const spinning = prompter.spin(t('核对应用的权限和事件', 'Checking the app\'s permissions and events'));
+    try {
+      const app = await readApp((pathname, query) => larkCli.get({ profile: agent.profile, pathname, query }));
+      spinning.succeed(t(`应用 ${app.appId} 已读取`, `Read the app ${app.appId}`));
+      return app;
+    } catch (error) {
+      spinning.warn(t(`读不到应用的配置，跳过核对：${error.message}`, `The app's settings could not be read, so they are not checked: ${error.message}`));
+      return null;
+    }
+  };
+  const inspected = await read();
+  if (!inspected || !lacksAny(reportApp(prompter, scopes, inspected))) return inspected;
+  // The confirm page withdraws a version under review before publishing its
+  // own, and the approval starts over: not by default.
+  if (inspected.pendingReview) {
+    prompter.warn(t('应用有一个版本正在审核：扫码补齐时，飞书会先撤回它再提交新版本，审批要重新排队。',
+      'A version of the app is under review: adding what is missing withdraws it first and submits a new one, so the approval starts over.'));
+  }
+  if (!await prompter.confirm(t('扫码把缺的补上？要你是这个应用的所有者或管理员', 'Scan to add what is missing? You need to own or administer the app'),
+    !inspected.pendingReview)) {
+    return inspected;
+  }
+  let updated;
+  try {
+    updated = await registerApp({ plan: agent, prompter, scopes, mode: 'update', appId: inspected.appId, ...(register ? { register } : {}) });
+  } catch (error) {
+    if (!(error instanceof LarkRegistrationError)) throw error;
+    prompter.warn(t(`应用没有更新（${error.code}）：${error.message}`, `The app was not updated (${error.code}): ${error.message}`));
+    return inspected;
+  }
+  if (!updated) {
+    prompter.info(t('跳过了，应用没有改动', 'Skipped; the app is unchanged'));
+    return inspected;
+  }
+  prompter.success(t('平台已确认', 'The platform confirmed it'));
+  const after = await read();
+  if (after) reportApp(prompter, scopes, after);
+  return after ?? inspected;
 }
 
 async function restart({ agent, prompter, env, control }) {
@@ -41,10 +90,10 @@ async function restart({ agent, prompter, env, control }) {
 export async function loginCommand([connector, requested, ...extra], {
   prompter,
   env = process.env,
-  connect = { weixin: connectWeixin, telegram: connectTelegram, qq: connectQQ, email: askEmail },
+  connect = { weixin: connectWeixin, telegram: connectTelegram, slack: connectSlack, qq: connectQQ, email: askEmail },
   control = { restart: restartCommand, stop: stopCommand },
 } = {}) {
-  if (!['lark', 'weixin', 'email', 'telegram', 'qq'].includes(connector) || extra.length) {
+  if (!['lark', 'weixin', 'email', 'telegram', 'slack', 'qq'].includes(connector) || extra.length) {
     prompter.write(usage());
     return 2;
   }
@@ -61,7 +110,8 @@ export async function loginCommand([connector, requested, ...extra], {
   if (having.agents.length === 0) throw new Error(t(`还没有实例接${label}；要接入，运行 vika setup 修改实例`, `No instance has ${label}; to connect it, change an instance with vika setup`));
   const agent = await chooseInstance({ deployment: having, requested, prompter, question: t(`重新授权哪个实例的${label}`, `Which instance's ${label} to authorize again`) });
 
-  if (connector === 'telegram' || connector === 'qq') {
+  // Only one receiver at a time: the instance stops while the new tokens are checked.
+  if (['telegram', 'slack', 'qq'].includes(connector)) {
     prompter.write(t(`验证新密钥时会暂时停止这个实例，避免同时接收 ${label} 消息；完成后重新启动。\n`,
       'The instance stops while the new credentials are checked, so nothing else receives its messages; it starts again afterwards.\n'));
     await control.stop(agent.id, { env });
@@ -99,7 +149,9 @@ export async function loginCommand([connector, requested, ...extra], {
   const bin = larkCliBin(env, deployment);
   if (!bin) throw new Error(t('找不到 lark-cli：这个安装不完整，重新运行安装脚本', 'lark-cli is missing: this install is incomplete, run the installer again'));
   const larkCli = new LarkCli(bin);
-  const login = await larkCli.beginUserLogin({ profile: agent.profile, scopes: larkScopes().user });
+  const scopes = larkScopes();
+  const inspected = await completeApp({ agent, prompter, larkCli, scopes, register: connect.register });
+  const login = await larkCli.beginUserLogin({ profile: agent.profile, scopes: grantedUserScopes(scopes, inspected) });
   const scan = showScan(prompter, {
     url: login.url, where: IM_LABELS.lark, label: t('等待授权', 'Waiting for authorization'),
     title: t(`扫码重新授权 ${agent.displayName}（${agent.profile}）以你的身份读消息`, `Scan to let ${agent.displayName} (${agent.profile}) read messages as you again`),
