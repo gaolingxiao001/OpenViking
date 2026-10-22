@@ -4,6 +4,7 @@ import pytest
 
 from benchmark.gacc import adapters, core, records, report
 from benchmark.gacc.run_eval import _effective_config
+from openviking.session.retention import RETENTION_MODE_TURN_BUDGET
 
 
 def _write_jsonl(path, rows):
@@ -86,17 +87,75 @@ def test_artifact_paths_are_stable_and_condition_specific(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ov_compression_adapter_outputs_final_messages_and_metrics():
+async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
+    def fail_compression_prompt(*args, **kwargs):
+        raise AssertionError("ov adapter must not use the local GACC compression prompt")
+
+    monkeypatch.setattr(core, "build_compression_prompt", fail_compression_prompt)
+
     class FakeVLM:
         model = "fake-model"
+        calls = []
 
         async def get_completion_async(self, **kwargs):
-            assert "Compress SOURCE_CONTEXT" in kwargs["prompt"]
-            assert kwargs["max_tokens"] > 0
-            return "alpha beta"
+            self.calls.append(kwargs)
+            raise AssertionError("ov adapter must not call the compressor VLM directly")
+
+    class FakeSession:
+        def __init__(self, session_id):
+            self.session_id = session_id
+            self.added_messages = None
+            self.commit_kwargs = None
+            self.context_budget = None
+
+        async def add_messages_async(self, messages):
+            self.added_messages = messages
+            return []
+
+        async def commit_async(self, **kwargs):
+            self.commit_kwargs = kwargs
+            return {
+                "status": "skipped",
+                "task_id": None,
+                "archive_uri": "viking://archive/test",
+                "estimated_active_tokens": 2,
+                "budget_exceeded": False,
+            }
+
+        async def get_session_context(self, token_budget):
+            self.context_budget = token_budget
+            return {
+                "latest_archive_overview": "summary alpha beta",
+                "messages": [
+                    {
+                        "role": "user",
+                        "parts": [{"type": "text", "text": "tail gamma"}],
+                    }
+                ],
+                "estimatedTokens": core.count_tokens("summary alpha beta tail gamma"),
+                "stats": {
+                    "totalArchives": 1,
+                    "includedArchives": 0,
+                    "droppedArchives": 0,
+                    "failedArchives": 0,
+                    "activeTokens": core.count_tokens("tail gamma"),
+                    "archiveTokens": core.count_tokens("summary alpha beta"),
+                },
+            }
+
+    created = []
+
+    async def session_factory(request, session_id, memory_policy):
+        session = FakeSession(session_id)
+        created.append((request, session_id, memory_policy, session))
+        return session
 
     bundle = core.GACCBundle.from_mapping(_row())
-    adapter = adapters.OVCompressionAdapter(FakeVLM(), model="fake-model")
+    adapter = adapters.OVCompressionAdapter(
+        FakeVLM(),
+        model="fake-model",
+        session_factory=session_factory,
+    )
 
     baseline = await adapter.compress(
         adapters.CompressionRequest(
@@ -122,9 +181,31 @@ async def test_ov_compression_adapter_outputs_final_messages_and_metrics():
     )
 
     assert compressed.condition == "ratio_0_5"
-    assert compressed.final_messages == [{"role": "user", "content": "alpha beta"}]
+    assert compressed.final_messages == [
+        {"role": "assistant", "content": "OpenViking latest_archive_overview:\nsummary alpha beta"},
+        {"role": "user", "content": "tail gamma"},
+    ]
     assert compressed.token_metrics["target_ratio"] == 0.5
     assert compressed.effective_options["model"] == "fake-model"
+    assert compressed.effective_options["mode"] == "ov_session_retention"
+    assert compressed.effective_options["retention"]["mode"] == RETENTION_MODE_TURN_BUDGET
+    assert len(created) == 1
+    _request, session_id, memory_policy, session = created[0]
+    assert "goal-1" not in session_id
+    assert memory_policy == {
+        "self": {"enabled": False},
+        "peer": {"enabled": False},
+        "memory_types": [],
+        "working_memory": {"enabled": True},
+    }
+    assert session.added_messages[0]["role"] == "user"
+    assert "GACC goal" in session.added_messages[0]["parts"][0].text
+    assert session.commit_kwargs["retention_mode"] == RETENTION_MODE_TURN_BUDGET
+    assert session.commit_kwargs["retained_message_token_budget"] == core.budget_tokens(
+        bundle, 0.5
+    )
+    assert session.commit_kwargs["enable_working_memory"] is True
+    assert session.context_budget == core.budget_tokens(bundle, 0.5)
 
 
 def test_sqlite_record_layer_tracks_repeats_and_conditions(tmp_path):

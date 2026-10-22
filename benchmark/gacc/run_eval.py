@@ -374,8 +374,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     if not judge.is_available():
         raise RuntimeError("judge VLM is not configured")
 
+    adapter = adapters.OVCompressionAdapter(
+        compressor,
+        model=compressor.model,
+        state_root=root / "ov_state" / args.run_id,
+    )
     try:
-        adapter = adapters.OVCompressionAdapter(compressor, model=compressor.model)
         rows = []
         with records.connect(root / "gacc.sqlite") as conn:
             records.record_run(
@@ -446,6 +450,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         _print_summary(metrics, root)
         return {**metrics, "run_id": args.run_id, "output": str(root)}
     finally:
+        await adapter.close()
         for config in (compressor, reader, judge):
             close = getattr(config, "close", None)
             if callable(close):
