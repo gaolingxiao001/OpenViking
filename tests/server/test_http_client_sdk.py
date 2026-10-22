@@ -324,6 +324,7 @@ async def test_sdk_commit_session_sends_turn_budget_retention_fields():
         retention_mode="turn_budget",
         keep_recent_turn_count=3,
         retained_message_token_budget=12_000,
+        summary_tokens=48_000,
         min_raw_tail_steps=1,
     )
 
@@ -337,6 +338,7 @@ async def test_sdk_commit_session_sends_turn_budget_retention_fields():
                 "retention_mode": "turn_budget",
                 "keep_recent_turn_count": 3,
                 "retained_message_token_budget": 12_000,
+                "summary_tokens": 48_000,
                 "min_raw_tail_steps": 1,
             },
         )

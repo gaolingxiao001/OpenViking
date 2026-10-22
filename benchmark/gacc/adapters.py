@@ -39,6 +39,8 @@ class OVCompressionAdapter:
     """OpenViking session-retention adapter for GACC-Bench."""
 
     name = "ov"
+    _RETAINED_BUDGET_RATIO = 0.2
+    _SUMMARY_BUDGET_RATIO = 0.8
 
     _MEMORY_POLICY = {
         "self": {"enabled": False},
@@ -99,6 +101,8 @@ class OVCompressionAdapter:
             )
 
         target_tokens = core.budget_tokens(bundle, request.target_ratio)
+        retained_budget_tokens = max(1, int(target_tokens * self._RETAINED_BUDGET_RATIO))
+        summary_budget_tokens = max(1, target_tokens - retained_budget_tokens)
         session = await self._create_session(
             request,
             session_id=session_id,
@@ -108,7 +112,8 @@ class OVCompressionAdapter:
         commit = await session.commit_async(
             retention_mode=RETENTION_MODE_TURN_BUDGET,
             keep_recent_turn_count=1,
-            retained_message_token_budget=target_tokens,
+            retained_message_token_budget=retained_budget_tokens,
+            summary_tokens=summary_budget_tokens,
             min_raw_tail_steps=1,
             enable_working_memory=True,
             memory_policy=self._MEMORY_POLICY,
@@ -125,6 +130,8 @@ class OVCompressionAdapter:
             token_metrics={
                 "source_tokens": source_tokens,
                 "target_tokens": target_tokens,
+                "retained_budget_tokens": retained_budget_tokens,
+                "summary_budget_tokens": summary_budget_tokens,
                 "final_tokens": final_tokens,
                 "target_ratio": request.target_ratio,
                 "actual_ratio": final_tokens / source_tokens if source_tokens else None,
@@ -140,7 +147,10 @@ class OVCompressionAdapter:
                 "retention": {
                     "mode": RETENTION_MODE_TURN_BUDGET,
                     "keep_recent_turn_count": 1,
-                    "retained_message_token_budget": target_tokens,
+                    "retained_budget_ratio": self._RETAINED_BUDGET_RATIO,
+                    "retained_message_token_budget": retained_budget_tokens,
+                    "summary_budget_ratio": self._SUMMARY_BUDGET_RATIO,
+                    "summary_tokens": summary_budget_tokens,
                     "min_raw_tail_steps": 1,
                 },
                 "commit": self._compact_commit_result(commit),

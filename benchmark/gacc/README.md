@@ -125,6 +125,12 @@ Run the full benchmark:
 `-1` means no compression and is the baseline. Ratios between 0 and 1 ask the
 adapter to target that share of the original context tokens.
 
+For compressed OV runs, the adapter uses 20% of the target budget as raw
+retained-message budget and passes the remaining 80% to OV as `summary_tokens`.
+OV applies that as a hard Working Memory summary budget: if an incremental update
+would exceed it, OV rewrites the full summary with that output cap. The total
+returned context is still bounded by the requested target ratio.
+
 `gacc.sqlite` is the primary record layer. `metrics.json` and `report.html`
 summarize condition and dataset-subset accuracy, token ratios and failures.
 `results.jsonl` keeps per-question rows for lightweight debugging.

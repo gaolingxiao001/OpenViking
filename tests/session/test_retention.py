@@ -203,6 +203,13 @@ def test_turn_retention_fields_require_explicit_mode_opt_in():
     assert request.retention_mode == "turn_budget"
 
 
+def test_summary_tokens_is_independent_commit_budget():
+    request = CommitRequest(summary_tokens=4096)
+
+    assert request.summary_tokens == 4096
+    assert request.retention_mode is None
+
+
 def test_active_budget_keeps_latest_anchor_and_final_without_mutating_raw():
     user_text = "latest query"
     final_text = "F" * 1200

@@ -629,6 +629,15 @@ class CommitRequest(BaseModel):
         ge=1,
         description="Token budget for retained raw messages and checkpoint.",
     )
+    summary_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Hard token budget for the generated Working Memory summary. "
+            "When an incremental update exceeds this budget, OV rewrites the "
+            "full summary with this output cap instead of appending again."
+        ),
+    )
     min_raw_tail_steps: Optional[int] = Field(
         default=None,
         ge=0,
@@ -682,6 +691,7 @@ async def commit_session(
         "retention_mode": body.retention_mode,
         "keep_recent_turn_count": body.keep_recent_turn_count,
         "retained_message_token_budget": body.retained_message_token_budget,
+        "summary_tokens": body.summary_tokens,
         "min_raw_tail_steps": body.min_raw_tail_steps,
     }
     commit_kwargs.update(

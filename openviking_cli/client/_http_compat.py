@@ -177,6 +177,7 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
         retention_mode: str | None = None,
         keep_recent_turn_count: int | None = None,
         retained_message_token_budget: int | None = None,
+        summary_tokens: int | None = None,
         min_raw_tail_steps: int | None = None,
         event_tags: list[str] | None = None,
     ) -> Dict[str, Any]:
@@ -190,6 +191,7 @@ class AsyncHTTPClient(import_openviking_sdk().AsyncHTTPClient):
             "retention_mode": retention_mode,
             "keep_recent_turn_count": keep_recent_turn_count,
             "retained_message_token_budget": retained_message_token_budget,
+            "summary_tokens": summary_tokens,
             "min_raw_tail_steps": min_raw_tail_steps,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
@@ -235,6 +237,7 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
         retention_mode: str | None = None,
         keep_recent_turn_count: int | None = None,
         retained_message_token_budget: int | None = None,
+        summary_tokens: int | None = None,
         min_raw_tail_steps: int | None = None,
         event_tags: list[str] | None = None,
     ) -> Dict[str, Any]:
@@ -247,6 +250,7 @@ class SyncHTTPClient(import_openviking_sdk().SyncHTTPClient):
                 retention_mode=retention_mode,
                 keep_recent_turn_count=keep_recent_turn_count,
                 retained_message_token_budget=retained_message_token_budget,
+                summary_tokens=summary_tokens,
                 min_raw_tail_steps=min_raw_tail_steps,
                 event_tags=event_tags,
             )

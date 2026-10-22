@@ -259,6 +259,7 @@ class _ArchiveSummaryResult:
 
     overview: str
     checkpoint_summaries: tuple[str, ...] = ()
+    summary_metrics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -1138,12 +1139,14 @@ class Session:
         *,
         keep_recent_turn_count: int,
         retained_message_token_budget: int,
+        summary_tokens: int,
         min_raw_tail_steps: int,
     ) -> Dict[str, Any]:
         return {
             "mode": RETENTION_MODE_TURN_BUDGET,
             "keep_recent_turn_count": keep_recent_turn_count,
             "retained_message_token_budget": retained_message_token_budget,
+            "summary_tokens": summary_tokens,
             "min_raw_tail_steps": min_raw_tail_steps,
             "partial_turn": plan.partial_turn,
             "turn_anchor_message_id": plan.turn_anchor.id if plan.turn_anchor else None,
@@ -1165,6 +1168,7 @@ class Session:
         retention_mode: Optional[str],
         keep_recent_turn_count: int,
         retained_message_token_budget: int,
+        summary_tokens: int,
         min_raw_tail_steps: int,
         agent_evolution_enabled: bool = True,
         agent_memory_skip_reason: Optional[str] = None,
@@ -1183,6 +1187,7 @@ class Session:
             "retention_mode": retention_mode or "",
             "keep_recent_turn_count": keep_recent_turn_count,
             "retained_message_token_budget": retained_message_token_budget,
+            "summary_tokens": summary_tokens,
             "min_raw_tail_steps": min_raw_tail_steps,
         }
         await self._merge_archive_meta(
@@ -1350,6 +1355,7 @@ class Session:
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
+        summary_tokens: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Sync wrapper for commit_async()."""
@@ -1361,6 +1367,7 @@ class Session:
                 retention_mode=retention_mode,
                 keep_recent_turn_count=keep_recent_turn_count,
                 retained_message_token_budget=retained_message_token_budget,
+                summary_tokens=summary_tokens,
                 min_raw_tail_steps=min_raw_tail_steps,
             )
         )
@@ -1375,6 +1382,7 @@ class Session:
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
+        summary_tokens: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
         persist_keep_recent_count: bool = True,
         record_auto_commit_success: bool = False,
@@ -1447,9 +1455,14 @@ class Session:
             0,
             int(12_000 if retained_message_token_budget is None else retained_message_token_budget),
         )
+        effective_summary_tokens = (
+            max(0, int(summary_tokens or 0)) if summary_tokens is not None else 0
+        )
         effective_min_tail = max(0, int(1 if min_raw_tail_steps is None else min_raw_tail_steps))
         if turn_mode and effective_token_budget <= 0:
             raise ValueError("retained_message_token_budget must be greater than 0")
+        if summary_tokens is not None and effective_summary_tokens <= 0:
+            raise ValueError("summary_tokens must be greater than 0")
         if enable_working_memory is not None and not isinstance(enable_working_memory, bool):
             raise ValueError("enable_working_memory must be a boolean or null")
         in_memory_default_memory_policy = self._meta.memory_policy
@@ -1482,7 +1495,8 @@ class Session:
             f"[TRACER] session_commit started, trace_id={trace_id}, "
             f"keep_recent_count={keep_recent_count}, retention_mode={retention_mode}, "
             f"keep_recent_turn_count={effective_keep_turns}, "
-            f"retained_message_token_budget={effective_token_budget}"
+            f"retained_message_token_budget={effective_token_budget}, "
+            f"summary_tokens={effective_summary_tokens or None}"
         )
 
         # ===== Phase 1: authoritative snapshot + split (path-lock protected) =====
@@ -1654,6 +1668,7 @@ class Session:
                 record_auto_commit_success=record_auto_commit_success,
                 event_search_tags=list(effective_event_tags),
                 auto_commit_policy=dict(self._meta.auto_commit_policy or {}),
+                summary_tokens=effective_summary_tokens,
             )
             phase1_stage = "phase1_persist"
             try:
@@ -1668,6 +1683,7 @@ class Session:
                         retention_mode=retention_mode,
                         keep_recent_turn_count=effective_keep_turns if turn_mode else 0,
                         retained_message_token_budget=effective_token_budget if turn_mode else 0,
+                        summary_tokens=effective_summary_tokens,
                         min_raw_tail_steps=effective_min_tail,
                         agent_evolution_enabled=agent_evolution_enabled,
                         agent_memory_skip_reason=agent_memory_skip_reason,
@@ -1697,6 +1713,7 @@ class Session:
                                 retention_plan,
                                 keep_recent_turn_count=effective_keep_turns,
                                 retained_message_token_budget=effective_token_budget,
+                                summary_tokens=effective_summary_tokens,
                                 min_raw_tail_steps=effective_min_tail,
                             )
                         },
@@ -2035,6 +2052,7 @@ class Session:
             record_auto_commit_success=msg.record_auto_commit_success,
             event_search_tags=list(msg.event_search_tags or []),
             auto_commit_policy=msg.auto_commit_policy,
+            summary_tokens=msg.summary_tokens,
         )
         return True
 
@@ -2164,6 +2182,7 @@ class Session:
         record_auto_commit_success: bool = False,
         event_search_tags: Optional[List[str]] = None,
         auto_commit_policy: Optional[Dict[str, Any]] = None,
+        summary_tokens: int = 0,
     ) -> None:
         """Phase 2: Extract memories and enqueue semantic work in the background."""
         from openviking.service.task_tracker import get_task_tracker
@@ -2249,6 +2268,8 @@ class Session:
                         summary_kwargs: Dict[str, Any] = {
                             "latest_archive_overview": latest_archive_overview,
                         }
+                        if summary_tokens > 0:
+                            summary_kwargs["summary_tokens"] = summary_tokens
                         if checkpoint_requests:
                             summary_kwargs["checkpoint_requests"] = checkpoint_requests
                         summary_batches = plan_extraction_batches(
@@ -2312,14 +2333,14 @@ class Session:
                                 ),
                                 ctx=self.ctx,
                             )
-                            await self._merge_archive_meta(
-                                archive_uri,
-                                {
-                                    "overview_tokens": estimate_text_tokens(summary),
-                                    "abstract_tokens": estimate_text_tokens(abstract),
-                                    "checkpoints": checkpoint_records,
-                                },
-                            )
+                            summary_meta = {
+                                "overview_tokens": estimate_text_tokens(summary),
+                                "abstract_tokens": estimate_text_tokens(abstract),
+                                "checkpoints": checkpoint_records,
+                            }
+                            if summary_result.summary_metrics:
+                                summary_meta["summary_metrics"] = summary_result.summary_metrics
+                            await self._merge_archive_meta(archive_uri, summary_meta)
 
                     async def _run_retryable_phase2_step(
                         operation_name: str,
@@ -3123,13 +3144,15 @@ class Session:
         *,
         latest_archive_overview: str,
         limits: ExtractionBatchLimits,
-    ) -> str:
+        summary_tokens: int = 0,
+    ) -> str | _ArchiveSummaryResult:
         messages = [message for batch in batches for message in batch.messages]
         vlm = await self._get_vlm_config()
         if not (vlm and vlm.is_available()):
             return await self._generate_archive_summary_async(
                 messages,
                 latest_archive_overview=latest_archive_overview,
+                summary_tokens=summary_tokens,
             )
         try:
             _load_render_prompt()
@@ -3137,6 +3160,7 @@ class Session:
             return await self._generate_archive_summary_async(
                 messages,
                 latest_archive_overview=latest_archive_overview,
+                summary_tokens=summary_tokens,
             )
 
         logger.info(
@@ -3147,17 +3171,28 @@ class Session:
             limits.max_messages,
         )
         current_overview = latest_archive_overview
+        current_metrics: Dict[str, Any] = {}
 
         for batch in batches:
             batch_messages = list(batch.messages)
             generated = await self._generate_archive_summary_async(
                 batch_messages,
                 latest_archive_overview=current_overview,
+                summary_tokens=summary_tokens,
             )
-            current_overview = (
-                generated.overview
-                if isinstance(generated, _ArchiveSummaryResult)
-                else str(generated or "")
+            if isinstance(generated, _ArchiveSummaryResult):
+                current_overview = generated.overview
+                current_metrics = generated.summary_metrics
+            else:
+                current_overview = str(generated or "")
+        if summary_tokens > 0:
+            return _ArchiveSummaryResult(
+                overview=current_overview,
+                summary_metrics=current_metrics
+                or self._summary_budget_metrics(
+                    current_overview,
+                    summary_tokens,
+                ),
             )
         return current_overview
 
@@ -3166,6 +3201,7 @@ class Session:
         messages: List[Message],
         latest_archive_overview: str = "",
         checkpoint_requests: Optional[List[_CheckpointRequest]] = None,
+        summary_tokens: int = 0,
     ) -> str | _ArchiveSummaryResult:
         """Generate Working Memory document for the current archive (async).
 
@@ -3181,7 +3217,8 @@ class Session:
         """
         wm.wm_debug(
             f"_generate_archive_summary_async called "
-            f"messages={len(messages)} prior_wm={len(latest_archive_overview)}B"
+            f"messages={len(messages)} prior_wm={len(latest_archive_overview)}B "
+            f"summary_tokens={summary_tokens or None}"
         )
         checkpoint_requests = list(checkpoint_requests or [])
         if not messages:
@@ -3244,14 +3281,19 @@ class Session:
                 },
             )
             if checkpoint_requests:
-                response = await vlm.get_completion_async(
-                    prompt=prompt,
-                    tools=[WM_CREATE_WITH_CHECKPOINTS_TOOL],
-                    tool_choice=(
+                create_kwargs: Dict[str, Any] = {
+                    "prompt": prompt,
+                    "tools": [WM_CREATE_WITH_CHECKPOINTS_TOOL],
+                    "tool_choice": (
                         "auto"
                         if getattr(vlm, "thinking", False)
                         else {"type": "function", "function": {"name": "create_working_memory"}}
                     ),
+                }
+                if summary_tokens > 0:
+                    create_kwargs["max_tokens"] = summary_tokens
+                response = await vlm.get_completion_async(
+                    **create_kwargs,
                 )
                 if not (
                     getattr(response, "has_tool_calls", False)
@@ -3273,6 +3315,22 @@ class Session:
                     checkpoint_summaries=wm.parse_required_checkpoint_summaries(
                         args,
                         len(checkpoint_requests),
+                    ),
+                    summary_metrics=self._summary_budget_metrics(
+                        working_memory,
+                        summary_tokens,
+                    ),
+                )
+            if summary_tokens > 0:
+                overview = await vlm.get_completion_async(
+                    prompt=prompt,
+                    max_tokens=summary_tokens,
+                )
+                return _ArchiveSummaryResult(
+                    overview=str(overview or ""),
+                    summary_metrics=self._summary_budget_metrics(
+                        str(overview or ""),
+                        summary_tokens,
                     ),
                 )
             return await vlm.get_completion_async(prompt)
@@ -3315,9 +3373,24 @@ class Session:
             if checkpoint_requests:
                 raise ValueError("Working Memory update returned no tool call for checkpoints")
             logger.warning("WM update: LLM returned no tool_call; falling back to creation prompt")
-            return await self._fallback_generate_wm_creation(
-                formatted, messages, latest_archive_overview, output_language
+            overview = await self._fallback_generate_wm_creation(
+                formatted,
+                messages,
+                latest_archive_overview,
+                output_language,
+                summary_tokens=summary_tokens,
             )
+            if summary_tokens > 0:
+                return _ArchiveSummaryResult(
+                    overview=overview,
+                    summary_metrics=self._summary_budget_metrics(
+                        overview,
+                        summary_tokens,
+                        rewrite_triggered=True,
+                        rewrite_reason="update_tool_missing",
+                    ),
+                )
+            return overview
 
         checkpoint_summaries: tuple[str, ...] = ()
         try:
@@ -3409,28 +3482,135 @@ class Session:
                     len(salvaged),
                     len(WM_SEVEN_SECTIONS),
                 )
-                return wm.merge_wm_sections(latest_archive_overview, salvaged)
+                overview = wm.merge_wm_sections(latest_archive_overview, salvaged)
+                return await self._enforce_summary_token_budget(
+                    formatted_messages=formatted,
+                    messages=messages,
+                    prior_overview=latest_archive_overview,
+                    output_language=output_language,
+                    overview=overview,
+                    summary_tokens=summary_tokens,
+                )
             wm.wm_debug("regex recovery salvaged 0 sections; falling back to creation prompt")
             logger.warning(
                 "WM update: tool_call arguments parse failed (%s); "
                 "regex recovery found nothing; falling back to creation prompt",
                 e,
             )
-            return await self._fallback_generate_wm_creation(
-                formatted, messages, latest_archive_overview, output_language
+            overview = await self._fallback_generate_wm_creation(
+                formatted,
+                messages,
+                latest_archive_overview,
+                output_language,
+                summary_tokens=summary_tokens,
             )
+            if summary_tokens > 0:
+                return _ArchiveSummaryResult(
+                    overview=overview,
+                    summary_metrics=self._summary_budget_metrics(
+                        overview,
+                        summary_tokens,
+                        rewrite_triggered=True,
+                        rewrite_reason="update_parse_failed",
+                    ),
+                )
+            return overview
 
         wm.wm_debug(
             f"ops keys={list(ops.keys())[:7]} "
             f"ops_summary={[(k, v.get('op') if isinstance(v, dict) else type(v).__name__) for k, v in ops.items()][:7]}"
         )
         overview = wm.merge_wm_sections(latest_archive_overview, ops)
-        if checkpoint_requests:
+        return await self._enforce_summary_token_budget(
+            formatted_messages=formatted,
+            messages=messages,
+            prior_overview=latest_archive_overview,
+            output_language=output_language,
+            overview=overview,
+            summary_tokens=summary_tokens,
+            checkpoint_summaries=checkpoint_summaries,
+        )
+
+    @staticmethod
+    def _summary_budget_metrics(
+        overview: str,
+        summary_tokens: int,
+        *,
+        rewrite_triggered: bool = False,
+        rewrite_reason: str = "",
+        pre_rewrite_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if summary_tokens <= 0:
+            return {}
+        overview_tokens = estimate_text_tokens(overview)
+        budget_exceeded = overview_tokens > summary_tokens
+        metrics: Dict[str, Any] = {
+            "summary_tokens": summary_tokens,
+            "overview_tokens": overview_tokens,
+            "summary_budget_exceeded": budget_exceeded,
+            "rewrite_triggered": rewrite_triggered,
+        }
+        if pre_rewrite_tokens is not None:
+            metrics["pre_rewrite_tokens"] = pre_rewrite_tokens
+            metrics["summary_budget_exceeded"] = pre_rewrite_tokens > summary_tokens
+            metrics["final_summary_budget_exceeded"] = budget_exceeded
+        if rewrite_reason:
+            metrics["rewrite_reason"] = rewrite_reason
+        return metrics
+
+    async def _enforce_summary_token_budget(
+        self,
+        *,
+        formatted_messages: str,
+        messages: List[Message],
+        prior_overview: str,
+        output_language: str,
+        overview: str,
+        summary_tokens: int,
+        checkpoint_summaries: tuple[str, ...] = (),
+    ) -> str | _ArchiveSummaryResult:
+        if summary_tokens <= 0:
+            if checkpoint_summaries:
+                return _ArchiveSummaryResult(
+                    overview=overview,
+                    checkpoint_summaries=checkpoint_summaries,
+                )
+            return overview
+
+        overview_tokens = estimate_text_tokens(overview)
+        if overview_tokens <= summary_tokens:
             return _ArchiveSummaryResult(
                 overview=overview,
                 checkpoint_summaries=checkpoint_summaries,
+                summary_metrics=self._summary_budget_metrics(
+                    overview,
+                    summary_tokens,
+                ),
             )
-        return overview
+
+        wm.wm_debug(
+            "summary_tokens exceeded after WM update; "
+            f"overview_tokens={overview_tokens} summary_tokens={summary_tokens}; "
+            "rewriting full Working Memory"
+        )
+        rewritten = await self._fallback_generate_wm_creation(
+            formatted_messages,
+            messages,
+            prior_overview,
+            output_language,
+            summary_tokens=summary_tokens,
+        )
+        return _ArchiveSummaryResult(
+            overview=rewritten,
+            checkpoint_summaries=checkpoint_summaries,
+            summary_metrics=self._summary_budget_metrics(
+                rewritten,
+                summary_tokens,
+                rewrite_triggered=True,
+                rewrite_reason="summary_tokens_exceeded",
+                pre_rewrite_tokens=overview_tokens,
+            ),
+        )
 
     async def _fallback_generate_wm_creation(
         self,
@@ -3438,6 +3618,7 @@ class Session:
         messages: List[Message],
         prior_overview: str = "",
         output_language: str = "en",
+        summary_tokens: int = 0,
     ) -> str:
         """Regenerate WM when a successful update response cannot be parsed.
 
@@ -3460,7 +3641,14 @@ class Session:
             },
         )
         vlm = await self._get_vlm_config()
-        return await vlm.get_completion_async(prompt)
+        if summary_tokens > 0:
+            response = await vlm.get_completion_async(
+                prompt=prompt,
+                max_tokens=summary_tokens,
+            )
+        else:
+            response = await vlm.get_completion_async(prompt)
+        return str(response or "")
 
     async def _write_to_agfs_async(
         self,

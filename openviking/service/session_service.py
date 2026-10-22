@@ -417,6 +417,7 @@ class SessionService:
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
+        summary_tokens: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
@@ -440,6 +441,7 @@ class SessionService:
             retention_mode=retention_mode,
             keep_recent_turn_count=keep_recent_turn_count,
             retained_message_token_budget=retained_message_token_budget,
+            summary_tokens=summary_tokens,
             min_raw_tail_steps=min_raw_tail_steps,
             event_tags=event_tags,
             reset_context=reset_context,
@@ -455,6 +457,7 @@ class SessionService:
         retention_mode: Optional[str] = None,
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
+        summary_tokens: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
         event_tags: Optional[List[str]] = None,
         reset_context: bool = False,
@@ -481,6 +484,7 @@ class SessionService:
             "retention_mode": retention_mode,
             "keep_recent_turn_count": keep_recent_turn_count,
             "retained_message_token_budget": retained_message_token_budget,
+            "summary_tokens": summary_tokens,
             "min_raw_tail_steps": min_raw_tail_steps,
         }
         commit_kwargs.update(

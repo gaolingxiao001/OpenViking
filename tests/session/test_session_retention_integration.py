@@ -702,10 +702,9 @@ async def test_phase2_persists_checkpoint_from_same_summary_call(
 
 
 async def test_wm_creation_returns_two_products_in_one_model_call(
-    client,
     monkeypatch,
 ):
-    session = client(session_id="single_call_checkpoint_generation_test")
+    session = Session(viking_fs=None)
     calls: list[dict] = []
 
     class FakeVLM:
@@ -751,12 +750,14 @@ async def test_wm_creation_returns_two_products_in_one_model_call(
                 estimated_active_tokens=100,
             )
         ],
+        summary_tokens=128,
     )
 
     assert isinstance(result, _ArchiveSummaryResult)
     assert result.checkpoint_summaries == ("Queried the service and found pool saturation.",)
     assert len(calls) == 1
     assert calls[0]["tools"][0]["function"]["name"] == "create_working_memory"
+    assert calls[0]["max_tokens"] == 128
     assert '<checkpoint_source index="0">' in calls[0]["prompt"]
     assert calls[0]["prompt"].count("queried the service") == 1
     assert "secret-anchor-id" not in calls[0]["prompt"]
@@ -828,10 +829,9 @@ async def test_wm_creation_detects_language_from_multiline_user_message(client, 
 
 
 async def test_wm_update_returns_two_products_in_one_model_call(
-    client,
     monkeypatch,
 ):
-    session = client(session_id="single_call_checkpoint_update_test")
+    session = Session(viking_fs=None)
     calls: list[dict] = []
 
     class FakeVLM:
@@ -922,6 +922,90 @@ Confirm the database state.
     assert '<checkpoint_previous index="0">' in calls[0]["prompt"]
     assert "Queried the service and found pool saturation." in calls[0]["prompt"]
     assert "Never return only the new delta" in calls[0]["prompt"]
+
+
+async def test_wm_update_over_summary_tokens_triggers_full_rewrite(monkeypatch):
+    session = Session(viking_fs=None)
+    calls: list[dict] = []
+    compact = "# Working Memory\n\n## Session Title\nBudgeted rewrite"
+
+    class FakeVLM:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        async def get_completion_async(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("tools"):
+                return VLMResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="tool-call-1",
+                            name="update_working_memory",
+                            arguments={
+                                "sections": {
+                                    name: (
+                                        {
+                                            "op": "APPEND",
+                                            "items": ["oversized detail " * 200],
+                                        }
+                                        if name == "Key Facts & Decisions"
+                                        else {"op": "KEEP"}
+                                    )
+                                    for name in wm.WM_SEVEN_SECTIONS
+                                }
+                            },
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return compact
+
+    vlm = FakeVLM()
+    session._vlm_resolver = SimpleNamespace(get_vlm=AsyncMock(return_value=vlm))
+    monkeypatch.setattr(
+        "openviking.session.session.get_openviking_config",
+        lambda: SimpleNamespace(vlm=vlm),
+    )
+    prior = """# Working Memory
+
+## Session Title
+Budget test
+
+## Current State
+Existing state.
+
+## Task & Goals
+Keep summary bounded.
+
+## Key Facts & Decisions
+- Existing fact.
+
+## Files & Context
+None.
+
+## Errors & Corrections
+None.
+
+## Open Issues
+None.
+"""
+
+    result = await session._generate_archive_summary_async(
+        [_text_message("source-id", "assistant", "new fact")],
+        latest_archive_overview=prior,
+        summary_tokens=20,
+    )
+
+    assert isinstance(result, _ArchiveSummaryResult)
+    assert result.overview == compact
+    assert result.summary_metrics["summary_tokens"] == 20
+    assert result.summary_metrics["rewrite_triggered"] is True
+    assert result.summary_metrics["rewrite_reason"] == "summary_tokens_exceeded"
+    assert len(calls) == 2
+    assert calls[0]["tools"][0]["function"]["name"] == "update_working_memory"
+    assert "tools" not in calls[1]
+    assert calls[1]["max_tokens"] == 20
 
 
 async def test_roll_forward_collects_multiple_checkpoint_requests(

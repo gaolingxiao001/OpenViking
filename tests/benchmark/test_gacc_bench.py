@@ -201,11 +201,19 @@ async def test_ov_compression_adapter_uses_session_retention_path(monkeypatch):
     assert session.added_messages[0]["role"] == "user"
     assert "GACC goal" in session.added_messages[0]["parts"][0].text
     assert session.commit_kwargs["retention_mode"] == RETENTION_MODE_TURN_BUDGET
-    assert session.commit_kwargs["retained_message_token_budget"] == core.budget_tokens(
-        bundle, 0.5
-    )
+    target_tokens = core.budget_tokens(bundle, 0.5)
+    retained_budget = max(1, int(target_tokens * 0.2))
+    summary_budget = max(1, target_tokens - retained_budget)
+    assert session.commit_kwargs["retained_message_token_budget"] == retained_budget
+    assert session.commit_kwargs["summary_tokens"] == summary_budget
     assert session.commit_kwargs["enable_working_memory"] is True
-    assert session.context_budget == core.budget_tokens(bundle, 0.5)
+    assert session.context_budget == target_tokens
+    assert compressed.token_metrics["target_tokens"] == target_tokens
+    assert compressed.token_metrics["retained_budget_tokens"] == retained_budget
+    assert compressed.token_metrics["summary_budget_tokens"] == summary_budget
+    assert compressed.effective_options["retention"]["retained_budget_ratio"] == 0.2
+    assert compressed.effective_options["retention"]["summary_budget_ratio"] == 0.8
+    assert compressed.effective_options["retention"]["summary_tokens"] == summary_budget
 
 
 def test_sqlite_record_layer_tracks_repeats_and_conditions(tmp_path):
