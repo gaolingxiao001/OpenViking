@@ -6,13 +6,14 @@ import { loginWeixin } from '../../daemon/src/weixin/auth.mjs';
 import { WeixinState } from '../../daemon/src/weixin/state.mjs';
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { managedPiBin } from '../../daemon/src/pi-runtime.mjs';
+import { resolveRolePromptPath } from '../../daemon/src/conversation-policy.mjs';
 import { LarkCli } from './lark-cli.mjs';
 import {
   LarkCredentialsError, grantedUserScopes, inspectApp, lacksAny, missingConfig, scanApp, tenantToken,
 } from './lark-app.mjs';
 import {
-  WEB_PORT, allocatePort, availableInstanceOvConfig, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand, vikaHome,
-  withChangedInstance, withInstance, writeManifest,
+  ROLE_PRESETS, WEB_PORT, allocatePort, availableInstanceOvConfig, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand,
+  vikaHome, withChangedInstance, withInstance, writeManifest,
 } from './manifest.mjs';
 import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
 import { configureOpenViking, prepareInstanceOpenViking, saveOVConnection } from './ov-setup.mjs';
@@ -168,6 +169,10 @@ function initialState({ id, env, homeDir, current, runtimes, kept }) {
     id,
     dataDir: current?.dataDir ?? path.join(vikaHome(env), 'data', id),
     displayName: current?.displayName ?? 'Vika',
+    // A shipped role by name, or the absolute path of the owner's own file;
+    // roleSeed is the role a new file of theirs starts from (written on save).
+    role: current ? current.role ?? null : ROLE_PRESETS[0],
+    roleSeed: null,
     workspace: current?.workspace ?? path.join(homeDir, 'vika-workspace', id),
     runtime: kept ?? runtimes.find((runtime) => runtime.available && (!current || runtime.model === current.model)),
     connectors,
@@ -214,6 +219,67 @@ async function askWorkspace({ prompter, env, homeDir }, state) {
       return null;
     },
   }), homeDir));
+}
+
+// What each shipped role is for, as setup offers it.
+const ROLE_CHOICES = () => ({
+  colleague: {
+    label: t('AI 同事', 'AI colleague'),
+    hint: t('你的 AI 分身：在工作群里像你一样答疑、跟进，和同事及其他 bot 协作', 'your AI counterpart: answers and follows up in work chats as you would, with colleagues and other bots'),
+  },
+  assistant: {
+    label: t('个人助理', 'Personal assistant'),
+    hint: t('只为你工作：记事、提醒，主动把值得知道的事告诉你', 'works for you alone: remembers, reminds, and tells you what is worth knowing'),
+  },
+  qa: {
+    label: t('答疑助手', 'Q&A assistant'),
+    hint: t('在答疑群里查证后把问题讲明白，注意隐私，无关的话题不接', 'answers questions in Q&A groups after checking the sources, guards privacy, skips what is off-topic'),
+  },
+});
+
+const customRole = (role) => Boolean(role) && path.isAbsolute(role);
+
+function roleShown(state, homeDir) {
+  if (!state.role) return t('没有设置（只用默认规则）', 'none (default rules only)');
+  return customRole(state.role) ? shortenHome(state.role, homeDir) : ROLE_CHOICES()[state.role].label;
+}
+
+async function askRole({ prompter, env, homeDir }, state) {
+  const choices = ROLE_CHOICES();
+  const options = [
+    ...ROLE_PRESETS.map((name) => ({ ...choices[name], value: name })),
+    { label: t('自己写 prompt', 'My own prompt'), hint: t('用你指定的 Markdown 文件，可以从上面任一个角色改起', 'a Markdown file of yours, which can start from any role above'), value: 'custom' },
+  ];
+  const at = customRole(state.role) ? options.length - 1 : Math.max(0, ROLE_PRESETS.indexOf(state.role));
+  const choice = await prompter.select(t('它的角色', 'Its role'), options, { initial: at, label: t('角色', 'Role') });
+  if (choice !== 'custom') {
+    state.role = choice;
+    state.roleSeed = null;
+    return;
+  }
+  const initial = customRole(state.role) ? state.role : path.join(vikaHome(env), 'roles', `${state.id}.md`);
+  const file = path.resolve(expandHome(await prompter.text(t('角色 prompt 文件（Markdown）', 'Role prompt file (Markdown)'), {
+    label: t('角色文件', 'Role file'),
+    initial: shortenHome(initial, homeDir),
+    validate: (value) => {
+      const resolved = path.resolve(expandHome(value, homeDir));
+      return fs.existsSync(resolved) && !fs.statSync(resolved).isFile() ? t('这不是一个文件', 'That is not a file') : null;
+    },
+  }), homeDir));
+  state.role = file;
+  state.roleSeed = fs.existsSync(file) ? null : await prompter.select(
+    t('这个文件还没有。先用哪个角色的 prompt 填上？之后可以随便改', 'That file does not exist yet. Start it from which role? Change it freely afterwards'),
+    [...ROLE_PRESETS.map((name) => ({ label: choices[name].label, value: name })), { label: t('空白', 'Blank'), value: '' }],
+    { label: t('从哪个角色开始', 'Start from') },
+  );
+}
+
+// A role file of the owner's own, begun from a shipped role (or blank).
+function writeRoleFile({ role, roleSeed }, id) {
+  if (roleSeed === null || fs.existsSync(role)) return;
+  const note = `<!-- ${roleSeed ? `Started from Vika's "${roleSeed}" role. ` : ''}This is ${id}'s role: edit it freely, then run vika restart ${id}. Comments like this one are not sent to the model. -->\n\n`;
+  fs.mkdirSync(path.dirname(role), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(role, `${note}${roleSeed ? fs.readFileSync(resolveRolePromptPath(roleSeed), 'utf8') : ''}`, { mode: 0o600 });
 }
 
 async function askRuntime({ prompter, runtimes, kept }, state) {
@@ -387,6 +453,7 @@ async function askMailboxes(ctx, state) {
 
 const SETTINGS = [
   { key: 'displayName', label: () => t('机器人名字', 'Bot name'), ask: askName, shown: (state) => state.displayName },
+  { key: 'role', label: () => t('角色', 'Role'), ask: askRole, shown: (state, { homeDir }) => roleShown(state, homeDir) },
   { key: 'workspace', label: () => t('工作目录', 'Workspace'), ask: askWorkspace, shown: (state, { homeDir }) => shortenHome(state.workspace, homeDir) },
   { key: 'runtime', label: () => t('Agent 运行时', 'Agent runtime'), ask: askRuntime,
     shown: (state) => (state.runtime.kept ? state.runtime.model : state.runtime.label) },
@@ -1143,6 +1210,8 @@ async function setupFlow({
       workspace: state.workspace,
       model: state.runtime.model,
     };
+    if (state.role) agent.role = state.role;
+    else delete agent.role;
     if (state.connectors.includes('lark')) agent.profile = current?.profile ?? `vika-${state.id}`;
     else delete agent.profile;
     agent.ovConfig = state.ovConfig;
@@ -1193,6 +1262,7 @@ async function setupFlow({
       : imList(ims(state));
     table(prompter, t(`将添加实例 ${state.id}`, `New instance ${state.id}`), [
       [t('机器人', 'Bot'), `${state.displayName} · ${state.runtime.label}`],
+      [t('角色', 'Role'), roleShown(state, homeDir)],
       [t('消息渠道', 'Channels'), channels],
       ...(larkSource(state, null) ? [[t('飞书机器人', 'Feishu/Lark bot'), larkAppShown(state, null)]] : []),
       ...(addresses.length ? [[t('邮箱', 'Email'), list(addresses)]] : []),
@@ -1210,7 +1280,7 @@ async function setupFlow({
 
   const steps = current ? [] : [
     { section: { title: t('OpenViking 记忆', 'OpenViking memory'), step: 1, total: 4 }, ask: chooseOV },
-    { section: { title: t('机器人', 'Bot'), step: 2, total: 4 }, ask: askId }, { ask: askName }, { ask: askWorkspace }, { ask: askRuntime },
+    { section: { title: t('机器人', 'Bot'), step: 2, total: 4 }, ask: askId }, { ask: askName }, { ask: askRole }, { ask: askWorkspace }, { ask: askRuntime },
     { ask: prepareOV },
     { section: { title: t('消息渠道', 'Channels'), step: 3, total: 4 }, ask: askIms }, { ask: askChannel }, { ask: askLarkApp }, { ask: askMail },
     { section: { title: t('确认', 'Confirm'), step: 4, total: 4 }, ask: confirmNew },
@@ -1293,6 +1363,7 @@ async function setupFlow({
   const id = state.id;
   const mail = mailPlan(state);
   for (const { config, account } of mail.write) writeEmailAccount(config, account);
+  writeRoleFile(state, id);
 
   fs.mkdirSync(state.workspace, { recursive: true, mode: 0o700 });
   writeManifest(configPath, manifestWith(agent));
@@ -1407,6 +1478,10 @@ function describeChanges(before, after, mailboxes, homeDir, state) {
   const was = connectorsOf(before);
   if (before.ovConfig !== after.ovConfig) changes.push(t('更新 OpenViking 连接', 'Update the OpenViking connection'));
   if (before.displayName !== after.displayName) changes.push(`${t('机器人名字：', 'Bot name: ')}${before.displayName} → ${after.displayName}`);
+  if (before.role !== after.role) {
+    const shown = (agent) => roleShown(agent, homeDir);
+    changes.push(t(`角色：${shown(before)} → ${shown(after)}（模型会开一次新的会话）`, `Role: ${shown(before)} → ${shown(after)} (the model starts a new session)`));
+  }
   if (before.workspace !== after.workspace) {
     const move = `${shortenHome(before.workspace, homeDir)} → ${shortenHome(after.workspace, homeDir)}`;
     changes.push(t(`工作目录：${move}（模型会开一次新的会话）`, `Workspace: ${move} (the model starts a new session)`));

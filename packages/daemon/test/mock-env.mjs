@@ -200,7 +200,6 @@ function readLines(file) {
 // Connector through files under `<dir>/data`.
 export async function startMockEnv({
   codex = {},
-  identity = null,
   ovCheck = async () => {},
   config: configOverrides = {},
   prepare = null,
@@ -217,11 +216,8 @@ export async function startMockEnv({
   }));
   fs.writeFileSync(path.join(dir, 'events.ndjson'), '');
 
-  // OpenViking: identity injection stays off unless the test passes an
-  // identity, which the fake client then serves for the config's user.
   const openVikingConfigPath = path.join(dir, 'ov-config.json');
   fs.writeFileSync(openVikingConfigPath, JSON.stringify({ user: 'e2e-user' }));
-  const ovReads = [];
 
   const config = {
     ...getConfig(),
@@ -240,7 +236,6 @@ export async function startMockEnv({
     initialModel: '',
     claudeModel: '',
     openVikingConfigPath,
-    openVikingIdentityEnabled: identity !== null,
     ignoredSenderIds: new Set(),
     port: 0,
     httpEnabled: false,
@@ -260,11 +255,6 @@ export async function startMockEnv({
       async append(id, message) { const rows = this.messages.get(id) || []; rows.push({ ...message, parts: [{ type: 'text', text: message.content }] }); this.messages.set(id, rows); },
       async context(id) { return { latest_archive_overview: '', messages: this.messages.get(id) || [], stats: { totalArchives: 0 } }; },
       async request() { return { pending_tokens: 0 }; },
-      async read(uri) {
-        ovReads.push(uri);
-        if (identity !== null && uri === 'viking://user/e2e-user/identity.md') return identity;
-        throw Object.assign(new Error('missing'), { httpStatus: 404 });
-      },
     },
   });
 
@@ -287,11 +277,6 @@ export async function startMockEnv({
     // developer_instructions is a `-c` config override).
     codexSpawnArgs() {
       return readLines(path.join(dir, 'codex-spawns.ndjson')).map((line) => JSON.parse(line));
-    },
-
-    // Every URI the daemon read from the fake OV client.
-    ovReads() {
-      return [...ovReads];
     },
 
     // argv of every outbound lark-cli reply/send call.

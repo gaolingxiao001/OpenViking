@@ -1,7 +1,6 @@
 import { ovFixture } from './ov-fixture.mjs';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import {
   CodexAgent,
@@ -17,10 +16,8 @@ import { GroupBurstRouter } from '../src/group-burst.mjs';
 import { registerNameResolver } from '../src/roster.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   codexBin: 'codex',
   codexEffort: 'medium',
   workspace: '/tmp/vika-workspace',

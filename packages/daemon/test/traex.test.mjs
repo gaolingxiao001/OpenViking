@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import { TraexAgent } from '../src/traex.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
-const systemPromptPath = fileURLToPath(new URL('../agent/system-prompt.md', import.meta.url));
 
 const baseConfig = {
-  systemPromptPath,
   traexBin: 'traecli',
   traexEffort: 'medium',
   workspace: '/tmp/vika-workspace',

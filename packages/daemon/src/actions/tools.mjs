@@ -140,7 +140,7 @@ export const TOOLS = [
     inputSchema: schema({
       decision_id: { type: 'string', pattern: REF, description: 'event= (never msg=) of the newest daemon-authenticated input you have seen in that chat/thread, or about that subject. Copy it exactly. If newer input has arrived, silence is still recorded for this one.' },
       decision_instance: DECISION_INSTANCE,
-      reason: { type: 'string', maxLength: 120, description: 'Optional short private reason, e.g. "chatter between others", "waiting for OpenViking小助手", "newsletter". Kept only in the local Activity log; never sent.' },
+      reason: { type: 'string', maxLength: 120, description: 'Optional short private reason, e.g. "chatter between others", "waiting for another bot", "newsletter". Kept only in the local Activity log; never sent.' },
     }, ['decision_id']),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },

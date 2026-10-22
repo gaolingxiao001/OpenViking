@@ -24,6 +24,7 @@ export class Harness {
     approvalReply = () => null,
     onInboundChat = null,
     afterEvent = null,
+    isOwner = () => false,
     isStopping = () => false,
   }) {
     this.config = config;
@@ -39,6 +40,7 @@ export class Harness {
     this.approvalReply = approvalReply;
     this.onInboundChat = onInboundChat;
     this.afterEvent = afterEvent;
+    this.isOwner = isOwner;
     this.isStopping = isStopping;
     this.ingressBarrier = Promise.resolve();
     this.pendingIngress = 0;
@@ -175,6 +177,7 @@ export class Harness {
       this.groupBurst.route(eventDeliveryItem(event, result.inbound.seq, {
         text: formatInboundLine(event, null, {
           ...(idleHint ?? {}),
+          owner: this.isOwner(event),
           replyTo: event.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, event),
           // How long only bots have been talking here: the model's cue to stop.
           ...(BOT_SENDERS.has(event.senderType)
@@ -191,7 +194,7 @@ export class Harness {
     return this.enqueueIngress(async () => {
       await this.runtime.prepareInputContext?.();
       this.groupBurst.route(eventDeliveryItem(event, null, {
-        text: formatInboundLine({ ...event, content }, null, { replyTo: { kind: 'me' } }),
+        text: formatInboundLine({ ...event, content }, null, { owner: this.isOwner(event), replyTo: { kind: 'me' } }),
       }));
     });
   }
@@ -205,6 +208,7 @@ export class Harness {
       await this.runtime.prepareInputContext?.();
       this.groupBurst.route(eventDeliveryItem(row, null, {
         text: formatInboundLine(row, null, {
+          owner: this.isOwner(row),
           replyTo: row.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, row),
           undecided: true,
         }),

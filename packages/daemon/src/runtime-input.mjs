@@ -124,6 +124,8 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     : '';
   // A one-time reminder: the last turn ended without a decision on this line.
   const undecidedTag = authenticated?.undecided ? ' undecided=1' : '';
+  // The sender is the owner this connector reported at check.
+  const ownerTag = authenticated?.owner ? ' owner=1' : '';
   const replyTo = authenticated?.replyTo;
   const replyTag = replyTo
     ? ` reply_to=${replyTo.kind === 'me'
@@ -138,7 +140,7 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     + (message.connectorInstance && message.connectorInstance !== message.source ? ` instance=${metadataTag(message.connectorInstance)}` : '')
     + ` msg=${metadataTag(message.messageId)} event=${metadataTag(message.eventId)}`
     + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
-    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source, message.senderName)}`
+    + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source, message.senderName)}${ownerTag}`
     + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
   return line;
 }

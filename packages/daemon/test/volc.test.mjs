@@ -271,9 +271,9 @@ describe('Volc managed-agent runtime', () => {
     // The Ark agent template's own system field only carries persona; the
     // injected policy must also explain the [chat=... msg=...] line format
     // and the reply/silence rules, or MA has no way to know them.
-    assert.match(messageText, /Chat input format/);
+    assert.match(messageText, /^## Inputs\n/);
     assert.match(messageText, /source=github kind=issue.opened/);
-    assert.match(messageText, /When to reply/);
+    assert.match(messageText, /Unless the Role below says otherwise/);
     assert.match(messageText, /hello$/);
     assert.equal(agent.turnInProgress, false);
     assert.ok(data.activities.some((activity) => activity.kind === 'agent.tool_called'));
@@ -648,47 +648,21 @@ describe('Volc managed-agent runtime', () => {
       && activity.metadata.delivery === 'telemetry_only'));
   });
 
-  it('pulls the canonical persona from system-prompt.md instead of relying on a separately maintained copy', () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-volc-persona-'));
-    const promptPath = path.join(directory, 'system-prompt.md');
-    fs.writeFileSync(promptPath, [
-      '# Lark conversation policy',
-      '',
-      '## Message format',
-      '',
-      'irrelevant filler the Volc policy already covers on its own.',
-      '',
-      '## Persona and voice',
-      '',
-      'CANONICAL_PERSONA_MARKER: friendly and terse.',
-    ].join('\n'));
+  it('carries the instance role into the policy it injects', () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-volc-role-'));
+    const rolePromptPath = path.join(directory, 'role.md');
+    fs.writeFileSync(rolePromptPath, '<!-- editor note -->\nROLE_MARKER: {{AGENT_NAME}} answers garden questions.\n');
     try {
-      const agent = new VolcAgent(
-        config({ systemPromptPath: promptPath, agentName: 'Zayn' }),
-        store(),
-        quietLogger,
-        { fetch: async () => json({}) },
-      );
-      assert.match(agent.transportPolicy, /## Persona and voice/);
-      assert.match(agent.transportPolicy, /CANONICAL_PERSONA_MARKER/);
-      // Only the persona section is pulled in, not the whole file (that
-      // would duplicate the message-format/reply rules already composed
-      // above it).
-      assert.doesNotMatch(agent.transportPolicy, /irrelevant filler/);
+      const agent = new VolcAgent(config({ rolePromptPath, agentName: 'Zayn' }), store(), quietLogger, { fetch: async () => json({}) });
+      assert.match(agent.transportPolicy, /## Role\n/);
+      assert.match(agent.transportPolicy, /ROLE_MARKER: Zayn answers garden questions\./);
+      assert.doesNotMatch(agent.transportPolicy, /editor note/);
+      const plain = new VolcAgent(config(), store(), quietLogger, { fetch: async () => json({}) });
+      assert.match(plain.transportPolicy, /^## Inputs\n/);
+      assert.doesNotMatch(plain.transportPolicy, /## Role/);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
-  });
-
-  it('degrades gracefully when system-prompt.md is unavailable, without breaking the rest of the policy', () => {
-    const agent = new VolcAgent(
-      config({ systemPromptPath: '/no/such/file/system-prompt.md' }),
-      store(),
-      quietLogger,
-      { fetch: async () => json({}) },
-    );
-    assert.match(agent.transportPolicy, /Chat input format/);
-    assert.doesNotMatch(agent.transportPolicy, /## Persona and voice/);
   });
 
   it('does not abort the stream when session-lifecycle events arrive before the user.message fence', () => {

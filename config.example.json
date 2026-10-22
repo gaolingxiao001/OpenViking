@@ -2,7 +2,6 @@
   "version": 1,
   "defaultInstance": "primary",
   "env": {
-    "TEAM_TASK_BOARD_URL": "",
     "LARK_CLI_BIN": "",
     "CODEX_BIN": "",
     "TRAEX_BIN": "traecli",
@@ -18,7 +17,6 @@
     "VIKA_MAX_EVENT_BYTES": "1000000",
     "VIKA_MAX_EVENT_AGE_MS": "86400000",
     "VIKA_IDLE_REACTION_AFTER_MS": "600000",
-    "VIKA_OV_IDENTITY": "false",
     "VIKA_RETENTION_MS": "7776000000",
     "VIKA_CODEX_EFFORT": "medium",
     "VIKA_TRAEX_EFFORT": "medium",
@@ -43,6 +41,8 @@
       "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
       "ovAutoRecall": false,
       "explicitSilence": false,
+      "role": "assistant",
+      "naturalWriting": true,
       "model": "ark",
       "volcSessionId": "sesn-your-self-hosted-seed",
       "volcEnvironmentId": "env-your-self-hosted-environment",
@@ -64,6 +64,8 @@
       "ovConfig": "/Users/you/.openviking/ovcli.conf.research",
       "ovAutoRecall": false,
       "explicitSilence": false,
+      "role": "/Users/you/.vika/roles/research.md",
+      "naturalWriting": false,
       "model": "gpt-5.6-sol"
     }
   ]

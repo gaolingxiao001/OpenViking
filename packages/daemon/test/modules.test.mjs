@@ -192,15 +192,13 @@ describe('module boundaries', () => {
 
   it('allows exact sibling operations without permitting self or broad PM2 control', () => {
     const prompt = fs.readFileSync(
-      path.join(root, 'packages', 'daemon', 'agent', 'system-prompt.md'),
+      path.join(root, 'packages', 'daemon', 'agent', 'core.md'),
       'utf8',
     );
-    assert.match(prompt, /Never directly restart, stop, reconfigure, or deploy the PM2 application that owns the active turn/);
-    assert.match(prompt, /Self-updates must go through an allowlisted external updater\/supervisor/);
-    assert.match(prompt, /vika upgrade \{\{VIKA_UPGRADE_TARGET\}\}/);
+    assert.match(prompt, /Never restart, stop, reconfigure, or redeploy the PM2 application you run in/);
+    assert.match(prompt, /The only self-update is `vika upgrade \{\{VIKA_UPGRADE_TARGET\}\}`/);
     assert.match(prompt, /installs the latest published release/);
-    assert.match(prompt, /may manage an explicitly named sibling daemon\/web pair only after verifying/);
-    assert.match(prompt, /Never use broad PM2 selectors or touch unrelated applications/);
-    assert.doesNotMatch(prompt, /Never deploy, restart, stop, or reconfigure vika or vika-web yourself/);
+    assert.match(prompt, /Manage another named instance only when directly asked, after verifying that it is not the one you run in/);
+    assert.match(prompt, /never use broad PM2 selectors or touch unrelated applications/);
   });
 });
