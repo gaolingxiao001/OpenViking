@@ -452,6 +452,24 @@ describe('agent tools', () => {
     };
     await assert.rejects(() => call('read_openviking_session_context', { epoch }), /no longer owns/);
   });
+
+  it('reads OV archives within the session of its epoch and never returns Working Memory', async (t) => {
+    let seen;
+    const ovClient = {
+      async archive(...args) { seen = args; return { archive_id: args[1], messages: [] }; },
+      async context() {
+        return { latest_archive_overview: 'bloated summary', pre_archive_abstracts: [], messages: [{ message_kind: 'checkpoint', parts: [] }] };
+      },
+    };
+    const { store, call } = setup(t, { ovClient });
+    const { epoch } = store.getCognitionState();
+    store.db.exec('CREATE TABLE IF NOT EXISTS ov_session_sync(epoch INTEGER PRIMARY KEY, session_id TEXT, uri TEXT)');
+    store.db.prepare('INSERT INTO ov_session_sync(epoch, session_id, uri) VALUES (?, ?, ?)').run(epoch, 'test-session', 'viking://session/test');
+    const result = (await call('read_openviking_session_context', { epoch, archive_id: 'archive_002' })).data;
+    assert.deepEqual(seen, ['viking://session/test', 'archive_002']);
+    assert.equal(result.text, JSON.stringify({ archive_id: 'archive_002', messages: [] }));
+    assert.equal((await call('read_openviking_session_context', { epoch })).data.text, JSON.stringify({ messages: [] }));
+  });
 });
 
 describe('agent tool front-ends', () => {

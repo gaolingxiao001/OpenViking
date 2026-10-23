@@ -5,7 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { configureOpenViking, discoverOpenViking, saveOVConnection } from '../src/ov-setup.mjs';
-import { detectOpenViking, LOCAL_OV_URL, savedOVConfigPath } from '../src/ov.mjs';
+import { detectOpenViking, HOSTED_OV_URL, LOCAL_OV_URL, savedOVConfigPath } from '../src/ov.mjs';
 import { Prompter } from '../src/prompt.mjs';
 import { setLanguage } from '../src/i18n.mjs';
 
@@ -40,7 +40,7 @@ function fetchOV({ local = false, key = 'test-secret', calls = [] } = {}) {
 }
 
 test('manual remote URL, custom port and hidden credentials are available when nothing is detected', async (t) => {
-  const h = fixture(t, ['2', remote, '1', 'test-secret', 'team', 'owner', 'worker']);
+  const h = fixture(t, ['3', remote, '1', 'test-secret', 'team', 'owner', 'worker']);
   const calls = [];
   const result = await configureOpenViking({ ...h.options, fetchImpl: fetchOV({ calls }) });
   assert.deepEqual(result.config, { url: remote, api_key: 'test-secret', account: 'team', user: 'owner', agent: 'worker' });
@@ -53,8 +53,74 @@ test('manual remote URL, custom port and hidden credentials are available when n
   assert.deepEqual(fs.readdirSync(h.home), [], 'selecting a connection does not save it');
 });
 
+// The hosted service checks the key even on /health and reports the key's user.
+function fetchHosted({ key = 'hosted-key', user = 'Vika-Nvidia', calls = [] } = {}) {
+  return async (url, init) => {
+    calls.push({ url, headers: init.headers });
+    if (url.startsWith(LOCAL_OV_URL)) throw new Error('offline');
+    assert.ok(url.startsWith(HOSTED_OV_URL));
+    if (init.headers['X-API-Key'] !== key) return Response.json({ status: 'error', message: 'sensitive' }, { status: 401 });
+    if (url.endsWith('/health')) return Response.json({ status: 'ok', auth_mode: 'api_key', user_id: user });
+    return Response.json({ status: 'ok', result: { initialized: true, user } });
+  };
+}
+
+test('the hosted service needs only an API key, and the instance keeps the user that key logs in as', async (t) => {
+  const h = fixture(t, ['2', 'hosted-key']);
+  const calls = [];
+  const result = await configureOpenViking({ ...h.options, fetchImpl: fetchHosted({ calls }) });
+  assert.deepEqual(result.config, { url: HOSTED_OV_URL, api_key: 'hosted-key', user: 'Vika-Nvidia' });
+  assert.equal(result.user, 'Vika-Nvidia');
+  assert.ok(calls.some(({ url }) => url === `${HOSTED_OV_URL}/api/v1/system/status`));
+  assert.match(h.text(), /OpenViking Service on Volcengine\s+API key only/);
+  assert.doesNotMatch(h.text(), /Account \(optional|hosted-key/);
+});
+
+test('a rejected hosted key says so and can be replaced', async (t) => {
+  const h = fixture(t, ['2', 'wrong-key', '2', '2', 'hosted-key']);
+  const result = await configureOpenViking({ ...h.options, fetchImpl: fetchHosted() });
+  assert.equal(result.config.api_key, 'hosted-key');
+  assert.match(h.text(), /OpenViking rejected the API key \(HTTP 401\)/);
+  assert.match(h.text(), /Keep the configured key/);
+  assert.doesNotMatch(h.text(), /wrong-key|hosted-key|sensitive/);
+});
+
+test('a manual connection to another server does not inherit the detected Account and User', async (t) => {
+  const answers = ['3', remote, '1', 'test-secret', '', '', ''];
+  for (const [form, expected] of [
+    [answers, { url: remote, api_key: 'test-secret' }],
+    // The same server keeps them, as defaults to confirm.
+    [['3', '', '2', '', '', ''], { url: LOCAL_OV_URL, account: 'team', user: 'owner' }],
+  ]) {
+    const h = fixture(t, form);
+    fs.mkdirSync(path.join(h.home, '.openviking'));
+    fs.writeFileSync(path.join(h.home, '.openviking', 'ovcli.conf'), JSON.stringify({ url: LOCAL_OV_URL, account: 'team', user: 'owner' }));
+    const local = fetchOV();
+    const result = await configureOpenViking({ ...h.options, fetchImpl: async (url, init) => (url.startsWith(LOCAL_OV_URL)
+      ? Response.json({ status: 'ok', auth_mode: 'trusted', result: [] })
+      : local(url, init)) });
+    assert.deepEqual(result.config, expected);
+  }
+});
+
+test('an API key server replaces a stale configured identity with the one the key logs in as', async (t) => {
+  const h = fixture(t, ['4', '~/remote.json']);
+  fs.writeFileSync(path.join(h.home, 'remote.json'), JSON.stringify({ url: remote, api_key: 'test-secret', account: 'team', user: 'stale' }));
+  const result = await configureOpenViking({ ...h.options, fetchImpl: async (url, init) => {
+    if (url.startsWith(LOCAL_OV_URL)) throw new Error('offline');
+    if (url.endsWith('/health')) return Response.json({ status: 'ok', auth_mode: 'api_key' });
+    assert.equal(init.headers['X-API-Key'], 'test-secret');
+    return Response.json({ status: 'ok', result: { initialized: true, user: 'amy' } });
+  } });
+  assert.deepEqual(result.config, { url: remote, api_key: 'test-secret', user: 'amy' });
+  // Without a reported user nothing is guessed: the configured one is not shown as the key's.
+  const unknown = await detectOpenViking({ env: h.options.env, homeDir: h.home, configPath: path.join(h.home, 'remote.json'),
+    fetchImpl: async (url) => (url.endsWith('/health') ? Response.json({ status: 'ok', auth_mode: 'api_key' }) : Response.json({ status: 'ok', result: [] })) });
+  assert.equal(unknown.user, null);
+});
+
 test('a healthy discovery still offers manual entry and accepts a different connection', async (t) => {
-  const h = fixture(t, ['2', remote, '1', 'test-secret', '', '', '']);
+  const h = fixture(t, ['3', remote, '1', 'test-secret', '', '', '']);
   const result = await configureOpenViking({ ...h.options, fetchImpl: fetchOV({ local: true }) });
   assert.equal(result.url, remote);
   assert.match(h.text(), /Use the local default address \(no credentials\)\s+http:\/\/127\.0\.0\.1:1933 · ready/);
@@ -131,7 +197,7 @@ test('a configured local connection is checked with its identity without an anon
 });
 
 test('an unconfigured Trusted server is shown as running and can be completed manually', async (t) => {
-  const h = fixture(t, ['2', '', '2', 'team', 'owner', '']);
+  const h = fixture(t, ['3', '', '2', 'team', 'owner', '']);
   const result = await configureOpenViking({ ...h.options, fetchImpl: async (url, init) => {
     if (url.endsWith('/health')) return Response.json({ status: 'ok', auth_mode: 'trusted' });
     return init.headers['X-OpenViking-Account'] && init.headers['X-OpenViking-User']
@@ -145,8 +211,8 @@ test('an unconfigured Trusted server is shown as running and can be completed ma
 });
 
 test('failed credentials can be edited and retried without leaking keys or server bodies', async (t) => {
-  const h = fixture(t, ['2', remote, '1', 'wrong-secret', '', '', '',
-    '2', '', '2', 'test-secret', '', '', '']);
+  const h = fixture(t, ['3', remote, '1', 'wrong-secret', '', '', '',
+    '3', '', '2', 'test-secret', '', '', '']);
   const result = await configureOpenViking({ ...h.options, fetchImpl: fetchOV() });
   assert.equal(result.usable, true);
   assert.match(h.text(), /HTTP 401/);
@@ -154,13 +220,13 @@ test('failed credentials can be edited and retried without leaking keys or serve
 });
 
 test('a configuration file can be imported after an invalid path; cancellation saves nothing', async (t) => {
-  const h = fixture(t, ['3', '~/missing.json', '3', '~/remote.json']);
+  const h = fixture(t, ['4', '~/missing.json', '4', '~/remote.json']);
   fs.writeFileSync(path.join(h.home, 'remote.json'), JSON.stringify({ url: remote, api_key: 'test-secret', plugin: { memory: true } }));
   const result = await configureOpenViking({ ...h.options, fetchImpl: fetchOV() });
   assert.equal(result.configPath, path.join(h.home, 'remote.json'));
   assert.deepEqual(result.config.plugin, { memory: true });
   assert.match(h.text(), /Cannot read the OV configuration/);
-  const cancel = fixture(t, ['5']);
+  const cancel = fixture(t, ['6']);
   await assert.rejects(configureOpenViking({ ...cancel.options, fetchImpl: fetchOV() }), { name: 'PromptAborted' });
   assert.deepEqual(fs.readdirSync(cancel.home), []);
 });

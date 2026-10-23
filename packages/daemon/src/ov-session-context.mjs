@@ -10,6 +10,16 @@ const RETAINED_TOKENS = 24_000;
 const COMMIT_TOKENS = 24_000;
 const CONTEXT_TOKENS = RETAINED_TOKENS + COMMIT_TOKENS;
 
+// OV releases up to v0.4.23, the hosted service among them, still write
+// Working Memory at every commit, and the daemon leaves OV's settings alone.
+// It only ever grows, so none of it is passed on; history is raw messages.
+// In /context it is `latest_archive_overview`, plus a `checkpoint` message
+// after a turn whose earlier part was archived; in the archive directory it
+// is `.overview.md` / `.abstract.md`, and checkpoints in `.meta.json`.
+export function withoutWorkingMemory({ latest_archive_overview: _overview, pre_archive_abstracts: _abstracts, ...context }) {
+  return { ...context, messages: context.messages?.filter(({ message_kind: kind }) => kind !== 'checkpoint') };
+}
+
 // OV owns archives and assembled context. SQLite retains only the transport
 // cursor/intent here; cognition_journal is the existing durable delivery ledger
 // and sync outbox, never a prompt source.
@@ -37,7 +47,31 @@ export class OVSessionClient extends OVConnection {
       retention_mode: 'turn_budget', keep_recent_turn_count: 10_000, retained_message_token_budget: RETAINED_TOKENS,
     });
   }
-  archive(sessionId, archiveId) { return this.request(`/sessions/${encodeURIComponent(sessionId)}/archives/${encodeURIComponent(archiveId)}`); }
+  // An archive's original messages, read from storage. OV's archive API adds
+  // the Working Memory where a release still writes one, and up to v0.4.23
+  // answers 404 for an archive without it; it also skips archives still
+  // being processed.
+  async archive(sessionUri, archiveId) {
+    const content = await this.read(`${sessionUri}/history/${encodeURIComponent(archiveId)}/messages.jsonl`, 0, -1);
+    let messages;
+    try {
+      messages = String(content).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    } catch {
+      // A parse error would quote the stored content.
+      throw new Error('OV archive messages are malformed');
+    }
+    return { archive_id: archiveId, messages };
+  }
+  // Archive directories, without the Working Memory abstract OV lists them with.
+  async archives(sessionUri) {
+    const entries = await this.request(`/fs/ls?uri=${encodeURIComponent(`${sessionUri}/history`)}`);
+    return (entries ?? []).map(({ abstract: _abstract, ...entry }) => entry);
+  }
+  // Matches in archived messages only, not in Working Memory files.
+  async grep(sessionUri, pattern) {
+    const result = await this.request('/search/grep', { uri: `${sessionUri}/history`, pattern, case_insensitive: true });
+    return { matches: (result?.matches ?? []).filter(({ uri }) => String(uri).endsWith('/messages.jsonl')) };
+  }
   read(uri, offset = 0, limit = 100) {
     return this.request(`/content/read?uri=${encodeURIComponent(uri)}&offset=${offset}&limit=${limit}&raw=true`);
   }
@@ -169,7 +203,7 @@ export class OVSessionContext {
       const context = await this.client.context(state.session_id);
       if (this.stopped) throw new Error('OV sync stopped');
       if (!context || !Array.isArray(context.messages)) throw new Error('OV session context is invalid');
-      const prepared = { ...context, sessionId: state.session_id, throughSeq: state.synced_seq, epoch };
+      const prepared = { ...withoutWorkingMemory(context), sessionId: state.session_id, throughSeq: state.synced_seq, epoch };
       this.contexts.set(epoch, prepared);
       return prepared;
     });

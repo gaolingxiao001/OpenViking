@@ -18,7 +18,9 @@ class SimulationStore {
     }];
   }
 
-  getOVContext() { return { sessionId: 'ov-simulation', latest_archive_overview: 'prior message', messages: [] }; }
+  getOVContext() {
+    return { sessionId: 'ov-simulation', messages: [{ parts: [{ type: 'text', text: 'prior message' }], source_message_ids: ['lark:1:1'] }] };
+  }
   getCognitionState() { return { ...this.cognition }; }
   initializeCognition(runtime, authorityToken) {
     this.cognition = { runtime, epoch: this.cognition.epoch, authorityToken };
