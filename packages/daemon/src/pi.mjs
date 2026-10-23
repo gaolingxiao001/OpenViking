@@ -497,11 +497,7 @@ export class PiAgent {
         this.store,
         this.cognitionEpoch,
         throughSeq,
-        this.config.cognitionMaxChars,
         this.needsHistoryPrefix ? 0 : this.deliveredThroughSeq,
-        // Same-session delta only: this transcript already observed its own
-        // committed sends; a fresh transcript still receives everything.
-        this.needsHistoryPrefix ? {} : { excludeCommittedOutboundFrom: this.authorityToken },
       );
       prefixThroughSeq = catchup.throughSeq;
       if (catchup.text) body = `${catchup.text}\n${body}`;

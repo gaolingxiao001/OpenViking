@@ -40,7 +40,6 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'VIKA_VOLC_REQUEST_TIMEOUT_MS',
   'VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS',
   'FALLBACK_MODEL',
-  'VIKA_COGNITION_MAX_CHARS',
   'VIKA_HISTORY_LIMIT',
 ]);
 // Secrets may flow from the operator environment into daemon/updater PM2

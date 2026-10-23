@@ -134,8 +134,7 @@ export class PersonalAgentDaemon {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
       this.timers = new TimerRepository(this.store.db);
       const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
-      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
-        { canCommit: () => !this.connectors?.subscribed });
+      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger);
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
         status: 'STARTING',

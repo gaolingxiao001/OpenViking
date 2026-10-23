@@ -398,7 +398,6 @@ export class CodexAgent {
           this.store,
           this.cognitionEpoch,
           throughSeq,
-          this.config.cognitionMaxChars,
           hadPrefix ? 0 : this.syncedThroughSeq,
         );
         journalThroughSeq = catchup.throughSeq;
