@@ -36,6 +36,13 @@ export function loadInstances(env = process.env) {
   return loadDeploymentManifest(env);
 }
 
+// One line naming the manifest fields this release skipped, or null.
+export function ignoredFieldsNotice(fields, filePath) {
+  if (!fields?.length) return null;
+  return t(`配置里有当前版本不认识的项，已忽略，可以从 ${filePath} 删掉：${list(fields)}`,
+    `Ignored settings this version does not know; you can remove them from ${filePath}: ${list(fields)}`);
+}
+
 export function describeInstances(deployment) {
   const width = Math.max(...deployment.agents.map((agent) => agent.id.length));
   return deployment.agents.map((agent) => `  ${agent.id.padEnd(width)}  ${agent.displayName}  ${imList(agent.connectors, agent.emailAccounts?.length)}`).join('\n');

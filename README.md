@@ -255,11 +255,11 @@ OpenViking 是 Vika 的必需组件：setup 新建实例时，会在接入 IM �
 
 运行中 OV 请求失败不会退出 daemon，也不主动向聊天发送故障通知。新原生会话可跳过 OV 历史继续处理消息；本地同步账本保留，后台恢复后重试。已有会话不会在恢复后突然补入历史；下次新会话可再次读取 OV。归档完整性错误仍会阻止不完整的历史交接，不回退到 SQLite 回放。
 
-每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 JSON manifest，完整格式见 [`config.example.json`](./config.example.json)。顶层只接受 `version`、`defaultInstance`、`env`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`，可用 `channel` 选择 `lark` 或 `weixin`，省略时默认 `lark`。
+每个 Agent 是独立 daemon 进程，不是另一个 Agent 的子 agent；manifest 可以增加多个 daemon，它们共享一份 release、Web 和 updater。唯一配置源是 JSON manifest，完整格式见 [`config.example.json`](./config.example.json)。顶层字段是 `version`、`defaultInstance`、`env`、`agents`；每个 agent 必须完整提供 `id`、`displayName`、`profile`、`port`、`dataDir`、`workspace`、`ovConfig`、`model`，可用 `channel` 选择 `lark` 或 `weixin`，省略时默认 `lark`。
 
-`env` 是所有 daemon 共用的运行参数，只接受示例中列出的 key，所有 JSON value 都必须是字符串（包括布尔值和数字；空字符串允许）。同名系统进程环境变量优先于 manifest `env`，可用于临时覆盖。Agent identity、channel、Lark profile、端口、dataDir、workspace、OV config、model，以及 Web/updater 控制面字段不能放进 `env`；未知或保留字段会让 preflight 直接失败。每个 agent 的 `profile` 会同时固定注入 `VIKA_LARK_PROFILE` 和 `LARKSUITE_CLI_PROFILE`；没有接入飞书的实例，其 Agent 子进程不会继承这两个飞书变量。
+`env` 是所有 daemon 共用的运行参数，只认示例中列出的 key，所有 JSON value 都必须是字符串（包括布尔值和数字；空字符串允许）。同名系统进程环境变量优先于 manifest `env`，可用于临时覆盖。Agent identity、channel、Lark profile、端口、dataDir、workspace、OV config、model，以及 Web/updater 控制面字段不能放进 `env`；未知或保留的 key 会被丢弃，不会传给任何进程。每个 agent 的 `profile` 会同时固定注入 `VIKA_LARK_PROFILE` 和 `LARKSUITE_CLI_PROFILE`；没有接入飞书的实例，其 Agent 子进程不会继承这两个飞书变量。
 
-启动 preflight 严格拒绝未知字段、相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `vika-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
+manifest 里当前版本不认识的字段（顶层、agent、`env` 等任何一层）会被忽略：daemon 启动日志记 `config_fields_ignored`，`vika status` 和 `vika setup` 会列出这些字段，所以旧版本写的配置升级后照样能起来。已知字段仍严格校验：启动 preflight 拒绝相对路径、非法 id/端口，以及重复的 id、profile、port、dataDir、workspace、OV config；任意 agent 的 dataDir/workspace 互相嵌套也会拒绝。ecosystem 据此生成全部 `vika-<id>`、Web routes 和 updater allowlist，每个 daemon 都被固定注入自己的 Lark profile、CLI profile、数据、工作区、OV 和 model。
 
 `npm run start:daemon` 默认运行 `defaultInstance`；临时前台跑另一只可设置 `VIKA_INSTANCE_ID=<id>`。添加、删除 agent，或修改 id/port 等 topology/allowlist 时，先保存 manifest，再执行 `vika upgrade all`（或 `vika start <新实例>` 加 `vika restart web`）。`upgrade all` 在新拓扑全部验活后，会删除同一受管 release 中已不在 manifest 的旧 daemon PM2 app，不删除数据目录，也不触碰外部同名前缀进程。若重命名 id 时还要立即复用旧端口，先核对旧 app 的 executable 确属本部署，再精确 stop/delete 旧 app；代码不提供 alias 或 migration。普通 daemon 代码升级仍用 `vika upgrade <id>`。
 

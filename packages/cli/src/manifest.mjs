@@ -43,9 +43,9 @@ export function manifestPath(env = process.env) {
 // but does not load is an error: setup never overwrites a broken manifest.
 export function readManifest(env = process.env) {
   const filePath = manifestPath(env);
-  if (!fs.existsSync(filePath)) return { path: filePath, value: null };
-  loadDeploymentManifest({ ...env, VIKA_CONFIG: filePath });
-  return { path: filePath, value: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
+  if (!fs.existsSync(filePath)) return { path: filePath, value: null, ignored: [] };
+  const { ignoredFields } = loadDeploymentManifest({ ...env, VIKA_CONFIG: filePath });
+  return { path: filePath, value: JSON.parse(fs.readFileSync(filePath, 'utf8')), ignored: ignoredFields };
 }
 
 export function availableInstanceOvConfig(env, id, reserved = new Set()) {

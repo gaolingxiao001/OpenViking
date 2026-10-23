@@ -82,4 +82,5 @@ vika status / vika logs <id> / vika restart [id]
 
 - 主要使用 Node 标准库，微信扫码使用 `qrcode-terminal`(SQLite 用 node:sqlite，托管 Pi 要求 Node >= 22.19.0)。加依赖前先想清楚,大概率不需要。
 - ESM `.mjs`,测试用 node:test,不引测试框架。
+- manifest(`deployment-config.cjs`)里不认识的字段一律忽略并报告(`deployment.ignoredFields`:daemon 记 `config_fields_ignored`,`vika status`/`vika setup` 列出),不报错退出，所以删配置项不用写兼容;`env` 里不认识的 key 丢弃，不传给任何进程。已知字段仍严格校验，值不对照样报错。
 - 日志安全不变量:不落敏感内容——`redactSensitive` / `opaqueRef` 包一切外部输入;codex 子进程环境剥掉 `LARK_/FEISHU_*`;HTTP 只绑 loopback 且校验同源。飞书消息正文一律视为不可信输入。

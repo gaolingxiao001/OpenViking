@@ -28,7 +28,7 @@ import { LANGUAGES, languageChoice, list, saveLanguage, setLanguage, t } from '.
 import { releaseInfo } from './version.mjs';
 import { EmailCancelled, askEmail, emailAccountPath, emailInstanceId, mailboxesOf, writeEmailAccount } from './email.mjs';
 import { GoBack } from './prompt.mjs';
-import { IM_LABELS, connectorsOf, imList, primaryMeaning } from './instances.mjs';
+import { IM_LABELS, connectorsOf, ignoredFieldsNotice, imList, primaryMeaning } from './instances.mjs';
 import { connectTelegram } from './telegram.mjs';
 import { connectSlack } from './slack.mjs';
 
@@ -1136,7 +1136,9 @@ async function setupFlow({
   // The connection this run chose (a new instance's, or a changed one), kept
   // for the next instance once the manifest is saved.
   let ov = null;
-  const { path: configPath, value: manifest } = readManifest(env);
+  const { path: configPath, value: manifest, ignored } = readManifest(env);
+  const notice = ignoredFieldsNotice(ignored, configPath);
+  if (notice) prompter.warn(notice);
   // ← and → move between the questions, until the scans begin.
   prompter.navigable = prompter.tty;
   const current = await chooseTarget(prompter, manifest);

@@ -12,6 +12,7 @@ const {
   applyDeploymentDaemonEnv,
   loadDeploymentManifest,
   resolveDeploymentManifestPath,
+  resolvedDeploymentDaemonEnv,
   selectDeploymentAgent,
 } = require('../../../deployment-config.cjs');
 
@@ -195,24 +196,59 @@ test('a missing secrets file is not an error', () => {
   });
 });
 
-test('manifest env accepts only string values from the daemon-wide allowlist', () => {
-  const cases = [
-    ['reserved identity', 'VIKA_LARK_PROFILE', 'cli_wrong', /env field is not allowed: VIKA_LARK_PROFILE/],
-    ['reserved control plane', 'VIKA_UPDATER_SOCKET', '/tmp/wrong', /env field is not allowed: VIKA_UPDATER_SOCKET/],
-    ['system-only secret', 'ARK_API_KEY', 'must-not-live-in-manifest', /env field is not allowed: ARK_API_KEY/],
-    ['removed Codex model', 'VIKA_CODEX_MODEL', 'gpt-5.6-sol', /env field is not allowed: VIKA_CODEX_MODEL/],
-    ['unknown key', 'UNRELATED_SETTING', 'value', /env field is not allowed: UNRELATED_SETTING/],
-    ['non-string', 'VIKA_HISTORY_LIMIT', 30, /env\.VIKA_HISTORY_LIMIT must be a string/],
+test('manifest env passes on only the daemon-wide allowlist and drops every other key', () => {
+  const dropped = [
+    ['reserved identity', 'VIKA_LARK_PROFILE', 'cli_wrong'],
+    ['reserved control plane', 'VIKA_UPDATER_SOCKET', '/tmp/wrong'],
+    ['system-only secret', 'ARK_API_KEY', 'must-not-live-in-manifest'],
+    ['removed Codex model', 'VIKA_CODEX_MODEL', 'gpt-5.6-sol'],
+    ['retired history cap', 'VIKA_COGNITION_MAX_CHARS', '120000'],
+    ['unknown key', 'UNRELATED_SETTING', 'value'],
   ];
-  for (const [name, key, value, error] of cases) {
+  for (const [name, key, value] of dropped) {
     const manifest = validManifest();
     manifest.env[key] = value;
     withManifest(manifest, (manifestPath) => {
-      assert.throws(() => loadDeploymentManifest({
-        VIKA_CONFIG: manifestPath,
-      }), error, name);
+      const deployment = loadDeploymentManifest({ VIKA_CONFIG: manifestPath });
+      assert.deepEqual(deployment.ignoredFields, [`env.${key}`], name);
+      assert.equal(Object.hasOwn(deployment.env, key), false, name);
+      const processEnv = resolvedDeploymentDaemonEnv(deployment, { VIKA_SECRETS_FILE: '/no/such/file/secrets.env' });
+      assert.equal(Object.hasOwn(processEnv, key), false, name);
     });
   }
+  const manifest = validManifest();
+  manifest.env.VIKA_HISTORY_LIMIT = 30;
+  withManifest(manifest, (manifestPath) => {
+    assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /env\.VIKA_HISTORY_LIMIT must be a string/);
+  });
+});
+
+test('ignores and reports unknown manifest fields at every level', () => {
+  const manifest = validManifest();
+  manifest.instances = [];
+  manifest.agents[0].alias = 'old-name';
+  manifest.agents[0].meetingAudio.sampleRate = 16000;
+  manifest.agents[1].connectors = ['lark', 'email'];
+  manifest.agents[1].emailAccounts = [{ id: 'email-gmail', config: '/srv/vika/secrets/beta-gmail.json', label: 'Gmail' }];
+  manifest.env.VIKA_COGNITION_MAX_CHARS = '120000';
+  withManifest(manifest, (manifestPath) => {
+    const deployment = loadDeploymentManifest({ VIKA_CONFIG: manifestPath });
+    assert.deepEqual(deployment.ignoredFields, [
+      'instances',
+      'env.VIKA_COGNITION_MAX_CHARS',
+      'agents[0].alias',
+      'agents[0].meetingAudio.sampleRate',
+      'agents[1].emailAccounts[0].label',
+    ]);
+    const alpha = selectDeploymentAgent(deployment, 'alpha');
+    assert.equal(Object.hasOwn(alpha, 'alias'), false);
+    assert.deepEqual(selectDeploymentAgent(deployment, 'beta').emailAccounts, [
+      { id: 'email-gmail', config: '/srv/vika/secrets/beta-gmail.json' },
+    ]);
+  });
+  withManifest(validManifest(), (manifestPath) => {
+    assert.deepEqual(loadDeploymentManifest({ VIKA_CONFIG: manifestPath }).ignoredFields, []);
+  });
 });
 
 test('foreground selection defaults to defaultInstance and pins every identity boundary', () => {
@@ -411,7 +447,7 @@ test('an instance names a shipped role or its own role file, and keeps natural w
   }
 });
 
-test('rejects unknown and missing manifest fields instead of guessing', () => {
+test('rejects missing and invalid manifest fields instead of guessing', () => {
   const cases = [
     {
       name: 'OV configuration is required',
@@ -424,19 +460,9 @@ test('rejects unknown and missing manifest fields instead of guessing', () => {
       error: /agents\[0\]\.ovAutoRecall must be a boolean/,
     },
     {
-      name: 'unknown top-level field',
-      mutate: (manifest) => { manifest.instances = []; },
-      error: /unknown deployment manifest field: instances/,
-    },
-    {
       name: 'missing daemon env',
       mutate: (manifest) => { delete manifest.env; },
       error: /deployment manifest env must be an object/,
-    },
-    {
-      name: 'unknown agent field',
-      mutate: (manifest) => { manifest.agents[0].alias = 'old-name'; },
-      error: /unknown agents\[0\] field: alias/,
     },
     {
       name: 'missing agent field',

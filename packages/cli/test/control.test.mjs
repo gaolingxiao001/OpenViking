@@ -89,3 +89,20 @@ test('status lists every app with its pm2 state and readiness', async (t) => {
   assert.match(f.output(), /vika-beta\s+未启动\s+-/);
   assert.match(f.output(), /vika-updater\s+未启动/);
 });
+
+test('status names the manifest settings this version ignores', async (t) => {
+  const f = fixture(t);
+  const home = f.options.env.HOME;
+  fs.writeFileSync(path.join(home, '.vika', 'config.json'), JSON.stringify({
+    version: 1,
+    defaultInstance: 'alpha',
+    env: { VIKA_COGNITION_MAX_CHARS: '120000' },
+    agents: [{
+      id: 'alpha', displayName: 'Alpha', profile: 'vika-alpha', port: 3738, model: 'codex',
+      dataDir: path.join(home, 'data'), workspace: path.join(home, 'workspace'), ovConfig: path.join(home, 'ov.json'),
+    }],
+  }));
+  await statusCommand(f.options);
+  assert.match(f.output(), /vika-alpha\s+未启动/);
+  assert.match(f.output(), /已忽略.*config\.json 删掉：env\.VIKA_COGNITION_MAX_CHARS/);
+});
