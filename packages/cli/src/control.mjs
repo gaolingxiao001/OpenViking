@@ -15,7 +15,7 @@ import {
   verifyPm2App,
 } from '../../updater/src/pm2.mjs';
 import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '../../updater/src/targets.mjs';
-import { imList, loadInstances } from './instances.mjs';
+import { ignoredFieldsNotice, imList, loadInstances } from './instances.mjs';
 import { manifestPath } from './manifest.mjs';
 import { t } from './i18n.mjs';
 import { padEnd, spinner, styler } from './ui.mjs';
@@ -235,10 +235,9 @@ export async function statusCommand(options) {
   const context = defaults(options);
   const apps = appsFor(undefined, loadTargets(context.env));
   const processes = new Map((await pm2Processes(context)).map((processInfo) => [processInfo?.name, processInfo]));
-  let ims = new Map();
-  try {
-    ims = new Map((loadInstances(context.env)?.agents ?? []).map((agent) => [`vika-${agent.id}`, imList(agent.connectors, agent.emailAccounts?.length)]));
-  } catch {}
+  let deployment = null;
+  try { deployment = loadInstances(context.env); } catch {}
+  const ims = new Map((deployment?.agents ?? []).map((agent) => [`vika-${agent.id}`, imList(agent.connectors, agent.emailAccounts?.length)]));
   const s = styler(context.stdout, context.env);
   const rows = [];
   for (const spec of apps) {
@@ -254,6 +253,8 @@ export async function statusCommand(options) {
     const line = `${dot} ${padEnd(app, width)}  ${padEnd(state, t(8, 11))}  ${padEnd(answer, t(6, 9))}  ${s.gray(im)}`;
     context.stdout.write(`${line.trimEnd()}\n`);
   }
+  const notice = ignoredFieldsNotice(deployment?.ignoredFields, deployment?.manifestPath);
+  if (notice) context.stdout.write(`${s.yellow('⚠')} ${notice}\n`);
   return 0;
 }
 

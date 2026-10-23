@@ -115,7 +115,7 @@ it('preserves standard event context through the journal and OpenViking history'
   const text = formatCognitionJournalLine(entry);
   assert.equal(text, formatInboundLine(event));
   const prefix = cognitionHistoryPrefix({ getOVContext: () => ({
-    archiveThroughSeq: 0, latest_archive_overview: '', sessionId: 'ov-test',
+    latest_archive_overview: '', sessionId: 'ov-test',
     messages: [{ source_message_ids: [], parts: [{ type: 'text', text }] }],
   }) }, 1, 1).text;
   assert.match(prefix, /source=github kind=issue.opened/);

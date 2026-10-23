@@ -435,7 +435,6 @@ export class ClaudeAgent {
         this.store,
         this.cognitionEpoch,
         throughSeq,
-        this.config.cognitionMaxChars,
         this.needsHistoryPrefix ? 0 : this.deliveredThroughSeq,
       );
       prefixThroughSeq = catchup.throughSeq;

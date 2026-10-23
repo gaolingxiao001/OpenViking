@@ -54,7 +54,7 @@ function makeStore() {
     cognitionJournalSeqForInbound: () => 0,
     recordActivity() {},
     history: () => [],
-    getOVContext: () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: '', messages: [] }),
+    getOVContext: () => ({ sessionId: 'ov-test', latest_archive_overview: '', messages: [] }),
     getSetting: (key) => settings[key] ?? null,
     setSetting: (key, value) => { settings[key] = value; },
     settings,

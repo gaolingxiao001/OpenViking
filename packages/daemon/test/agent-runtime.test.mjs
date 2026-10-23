@@ -9,6 +9,8 @@ import { adaptRuntime } from '../src/runtime-adapter.mjs';
 import { ActionService } from '../src/actions/service.mjs';
 import { fakeConnectors } from './action-fixture.mjs';
 import { Store } from '../src/store.mjs';
+import { OVSessionContext } from '../src/ov-session-context.mjs';
+import { cognitionHistoryPrefix } from '../src/cognition.mjs';
 import { runClaudeRuntimeSimulation } from '../simulator/claude-runtime-simulator.mjs';
 
 const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
@@ -140,7 +142,7 @@ describe('global Codex/Claude hard switch', () => {
     store.initializeCognition('pi', 'pi-authority');
     let instance;
     const selected = [];
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       codexFactory: (options) => {
         selected.push('codex');
         return backend('codex', options);
@@ -207,7 +209,6 @@ describe('global Codex/Claude hard switch', () => {
     const selected = [];
     const runtime = new AgentRuntime({
       initialModel: 'pi',
-      cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       codexFactory: () => {
         selected.push('codex');
@@ -237,7 +238,6 @@ describe('global Codex/Claude hard switch', () => {
     const selected = [];
     const runtime = new AgentRuntime({
       initialModel: 'traex',
-      cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       codexFactory: () => {
         selected.push('codex');
@@ -267,7 +267,6 @@ describe('global Codex/Claude hard switch', () => {
     let initialOptions;
     const runtime = new AgentRuntime({
       initialModel: 'trae:gpt-5.6-sol',
-      cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       codexFactory: () => backend('codex'),
       traexFactory: (options) => {
@@ -296,7 +295,6 @@ describe('global Codex/Claude hard switch', () => {
     const runtime = new AgentRuntime({
       connectors: ['lark'],
       initialModel: 'ark',
-      cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       codexFactory: () => {
         selected.push('codex');
@@ -329,7 +327,6 @@ describe('global Codex/Claude hard switch', () => {
     const persisted = [];
     const runtime = new AgentRuntime({
       initialModel: 'pi',
-      cognitionMaxChars: 120_000,
     }, store, quietLogger, {
       persistRuntimePreference: (target) => persisted.push(target),
       codexFactory: () => {
@@ -361,7 +358,7 @@ describe('global Codex/Claude hard switch', () => {
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     store.initializeCognition('codex', 'old-token');
     const order = [];
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       persistRuntimePreference: async (target) => {
         assert.equal(target, 'pi');
         assert.equal(store.getCognitionState().runtime, 'codex');
@@ -391,7 +388,7 @@ describe('global Codex/Claude hard switch', () => {
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     store.initializeCognition('codex', 'old-token');
     let staged;
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       persistRuntimePreference: () => { throw new Error('manifest write failed'); },
       codexFactory: (options) => backend('codex', options),
       piFactory: (options) => {
@@ -523,7 +520,7 @@ describe('global Codex/Claude hard switch', () => {
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     store.initializeCognition('claude', 'old-token');
     const stagedCodex = [];
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       claudeFactory: (options) => {
         const instance = backend('claude', options);
         instance.model = 'sonnet';
@@ -563,7 +560,7 @@ describe('global Codex/Claude hard switch', () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-stuck-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     let previous;
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       codexFactory: (options) => {
         previous = backend('codex', options);
         previous.calls = [];
@@ -600,12 +597,58 @@ describe('global Codex/Claude hard switch', () => {
     }
   });
 
+  it('hands archived OV history without an overview to the target runtime', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-ov-'));
+    const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
+    // Latest OV with Working Memory off: archived messages leave /context and
+    // no overview replaces them.
+    const ov = new OVSessionContext(store, {
+      messages: [],
+      async create(id) { return { session_id: id, uri: `viking://session/${id}` }; },
+      async append(id, message) { this.messages.push({ ...message, parts: [{ type: 'text', text: message.content }] }); },
+      async context() {
+        return { messages: this.messages.slice(-1), latest_archive_overview: '', stats: { totalArchives: 3, failedArchives: 0 } };
+      },
+    }, quietLogger);
+    const runtime = new AgentRuntime({}, store, quietLogger, {
+      codexFactory: (options) => backend('codex', options),
+      claudeFactory: (options) => {
+        const instance = backend('claude', options);
+        instance.model = options.model;
+        // A fresh native session prepares OV history while it starts.
+        instance.start = async function start() {
+          await store.prepareOVContext(options.cognitionEpoch);
+          this.state.connected = true;
+        };
+        return instance;
+      },
+    });
+
+    try {
+      await runtime.start();
+      store.appendCognitionJournal({ kind: 'inbound', actor: 'user', chatId: 'chat', messageId: 'm1', text: 'archived request' });
+      store.appendCognitionJournal({ kind: 'inbound', actor: 'user', chatId: 'chat', messageId: 'm2', text: 'recent request' });
+      store.setSetting('claude_model', 'sonnet');
+      const result = await runtime.transition({ kind: 'select-runtime', runtime: 'claude' });
+      assert.equal(result.runtimeChanged, true);
+      assert.equal(runtime.runtime, 'claude');
+      const prefix = cognitionHistoryPrefix(store, store.getCognitionState().epoch, result.syncedThroughSeq).text;
+      assert.match(prefix, /recent request/);
+      assert.doesNotMatch(prefix, /archived request/);
+    } finally {
+      ov.stop();
+      await runtime.stop();
+      store.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('preserves the active turn, session, epoch and authority on a same-runtime model change', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lark-runtime-samemodel-'));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     let instance;
     const authorities = [];
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       onAuthorityChanged: (authority) => authorities.push(authority),
       codexFactory: (options) => {
         instance = backend('codex', options);
@@ -669,7 +712,7 @@ describe('global Codex/Claude hard switch', () => {
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
     store.initializeCognition('volc', 'old-token');
     let instance;
-    const runtime = new AgentRuntime({ connectors: ['lark'], cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({ connectors: ['lark'] }, store, quietLogger, {
       volcFactory: (options) => {
         instance = backend('volc', options);
         instance.threadId = 'sesn-old123456';
@@ -713,7 +756,7 @@ describe('global Codex/Claude hard switch', () => {
     let instance;
     let cancelled = 0;
     let committed = 0;
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       codexFactory: (options) => {
         instance = backend('codex', options);
         instance.prepareSessionRotation = async () => ({ id: 'codex-candidate', sessionReady: true });
@@ -843,7 +886,7 @@ describe('global Codex/Claude hard switch', () => {
     const connectors = fakeConnectors();
     const actions = new ActionService({ config: {}, store, connectors, logger: quietLogger });
     const stale = { authority: 'token-from-crashed-daemon' };
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       codexFactory: (options) => backend('codex', options),
     });
 
@@ -867,7 +910,7 @@ describe('global Codex/Claude hard switch', () => {
   for (const connector of ['weixin', 'telegram']) it(`serves ${connector} through local agent tools and rejects a switch to Volc`, async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `lark-runtime-${connector}-`));
     const store = new Store(path.join(directory, 'state.sqlite3'), quietLogger);
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000, connectors: [connector] }, store, quietLogger, {
+    const runtime = new AgentRuntime({ connectors: [connector] }, store, quietLogger, {
       codexFactory: (options) => backend('codex', options),
     });
     try {
@@ -890,7 +933,7 @@ describe('global Codex/Claude hard switch', () => {
     const startGate = new Promise((resolve) => { releaseStart = resolve; });
     const stagedStarted = new Promise((resolve) => { markStarted = resolve; });
     let staged;
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       codexFactory: (options) => backend('codex', options),
       claudeFactory: (options) => {
         staged = backend('claude', options);
@@ -939,7 +982,7 @@ describe('global Codex/Claude hard switch', () => {
     const modelStarted = new Promise((resolve) => { markModelStarted = resolve; });
     const modelGate = new Promise((resolve) => { releaseModel = resolve; });
     let instance;
-    const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+    const runtime = new AgentRuntime({}, store, quietLogger, {
       codexFactory: (options) => {
         instance = backend('codex', options);
         instance.stopCount = 0;

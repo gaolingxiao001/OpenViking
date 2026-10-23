@@ -277,7 +277,6 @@ export function getConfig() {
     // Replies to bot messages in one chat/thread with no person writing there
     // before the safety fuse holds further ones; 0 turns the fuse off.
     botReplyFuse: intEnv('VIKA_BOT_REPLY_FUSE', 20, { min: 0, max: 1_000 }),
-    cognitionMaxChars: intEnv('VIKA_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
     retentionMs: intEnv('VIKA_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
     dryRun: boolEnv('VIKA_DRY_RUN', false),
     meetingAudio,

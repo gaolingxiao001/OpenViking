@@ -258,9 +258,7 @@ describe('Store', () => {
     // A delta that only contained the runtime's own committed sends produces no
     // prefix text at all, while still advancing the cursor.
     const head = store.cognitionJournalHead(epoch);
-    const emptyDelta = cognitionHistoryPrefix(store, epoch, 2, 120_000, 1, {
-      excludeCommittedOutboundFrom: 'token-own',
-    });
+    const emptyDelta = cognitionHistoryPrefix(store, epoch, 2, 1);
     assert.equal(emptyDelta.text, '');
     assert.equal(emptyDelta.throughSeq, 2);
     // An unprepared context fails closed, never replaying the local ledger.

@@ -1,10 +1,18 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { formatCognitionJournalLine } from './cognition.mjs';
-import { OVConnection, OVUnavailableError, readOVConfig } from './ov-connection.mjs';
+import { safeError } from './logger.mjs';
+import { OVConnection, readOVConfig } from './ov-connection.mjs';
 
-// OV owns summaries, archives and assembled context. SQLite retains only the
-// transport cursor/intent here; cognition_journal is the existing durable
-// delivery ledger and migration/sync outbox, never a prompt source.
+// A commit keeps the newest complete turns, up to RETAINED_TOKENS, live as raw
+// messages and runs once COMMIT_TOKENS more are pending, so the live session
+// fits the context read whole.
+const RETAINED_TOKENS = 24_000;
+const COMMIT_TOKENS = 24_000;
+const CONTEXT_TOKENS = RETAINED_TOKENS + COMMIT_TOKENS;
+
+// OV owns archives and assembled context. SQLite retains only the transport
+// cursor/intent here; cognition_journal is the existing durable delivery ledger
+// and sync outbox, never a prompt source.
 export class OVSessionClient extends OVConnection {
   constructor(configPath, options) {
     super(readOVConfig(configPath), options);
@@ -20,8 +28,15 @@ export class OVSessionClient extends OVConnection {
     } });
   }
   append(sessionId, message) { return this.request(`/sessions/${encodeURIComponent(sessionId)}/messages`, message); }
-  context(sessionId) { return this.request(`/sessions/${encodeURIComponent(sessionId)}/context?token_budget=24000`); }
-  commit(sessionId) { return this.request(`/sessions/${encodeURIComponent(sessionId)}/commit`, { keep_recent_count: 10 }); }
+  context(sessionId) {
+    return this.request(`/sessions/${encodeURIComponent(sessionId)}/context?token_budget=${CONTEXT_TOKENS}`);
+  }
+  // The turn count is OV's maximum, so only the token budget binds.
+  commit(sessionId) {
+    return this.request(`/sessions/${encodeURIComponent(sessionId)}/commit`, {
+      retention_mode: 'turn_budget', keep_recent_turn_count: 10_000, retained_message_token_budget: RETAINED_TOKENS,
+    });
+  }
   archive(sessionId, archiveId) { return this.request(`/sessions/${encodeURIComponent(sessionId)}/archives/${encodeURIComponent(archiveId)}`); }
   read(uri, offset = 0, limit = 100) {
     return this.request(`/content/read?uri=${encodeURIComponent(uri)}&offset=${offset}&limit=${limit}&raw=true`);
@@ -29,7 +44,7 @@ export class OVSessionClient extends OVConnection {
 }
 
 export class OVSessionContext {
-  constructor(store, client, logger, { canCommit = () => false, waitMs = 15_000 } = {}) {
+  constructor(store, client, logger) {
     this.store = store;
     this.client = client;
     this.logger = logger;
@@ -37,24 +52,25 @@ export class OVSessionContext {
     this.contexts = new Map();
     this.stopped = false;
     this.checked = new Map();
-    this.canCommit = canCommit;
-    this.waitMs = waitMs;
     store.db.exec(`CREATE TABLE IF NOT EXISTS ov_session_sync (
       epoch INTEGER PRIMARY KEY, session_id TEXT NOT NULL, uri TEXT,
-      synced_seq INTEGER NOT NULL DEFAULT 0, pending_seq INTEGER,
-      commit_seq INTEGER NOT NULL DEFAULT 0, confirmed_seq INTEGER NOT NULL DEFAULT 0,
-      commit_pending INTEGER NOT NULL DEFAULT 0, previous_overview TEXT, pending_confirm_seq INTEGER NOT NULL DEFAULT 0
+      synced_seq INTEGER NOT NULL DEFAULT 0, pending_seq INTEGER
     )`);
     store.prepareOVContext = async (epoch) => {
       try {
         return await this.prepare(epoch);
       } catch (error) {
-        if (this.stopped || !(error instanceof OVUnavailableError)) throw error;
-        // Never reuse stale prefetched history after a failed sync. The local
-        // outbox/cursors remain intact, so the idle checkpoint can retry later.
-        const empty = { messages: [], latest_archive_overview: '', archiveThroughSeq: 0 };
+        if (this.stopped) throw error;
+        // History is best effort: a fresh session starts without it rather
+        // than blocking a runtime switch or an inbound message. Never reuse
+        // stale prefetched history after a failure. The local outbox/cursors
+        // remain intact, so the idle checkpoint can retry later.
+        const empty = { messages: [] };
         this.contexts.set(epoch, empty);
-        this.logger.warn('ov_context_unavailable', { error: 'Continuing without OV history; sync will retry' });
+        // A JSON parse error can quote remote content.
+        this.logger.warn('ov_context_unavailable', {
+          error: error instanceof SyntaxError ? 'OV returned malformed data' : safeError(error),
+        });
         return empty;
       }
     };
@@ -87,8 +103,8 @@ export class OVSessionContext {
     return state;
   }
 
-  // A write timeout is ambiguous. Auto-commit is disabled for daemon-owned OV
-  // sessions, so the uncertain write remains in live messages until reconciled.
+  // A write timeout is ambiguous. Commits run only after a complete sync, so
+  // the uncertain write remains in live messages until it is reconciled.
   // Do not retry an append based only on a timeout: first look for its source ID.
   async hasSource(state, sourceId) {
     for (let offset = 0; ; offset += 100) {
@@ -110,8 +126,9 @@ export class OVSessionContext {
     }
   }
 
-  async sync(epoch, throughSeq) {
-    const state = await this.session(epoch);
+  // Returns false when an unsettled local delivery stops the cursor; a later
+  // checkpoint continues from it once it settles.
+  async sync(state, epoch, throughSeq) {
     // Bounded DB reads; no epoch-sized array of bodies is materialized.
     while (state.synced_seq < throughSeq) {
       if (this.stopped) throw new Error('OV sync stopped');
@@ -120,19 +137,18 @@ export class OVSessionContext {
           AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')
         ORDER BY seq LIMIT 1`).get(epoch, state.synced_seq, throughSeq);
       if (!row) break;
-      if (row.status === 'PENDING') throw new Error('OV sync is waiting for an unsettled local delivery');
+      if (row.status === 'PENDING') return false;
       const sourceId = `lark:${epoch}:${row.seq}`;
       if (!(state.pending_seq === row.seq && await this.hasSource(state, sourceId))) {
         const item = this.store.cognitionJournal(epoch, row.seq, row.seq - 1)[0];
         if (!item) throw new Error('OV sync source record is unavailable');
         this.store.db.prepare('UPDATE ov_session_sync SET pending_seq=? WHERE epoch=?').run(row.seq, epoch);
         state.pending_seq = row.seq;
-        const content = formatCognitionJournalLine(item);
         await this.client.append(state.session_id, {
           role: item.kind === 'outbound' ? 'assistant' : 'user',
-          content,
+          content: formatCognitionJournalLine(item),
           created_at: new Date(item.atMs).toISOString(),
-          source_message_ids: [sourceId, `sha256:${createHash('sha256').update(content).digest('hex')}`],
+          source_message_ids: [sourceId],
         });
       }
       if (this.stopped) throw new Error('OV sync stopped');
@@ -140,99 +156,44 @@ export class OVSessionContext {
       state.synced_seq = row.seq;
       state.pending_seq = null;
     }
-    return state;
+    return true;
   }
 
+  // OV's recent raw history for a fresh native session. Older history stays in
+  // OV archives, which the model reads on demand.
   prepare(epoch) {
     const throughSeq = this.store.cognitionJournalHead(epoch);
     return this.run(async () => {
-      const state = await this.sync(epoch, throughSeq);
-      if (this.canCommit()) await this.maybeCommit(state, epoch);
-      let context = await this.client.context(state.session_id);
-      const deadline = Date.now() + this.waitMs;
-      while (state.commit_pending && (!context.latest_archive_overview || context.latest_archive_overview === state.previous_overview)
-        && !context.stats.failedArchives && Date.now() < deadline && !this.stopped) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        context = await this.client.context(state.session_id);
-      }
+      const state = await this.session(epoch);
+      await this.sync(state, epoch, throughSeq);
+      const context = await this.client.context(state.session_id);
       if (this.stopped) throw new Error('OV sync stopped');
       if (!context || !Array.isArray(context.messages)) throw new Error('OV session context is invalid');
-      if (context.stats?.failedArchives > 0) throw new Error('OV archive failed; refusing an incomplete handoff');
-      if (context.stats?.totalArchives > 0 && !context.latest_archive_overview) {
-        throw new Error('OV archive overview is pending or excluded by its context budget; retry when available');
-      }
-      this.confirmCommit(state, epoch, context);
-      for (const message of context.messages) {
-        const expected = message.source_message_ids?.find((id) => id.startsWith('sha256:'));
-        if (expected) {
-          const text = (message.parts ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
-          if (`sha256:${createHash('sha256').update(text).digest('hex')}` !== expected) {
-            throw new Error('OV live context was truncated; compact the OV session before handoff');
-          }
-        }
-      }
-      const visibleSources = new Set(context.messages.flatMap((message) => message.source_message_ids ?? []));
-      const needed = this.store.db.prepare(`SELECT seq FROM cognition_journal
-        WHERE epoch=? AND seq>? AND seq<=?
-          AND status IN ('PENDING', 'COMMITTED', 'UNCERTAIN')`)
-        .all(epoch, state.confirmed_seq, state.synced_seq);
-      if (needed.some((row) => !visibleSources.has(`lark:${epoch}:${row.seq}`))) {
-        throw new Error('OV context omitted unsummarized source messages; refusing an incomplete handoff');
-      }
-      const prepared = { ...context, sessionId: state.session_id, throughSeq: state.synced_seq,
-        archiveThroughSeq: state.commit_seq, epoch };
+      const prepared = { ...context, sessionId: state.session_id, throughSeq: state.synced_seq, epoch };
       this.contexts.set(epoch, prepared);
       return prepared;
     });
   }
 
-  // Run only after the local runtime and ingress buffers are idle. This gives
-  // commit a turn boundary and prevents summaries from covering queued inputs.
+  // Run only after the local runtime and ingress buffers are idle, so a commit
+  // lands on a turn boundary.
   checkpoint(epoch) {
     const throughSeq = this.store.cognitionJournalHead(epoch);
     return this.run(async () => {
-      if (this.checked.get(epoch) === throughSeq
-        && !this.store.db.prepare('SELECT commit_pending FROM ov_session_sync WHERE epoch=?').get(epoch)?.commit_pending) return;
-      const state = await this.sync(epoch, throughSeq);
-      await this.maybeCommit(state, epoch);
+      if (this.checked.get(epoch) === throughSeq) return;
+      const state = await this.session(epoch);
+      if (!await this.sync(state, epoch, throughSeq)) return;
+      await this.maybeCommit(state);
       this.checked.set(epoch, throughSeq);
     });
   }
 
-  confirmCommit(state, epoch, context) {
-    if (state.commit_pending && !context.stats?.failedArchives
-      && context.latest_archive_overview && context.latest_archive_overview !== state.previous_overview) {
-      this.store.db.prepare('UPDATE ov_session_sync SET confirmed_seq=pending_confirm_seq,commit_pending=0 WHERE epoch=?').run(epoch);
-      state.confirmed_seq = state.pending_confirm_seq;
-      state.commit_pending = 0;
-    }
-  }
-
-  async maybeCommit(state, epoch) {
-    const context = await this.client.context(state.session_id);
-    if (this.stopped) throw new Error('OV sync stopped');
-    this.confirmCommit(state, epoch, context);
-    // An ambiguous commit is never resubmitted. A changed cumulative overview
-    // confirms completion for this exclusively daemon-owned session. Until then
-    // every unconfirmed source must remain visible in OV's raw context.
-    if (state.commit_pending || context.stats?.failedArchives) return;
+  // Keeps no local commit state. A commit with an unknown outcome is safe to
+  // repeat: one that landed leaves nothing pending to trigger another.
+  async maybeCommit(state) {
     const meta = await this.client.request(`/sessions/${encodeURIComponent(state.session_id)}`);
     if (this.stopped) throw new Error('OV sync stopped');
-    if ((meta.pending_tokens ?? 0) >= 12_000) {
-      // keep_recent_count=10 leaves these raw messages outside the summary.
-      // Coverage comes from source metadata only, never local message bodies.
-      const retained = this.store.db.prepare('SELECT seq FROM cognition_journal WHERE epoch=? AND seq<=? ORDER BY seq DESC LIMIT 10')
-        .all(epoch, state.synced_seq);
-      const covered = retained.length ? Math.min(...retained.map((row) => row.seq)) - 1 : state.confirmed_seq;
-      if (covered <= state.confirmed_seq) return;
-      this.store.db.prepare('UPDATE ov_session_sync SET commit_seq=?,commit_pending=1,previous_overview=?,pending_confirm_seq=? WHERE epoch=?')
-        .run(state.synced_seq, context.latest_archive_overview || '', covered, epoch);
-      state.pending_confirm_seq = covered;
-      state.commit_seq = state.synced_seq;
-      state.commit_pending = 1;
-      state.previous_overview = context.latest_archive_overview || '';
-      await this.client.commit(state.session_id);
-    }
+    if ((meta.pending_tokens ?? 0) >= COMMIT_TOKENS) await this.client.commit(state.session_id);
   }
 
   stop() { this.stopped = true; }

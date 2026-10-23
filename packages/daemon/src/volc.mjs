@@ -423,7 +423,6 @@ export class VolcAgent {
         this.store,
         this.cognitionEpoch,
         throughSeq,
-        this.config.cognitionMaxChars,
         this.deliveredThroughSeq,
       );
       deliveredThroughSeq = catchup.throughSeq;

@@ -15,7 +15,6 @@ import {
   isModelUnavailableError,
 } from './runtime-catalog.mjs';
 
-const SWITCH_JOURNAL_HEADROOM = 4_096;
 
 export class AgentRuntime {
   constructor(config, store, logger, options = {}) {
@@ -360,8 +359,8 @@ export class AgentRuntime {
     let previousEffort;
     try {
       // Never wait for a stuck in-flight turn: interrupt/abandon it. Its
-      // inbound rows are already in the cognition journal, which the target
-      // replays as a catch-up prefix on its first real turn.
+      // inbound rows are already in the cognition journal, synced to OV, whose
+      // recent history the target receives on its first real turn.
       await previous?.interrupt();
       if (this.stopping) throw new Error('agent runtime stopped during runtime switch');
       const cognition = this.store.getCognitionState();
@@ -426,12 +425,7 @@ export class AgentRuntime {
         if (!staged.state?.connected) throw new Error('target runtime exited before switch commit');
         break;
       }
-      const catchup = cognitionHistoryPrefix(
-        this.store,
-        cognition.epoch,
-        journalThrough,
-        Math.max(1, (this.config.cognitionMaxChars ?? 120_000) - SWITCH_JOURNAL_HEADROOM),
-      );
+      const catchup = cognitionHistoryPrefix(this.store, cognition.epoch, journalThrough);
       const session = staged.sessionDescriptor;
       if (!session.sessionId) throw new Error('target runtime produced no global session id');
       if (this.stopping || this.stagedBackend !== staged) {
