@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { OVConnection, readOVConfig } from '../../daemon/src/ov-connection.mjs';
 import { availableInstanceOvConfig } from './manifest.mjs';
-import { LOCAL_OV_URL, detectOpenViking, savedOVConfigPath, writeInstanceOvConfig } from './ov.mjs';
+import { HOSTED_OV_URL, LOCAL_OV_URL, detectOpenViking, savedOVConfigPath, writeInstanceOvConfig } from './ov.mjs';
 import { GoBack, PromptAborted } from './prompt.mjs';
 import { t } from './i18n.mjs';
 
@@ -101,9 +101,12 @@ async function manualConfig(prompter, previous = {}) {
       }
     },
   });
-  // Never carry a credential to a different address without the owner's input.
+  // Never carry a credential or an identity to a different address without
+  // the owner's input: another server's user would name a private area this
+  // one refuses.
+  const sameServer = config.url === previous.url;
   const credential = await prompter.select(t('API Key', 'API key'), [
-    ...(previous.api_key && config.url === previous.url ? [{ label: t('保留已配置的密钥', 'Keep the configured key'), value: 'keep' }] : []),
+    ...(previous.api_key && sameServer ? [{ label: t('保留已配置的密钥', 'Keep the configured key'), value: 'keep' }] : []),
     { label: t('输入 API Key', 'Enter an API key'), value: 'enter' },
     { label: t('服务不需要 API Key', 'The service does not require an API key'), value: 'none' },
   ]);
@@ -111,12 +114,36 @@ async function manualConfig(prompter, previous = {}) {
   if (credential === 'enter') config.api_key = await prompter.secret(t('API Key（隐藏输入）', 'API key (hidden input)'));
   for (const [key, label] of [['account', 'Account'], ['user', 'User'], ['agent', 'Agent']]) {
     const value = await prompter.text(t(`${label}（可选；回车沿用默认值，输入 - 清空）`, `${label} (optional; Enter keeps the default, - clears it)`), {
-      initial: previous[key] || '',
+      initial: sameServer ? previous[key] || '' : '',
     });
     if (value && value !== '-') config[key] = value;
     else delete config[key];
   }
   return config;
+}
+
+// The hosted service has one address and takes identity from the key alone.
+async function hostedConfig(prompter, previous = {}) {
+  const config = previous.url === HOSTED_OV_URL ? { ...previous } : { url: HOSTED_OV_URL };
+  for (const key of ['api_key', 'account', 'user', 'agent']) delete config[key];
+  const keep = previous.url === HOSTED_OV_URL && previous.api_key
+    && await prompter.select(t('API Key', 'API key'), [
+      { label: t('保留已配置的密钥', 'Keep the configured key'), value: true },
+      { label: t('输入 API Key', 'Enter an API key'), value: false },
+    ]);
+  config.api_key = keep ? previous.api_key : await prompter.secret(
+    t('API Key（OpenViking 控制台 → 用户管理 → API Key；隐藏输入）',
+      'API key (OpenViking console → User management → API Key; hidden input)'));
+  return config;
+}
+
+// An API key alone decides who a request runs as; the server ignores Account
+// and User headers. Keep the user the key logs in as, which names the
+// instance's private area (mail archive paths), instead of a typed or stale one.
+function keyIdentity(config, result) {
+  if (result.authMode !== 'api_key' || !result.user) return config;
+  const { account: _account, ...rest } = config;
+  return { ...rest, user: result.user };
 }
 
 // Always offer both manual entry and importing a file, even if discovery found
@@ -138,11 +165,13 @@ export async function configureOpenViking({
         || candidates.find((entry) => entry.usable) || candidates[0]);
   } catch { draft = {}; }
   for (;;) {
-    const before = { manual: candidates.length, file: candidates.length + 1 }[previous?.via]
+    const before = { hosted: candidates.length, manual: candidates.length + 1, file: candidates.length + 2 }[previous?.via]
       ?? candidates.findIndex(({ label }) => label === previous?.via);
     const ready = candidates.findIndex(({ usable }) => usable);
     const choice = await prompter.select(t('选择 OpenViking 连接', 'Choose an OpenViking connection'), [
       ...candidates.map((candidate) => ({ label: candidate.label, hint: describe(candidate), value: candidate })),
+      { label: t('火山引擎 OpenViking 托管服务', 'OpenViking Service on Volcengine'),
+        hint: t('只需填写 API Key', 'API key only'), value: 'hosted' },
       { label: t('手动填写／修改地址和凭据', 'Enter or edit the address and credentials'), value: 'manual' },
       { label: t('指定 OV 配置文件', 'Choose an OV configuration file'), value: 'file' },
       { label: t('重新检测', 'Detect again'), value: 'retry' },
@@ -154,7 +183,10 @@ export async function configureOpenViking({
       let configPath = null;
       let config;
       let via = choice;
-      if (choice === 'manual') {
+      if (choice === 'hosted') {
+        draft = await hostedConfig(prompter, draft);
+        config = draft;
+      } else if (choice === 'manual') {
         draft = await manualConfig(prompter, draft);
         config = draft;
       } else if (choice === 'file') {
@@ -176,7 +208,7 @@ export async function configureOpenViking({
         continue;
       }
       prompter.success(t(`OpenViking 连接已验证：${address(result.url || config.url)}`, `OpenViking connection verified: ${address(result.url || config.url)}`));
-      return { ...result, configPath, config: structuredClone(config), via };
+      return { ...result, configPath, config: keyIdentity(structuredClone(config), result), via };
     } catch (error) {
       if (error instanceof PromptAborted) throw error;
       if (!(error instanceof GoBack)) prompter.warn(t('无法读取 OV 配置，请检查文件路径和 JSON 格式后重试。',

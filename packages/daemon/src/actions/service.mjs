@@ -8,7 +8,7 @@ import {
 import { chunkOffset, mailArchiveRoot, readStoredText, readTarget } from '../email/archive.mjs';
 import { meetingContextLines } from '../meeting/index.mjs';
 import { OVUnavailableError } from '../ov-connection.mjs';
-import { OVSessionClient } from '../ov-session-context.mjs';
+import { OVSessionClient, withoutWorkingMemory } from '../ov-session-context.mjs';
 import { opaqueRef, redactSensitive, safeError } from '../logger.mjs';
 import { BOT_SENDERS, readMetadataTag } from '../runtime-input.mjs';
 import { TimerSchedule } from '../timers.mjs';
@@ -1080,10 +1080,10 @@ export class ActionService {
     if (!state?.uri) throw new Error('No OpenViking session is linked to this epoch');
     const client = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
     let result;
-    if (input.archive_id) result = await client.archive(state.session_id, input.archive_id);
-    else if (input.list_archives) result = await client.request(`/fs/ls?uri=${encodeURIComponent(`${state.uri}/history`)}`);
-    else if (input.query) result = await client.request('/search/grep', { uri: `${state.uri}/history`, pattern: input.query, case_insensitive: true });
-    else result = await client.context(state.session_id);
+    if (input.archive_id) result = await client.archive(state.uri, input.archive_id);
+    else if (input.list_archives) result = await client.archives(state.uri);
+    else if (input.query) result = await client.grep(state.uri, input.query);
+    else result = withoutWorkingMemory(await client.context(state.session_id));
     const text = JSON.stringify(result);
     const digest = createHash('sha256').update(text).digest('hex');
     if (input.expected_digest && input.expected_digest !== digest) throw new Error('OV result changed; restart pagination at offset zero');

@@ -111,8 +111,8 @@ test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after ev
 });
 
 test('without a usable OV, a new instance goes no further than the OV form', async (t) => {
-  //                   local default, manual, file, detect again, exit
-  const h = harness(t, ['5']);
+  //                   local default, hosted, manual, file, detect again, exit
+  const h = harness(t, ['6']);
   h.options.configureOV = configureOpenViking;
   h.options.detect.openViking = detectOpenViking;
   h.options.fetchImpl = async () => { throw new Error('offline'); };
@@ -124,7 +124,7 @@ test('without a usable OV, a new instance goes no further than the OV form', asy
 });
 
 test('the real OV form accepts remote credentials before any IM questions or authorization', async (t) => {
-  const h = harness(t, ['2', 'https://memory.example:9443', '1', 'private-key', 'team', 'owner', '',
+  const h = harness(t, ['3', 'https://memory.example:9443', '1', 'private-key', 'team', 'owner', '',
     'Vika', '', '', '1', '2', 'y']);
   h.options.configureOV = configureOpenViking;
   h.options.detect.openViking = detectOpenViking;
@@ -148,7 +148,7 @@ test('the real OV form accepts remote credentials before any IM questions or aut
 
 test('editing the OV connection preserves the actor and old file; Save applies it and Discard removes the pending copy', async (t) => {
   for (const save of [true, false]) {
-    const h = harness(t, ['2', '9', '3', 'https://memory.example:9443', '1', 'new-key', '', '', '', save ? '10' : '11']);
+    const h = harness(t, ['2', '9', '4', 'https://memory.example:9443', '1', 'new-key', '', '', '', save ? '10' : '11']);
     const before = existing(h, { ovAutoRecall: true });
     fs.mkdirSync(path.dirname(before.ovConfig), { recursive: true });
     const original = JSON.stringify({ url: 'https://old.example', api_key: 'old-key', actor_peer_id: 'original-actor' });
@@ -298,7 +298,7 @@ test('editing ordinary settings never probes OV or opens its form and preserves 
 });
 
 test('returning from OV configuration keeps other unsaved settings and the original OV config', async (t) => {
-  const h = harness(t, ['2', '1', 'Renamed', '9', '6', '10']);
+  const h = harness(t, ['2', '1', 'Renamed', '9', '7', '10']);
   const before = existing(h);
   fs.mkdirSync(path.dirname(before.ovConfig), { recursive: true });
   const original = JSON.stringify({ url: 'https://old.example', actor_peer_id: 'original-actor' });

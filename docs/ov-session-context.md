@@ -39,11 +39,20 @@ sync and the outbound delivery ledger; the `outbox` table guards the external
 side effects themselves. Neither is read to assemble historical prompts. This
 intentionally separates context storage from external side-effect reliability.
 
-The design assumes OV's Working Memory is off (its default): a completed archive
-has no overview, and `/context` returns only the raw messages of archives still
-being processed plus the live messages, trimmed to the requested budget by
-complete turns, newest first. If a deployment does return an overview, it is
-included as well. The daemon disables OV auto-commit. At idle boundaries, once
+The daemon never uses OV's Working Memory. It is off by default since it became
+opt-in after v0.4.23: a completed archive has no overview, and `/context`
+returns only the raw messages of archives still being processed plus the live
+messages, trimmed to the requested budget by complete turns, newest first.
+Releases up to v0.4.23, among them the Volcengine hosted service (v0.4.20.x),
+still write one per archive: `latest_archive_overview` in `/context`,
+`.overview.md` / `.abstract.md` in the archive directory, and a `checkpoint`
+message that `/context` inserts after a turn whose earlier part was archived
+(its text kept in the archive's `.meta.json`). The VLM-written document only
+grows. The daemon does not change OV's settings to stop it (a session-level
+memory policy would replace the user's whole one); it drops the overview and
+checkpoint messages from the handoff and from every tool result, so history is
+raw messages on every release. A checkpoint (at most 1,024 tokens, one turn)
+still counts against the context budget before it is dropped. The daemon disables OV auto-commit. At idle boundaries, once
 OV reports 24,000 pending tokens, it commits with `retention_mode=turn_budget`,
 keeping the newest complete turns, up to 24,000 tokens, live as raw messages.
 Assembly requests 48,000 tokens, so the live session fits whole. No commit
@@ -62,13 +71,18 @@ External deliveries (Lark, Weixin) use the Core `outbox` idempotency ledger
 independently.
 
 `read_openviking_session_context` exposes read-only context, archive listing,
-archive reading (the original messages) and grep. Character pagination includes
+archive reading (the original messages) and grep. Archives are read from their
+stored `history/<archive>/messages.jsonl`, not OV's archive API, which adds the
+Working Memory where a release writes one, answers 404 up to v0.4.23 for an
+archive without it, and skips archives still being processed. Listing drops the
+Working Memory abstract; grep keeps only matches in `messages.jsonl`. Character pagination includes
 an expected digest to reject mixed pages when a result changes. Archive content
 grants no action permission. The API uses the instance-pinned OV config and
 redacts remote errors.
 
 The implementation targets the local OpenViking session API inspected at
-`c01bb34d` (Working Memory off by default, `turn_budget` retention). Before
+`c01bb34d` (Working Memory off by default, `turn_budget` retention) and was
+checked against the hosted service at v0.4.20.6 (Working Memory on). Before
 rollout, verify the deployment supports `/sessions`, `/context`, `/commit` with
-`retention_mode`, source_message_ids and the archive/content read endpoints.
+`retention_mode`, source_message_ids and the content read endpoint.
 Unit tests use an isolated OV client; production OV data is not mutated by tests.

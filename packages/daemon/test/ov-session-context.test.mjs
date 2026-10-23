@@ -94,6 +94,25 @@ test('archives without an overview hand off the recent raw tail', async (t) => {
   assert.match(prefix, /Earlier history of this epoch is in OpenViking archives/);
 });
 
+test("an older OV's Working Memory is never handed over", async (t) => {
+  const { store, epoch, client, append } = setup(t);
+  append('recent message');
+  const context = client.context.bind(client);
+  // The cumulative overview, and a checkpoint after a turn whose earlier part was archived.
+  client.context = async (id) => {
+    const { messages, ...rest } = await context(id);
+    const checkpoint = { id: 'checkpoint_archive_001_m', role: 'assistant', message_kind: 'checkpoint',
+      parts: [{ type: 'context', context_type: 'memory', abstract: 'checkpoint summary' }], source_message_ids: [] };
+    return { ...rest, latest_archive_overview: '# Working Memory\nbloated summary', messages: [...messages, checkpoint] };
+  };
+  const prepared = await store.prepareOVContext(epoch);
+  assert.equal('latest_archive_overview' in prepared, false);
+  assert.deepEqual(prepared.messages.map(({ message_kind: kind }) => kind), [undefined]);
+  const prefix = cognitionHistoryPrefix(store, epoch, prepared.throughSeq).text;
+  assert.match(prefix, /recent message/);
+  assert.doesNotMatch(prefix, /Working Memory|bloated summary|checkpoint summary/);
+});
+
 test('commits only above the pending threshold and keeps no local commit state', async (t) => {
   const { epoch, client, service, append } = setup(t);
   append('one'); client.pending = 23_999;
@@ -159,6 +178,43 @@ test('OV HTTP client pins auth, disables auto commits, retains a token tail, and
   await assert.rejects(client.context('test'), (error) => {
     assert.equal(error.httpStatus, 503);
     assert.doesNotMatch(error.message, /secret-test-key|private content/);
+    return true;
+  });
+});
+
+test('archives are read, listed and searched as raw messages, never as Working Memory', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-archive-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const config = path.join(dir, 'config.json');
+  fs.writeFileSync(config, JSON.stringify({ url: 'https://ov.invalid', api_key: 'secret-test-key' }));
+  const uri = 'viking://user/u/sessions/s';
+  const stored = [{ role: 'user', parts: [{ type: 'text', text: 'hello' }] }, { role: 'assistant', parts: [{ type: 'text', text: 'hi' }] }];
+  let content = stored.map((message) => JSON.stringify(message)).join('\n') + '\n';
+  const requests = [];
+  const client = new OVSessionClient(config, { fetch: async (url, init) => {
+    requests.push({ url, body: init.body && JSON.parse(init.body) });
+    if (url.includes('/fs/ls')) {
+      return Response.json({ status: 'ok', result: [{ uri: `${uri}/history/archive_001`, isDir: true, abstract: 'Working Memory abstract' }] });
+    }
+    if (url.endsWith('/search/grep')) {
+      return Response.json({ status: 'ok', result: { matches: [
+        { uri: `${uri}/history/archive_001/messages.jsonl`, line: 1, content: 'hello' },
+        { uri: `${uri}/history/archive_001/.overview.md`, line: 3, content: 'hello, summarized' },
+      ] } });
+    }
+    return Response.json({ status: 'ok', result: content });
+  } });
+  // OV up to v0.4.23 answers 404 for an archive without Working Memory, so storage is read directly.
+  assert.deepEqual(await client.archive(uri, 'archive_002'), { archive_id: 'archive_002', messages: stored });
+  assert.deepEqual(requests.map(({ url }) => url),
+    [`https://ov.invalid/api/v1/content/read?uri=${encodeURIComponent(`${uri}/history/archive_002/messages.jsonl`)}&offset=0&limit=-1&raw=true`]);
+  assert.deepEqual(await client.archives(uri), [{ uri: `${uri}/history/archive_001`, isDir: true }]);
+  assert.deepEqual(await client.grep(uri, 'hello'), { matches: [{ uri: `${uri}/history/archive_001/messages.jsonl`, line: 1, content: 'hello' }] });
+  assert.deepEqual(requests.at(-1).body, { uri: `${uri}/history`, pattern: 'hello', case_insensitive: true });
+  content = 'private {not json';
+  await assert.rejects(client.archive(uri, 'archive_002'), (error) => {
+    assert.match(error.message, /malformed/);
+    assert.doesNotMatch(error.message, /private/);
     return true;
   });
 });
