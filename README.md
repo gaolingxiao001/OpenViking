@@ -94,6 +94,7 @@ Bot token、owner/chat ID、接收游标及回复路由保存在 `<dataDir>/tele
 
 1. 运行 `vika setup`，新建或修改实例，勾选 Slack。
 2. 打开终端里给出的链接，选择工作区，用预填的配置创建 App（链接打不开时，在 [api.slack.com/apps](https://api.slack.com/apps) 选 Create New App → From a manifest，粘贴 `<dataDir>/slack/app-manifest.json`）。工作区开启了应用审批时，安装要等管理员批准。
+   也可以用已有的 App：对照这份 manifest 打开 Socket Mode、在 App Home 允许用户发消息，补齐事件订阅和 Bot Token Scopes 后重新安装。开了 Token Rotation 的 App 不能用；原来接收它消息的程序要先停掉。
 3. 点 **Install to Workspace**，在 OAuth & Permissions 复制 Bot User OAuth Token（`xoxb-`）；在 Basic Information → App-Level Tokens 生成一个带 `connections:write` 的 token（`xapp-`）。两个 token 都在终端的隐藏输入框粘贴。
 4. 终端显示一个一次性口令（`vika-xxxxxxxx`），在 Slack 里私聊这个机器人发送它，5 分钟内完成绑定；发送口令的人就是 owner。之后要换 token 或换 owner，用 `vika login slack [实例]`，验证期间实例暂停，期间别人发给机器人的消息会在恢复后补上。
 

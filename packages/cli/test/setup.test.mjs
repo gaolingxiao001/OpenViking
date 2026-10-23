@@ -382,8 +382,8 @@ test('adding Slack to an existing instance pastes tokens for the new IM only and
   assert.equal(await setupCommand(h.options), 0);
   assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'slack'], channel: 'slack' }]);
   assert.deepEqual(h.calls, [['slack', before.dataDir], ['restart', 'asd']]);
-  assert.match(h.written(), /接入Slack（需要建 App、两个 token 和私聊口令绑定）/);
-  assert.match(h.written(), /接下来接入：Slack 建 App \+ 两个 token \+ 私聊口令绑定/);
+  assert.match(h.written(), /接入Slack（需要新建或选已有 App、两个 token 和私聊口令绑定）/);
+  assert.match(h.written(), /接下来接入：Slack 新建或选已有 App \+ 两个 token \+ 私聊口令绑定/);
   assert.match(h.written(), /\/invite/);
 });
 
