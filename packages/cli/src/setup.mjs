@@ -68,7 +68,7 @@ const imChoices = () => [
   { label: 'Telegram', value: 'telegram',
     hint: t('官方 Bot API；需要 @BotFather 创建 Bot 和 token', 'official Bot API; needs a bot and its token from @BotFather') },
   { label: 'Slack', value: 'slack',
-    hint: t('工作区里自建的 Slack App（Socket Mode）；需要粘贴两个 token', 'an app in your own Slack workspace (Socket Mode); paste two tokens') },
+    hint: t('工作区里的 Slack App（新建或用已有的，Socket Mode）；需要粘贴两个 token', 'a new or existing app in your Slack workspace (Socket Mode); paste two tokens') },
 ];
 
 // IMs connected by pasting tokens rather than scanning a code.
@@ -1054,7 +1054,7 @@ function connectionSteps(prompter, connectors, { saving = false, larkSource = 'c
   const telegram = connectors.some((im) => TOKEN_IMS.includes(im));
   const steps = connectors.map((im) => {
     if (im === 'telegram') return t('Telegram Bot token + Start 绑定', 'Telegram bot token + Start');
-    if (im === 'slack') return t('Slack 建 App + 两个 token + 私聊口令绑定', 'Slack app + two tokens + a code in a direct message');
+    if (im === 'slack') return t('Slack 新建或选已有 App + 两个 token + 私聊口令绑定', 'Slack app (new or existing) + two tokens + a code in a direct message');
     const scans = scansOf(im, larkSource);
     return t(`${IM_LABELS[im]} ${scans} 次`, `${IM_LABELS[im]} ${scans} ${scans === 1 ? 'scan' : 'scans'}`);
   });
@@ -1502,7 +1502,7 @@ function describeChanges(before, after, mailboxes, homeDir, state) {
   for (const im of ['lark', 'weixin', 'telegram', 'slack']) {
     if (!was.includes(im) && after.connectors.includes(im)) {
       changes.push(im === 'telegram' ? t(`接入${IM_LABELS[im]}（需要 Bot token 和 Start 绑定）`, `Connect ${IM_LABELS[im]} (needs a bot token and Start)`)
-        : im === 'slack' ? t(`接入${IM_LABELS[im]}（需要建 App、两个 token 和私聊口令绑定）`, `Connect ${IM_LABELS[im]} (needs an app, two tokens and a code)`)
+        : im === 'slack' ? t(`接入${IM_LABELS[im]}（需要新建或选已有 App、两个 token 和私聊口令绑定）`, `Connect ${IM_LABELS[im]} (needs a new or existing app, two tokens and a code)`)
           : t(`接入${IM_LABELS[im]}（需要扫码）`, `Connect ${IM_LABELS[im]} (needs a scan)`));
     }
     if (was.includes(im) && !after.connectors.includes(im)) changes.push(t(`不再接${IM_LABELS[im]}`, `Disconnect ${IM_LABELS[im]}`));

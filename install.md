@@ -110,7 +110,7 @@ vika login telegram [实例]
 
 ### Slack 接入
 
-运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装，再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
+运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装（也可以用已有的 App，按向导生成的 manifest 补齐配置，条件见 [README 的 Slack](./README.md#slack)），再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
 
 成员查询使用 `conversations.members` 和 `users.info`。新建 App 的模板已包含 `channels:read`（公开频道）、`groups:read`（私有频道）、`mpim:read`（多人私聊）、`im:read`（私聊）和 `users:read`（姓名与机器人标记）。已有 App 升级 Vika 不会自动获得新权限：到 **OAuth & Permissions → Bot Token Scopes** 添加对应会话类型的权限，再 **Reinstall to Workspace** 完成授权。查询报 `missing_scope` 时会提示这些步骤，原有收发消息能力仍可使用。
 
