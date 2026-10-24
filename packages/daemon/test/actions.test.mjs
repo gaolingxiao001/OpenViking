@@ -1329,29 +1329,40 @@ describe('staged replies', () => {
     assert.equal(interimRows(store).length, 2, 'the final delivery is not interim');
   });
 
-  it('an interim message is text, in the chat of its decision, and never a mail draft', async (t) => {
+  it('an interim message is text, lands where its decision is, inside its thread, and is never a mail draft', async (t) => {
     const { store, call, connectors, inbound, workspace } = setup(t, { stagedReplies: true, ids: ['lark', 'email'] });
     inbound({ messageId: 'om_here123456789', chatId: 'oc_here123456789' });
     inbound({ messageId: 'om_there12345678', chatId: 'oc_there12345678' });
-    const decision = { decision_id: 'message:om_here123456789', interim: true };
-    fs.writeFileSync(path.join(workspace, 'report.txt'), 'x');
-    const refusals = [
-      [{ chat_id: 'oc_here123456789', file_path: 'report.txt' }, /text only: use markdown/],
-      [{ chat_id: 'oc_here123456789', choices: { prompt: 'A or B?', options: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }] } }, /text only/],
-      [{ chat_id: 'oc_there12345678', markdown: 'elsewhere' }, /goes only to the chat of decision_id/],
-    ];
-    for (const [input, message] of refusals) {
-      await assert.rejects(call('send_message', { ...input, ...decision }), (error) => error.code === 'invalid_input' && message.test(error.message));
-    }
-    await assert.rejects(call('reply_message', { message_id: 'om_there12345678', markdown: 'elsewhere', ...decision }),
-      /goes only to the chat of decision_id/);
+    inbound({ messageId: 'om_threadA123456', chatId: 'oc_here123456789', threadId: 'omt_threadA12345' });
+    inbound({ messageId: 'om_threadB123456', chatId: 'oc_here123456789', threadId: 'omt_threadB12345' });
     store.ingest(mailEvent({ uid: 9 }));
-    await assert.rejects(call('reply_message', { message_id: 'mail:1:9', markdown: 'draft', ...decision }),
-      /goes only to the chat of decision_id/);
+    const main = { decision_id: 'message:om_here123456789', interim: true };
+    const thread = { decision_id: 'message:om_threadA123456', interim: true };
+    fs.writeFileSync(path.join(workspace, 'report.txt'), 'x');
+    const textOnly = /text only: use markdown/;
+    const elsewhere = /goes only where decision_id is/;
+    const refusals = [
+      ['send_message', { chat_id: 'oc_here123456789', file_path: 'report.txt', ...main }, textOnly],
+      ['send_message', { chat_id: 'oc_here123456789', choices: { prompt: 'A or B?', options: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }] }, ...main }, textOnly],
+      ['send_message', { chat_id: 'oc_there12345678', markdown: 'another chat', ...main }, elsewhere],
+      ['reply_message', { message_id: 'om_there12345678', markdown: 'another chat', ...main }, elsewhere],
+      // Where a reply to a message nobody has seen lands is unknown.
+      ['reply_message', { source: 'lark', message_id: 'om_unknown123456', markdown: 'who knows where', ...main }, elsewhere],
+      ['reply_message', { message_id: 'mail:1:9', markdown: 'draft', ...main }, elsewhere],
+      // A thread's request: a plain send leaves the thread, and another thread is not it.
+      ['send_message', { chat_id: 'oc_here123456789', markdown: 'out of the thread', ...thread }, elsewhere],
+      ['reply_message', { message_id: 'om_threadB123456', markdown: 'the other thread', reply_in_thread: true, ...thread }, elsewhere],
+      ['reply_message', { message_id: 'om_threadA123456', markdown: 'from the main chat', reply_in_thread: true, ...main }, elsewhere],
+    ];
+    for (const [tool, input, message] of refusals) {
+      await assert.rejects(call(tool, input), (error) => error.code === 'invalid_input' && message.test(error.message), `${tool} ${JSON.stringify(input)}`);
+    }
     assert.equal(connectors.calls.length, 0);
 
-    await call('reply_message', { message_id: 'om_here123456789', markdown: 'in its thread', reply_in_thread: true, ...decision });
-    assert.equal(connectors.calls.length, 1);
+    await call('send_message', { chat_id: 'oc_here123456789', markdown: 'in the chat', ...main });
+    await call('reply_message', { message_id: 'om_here123456789', markdown: 'under the request', reply_in_thread: true, ...main });
+    await call('reply_message', { message_id: 'om_threadA123456', markdown: 'in its thread', reply_in_thread: true, ...thread });
+    assert.equal(connectors.calls.length, 3);
   });
 
   it('a turn that ends takes every OnIt down, and forgets each before it returns', async (t) => {
@@ -1366,5 +1377,26 @@ describe('staged replies', () => {
     await cleared;
     assert.deepEqual(connectors.calls.filter((item) => item.action === 'message.reaction.delete').map((item) => item.input.message_id),
       ['om_turnA12345678', 'om_turnB12345678']);
+  });
+
+  it('closing waits for a removal a turn\'s end started, so the Connectors stop after it', async (t) => {
+    let finish;
+    const run = (_connector, action) => {
+      if (action === 'message.react') return { reaction_id: 'reaction_slow' };
+      if (action === 'message.reaction.delete') return new Promise((resolve) => { finish = () => resolve({ deleted: true }); });
+      return { message_id: 'om_delivered123456' };
+    };
+    const { service, call, inbound } = setup(t, { stagedReplies: true, run });
+    inbound({ messageId: 'om_slow123456789', chatId: 'oc_slow123456789' });
+    await call('react_to_message', { message_id: 'om_slow123456789', emoji_type: 'OnIt', temporary: true, decision_id: 'message:om_slow123456789' });
+    void service.clearTemporaryReactions('turn_end');
+    assert.equal(service.temporaryReactions.size, 0);
+    let closed = false;
+    const closing = service.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false, 'the removal is still under way');
+    finish();
+    await closing;
+    assert.equal(service.reactionRemovals.size, 0);
   });
 });

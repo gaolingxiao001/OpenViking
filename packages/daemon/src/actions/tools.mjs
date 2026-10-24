@@ -36,7 +36,7 @@ const DECISION_FIELDS = { decision_id: DECISION, decision_instance: DECISION_INS
 const INTERIM = {
   interim: {
     type: 'boolean', default: false,
-    description: 'true for an intermediate finding while you keep working on the request: not your final delivery, so your temporary OnIt stays and no decision is recorded. markdown only, to the chat of decision_id. Leave it out for the result, a question you wait on, or anything after which you stop working.',
+    description: 'true for an intermediate finding while you keep working on the request: not your final delivery, so your temporary OnIt stays and no decision is recorded. markdown only, landing where decision_id is: its chat, or its thread there (reply to its msg= with reply_in_thread). Leave it out for the result, a question you wait on, or anything after which you stop working.',
   },
 };
 const IDEMPOTENCY = {
