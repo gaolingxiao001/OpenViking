@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { DecisionPolicy, warnIfSilenceInert } from '../src/decisions.mjs';
+import { DecisionPolicy, warnIfSilenceInert, warnIfStagedRepliesInert } from '../src/decisions.mjs';
 import { Harness } from '../src/harness.mjs';
 import { RUNTIME_IDS, getRuntimeDefinition } from '../src/runtime-catalog.mjs';
 import { Store } from '../src/store.mjs';
@@ -171,6 +171,18 @@ describe('explicit silence on a runtime without core agent tools', () => {
       assert.equal(warnIfSilenceInert({ explicitSilence: true }, id, logger), false, id);
     }
     assert.deepEqual(warnings, []);
+  });
+
+  it('says the same of staged replies, which only the Core-tool runtimes deliver', () => {
+    const { warnings, logger } = capture();
+    assert.equal(warnIfStagedRepliesInert({ stagedReplies: true }, 'volc', logger), true);
+    assert.deepEqual(warnings.map(({ message, runtime }) => [message, runtime]), [['staged_replies_not_applied', 'volc']]);
+    assert.match(warnings[0].reason, /staged replies is not applied for this runtime/);
+    for (const id of RUNTIME_IDS) {
+      const core = getRuntimeDefinition(id).capabilities.agentTools === 'core';
+      assert.equal(warnIfStagedRepliesInert({ stagedReplies: true }, id, logger), !core, id);
+      assert.equal(warnIfStagedRepliesInert({ stagedReplies: false }, id, logger), false, id);
+    }
   });
 
   it('stays quiet when the switch is off, whatever the runtime', () => {

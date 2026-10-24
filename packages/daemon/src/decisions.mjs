@@ -5,18 +5,26 @@ import { opaqueRef, safeError } from './logger.mjs';
 // durable, the reminder is best effort.
 const NUDGED_LIMIT = 1_000;
 
-// explicitSilence only means something to a runtime with Core agent tools
-// (stay_silent, the turn-end check). On the others it is inert, so say so once
-// per runtime instead of letting an operator believe it is on. Returns whether
-// it warned.
-export function warnIfSilenceInert(config, runtime, logger) {
-  if (!config.explicitSilence) return false;
+// A switch that only means something to a runtime with Core agent tools
+// (explicitSilence: stay_silent and the turn-end check; stagedReplies: interim
+// messages). On the others it is inert, so say so once per runtime instead of
+// letting an operator believe it is on. Returns whether it warned.
+function warnIfInert(on, runtime, logger, message, what) {
+  if (!on) return false;
   if (getRuntimeDefinition(runtime)?.capabilities.agentTools === 'core') return false;
-  logger.warn('explicit_silence_not_applied', {
+  logger.warn(message, {
     runtime,
-    reason: 'runtime has no core agent tools; explicit silence is not applied for this runtime',
+    reason: `runtime has no core agent tools; ${what} is not applied for this runtime`,
   });
   return true;
+}
+
+export function warnIfSilenceInert(config, runtime, logger) {
+  return warnIfInert(config.explicitSilence, runtime, logger, 'explicit_silence_not_applied', 'explicit silence');
+}
+
+export function warnIfStagedRepliesInert(config, runtime, logger) {
+  return warnIfInert(config.stagedReplies, runtime, logger, 'staged_replies_not_applied', 'staged replies');
 }
 
 // Whether an unsettled input needs a decision: every chat message on every IM

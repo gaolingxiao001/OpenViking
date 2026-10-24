@@ -108,10 +108,17 @@ function explicitSilencePromptSection(config = {}) {
   return config.explicitSilence ? EXPLICIT_SILENCE_PROMPT : '';
 }
 
+// How a decision is delivered: one final delivery, or (agents[].stagedReplies)
+// the OnIt acknowledgement and interim findings of a longer task before it.
+// Each instance gets one of the two, in the Core's own place for it.
+function deliveryRules(config) {
+  return renderPrompt(config, path.join('delivery', config.stagedReplies ? 'staged.md' : 'single.md'));
+}
+
 // Codex, TraeX, Claude and Pi: the whole policy, delivered through the Core tools.
 export function assembleConversationPolicy(config = {}) {
   return joinSections([
-    renderPrompt(config, 'core.md'),
+    renderPrompt(config, 'core.md').replace('{{DELIVERY_RULES}}', () => deliveryRules(config)),
     renderPrompt(config, 'events.md'),
     ...connectorSections(config),
     renderPrompt(config, 'openviking.md'),

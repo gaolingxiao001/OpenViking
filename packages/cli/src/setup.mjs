@@ -180,6 +180,7 @@ function initialState({ id, env, homeDir, current, runtimes, kept }) {
     connectors,
     channel: current?.channel ?? connectors[0],
     ovConfig: current?.ovConfig,
+    switches: Object.fromEntries(Object.entries(SWITCH_DEFAULTS).map(([key, value]) => [key, current?.[key] ?? value])),
     larkApp: null,
     mail: { kept: current ? mailboxesOf(current) : [], added: [], updated: new Map(), removed: [] },
   };
@@ -453,6 +454,56 @@ async function askMailboxes(ctx, state) {
   else if (!state.connectors.includes('email')) state.connectors.push('email');
 }
 
+// The instance's on/off settings, under 其他设置, and what each is when the
+// manifest does not say.
+const SWITCH_DEFAULTS = Object.freeze({ stagedReplies: false, naturalWriting: true, explicitSilence: false, ovAutoRecall: false });
+// Switching one of these changes the model's policy: a new session.
+const POLICY_SWITCHES = new Set(['stagedReplies', 'naturalWriting', 'explicitSilence']);
+
+const SWITCHES = () => [
+  { key: 'stagedReplies', label: t('分段回复', 'Staged replies'),
+    hint: t('复杂任务先表态，做的过程中发阶段性结论；简单问题仍只回一条', 'on a longer task, shows it is on it and shares findings along the way; a quick question still gets one reply') },
+  { key: 'naturalWriting', label: t('自然写作', 'Natural writing'),
+    hint: t('写得像人，去掉 AI 腔', 'writes like a person, without the AI tone') },
+  { key: 'explicitSilence', label: t('显式不回复', 'Explicit silence'),
+    hint: t('每条消息都要模型表态：回复，或记下不回；漏了提醒一次', 'the model decides on every message: a reply, or a note that it stays silent; a miss gets one reminder') },
+  { key: 'ovAutoRecall', label: t('OpenViking 自动召回', 'OpenViking auto-recall'),
+    hint: t('每轮自动召回 OpenViking 里的相关记忆', 'recalls related OpenViking memory on every turn') },
+];
+
+const onOff = (value) => (value ? t('开', 'on') : t('关', 'off'));
+
+function switchesShown(state) {
+  const on = SWITCHES().filter(({ key }) => state.switches[key]).map(({ label }) => label);
+  return on.length ? t(`开着：${list(on)}`, `on: ${list(on)}`) : t('都关着', 'all off');
+}
+
+// Each switch with what it does, flipped where it is until Done; ← leaves
+// them all as they were.
+async function askSwitches({ prompter }, state) {
+  const before = { ...state.switches };
+  const mark = prompter.mark();
+  let cursor = 0;
+  try {
+    for (;;) {
+      prompter.rewind(mark);
+      const switches = SWITCHES();
+      const labelWidth = Math.max(...switches.map(({ label }) => width(label))) + 2;
+      const choice = await prompter.select(t('其他设置（选一项就切换开关）', 'Other settings (pick one to switch it)'), [
+        ...switches.map(({ key, label, hint }, index) => ({ label: padEnd(label, labelWidth), hint: `${onOff(state.switches[key])} · ${hint}`, value: index })),
+        { label: t('完成', 'Done'), value: 'done' },
+      ], { initial: cursor, label: t('其他设置', 'Other settings') });
+      if (choice === 'done') return;
+      const { key } = switches[choice];
+      state.switches[key] = !state.switches[key];
+      cursor = choice;
+    }
+  } catch (error) {
+    if (error instanceof GoBack) Object.assign(state.switches, before);
+    throw error;
+  }
+}
+
 const SETTINGS = [
   { key: 'displayName', label: () => t('机器人名字', 'Bot name'), ask: askName, shown: (state) => state.displayName },
   { key: 'role', label: () => t('角色', 'Role'), ask: askRole, shown: (state, { homeDir }) => roleShown(state, homeDir) },
@@ -467,6 +518,7 @@ const SETTINGS = [
     shown: (state) => (mailboxList(state).length ? list(mailboxList(state).map(addressOf)) : t('没有接', 'none')) },
   { key: 'ovConfig', label: () => 'OpenViking', ask: (ctx) => ctx.editOV(),
     shown: (state, { homeDir }) => shortenHome(state.ovConfig, homeDir) },
+  { key: 'switches', label: () => t('其他设置', 'Other settings'), ask: askSwitches, shown: switchesShown },
 ];
 
 const mailChanged = (state) => state.mail.added.length + state.mail.updated.size + state.mail.removed.length > 0;
@@ -1227,7 +1279,7 @@ async function setupFlow({
     if (state.connectors.includes('lark')) agent.profile = current?.profile ?? `vika-${state.id}`;
     else delete agent.profile;
     agent.ovConfig = state.ovConfig;
-    agent.ovAutoRecall = current?.ovAutoRecall ?? false;
+    Object.assign(agent, state.switches);
     if (emailAccounts.length) agent.emailAccounts = emailAccounts;
     else delete agent.emailAccounts;
     return agent;
@@ -1279,6 +1331,7 @@ async function setupFlow({
       ...(larkSource(state, null) ? [[t('飞书机器人', 'Feishu/Lark bot'), larkAppShown(state, null)]] : []),
       ...(addresses.length ? [[t('邮箱', 'Email'), list(addresses)]] : []),
       [t('记忆', 'Memory'), 'OpenViking'],
+      [t('其他设置', 'Other settings'), t(`${switchesShown(state)}（以后在修改实例里调）`, `${switchesShown(state)} (change them later by changing the instance)`)],
       [t('工作目录', 'Workspace'), shortenHome(state.workspace, homeDir)],
       [t('数据目录', 'Data'), shortenHome(state.dataDir, homeDir)],
     ]);
@@ -1499,6 +1552,13 @@ function describeChanges(before, after, mailboxes, homeDir, state) {
     changes.push(t(`工作目录：${move}（模型会开一次新的会话）`, `Workspace: ${move} (the model starts a new session)`));
   }
   if (before.model !== after.model) changes.push(`${t('运行时：', 'Runtime: ')}${before.model} → ${after.model}`);
+  for (const { key, label } of SWITCHES()) {
+    const was = before[key] ?? SWITCH_DEFAULTS[key];
+    if (was === after[key]) continue;
+    const arrow = `${onOff(was)} → ${onOff(after[key])}`;
+    const policy = POLICY_SWITCHES.has(key);
+    changes.push(t(`${label}：${arrow}${policy ? '（模型会开一次新的会话）' : ''}`, `${label}: ${arrow}${policy ? ' (the model starts a new session)' : ''}`));
+  }
   for (const im of ['lark', 'weixin', 'telegram', 'slack']) {
     if (!was.includes(im) && after.connectors.includes(im)) {
       changes.push(im === 'telegram' ? t(`接入${IM_LABELS[im]}（需要 Bot token 和 Start 绑定）`, `Connect ${IM_LABELS[im]} (needs a bot token and Start)`)

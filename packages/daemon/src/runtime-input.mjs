@@ -93,6 +93,17 @@ function fromLabel(chatId, senderId, resolveName = null, source = 'lark', sender
   return lookupMemberName(chatId, senderId) ?? shortenId(senderId);
 }
 
+// How a quoted message of the agent's own begins, as one tag value: no
+// whitespace, brackets or `=`, so it can neither end the tag nor pass for
+// another field.
+const QUOTE_CHARS = 60;
+
+function quoteTag(text) {
+  const words = String(text ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029[\]=]/g, ' ').trim().split(/\s+/).join('_');
+  const chars = [...words];
+  return chars.length > QUOTE_CHARS ? `${chars.slice(0, QUOTE_CHARS).join('')}…` : words;
+}
+
 export function chatTag(chatId, threadId) {
   const chat = chatId || 'unknown';
   return threadId ? `${chat} thread=${shortenId(threadId)}` : chat;
@@ -127,9 +138,10 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
   // The sender is the owner this connector reported at check.
   const ownerTag = authenticated?.owner ? ' owner=1' : '';
   const replyTo = authenticated?.replyTo;
+  const quote = replyTo?.kind === 'me' ? quoteTag(replyTo.text) : '';
   const replyTag = replyTo
     ? ` reply_to=${replyTo.kind === 'me'
-      ? 'me'
+      ? `me${quote ? ` quote=${quote}` : ''}`
       : replyTo.kind === 'user'
         ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName, message.source)
         : shortenId(replyTo.id)}`

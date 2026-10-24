@@ -415,6 +415,25 @@ test('explicit silence is opt-in per instance and always pinned in the daemon en
   });
 });
 
+test('staged replies are opt-in per instance and always pinned in the daemon env', () => {
+  const manifest = validManifest();
+  manifest.agents[1].stagedReplies = true;
+  withManifest(manifest, (manifestPath) => {
+    const env = { VIKA_CONFIG: manifestPath, VIKA_STAGED_REPLIES: 'true' };
+    const deployment = loadDeploymentManifest(env);
+    assert.equal(selectDeploymentAgent(deployment, 'alpha').stagedReplies, false);
+    applyDeploymentAgentEnv(env, deployment, 'alpha');
+    assert.equal(env.VIKA_STAGED_REPLIES, 'false');
+    applyDeploymentAgentEnv(env, deployment, 'beta');
+    assert.equal(env.VIKA_STAGED_REPLIES, 'true');
+  });
+  const broken = validManifest();
+  broken.agents[0].stagedReplies = 1;
+  withManifest(broken, (manifestPath) => {
+    assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /agents\[0\]\.stagedReplies must be a boolean/);
+  });
+});
+
 test('an instance names a shipped role or its own role file, and keeps natural writing unless it turns it off', () => {
   const manifest = validManifest();
   manifest.agents[0].role = 'assistant';
