@@ -12,7 +12,7 @@ import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy } from './notices.mjs';
-import { DecisionPolicy, warnIfSilenceInert } from './decisions.mjs';
+import { DecisionPolicy, warnIfSilenceInert, warnIfStagedRepliesInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
@@ -213,7 +213,9 @@ export class PersonalAgentDaemon {
       });
 
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
+        // A turn that ended leaves no OnIt behind, whatever it delivered.
         onTurnFailed: (info) => {
+          void this.actions.clearTemporaryReactions('turn_end');
           this.meeting?.onTurnFailed(info);
           void this.failurePolicy.onTurnFailed(info)
             .catch((error) => {
@@ -221,11 +223,13 @@ export class PersonalAgentDaemon {
             });
         },
         onTurnSucceeded: (info) => {
+          void this.actions.clearTemporaryReactions('turn_end');
           this.meeting?.onTurnSucceeded(info);
           this.failurePolicy.onTurnSucceeded(info);
           this.decisionPolicy?.onTurnSucceeded(info);
         },
         onTurnAbandoned: (info) => {
+          void this.actions.clearTemporaryReactions('turn_end');
           this.meeting?.onTurnAbandoned(info);
         },
         onAvailable: () => { this.harness?.onAvailable(); },
@@ -236,6 +240,7 @@ export class PersonalAgentDaemon {
           if (runtime !== this.silenceRuntime) {
             this.silenceRuntime = runtime;
             warnIfSilenceInert(this.config, runtime, this.logger);
+            warnIfStagedRepliesInert(this.config, runtime, this.logger);
           }
         },
         persistRuntimePreference: this.config.manifestPath && this.config.instanceId

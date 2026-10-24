@@ -65,7 +65,7 @@ describe('Store', () => {
     store.appendCognitionJournal({
       kind: 'delivery', messageId: 'om-mine', actor: 'me', chatId: 'oc-chat', text: 'sent by bot',
     });
-    assert.deepEqual(store.resolveMessageAuthor('om-mine'), { kind: 'me' });
+    assert.deepEqual(store.resolveMessageAuthor('om-mine'), { kind: 'me', text: 'sent by bot' });
 
     assert.equal(store.resolveMessageAuthor('om-never-seen'), null);
     assert.equal(store.resolveMessageAuthor(null), null);

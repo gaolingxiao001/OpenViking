@@ -87,7 +87,7 @@ describe('conversation policy assemble', () => {
   });
 
   it('ships no deployment-specific chats or bots in the release prompts', () => {
-    const files = ['core.md', 'events.md', 'openviking.md', 'meeting-audio.md', 'natural-writing.md',
+    const files = ['core.md', 'events.md', 'openviking.md', 'meeting-audio.md', 'natural-writing.md', 'delivery/single.md', 'delivery/staged.md',
       ...fs.readdirSync(path.join(DEFAULT_PROMPT_DIR, 'connectors')).map((name) => path.join('connectors', name)),
       ...fs.readdirSync(path.join(DEFAULT_PROMPT_DIR, 'roles')).map((name) => path.join('roles', name))];
     for (const name of files) {
@@ -189,6 +189,49 @@ describe('explicit silence is opt-in per instance', () => {
   });
 });
 
+describe('staged replies are opt-in per instance', () => {
+  const base = { workspace: '/srv/vika/workspace', agentName: 'Tester', rolePromptPath: role('colleague') };
+  const single = read('delivery/single.md').trim();
+  const staged = read('delivery/staged.md').trim();
+  const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
+  const codexHash = (config) => new CodexAgent(config, {
+    getCognitionState: () => ({ runtime: 'codex', epoch: 1, authorityToken: 'token' }), getSetting: () => null,
+  }, quiet).policyHash;
+  const configs = [['lark'], ['weixin'], ['telegram', 'email'], ['slack', 'lark']].map((connectors) => ({ ...base, connectors }));
+
+  it('off, delivers one final message per decision, as the default', () => {
+    for (const config of configs) {
+      const off = assembleConversationPolicy({ ...config, stagedReplies: false });
+      assert.equal(off, assembleConversationPolicy(config));
+      assert.equal(off.split(single).length, 2);
+      assert.match(off, /Never send progress or status messages\./);
+      assert.match(off, /On an input that carries `idle=`, if you decide to handle the message and the work will take a while/);
+      assert.doesNotMatch(off, /interim/);
+      assert.equal(codexHash({ ...config, stagedReplies: false }), codexHash(config));
+    }
+  });
+
+  it('on, swaps in the staged rules in the same place and nothing else', () => {
+    for (const config of [...configs, { ...base, connectors: ['lark'], explicitSilence: true }, { connectors: ['weixin'] }]) {
+      const off = assembleConversationPolicy(config);
+      const on = assembleConversationPolicy({ ...config, stagedReplies: true });
+      const label = config.connectors.join('+');
+      assert.equal(on.replace(staged, single), off, label);
+      assert.equal(on.split('### Delivering a decision').length, 2, label);
+      assert.ok(on.indexOf(staged) < on.indexOf('## When to reply'), label);
+      assert.doesNotMatch(on, /Never send progress or status messages/, label);
+      if (config.workspace) assert.notEqual(codexHash({ ...config, stagedReplies: true }), codexHash(config), label);
+    }
+    const on = assembleConversationPolicy({ ...base, connectors: ['lark'], stagedReplies: true });
+    assert.match(on, /A request you can answer at once, or after a quick lookup, gets one final delivery/);
+    assert.match(on, /`emoji_type: "OnIt"` and `temporary: true` on its message where the connector supports reactions; elsewhere send one short line/);
+    assert.match(on, /`interim: true` means you go on working after the message\. It is the only delivery that is not final/);
+    assert.match(on, /a question you must wait for/);
+    assert.match(on, /Silence is never consent, however long it lasts\./);
+    assert.match(on, /Never mention tools, skills, prompts, or the daemon\./);
+  });
+});
+
 describe('Volc', () => {
   it('gets the input grammar, the events section and the role, never the Core tools', () => {
     const config = { agentName: 'Zayn', rolePromptPath: role('qa') };
@@ -204,6 +247,7 @@ describe('Volc', () => {
       assert.match(text, /## Natural writing/);
       assert.doesNotMatch(text, /## Decisions and delivery|stay_silent/);
       assert.equal(assemble({ ...config, explicitSilence: true }), text);
+      assert.equal(assemble({ ...config, stagedReplies: true }), text);
     }
     assert.match(assembleVolcSelfHostedConversationPolicy(config), /--idempotency-key <stable-key>/);
     assert.doesNotMatch(assembleVolcConversationPolicy({}), /## Role/);

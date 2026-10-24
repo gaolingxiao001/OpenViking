@@ -408,7 +408,7 @@ export class Store {
     this.getInboundByMessage = this.db.prepare('SELECT * FROM connector_events WHERE connector_instance = ? AND message_id = ? ORDER BY seq DESC LIMIT 1');
     this.getInboundByEvent = this.db.prepare('SELECT * FROM connector_events WHERE connector_instance = ? AND event_id = ?');
     this.getJournalActorByMessage = this.db.prepare(
-      "SELECT actor FROM cognition_journal WHERE COALESCE(json_extract(detail_json, '$.connectorInstance'), json_extract(detail_json, '$.source'), 'lark') = ? AND message_id = ? ORDER BY seq DESC LIMIT 1",
+      "SELECT actor, text FROM cognition_journal WHERE COALESCE(json_extract(detail_json, '$.connectorInstance'), json_extract(detail_json, '$.source'), 'lark') = ? AND message_id = ? ORDER BY seq DESC LIMIT 1",
     );
     this.getMetaStatement = this.db.prepare('SELECT value FROM meta WHERE key = ?');
     this.setMetaStatement = this.db.prepare(`
@@ -1436,7 +1436,7 @@ export class Store {
     const inbound = this.getInboundByMessage.get(instance, messageId);
     if (inbound) return { kind: 'user', chatId: inbound.chat_id, senderId: inbound.sender_id };
     const journal = this.getJournalActorByMessage.get(instance, messageId);
-    if (journal?.actor === 'me') return { kind: 'me' };
+    if (journal?.actor === 'me') return { kind: 'me', text: journal.text };
     return null;
   }
 

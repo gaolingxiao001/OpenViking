@@ -49,6 +49,15 @@ describe('configuration safety', { concurrency: false }, () => {
     setEnv('VIKA_EXPLICIT_SILENCE', 'true');
     assert.equal(getConfig().explicitSilence, true);
   });
+  it('keeps staged replies off unless the instance opts in', () => {
+    setEnv('VIKA_STAGED_REPLIES', undefined);
+    assert.equal(getConfig().stagedReplies, false);
+    setEnv('VIKA_STAGED_REPLIES', 'true');
+    assert.equal(getConfig().stagedReplies, true);
+    setEnv('VIKA_STAGED_REPLIES', 'often');
+    assert.throws(() => getConfig(), /VIKA_STAGED_REPLIES must be a boolean/);
+    setEnv('VIKA_STAGED_REPLIES', undefined);
+  });
   it('keeps meeting audio entirely disabled unless explicitly configured', () => {
     setEnv('VIKA_MEETING_AUDIO_ENABLED', 'false');
     setEnv('VIKA_MEETING_AUDIO_TARGET_CHAT_ID', undefined);

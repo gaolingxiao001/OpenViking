@@ -6,7 +6,9 @@ import { CONTENT_PROPERTIES } from './content.mjs';
 // offered only when some configured Connector declares it; `connector` names
 // the kind of Connector whose data a Core-side tool reads; `explicitSilence`
 // marks the opt-in stay_silent tool, and `silenceInput` holds the optional
-// fields a tool gains only when explicit silence is on (see toolDefinition).
+// fields a tool gains only when explicit silence is on; `stagedInput` and
+// `stagedDescription` are what a tool gains or says instead with staged
+// replies on (see toolDefinition).
 
 const ID = '^[A-Za-z0-9_.:@=+-]{1,256}$';
 const SOURCE = {
@@ -31,6 +33,12 @@ const RESPONSE_TO = {
   description: 'Optional event= of the earlier input this delivery fulfills. Defaults to decision_id. Attribution only; it must be from the same chat/thread or subject and no newer than decision_id.',
 };
 const DECISION_FIELDS = { decision_id: DECISION, decision_instance: DECISION_INSTANCE, response_to_id: RESPONSE_TO };
+const INTERIM = {
+  interim: {
+    type: 'boolean', default: false,
+    description: 'true for an intermediate finding while you keep working on the request: not your final delivery, so your temporary OnIt stays and no decision is recorded. markdown only, landing where decision_id is: its chat, or its thread there (reply to its msg= with reply_in_thread). Leave it out for the result, a question you wait on, or anything after which you stop working.',
+  },
+};
 const IDEMPOTENCY = {
   type: 'string', pattern: '^[A-Za-z0-9_-]{1,64}$',
   description: 'Optional stable key to reuse if intentionally retrying the same delivery.',
@@ -70,6 +78,7 @@ export const TOOLS = [
       ...CONTENT_PROPERTIES, ...MENTIONS,
       ...DECISION_FIELDS, idempotency_key: IDEMPOTENCY,
     }, ['chat_id', 'decision_id']),
+    stagedInput: INTERIM,
     annotations: WRITE,
   },
   {
@@ -99,13 +108,15 @@ export const TOOLS = [
       reply_in_thread: { type: 'boolean', default: false, description: 'Lark and Slack: reply inside the message thread.' },
       ...DECISION_FIELDS, idempotency_key: IDEMPOTENCY,
     }, ['message_id', 'decision_id']),
+    stagedInput: INTERIM,
     annotations: WRITE,
   },
   {
     name: 'react_to_message',
     action: 'message.react',
     title: 'React to a message',
-    description: 'Add one emoji reaction as the bot. Prefer it over a short text reply when acknowledgement is useful but you have nothing new to add; normally it is the final delivery for that decision. Set temporary=true only when authenticated idle= metadata permits a working indicator and the work will take a while: the daemon removes it after the next successful final delivery in the same chat/thread.',
+    description: 'Add one emoji reaction as the bot. Prefer it over a short text reply when acknowledgement is useful but you have nothing new to add; normally it is the final delivery for that decision. Set temporary=true only when authenticated idle= metadata permits a working indicator and the work will take a while: the daemon removes it after the next successful final delivery in the same chat/thread, or when your turn ends.',
+    stagedDescription: 'Add one emoji reaction as the bot. Prefer it over a short text reply when acknowledgement is useful but you have nothing new to add; normally it is the final delivery for that decision. Set temporary=true (OnIt) when you take on a request that needs real work first: it shows you are on it and is not a final delivery; the daemon removes it after your final delivery in the same chat/thread, or when your turn ends.',
     inputSchema: schema({
       source: SOURCE,
       message_id: { type: 'string', pattern: ID, description: 'Full message id to react to.' },
@@ -310,9 +321,11 @@ export const TOOLS = [
 // A tool as this instance offers it. With explicit silence on, its
 // `silenceInput` fields join the schema as optional properties; off, the
 // definition is exactly the one without the feature.
-export function toolDefinition(tool, { explicitSilence = false } = {}) {
-  if (!explicitSilence || !tool.silenceInput) return tool;
-  return { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, ...tool.silenceInput } } };
+export function toolDefinition(tool, { explicitSilence = false, stagedReplies = false } = {}) {
+  const extra = { ...(explicitSilence ? tool.silenceInput : {}), ...(stagedReplies ? tool.stagedInput : {}) };
+  const description = stagedReplies && tool.stagedDescription ? tool.stagedDescription : tool.description;
+  if (Object.keys(extra).length === 0 && description === tool.description) return tool;
+  return { ...tool, description, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, ...extra } } };
 }
 
 export function publicTool({ name, title, description, inputSchema, annotations }) {

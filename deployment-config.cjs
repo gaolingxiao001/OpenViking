@@ -65,6 +65,7 @@ const AGENT_FIELDS = Object.freeze([
   'ovConfig',
   'ovAutoRecall',
   'explicitSilence',
+  'stagedReplies',
   'role',
   'naturalWriting',
   'model',
@@ -285,6 +286,9 @@ function parseAgent(value, index, ignored) {
   if (value.naturalWriting !== undefined && typeof value.naturalWriting !== 'boolean') {
     throw new Error(`${label}.naturalWriting must be a boolean`);
   }
+  if (value.stagedReplies !== undefined && typeof value.stagedReplies !== 'boolean') {
+    throw new Error(`${label}.stagedReplies must be a boolean`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -297,6 +301,7 @@ function parseAgent(value, index, ignored) {
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     ovAutoRecall: value.ovAutoRecall ?? false,
     explicitSilence: value.explicitSilence ?? false,
+    stagedReplies: value.stagedReplies ?? false,
     role: manifestRole(value.role, `${label}.role`),
     naturalWriting: value.naturalWriting ?? true,
     model,
@@ -492,6 +497,7 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
   // Always set, so neither the shell nor another instance's value leaks in.
   env.VIKA_EXPLICIT_SILENCE = agent.explicitSilence ? 'true' : 'false';
   env.VIKA_NATURAL_WRITING = agent.naturalWriting ? 'true' : 'false';
+  env.VIKA_STAGED_REPLIES = agent.stagedReplies ? 'true' : 'false';
   if (agent.role) env.VIKA_ROLE = agent.role;
   else delete env.VIKA_ROLE;
   env.VIKA_CHANNEL = agent.channel;

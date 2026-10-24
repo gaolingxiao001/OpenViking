@@ -100,6 +100,8 @@ export class ActionService {
     // One temporary working reaction per conversation, removed by the next
     // final delivery there.
     this.temporaryReactions = new Map();
+    // Removals of them still under way, which close() waits for.
+    this.reactionRemovals = new Set();
     // Query context may identify a reply target, but never an input/decision.
     this.queryTargets = new Map();
   }
@@ -130,7 +132,9 @@ export class ActionService {
   }
 
   definition(tool) {
-    return toolDefinition(tool, { explicitSilence: Boolean(this.config.explicitSilence) });
+    return toolDefinition(tool, {
+      explicitSilence: Boolean(this.config.explicitSilence), stagedReplies: Boolean(this.config.stagedReplies),
+    });
   }
 
   // Agent entrypoint. Returns { text, data, media? }; throws a model-readable
@@ -201,9 +205,19 @@ export class ActionService {
     }
   }
 
+  // A removal a turn's end started is forgotten from temporaryReactions at once,
+  // so it is waited for here: the Connectors stop right after.
   async close() {
+    await this.clearTemporaryReactions('shutdown');
+    await Promise.allSettled([...this.reactionRemovals]);
+  }
+
+  // A turn that ended is no longer working on anything, whatever it delivered:
+  // its OnIt reactions go too. Each is forgotten at once, before any removal is
+  // awaited, so one a later turn sets is never taken for it.
+  async clearTemporaryReactions(reason) {
     const scopes = [...this.temporaryReactions.keys()];
-    await Promise.allSettled(scopes.map((scope) => this.clearTemporaryReaction(scope, 'shutdown')));
+    await Promise.allSettled(scopes.map((scope) => this.clearTemporaryReaction(scope, reason)));
   }
 
   assertAuthority(authority) {
@@ -430,6 +444,21 @@ export class ActionService {
     return { connector, owner };
   }
 
+  // An interim finding (staged replies) while the work on a request goes on:
+  // text, landing in the decision's own conversation (`convKey`: the chat, or
+  // the thread there; null when where it lands is unknown). It is not the
+  // final delivery, so it records no decision and leaves the temporary OnIt
+  // where it is.
+  interim(input, caller, fence, connector, convKey) {
+    if (input.interim !== true) return false;
+    if (input.markdown === undefined) throw blocked('invalid_input', `An interim message is text only: use markdown. ${NO_ACTION}`);
+    if (connector !== fence.connector_instance || !convKey || convKey !== fence.conv_key) {
+      throw blocked('invalid_input', `An interim message goes only where decision_id is: the same chat, and inside its thread when it has one (reply to its msg=). ${NO_ACTION}`);
+    }
+    caller.trace.interim = true;
+    return true;
+  }
+
   async content(input, connector, action, { chatId, fence, caller, answerer = fence.sender_id }) {
     const spec = this.manifest(connector).actions[action];
     let content;
@@ -582,6 +611,9 @@ export class ActionService {
     const connector = this.route(caller, 'message.send', 'actions', input.source, { chatId: input.chat_id });
     const fence = this.fence(input, caller);
     this.authorize(fence);
+    // A plain send lands in the chat's main conversation.
+    const interim = this.interim(input, caller, fence, connector,
+      conversationKeyFor(connector, { tenant_id: fence.tenant_key, id: input.chat_id }));
     const responseTo = this.attribution(caller, input.response_to_id, fence);
     const content = await this.content(input, connector, 'message.send', { chatId: input.chat_id, fence, caller });
     try {
@@ -593,9 +625,11 @@ export class ActionService {
         scope: { chatId: input.chat_id, convKey: responseTo.conv_key },
         fence,
         inboundSeq: responseTo.seq,
+        metadata: interim ? { interim: true } : {},
+        final: !interim,
       });
       const warning = this.rememberCard(content, result, { connector, chatId: input.chat_id, seen: [fence] });
-      if (!result.dry_run) await this.clearTemporaryReaction(fence.conv_key);
+      if (!result.dry_run && !interim) await this.clearTemporaryReaction(fence.conv_key);
       return this.deliveryResult(result, `message to chat_id=${input.chat_id}`, warning);
     } finally {
       content.cleanup();
@@ -633,13 +667,14 @@ export class ActionService {
       throw blocked('unsupported', `${connector} does not support thread replies. ${NO_ACTION}`);
     }
     const fence = this.fence(input, caller);
-    if (this.manifest(connector).actions['message.reply'].approval) return this.proposeReply(input, caller, connector, fence);
-    this.authorize(fence);
     const target = this.messageScope(connector, input.message_id);
-    const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     // The reply lands where its target is. A target outside any chat (a mail)
     // has no chat: it never borrows the decision's.
     const chatId = target ? target.chat_id : fence.chat_id;
+    const interim = this.interim(input, caller, fence, connector, target?.conv_key ?? null);
+    if (this.manifest(connector).actions['message.reply'].approval) return this.proposeReply(input, caller, connector, fence);
+    this.authorize(fence);
+    const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     const content = await this.content(input, connector, 'message.reply', { chatId, fence, caller });
     try {
       const result = await this.deliver({
@@ -652,13 +687,15 @@ export class ActionService {
         fence,
         inboundSeq: responseTo.seq,
         // Non-chat history is rendered from the event it answers.
-        metadata: target && !target.chat_id && target.event_json ? { event: JSON.parse(target.event_json) } : {},
+        metadata: target && !target.chat_id && target.event_json ? { event: JSON.parse(target.event_json) }
+          : interim ? { interim: true } : {},
+        final: !interim,
       });
       const warning = this.rememberCard(content, result, {
         connector, chatId, seen: [this.store.eventByMessageId(input.message_id, connector), fence],
         replyInThread: inThread, replyTarget: input.message_id,
       });
-      if (!result.dry_run) await this.clearTemporaryReaction(fence.conv_key);
+      if (!result.dry_run && !interim) await this.clearTemporaryReaction(fence.conv_key);
       return this.deliveryResult(result, `reply to message_id=${input.message_id}`, warning);
     } finally {
       content.cleanup();
@@ -931,9 +968,19 @@ export class ActionService {
     await this.deleteTemporaryReaction(token, scope, reason);
   }
 
+  async deleteTemporaryReaction(token, scope, reason) {
+    const removal = this.removeTemporaryReaction(token, scope, reason);
+    this.reactionRemovals.add(removal);
+    try {
+      await removal;
+    } finally {
+      this.reactionRemovals.delete(removal);
+    }
+  }
+
   // Compensating cleanup of an outbox-recorded reaction. Best-effort: the final
   // delivery that triggered it already succeeded and must not be reported failed.
-  async deleteTemporaryReaction(token, scope, reason) {
+  async removeTemporaryReaction(token, scope, reason) {
     const fields = { conversationRef: opaqueRef(scope), outboxId: token.outboxId, reason };
     try {
       await this.connectors.invoke(token.connector, 'message.reaction.delete', {

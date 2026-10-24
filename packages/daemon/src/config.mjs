@@ -273,6 +273,9 @@ export function getConfig() {
     // decisions ledger and the turn-end decision check. Off, the daemon offers
     // the same tools and assembles the same policy text as without them.
     explicitSilence: boolEnv('VIKA_EXPLICIT_SILENCE', false),
+    // Opt-in per instance (agents[].stagedReplies): a longer task may get an
+    // OnIt and interim findings before its final delivery.
+    stagedReplies: boolEnv('VIKA_STAGED_REPLIES', false),
     historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
     // Replies to bot messages in one chat/thread with no person writing there
     // before the safety fuse holds further ones; 0 turns the fuse off.

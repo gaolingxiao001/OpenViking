@@ -26,7 +26,7 @@ const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return 
 const mcpPath = fileURLToPath(new URL('../src/actions/mcp.mjs', import.meta.url));
 
 function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, meetingEnabled = false, ovClient = null,
-  owners = { lark: OWNER }, channel = 'lark', profile = undefined, explicitSilence = false } = {}) {
+  owners = { lark: OWNER }, channel = 'lark', profile = undefined, explicitSilence = false, stagedReplies = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'actions-'));
   const workspace = path.join(directory, 'workspace');
   fs.mkdirSync(workspace);
@@ -36,7 +36,7 @@ function setup(t, { ids = ['lark'], run = null, roster = null, liveness = null, 
   const logs = [];
   const record = (level) => (message, fields = {}) => logs.push({ level, message, ...fields });
   const service = new ActionService({
-    config: { workspace, tempDir: path.join(directory, 'tmp'), maxReplyChars: 1_000, channel, profile, explicitSilence },
+    config: { workspace, tempDir: path.join(directory, 'tmp'), maxReplyChars: 1_000, channel, profile, explicitSilence, stagedReplies },
     store, connectors, roster, liveness, meetingEnabled, ovClient,
     logger: { debug() {}, info: record('info'), warn: record('warn'), error: record('error'), child() { return this; } },
   });
@@ -1273,5 +1273,130 @@ describe('stay_silent switched off (the default)', () => {
     assert.equal(retract.inputSchema.additionalProperties, false);
     await assert.rejects(call('retract_message', { message_id: 'om_delivered123456', decision_id: 'message:om_x' }),
       (error) => error.code === 'invalid_input');
+  });
+});
+
+describe('staged replies', () => {
+  const reactions = () => {
+    let count = 0;
+    return (_connector, action) => {
+      if (action === 'message.react') return { reaction_id: `reaction_${count += 1}` };
+      if (action === 'message.reaction.delete') return { deleted: true };
+      return { message_id: `om_delivered${String(count += 1).padStart(6, '0')}` };
+    };
+  };
+  const outcome = (store, eventId) => store.db.prepare('SELECT outcome FROM decisions WHERE event_id = ?').get(eventId)?.outcome;
+  const interimRows = (store) => store.db.prepare(`SELECT text FROM cognition_journal
+    WHERE kind = 'outbound' AND json_extract(detail_json, '$.interim') = 1 ORDER BY seq`).all().map((row) => row.text);
+
+  it('offers interim only with the switch on; off, the tools are exactly as they were', async (t) => {
+    const off = setup(t);
+    for (const name of ['send_message', 'reply_message', 'react_to_message']) {
+      assert.deepEqual(off.service.tools().find((tool) => tool.name === name), publicTool(TOOLS.find((tool) => tool.name === name)), name);
+    }
+    off.inbound({ messageId: 'om_off123456789', chatId: 'oc_off123456789' });
+    await assert.rejects(off.call('send_message', { chat_id: 'oc_off123456789', markdown: 'x', interim: true,
+      decision_id: 'message:om_off123456789' }), (error) => error.code === 'invalid_input');
+    assert.equal(off.connectors.calls.length, 0);
+
+    const on = setup(t, { stagedReplies: true });
+    for (const name of ['send_message', 'reply_message']) {
+      const tool = on.service.tools().find((candidate) => candidate.name === name);
+      assert.equal(tool.inputSchema.properties.interim.type, 'boolean', name);
+      assert.equal(tool.inputSchema.required.includes('interim'), false, name);
+    }
+    const react = on.service.tools().find((tool) => tool.name === 'react_to_message');
+    assert.match(react.description, /Set temporary=true \(OnIt\) when you take on a request that needs real work first/);
+    assert.doesNotMatch(react.description, /idle=/);
+    assert.equal(on.service.tools().some((tool) => tool.name === 'stay_silent'), false, 'staged replies do not bring explicit silence');
+  });
+
+  it('an interim finding keeps the OnIt and decides nothing; the final delivery clears it and decides', async (t) => {
+    const { store, service, call, inbound, logs } = setup(t, { stagedReplies: true, explicitSilence: true, run: reactions() });
+    inbound({ messageId: 'om_task123456789', chatId: 'oc_task123456789' });
+    const decision = { decision_id: 'message:om_task123456789' };
+    await call('react_to_message', { message_id: 'om_task123456789', emoji_type: 'OnIt', temporary: true, ...decision });
+    await call('send_message', { chat_id: 'oc_task123456789', markdown: '注意到 14:05 起上游调用量翻了一倍', interim: true, ...decision });
+    await call('reply_message', { message_id: 'om_task123456789', markdown: '上游这段时间有大量限流报错', interim: true, ...decision });
+    assert.equal(service.temporaryReactions.size, 1);
+    assert.equal(outcome(store, 'message:om_task123456789'), undefined);
+    assert.deepEqual(interimRows(store), ['注意到 14:05 起上游调用量翻了一倍', '上游这段时间有大量限流报错']);
+    assert.deepEqual(logs.filter((line) => line.message === 'agent_tool' && line.interim).map((line) => line.tool), ['send_message', 'reply_message']);
+
+    await call('send_message', { chat_id: 'oc_task123456789', markdown: '清楚了：上游 redis 挂了，限流器没生效', ...decision });
+    assert.equal(service.temporaryReactions.size, 0);
+    assert.equal(outcome(store, 'message:om_task123456789'), 'delivered');
+    assert.equal(interimRows(store).length, 2, 'the final delivery is not interim');
+  });
+
+  it('an interim message is text, lands where its decision is, inside its thread, and is never a mail draft', async (t) => {
+    const { store, call, connectors, inbound, workspace } = setup(t, { stagedReplies: true, ids: ['lark', 'email'] });
+    inbound({ messageId: 'om_here123456789', chatId: 'oc_here123456789' });
+    inbound({ messageId: 'om_there12345678', chatId: 'oc_there12345678' });
+    inbound({ messageId: 'om_threadA123456', chatId: 'oc_here123456789', threadId: 'omt_threadA12345' });
+    inbound({ messageId: 'om_threadB123456', chatId: 'oc_here123456789', threadId: 'omt_threadB12345' });
+    store.ingest(mailEvent({ uid: 9 }));
+    const main = { decision_id: 'message:om_here123456789', interim: true };
+    const thread = { decision_id: 'message:om_threadA123456', interim: true };
+    fs.writeFileSync(path.join(workspace, 'report.txt'), 'x');
+    const textOnly = /text only: use markdown/;
+    const elsewhere = /goes only where decision_id is/;
+    const refusals = [
+      ['send_message', { chat_id: 'oc_here123456789', file_path: 'report.txt', ...main }, textOnly],
+      ['send_message', { chat_id: 'oc_here123456789', choices: { prompt: 'A or B?', options: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }] }, ...main }, textOnly],
+      ['send_message', { chat_id: 'oc_there12345678', markdown: 'another chat', ...main }, elsewhere],
+      ['reply_message', { message_id: 'om_there12345678', markdown: 'another chat', ...main }, elsewhere],
+      // Where a reply to a message nobody has seen lands is unknown.
+      ['reply_message', { source: 'lark', message_id: 'om_unknown123456', markdown: 'who knows where', ...main }, elsewhere],
+      ['reply_message', { message_id: 'mail:1:9', markdown: 'draft', ...main }, elsewhere],
+      // A thread's request: a plain send leaves the thread, and another thread is not it.
+      ['send_message', { chat_id: 'oc_here123456789', markdown: 'out of the thread', ...thread }, elsewhere],
+      ['reply_message', { message_id: 'om_threadB123456', markdown: 'the other thread', reply_in_thread: true, ...thread }, elsewhere],
+      ['reply_message', { message_id: 'om_threadA123456', markdown: 'from the main chat', reply_in_thread: true, ...main }, elsewhere],
+    ];
+    for (const [tool, input, message] of refusals) {
+      await assert.rejects(call(tool, input), (error) => error.code === 'invalid_input' && message.test(error.message), `${tool} ${JSON.stringify(input)}`);
+    }
+    assert.equal(connectors.calls.length, 0);
+
+    await call('send_message', { chat_id: 'oc_here123456789', markdown: 'in the chat', ...main });
+    await call('reply_message', { message_id: 'om_here123456789', markdown: 'under the request', reply_in_thread: true, ...main });
+    await call('reply_message', { message_id: 'om_threadA123456', markdown: 'in its thread', reply_in_thread: true, ...thread });
+    assert.equal(connectors.calls.length, 3);
+  });
+
+  it('a turn that ends takes every OnIt down, and forgets each before it returns', async (t) => {
+    const { service, call, connectors, inbound } = setup(t, { stagedReplies: true, run: reactions() });
+    for (const id of ['om_turnA12345678', 'om_turnB12345678']) {
+      inbound({ messageId: id, chatId: id.replace('om_', 'oc_') });
+      await call('react_to_message', { message_id: id, emoji_type: 'OnIt', temporary: true, decision_id: `message:${id}` });
+    }
+    assert.equal(service.temporaryReactions.size, 2);
+    const cleared = service.clearTemporaryReactions('turn_end');
+    assert.equal(service.temporaryReactions.size, 0);
+    await cleared;
+    assert.deepEqual(connectors.calls.filter((item) => item.action === 'message.reaction.delete').map((item) => item.input.message_id),
+      ['om_turnA12345678', 'om_turnB12345678']);
+  });
+
+  it('closing waits for a removal a turn\'s end started, so the Connectors stop after it', async (t) => {
+    let finish;
+    const run = (_connector, action) => {
+      if (action === 'message.react') return { reaction_id: 'reaction_slow' };
+      if (action === 'message.reaction.delete') return new Promise((resolve) => { finish = () => resolve({ deleted: true }); });
+      return { message_id: 'om_delivered123456' };
+    };
+    const { service, call, inbound } = setup(t, { stagedReplies: true, run });
+    inbound({ messageId: 'om_slow123456789', chatId: 'oc_slow123456789' });
+    await call('react_to_message', { message_id: 'om_slow123456789', emoji_type: 'OnIt', temporary: true, decision_id: 'message:om_slow123456789' });
+    void service.clearTemporaryReactions('turn_end');
+    assert.equal(service.temporaryReactions.size, 0);
+    let closed = false;
+    const closing = service.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false, 'the removal is still under way');
+    finish();
+    await closing;
+    assert.equal(service.reactionRemovals.size, 0);
   });
 });
