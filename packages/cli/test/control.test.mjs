@@ -100,6 +100,49 @@ test('start tolerates PM2 launching before the process becomes online', async (t
   assert.equal(f.apps.get('vika-alpha'), 'online');
 });
 
+test('start does not retry a terminal PM2 state', async (t) => {
+  const f = fixture(t);
+  const base = f.options.execFileImpl;
+  let jlistCalls = 0;
+  f.options.execFileImpl = async (bin, args, options) => {
+    if (args[0] === 'jlist' && f.apps.has('vika-alpha')) {
+      jlistCalls += 1;
+      return { stdout: JSON.stringify([{
+        name: 'vika-alpha',
+        pm2_env: { status: 'errored', exit_code: 1, unstable_restarts: 2, pm_exec_path: path.join(fs.realpathSync(f.options.releaseLink), 'packages', 'daemon', 'src', 'main.mjs') },
+      }]) };
+    }
+    return base(bin, args, options);
+  };
+  await assert.rejects(
+    startCommand('alpha', { ...f.options, readyOptions: { attempts: 40, intervalMs: 1, onlineTimeoutMs: 100 } }),
+    /status=errored, exit_code=1, unstable_restarts=2/,
+  );
+  assert.equal(jlistCalls, 1);
+});
+
+test('start gives each PM2 probe no more than the remaining online deadline', async (t) => {
+  const f = fixture(t);
+  const base = f.options.execFileImpl;
+  const timeouts = [];
+  f.options.execFileImpl = async (bin, args, options) => {
+    if (args[0] === 'jlist' && f.apps.has('vika-alpha')) {
+      timeouts.push(options.timeout);
+      return { stdout: JSON.stringify([{
+        name: 'vika-alpha',
+        pm2_env: { status: 'one-launch-status', pm_exec_path: path.join(fs.realpathSync(f.options.releaseLink), 'packages', 'daemon', 'src', 'main.mjs') },
+      }]) };
+    }
+    return base(bin, args, options);
+  };
+  await assert.rejects(
+    startCommand('alpha', { ...f.options, readyOptions: { attempts: 40, intervalMs: 1, onlineTimeoutMs: 5 } }),
+    /status=one-launch-status/,
+  );
+  assert.ok(timeouts.length >= 1);
+  assert.ok(timeouts.every((timeout) => timeout > 0 && timeout <= 5));
+});
+
 test('status lists every app with its pm2 state and readiness', async (t) => {
   const f = fixture(t, ['vika-alpha']);
   await statusCommand(f.options);
