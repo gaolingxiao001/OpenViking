@@ -82,6 +82,24 @@ test('start explains when no release is installed', async (t) => {
   await assert.rejects(startCommand('alpha', f.options), /no Vika release is installed/);
 });
 
+test('start tolerates PM2 launching before the process becomes online', async (t) => {
+  const f = fixture(t);
+  let launching = true;
+  const base = f.options.execFileImpl;
+  f.options.execFileImpl = async (bin, args) => {
+    if (args[0] === 'jlist' && f.apps.has('vika-alpha') && launching) {
+      launching = false;
+      return { stdout: JSON.stringify([{
+        name: 'vika-alpha',
+        pm2_env: { status: 'one-launch-status', pm_exec_path: path.join(fs.realpathSync(f.options.releaseLink), 'packages', 'daemon', 'src', 'main.mjs') },
+      }]) };
+    }
+    return base(bin, args);
+  };
+  await startCommand('alpha', { ...f.options, readyOptions: { attempts: 2, intervalMs: 1 } });
+  assert.equal(f.apps.get('vika-alpha'), 'online');
+});
+
 test('status lists every app with its pm2 state and readiness', async (t) => {
   const f = fixture(t, ['vika-alpha']);
   await statusCommand(f.options);

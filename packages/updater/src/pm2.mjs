@@ -94,12 +94,41 @@ export async function verifyPm2App({ app, release, pm2Bin, execFileImpl, pm2Env 
   const matches = processes.filter((processInfo) => processInfo?.name === app);
   if (matches.length !== 1) throw new Error(`expected exactly one PM2 app named ${app}`);
   const [processInfo] = matches;
-  if (processInfo.pm2_env?.status !== 'online') throw new Error(`${app} is not online`);
+  if (processInfo.pm2_env?.status !== 'online') {
+    const state = processInfo.pm2_env ?? {};
+    const details = [
+      `status=${state.status ?? 'unknown'}`,
+      Number.isInteger(state.exit_code) ? `exit_code=${state.exit_code}` : null,
+      Number.isInteger(state.unstable_restarts) ? `unstable_restarts=${state.unstable_restarts}` : null,
+      state.pm_err_log_path ? `error_log=${state.pm_err_log_path}` : null,
+    ].filter(Boolean).join(', ');
+    throw new Error(`${app} is not online (${details})`);
+  }
   const execPath = await realpath(processInfo.pm2_env?.pm_exec_path || '');
   if (!isInside(release, execPath)) {
     throw new Error(`${app} is running outside the current release`);
   }
   return processInfo;
+}
+
+// PM2 can answer `start` while a process is still in one-launch-status. A
+// one-shot verification made setup report failure even though the same
+// process became online moments later. Poll the process identity and status
+// before moving on to the HTTP readiness check.
+export async function waitUntilOnline(options, {
+  attempts = 40,
+  intervalMs = 250,
+} = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await verifyPm2App(options);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw lastError;
 }
 
 export async function pm2Processes({ pm2Bin, execFileImpl, pm2Env }) {
@@ -121,7 +150,7 @@ export function appControlEnv(app, pm2Env) {
 export async function startApp(spec, { release, configPath, pm2Bin, execFileImpl, fetchImpl, readyOptions, pm2Env }) {
   const env = appControlEnv(spec.app, pm2Env);
   await execFileImpl(pm2Bin, ['start', configPath, '--only', spec.app, '--update-env'], { timeout: 60_000, env });
-  await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env: env });
+  await waitUntilOnline({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env: env }, readyOptions);
   await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
 }
 

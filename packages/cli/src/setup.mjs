@@ -1446,8 +1446,8 @@ async function setupFlow({
       () => control[command](id, { env, stdout: quiet }),
       t(`${state.displayName}（${id}）在后台跑起来了`, `${state.displayName} (${id}) is running in the background`));
   } catch (error) {
-    out(t(`\n配置已保存，但${current ? '重启' : '启动'}没有完成：${error.message}\n修好后运行 ${vika} ${command} ${id}\n`,
-      `\nSaved, but the ${command} did not finish: ${error.message}\nOnce that is fixed, run ${vika} ${command} ${id}\n`));
+    out(t(`\n配置已保存，但${current ? '重启' : '启动'}没有完成：${error.message}\n运行 ${vika} logs ${id} 查看具体错误；修好后运行 ${vika} ${command} ${id}\n`,
+      `\nSaved, but the ${command} did not finish: ${error.message}\nRun ${vika} logs ${id} for the exact error; once fixed, run ${vika} ${command} ${id}\n`));
     return 1;
   }
   if (!current) {
