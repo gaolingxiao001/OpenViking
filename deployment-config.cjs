@@ -19,6 +19,7 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'PI_BIN',
   'VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS',
   'VIKA_LOG_LEVEL',
+  'VIKA_TEMP_DIR',
   'VIKA_DRY_RUN',
   'VIKA_IGNORED_SENDER_IDS',
   'VIKA_SEND_TIMEOUT_MS',
@@ -61,6 +62,7 @@ const AGENT_FIELDS = Object.freeze([
   'profile',
   'port',
   'dataDir',
+  'tempDir',
   'workspace',
   'ovConfig',
   'ovAutoRecall',
@@ -297,6 +299,7 @@ function parseAgent(value, index, ignored) {
     profile: connectors.includes('lark') ? manifestString(value.profile, `${label}.profile`) : null,
     port: value.port,
     dataDir: manifestAbsolutePath(value.dataDir, `${label}.dataDir`),
+    tempDir: value.tempDir == null ? null : manifestAbsolutePath(value.tempDir, `${label}.tempDir`),
     workspace: manifestAbsolutePath(value.workspace, `${label}.workspace`),
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     ovAutoRecall: value.ovAutoRecall ?? false,
@@ -373,6 +376,7 @@ function assertIsolatedAgentStorage(agents) {
   const paths = agents.flatMap((agent, index) => [
     { name: `agents[${index}].dataDir`, value: agent.dataDir },
     { name: `agents[${index}].workspace`, value: agent.workspace },
+    ...(agent.tempDir ? [{ name: `agents[${index}].tempDir`, value: agent.tempDir }] : []),
   ]);
   for (let leftIndex = 0; leftIndex < paths.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < paths.length; rightIndex += 1) {
@@ -486,6 +490,7 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     VIKA_WORKSPACE: agent.workspace,
     VIKA_MODEL: agent.model,
   });
+  if (agent.tempDir) env.VIKA_TEMP_DIR = agent.tempDir;
   if (agent.profile) {
     env.VIKA_LARK_PROFILE = agent.profile;
     env.LARKSUITE_CLI_PROFILE = agent.profile;

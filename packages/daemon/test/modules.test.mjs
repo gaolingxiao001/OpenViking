@@ -39,6 +39,7 @@ describe('module boundaries', () => {
           profile: 'cli_alpha',
           port: 3738,
           dataDir: '/Users/test/.vika/data/alpha',
+          tempDir: '/tmp/vika-alpha',
           workspace: '/Users/test/Documents/work/alpha-workspace',
           ovConfig: '/Users/test/.openviking/ovcli.conf.alpha',
           model: 'gpt-5.6-sol',
@@ -68,6 +69,7 @@ describe('module boundaries', () => {
       PATH: '/safe/bin',
       VIKA_CONFIG: manifestPath,
       VIKA_LOG_LEVEL: 'debug',
+      VIKA_TEMP_DIR: '/tmp/vika-default',
       ARK_API_KEY: 'system-only-secret',
       VIKA_VOLC_SESSION_ID: 'seed-session-ref',
       SESSION_ID: 'generic-session-ref',
@@ -100,6 +102,10 @@ describe('module boundaries', () => {
     assert.match(alpha.script, /packages\/daemon\/src\/main\.mjs$/);
     assert.match(web.script, /packages\/web\/src\/main\.mjs$/);
     assert.equal(alpha.env.VIKA_PORT, '3738');
+    assert.equal(alpha.env.VIKA_TEMP_DIR, '/tmp/vika-alpha');
+    assert.equal(beta.env.VIKA_TEMP_DIR, '/tmp/vika-default');
+    assert.equal(manifestOnlyEcosystem.apps[0].env.VIKA_TEMP_DIR, '/tmp/vika-alpha');
+    assert.equal(manifestOnlyEcosystem.apps[1].env.VIKA_TEMP_DIR, '');
     assert.equal(alpha.env.VIKA_HTTP_ENABLED, 'true');
     assert.equal(alpha.env.VIKA_LARK_PROFILE, 'cli_alpha');
     assert.equal(alpha.env.LARKSUITE_CLI_PROFILE, 'cli_alpha');

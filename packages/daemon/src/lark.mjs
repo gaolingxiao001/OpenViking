@@ -5,6 +5,7 @@ import path from 'node:path';
 import { redactSensitive } from './logger.mjs';
 import { sanitizeNonArkChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { MEETING_EVENT_TYPES } from './meeting/index.mjs';
+import { prepareLarkMediaDirectory } from './lark-media.mjs';
 
 export const SUBSCRIBED_EVENT_TYPES = Object.freeze([
   'im.message.receive_v1',
@@ -374,8 +375,7 @@ export class LarkClient {
   async getMedia({ message_id: messageId, key }) {
     if (!key) throw new Error('Lark media requires the image_key or file_key from the message placeholder');
     const kind = key.startsWith('img_') ? 'image' : 'file';
-    const directory = path.join(this.config.tempDir, 'media');
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const directory = prepareLarkMediaDirectory(this.config.tempDir);
     const output = `lark-${createHash('sha256').update(`${messageId}:${key}`).digest('hex').slice(0, 24)}`;
     const data = await this.im([
       '+messages-resources-download', '--as', 'bot', '--message-id', messageId, '--file-key', key,

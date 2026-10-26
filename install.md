@@ -81,6 +81,16 @@ vika restart
 
 默认配置是 `~/.vika/config.json`。如需放在其他位置，给所有启动、部署和升级命令设置同一个绝对路径的 `VIKA_CONFIG`。
 
+### 飞书图片下载的临时目录
+
+`lark-cli` 拒绝向 `/root` 等受保护路径下载文件。实例的 `dataDir` 位于 `/root` 下时，在 `~/.vika/config.json` 中给对应的 `agents[]` 条目增加 `"tempDir": "/tmp/vika-primary"`（每个实例使用独立目录），部署包含此修复的版本后执行 `vika restart primary`。数据库和会话仍保留在原 `dataDir`，不要把整个数据目录迁到 `/tmp`。
+
+也可以设置 `VIKA_TEMP_DIR=/tmp/vika-primary`，或将其放入配置顶层的 `env`；这是所有实例共享的默认值，多实例部署应分别设置 `agents[].tempDir`，该字段优先。路径必须为绝对路径，未配置时仍使用 `<dataDir>/tmp`，`TMPDIR` 不影响它。临时目录也承载发送文件的临时副本。
+
+下载时自动以 `0700` 创建临时目录及其 `media` 子目录；已存在的目录必须属于 daemon 用户、仅该用户可访问，且不能是符号链接。使用专用目录，不要直接配置为 `/tmp`。图片和文件下载到 `<tempDir>/media`，供 MCP 和后续工具读取，按 `VIKA_RETENTION_MS`（默认 90 天）在 daemon 维护时清理过期下载。
+
+重启后重新读取一条之前失败的图片消息，确认 `get_message_media` 返回图片内容。`lark-cli --dry-run` 只能验证路径校验，不能代替真实下载验证。无需重启服务器或 OpenViking，也无需清空数据库。
+
 ### 微信扫码与单聊链路
 
 给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`、`ovConfig`。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。

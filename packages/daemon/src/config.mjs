@@ -128,6 +128,10 @@ export function getConfig() {
   const dataDir = path.resolve(
     process.env.VIKA_DATA_DIR || path.join(os.homedir(), '.vika', 'data'),
   );
+  const configuredTempDir = (process.env.VIKA_TEMP_DIR ?? '').trim();
+  if (configuredTempDir && !path.isAbsolute(configuredTempDir)) {
+    throw new Error('VIKA_TEMP_DIR must be an absolute path');
+  }
   const workspace = path.resolve(
     process.env.VIKA_WORKSPACE
       || path.join(os.homedir(), 'Documents', 'work', 'vika-workspace'),
@@ -200,7 +204,7 @@ export function getConfig() {
     dataDir,
     databasePath: path.join(dataDir, 'vika.sqlite3'),
     lockPath: path.join(dataDir, 'daemon.lock'),
-    tempDir: path.join(dataDir, 'tmp'),
+    tempDir: configuredTempDir ? path.normalize(configuredTempDir) : path.join(dataDir, 'tmp'),
     workspace,
     promptDir,
     rolePromptPath: rolePromptEnv(promptDir),

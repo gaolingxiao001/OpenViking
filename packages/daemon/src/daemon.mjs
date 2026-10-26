@@ -15,6 +15,7 @@ import { FailurePolicy } from './notices.mjs';
 import { DecisionPolicy, warnIfSilenceInert, warnIfStagedRepliesInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
+import { pruneLarkMedia } from './lark-media.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
 import { approvalNote } from './actions/approval.mjs';
 import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
@@ -431,6 +432,11 @@ export class PersonalAgentDaemon {
   runMaintenance() {
     if (!this.store) return;
     const removed = this.store.prune(this.config.retentionMs);
+    try {
+      removed.larkMedia = pruneLarkMedia(this.config.tempDir, this.config.retentionMs);
+    } catch (error) {
+      this.logger.warn('lark_media_prune_failed', { error: safeError(error) });
+    }
     if (Object.values(removed).some((count) => count > 0)) {
       this.logger.info('state_maintenance_completed', { removed });
       this.recordSystemActivity('system.maintenance', {
