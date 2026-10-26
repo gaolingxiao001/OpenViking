@@ -17,6 +17,7 @@ import { normalizeEvent } from '../src/event.mjs';
 import { Harness } from '../src/harness.mjs';
 import { formatInboundLine } from '../src/runtime-input.mjs';
 import { Store } from '../src/store.mjs';
+import { LarkClient } from '../src/lark.mjs';
 import { chatEvent, mailEvent, subjectEvent } from './event-fixture.mjs';
 import { fakeConnectors } from './action-fixture.mjs';
 
@@ -282,6 +283,68 @@ describe('agent tools', () => {
     assert.equal(seen.bytes, 'png bytes');
     assert.ok(seen.path.startsWith(path.join(directory, 'tmp', 'outbox')));
     assert.equal(fs.existsSync(seen.path), false);
+  });
+
+  for (const tool of ['send_message', 'reply_message', 'notify_owner']) {
+    for (const [name, flag] of [['chart 图.png', '--image'], ['report.pdf', '--file']]) {
+      for (const fails of [false, true]) {
+        it(`${tool} uploads ${name} from configured private temp storage and cleans up on ${fails ? 'failure' : 'success'}`, async (t) => {
+          let lark;
+          const { call, workspace, service, inbound } = setup(t, {
+            run: (_connector, action, input) => action === 'message.reply' ? lark.replyMessage(input) : lark.sendMessage(input),
+          });
+          const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vika-upload-'));
+          t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+          service.config.dataDir = '/root/.vika/data/primary';
+          service.config.tempDir = tempDir;
+          let snapshot;
+          lark = new LarkClient({ ...service.config, profile: 'test', larkCliBin: '/fake/lark-cli', sendTimeoutMs: 5000 }, {
+            async run(_bin, args, { cwd }) {
+              assert.equal(args[3], tool === 'reply_message' ? '+messages-reply' : '+messages-send');
+              assert.equal(args[args.indexOf(flag) + 1], `./${name}`);
+              assert.equal(path.dirname(cwd), path.join(tempDir, 'outbox'));
+              snapshot = path.join(cwd, name);
+              for (const dir of [tempDir, path.dirname(cwd), cwd]) {
+                assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+              }
+              assert.equal(fs.statSync(snapshot).mode & 0o777, 0o600);
+              assert.equal(fs.readFileSync(snapshot, 'utf8'), 'original bytes');
+              return fails
+                ? { code: 1, stdout: '', stderr: 'simulated upload failure' }
+                : { code: 0, stdout: JSON.stringify({ ok: true, data: { message_id: 'om_delivered123456' } }), stderr: '' };
+            },
+          }, logger);
+          inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
+          const source = path.join(workspace, name);
+          fs.writeFileSync(source, 'original bytes');
+          const target = tool === 'send_message' ? { chat_id: 'oc_chat12345678' }
+            : tool === 'reply_message' ? { message_id: 'om_decision123456' } : {};
+          const send = () => call(tool, { ...target, file_path: name, decision_id: 'message:om_decision123456' });
+          if (fails) await assert.rejects(send, /simulated upload failure/);
+          else await send();
+          assert.ok(snapshot);
+          assert.equal(fs.existsSync(snapshot), false);
+          assert.deepEqual(fs.readdirSync(path.join(tempDir, 'outbox')), []);
+          assert.equal(fs.readFileSync(source, 'utf8'), 'original bytes');
+        });
+      }
+    }
+  }
+
+  it('rejects a shared temp root or symlinked outbox before uploading', async (t) => {
+    const { call, workspace, directory, service, connectors, inbound } = setup(t);
+    inbound({ messageId: 'om_decision123456', chatId: 'oc_chat12345678' });
+    fs.writeFileSync(path.join(workspace, 'chart.png'), 'image');
+    const tempDir = service.config.tempDir;
+    fs.mkdirSync(tempDir);
+    fs.chmodSync(tempDir, 0o755);
+    const send = () => call('send_message', { chat_id: 'oc_chat12345678', file_path: 'chart.png', decision_id: 'message:om_decision123456' });
+    await assert.rejects(send, /mode 0700/);
+    assert.equal(fs.statSync(tempDir).mode & 0o777, 0o755);
+    fs.chmodSync(tempDir, 0o700);
+    fs.symlinkSync(directory, path.join(tempDir, 'outbox'));
+    await assert.rejects(send, /owned by the daemon user/);
+    assert.equal(connectors.calls.length, 0);
   });
 
   it('resolves mention names through the roster of the target chat', async (t) => {

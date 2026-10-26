@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { preparePrivateDirectory } from '../private-temp.mjs';
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const MAX_CARD_BYTES = 30 * 1024;
@@ -80,7 +81,7 @@ function readWorkspaceFile(relative, workspace) {
 // form hashed into the idempotency key, and a journal summary. A file is frozen
 // into a private snapshot so the upload cannot change after validation; the
 // caller must call cleanup() once the delivery attempt is over.
-export function resolveContent(input, { workspace, snapshotDir, maxTextChars }) {
+export function resolveContent(input, { workspace, tempDir, maxTextChars }) {
   const present = BODY_FIELDS.filter((key) => input[key] !== undefined);
   if (present.length !== 1) {
     throw new Error(present.length
@@ -104,10 +105,18 @@ export function resolveContent(input, { workspace, snapshotDir, maxTextChars }) 
   if (kind === 'file_path') {
     const { name, bytes } = readWorkspaceFile(value, workspace);
     const digest = createHash('sha256').update(bytes).digest('hex');
-    fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+    // Upload from a private snapshot under the same configurable temp root
+    // as downloads, even when the original workspace is under /root.
+    preparePrivateDirectory(tempDir);
+    const snapshotDir = preparePrivateDirectory(path.join(tempDir, 'outbox'));
     const directory = fs.mkdtempSync(path.join(snapshotDir, 'upload-'));
     const snapshot = path.join(directory, name);
-    fs.writeFileSync(snapshot, bytes, { mode: 0o600 });
+    try {
+      fs.writeFileSync(snapshot, bytes, { mode: 0o600 });
+    } catch (error) {
+      fs.rmSync(directory, { recursive: true, force: true });
+      throw error;
+    }
     return {
       type: 'file', payload: { type: 'file', path: snapshot, name }, canonical: ['file', name, digest],
       summary: `[file ${name}]`, cleanup: () => fs.rmSync(directory, { recursive: true, force: true }),

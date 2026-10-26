@@ -6,7 +6,7 @@ import test from 'node:test';
 import { updateManifest } from '../../daemon/src/deployment-manifest.mjs';
 import { InstanceLock } from '../../daemon/src/lock.mjs';
 import {
-  allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, withInstance, writeManifest,
+  allocatePort, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, withDefaultTempDir, withInstance, writeManifest,
 } from '../src/manifest.mjs';
 
 function agent(id, overrides = {}) {
@@ -30,6 +30,23 @@ function tempHome(t) {
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   return home;
 }
+
+test('setup defaults only /root data paths to a per-instance /tmp directory and preserves explicit choices', () => {
+  for (const dataDir of ['/root', '/root/.vika/data/primary', '/root/.local/share/lark-daemon-primary', '/srv/../root/data']) {
+    const original = agent('primary', { dataDir });
+    const configured = withDefaultTempDir(original, { TMPDIR: '/root/tmp' });
+    assert.deepEqual(configured, { ...original, tempDir: '/tmp/vika-primary' });
+    assert.equal(original.tempDir, undefined);
+    assert.equal(withDefaultTempDir({ ...original, id: 'secondary' }).tempDir, '/tmp/vika-secondary');
+    assert.equal(withDefaultTempDir(original, { VIKA_TEMP_DIR: '/tmp/custom' }), original);
+    const custom = { ...original, tempDir: '/tmp/my-agent' };
+    assert.equal(withDefaultTempDir(custom, { VIKA_TEMP_DIR: '/tmp/global' }), custom);
+  }
+  for (const dataDir of ['/root-other/data', '/srv/root/data', '/home/alice/.vika/data/primary']) {
+    const original = agent('primary', { dataDir });
+    assert.equal(withDefaultTempDir(original), original);
+  }
+});
 
 test('instance ids follow the manifest rules and stay unique', () => {
   const manifest = { agents: [agent('primary')] };

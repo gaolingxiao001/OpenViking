@@ -1,25 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-
-function assertPrivateDirectory(directory) {
-  const info = fs.lstatSync(directory);
-  if (!info.isDirectory() || info.isSymbolicLink()
-    || (typeof process.getuid === 'function' && info.uid !== process.getuid())) {
-    throw new Error(`Lark media directory must be a directory owned by the daemon user: ${directory}`);
-  }
-  if ((info.mode & 0o077) !== 0) {
-    throw new Error(`Lark media directory must have mode 0700; use a private VIKA_TEMP_DIR: ${directory}`);
-  }
-}
+import { assertPrivateDirectory, preparePrivateDirectory } from './private-temp.mjs';
 
 export function prepareLarkMediaDirectory(tempDir) {
   // Never chmod a shared directory such as /tmp. Existing paths must already
   // be private; create both the configured root and media child with 0700.
   const directory = path.join(tempDir, 'media');
-  for (const entry of [tempDir, directory]) {
-    fs.mkdirSync(entry, { recursive: true, mode: 0o700 });
-    assertPrivateDirectory(entry);
-  }
+  for (const entry of [tempDir, directory]) preparePrivateDirectory(entry);
   return directory;
 }
 

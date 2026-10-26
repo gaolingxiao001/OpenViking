@@ -482,6 +482,30 @@ function existing(h, agent) {
   return full;
 }
 
+test('setup saves the safe temporary directory for /root data without moving the data or workspace', async (t) => {
+  const h = harness(t, ['2', '1', 'New name', '11']);
+  const before = existing(h, { dataDir: '/root/.vika/data/asd' });
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, displayName: 'New name', tempDir: '/tmp/vika-asd' }]);
+  assert.deepEqual(h.calls, [['restart', 'asd']]);
+});
+
+test('setup keeps per-instance, manifest and shell temporary directory overrides', async (t) => {
+  for (const source of ['instance', 'manifest', 'shell']) {
+    const h = harness(t, ['2', '1', 'New name', '11']);
+    const before = existing(h, { dataDir: '/root/.vika/data/asd',
+      ...(source === 'instance' ? { tempDir: '/tmp/custom' } : {}) });
+    if (source === 'shell') h.options.env.VIKA_TEMP_DIR = '/tmp/custom';
+    if (source === 'manifest') {
+      const manifest = h.manifest();
+      manifest.env.VIKA_TEMP_DIR = '/tmp/custom';
+      fs.writeFileSync(path.join(h.home, '.vika', 'config.json'), JSON.stringify(manifest));
+    }
+    assert.equal(await setupCommand(h.options), 0);
+    assert.deepEqual(h.manifest().agents, [{ ...before, displayName: 'New name' }]);
+  }
+});
+
 test('setup offers removal without requiring a usable runtime or OpenViking', async (t) => {
   const h = harness(t, ['3', '1', 'y'], { runtimes: [], ov: { usable: false } });
   const agent = existing(h, {});

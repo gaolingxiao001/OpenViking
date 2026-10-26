@@ -28,6 +28,15 @@ export function vikaHome(env = process.env) {
   return path.join(env.HOME || os.homedir(), '.vika');
 }
 
+// setup persists the default so users can inspect/change it. A global or
+// per-instance explicit choice wins; the durable data directory never moves.
+export function withDefaultTempDir(agent, env = {}) {
+  if (agent.tempDir != null || String(env.VIKA_TEMP_DIR ?? '').trim()) return agent;
+  const dataDir = path.resolve(agent.dataDir);
+  if (dataDir !== '/root' && !dataDir.startsWith('/root/')) return agent;
+  return { ...agent, tempDir: `/tmp/vika-${agent.id}` };
+}
+
 // How to call the vika command from here: by name once ~/.vika/bin is on
 // PATH, by its full path in the shell the installer ran from.
 export function vikaCommand(env = process.env) {

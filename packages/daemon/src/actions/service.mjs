@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import path from 'node:path';
 import { conversationKeyFor, eventIdentity } from '../event.mjs';
 import { registerCard } from '../card-messages.mjs';
 import {
@@ -465,7 +464,7 @@ export class ActionService {
     try {
       content = resolveContent(input, {
         workspace: this.config.workspace,
-        snapshotDir: path.join(this.config.tempDir, 'outbox'),
+        tempDir: this.config.tempDir,
         maxTextChars: this.config.maxReplyChars,
       });
     } catch (error) {
@@ -720,7 +719,7 @@ export class ActionService {
     let draftText;
     try {
       const content = resolveContent(input, { workspace: this.config.workspace, maxTextChars: this.config.maxReplyChars,
-        snapshotDir: path.join(this.config.tempDir, 'outbox') });
+        tempDir: this.config.tempDir });
       content.cleanup();
       if (content.type !== 'markdown') throw new Error(`${connector} replies are plain text only; use markdown`);
       draftText = content.payload.text;
