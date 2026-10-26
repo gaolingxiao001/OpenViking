@@ -36,6 +36,10 @@ curl -fsSL <下载地址>/install.sh | sh
 
 Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [config.example.json](./config.example.json)。
 
+TraeX 需要支持 `app-server` 的 **TRAE CLI 2.0**，旧 Coco / TRAE CLI 1.0 的 `acp serve` 不能替代它。安装时若保留 Coco，`traecli` 可能仍指向旧版，新版使用 `traex`。setup 会依次检查 `traex`、`traecli`，解析软链接并去重，只有 stdio `initialize` 握手和 `login status` 都通过才提供该选项；探测不会创建会话或调用模型。显式设置 `TRAECLI_BIN`（兼容旧变量 `TRAEX_BIN`，优先级更高）时只检查指定文件，失败不会悄悄换另一个 CLI。setup 保存通过检查的实际路径，不修改用户的命令别名。
+
+如果启动失败，先运行 `vika logs <实例>` 查看具体错误。app-server 握手失败会附上有长度上限、经过脱敏的 stderr。`vika start <实例>` 对已经 online 的 PM2 进程也会验证所属 release 和 ready 状态，服务未就绪会返回失败，不会重启或覆盖该进程。PATH 提示找不到 `vika` 时，可先用 `~/.vika/bin/vika`；安装器依据 shell 写 rc，macOS 的 bash 使用 `.bash_profile`，Linux 的 bash 使用 `.bashrc`，zsh 使用 `.zshrc`，当前终端需加载对应文件或重新打开。
+
 Claude Code 需要 2.1.259 或以上，支持 `--permission-prompts none`；启动预检会检查该参数。daemon 是无人值守会话：Pi 扩展对话框、Codex/TraeX 的审批和用户输入请求会被明确取消或拒绝；Claude 使用官方无人值守设置，并拒绝意外的控制请求。需要向人提问时，模型应通过消息工具发文字或支持的选项卡，结束当前轮次，再等待用户消息或卡片答案。用户的扩展、provider 和其他会话配置不因此被关闭。
 
 Pi 1.2.0 在启动扩展完成后才开始读取 RPC 回复，因此扩展在 `session_start` 中要求人工输入时，daemon 会立即拒绝启动并提示关闭该启动交互；运行期间的对话框则正常返回取消。

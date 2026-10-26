@@ -91,6 +91,24 @@ async function handshake(agent, children, { threadId = 'th-traex-1' } = {}) {
 }
 
 describe('TraexAgent app-server backend', () => {
+  it('explains a startup protocol mismatch with bounded, redacted stderr', async () => {
+    const { agent, children } = newAgent(makeStore());
+    const started = agent.start();
+    const rejected = assert.rejects(started, (error) => {
+      assert.match(error.message, /requires TRAE CLI 2.0 app-server/);
+      assert.match(error.message, /unknown subcommand.*app-server/);
+      assert.doesNotMatch(error.message, /super-secret/);
+      assert.ok(error.message.length < 2500);
+      return true;
+    });
+    await flush();
+    children[0].stderr.emit('data', 'unknown subcommand app-server; api_key=sup');
+    children[0].stderr.emit('data', `er-secret\n${'x'.repeat(10000)}`);
+    children[0].exitCode = 1;
+    children[0].emit('exit', 1, null);
+    await rejected;
+  });
+
   it('starts traecli app-server over stdio without Codex-only service-tier flags', async () => {
     const store = makeStore();
     const { agent, children, spawnCalls } = newAgent(store, {}, {

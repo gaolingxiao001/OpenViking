@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { managedPiBin } from '../../daemon/src/pi-runtime.mjs';
 import { t } from './i18n.mjs';
+import { probeAppServer } from './runtime-probe.mjs';
 
 // Setup only checks the agent runtimes; installing and logging in to them is
 // the user's business. Pi ships with Vika and reuses the user's ~/.pi/agent.
@@ -31,7 +32,7 @@ async function run(execFileImpl, command, args, env) {
 }
 
 // [{ id, label, model, bin, binEnv, available, note }], in the order setup offers them.
-export async function detectRuntimes({ env = process.env, execFileImpl = execFile, piBin = managedPiBin() } = {}) {
+export async function detectRuntimes({ env = process.env, execFileImpl = execFile, piBin = managedPiBin(), probe = probeAppServer } = {}) {
   const runtimes = [];
 
   const codex = which('codex', env);
@@ -62,12 +63,53 @@ export async function detectRuntimes({ env = process.env, execFileImpl = execFil
       : t('没有可用模型：运行 vika pi 后 /login，或编辑 ~/.pi/agent/models.json', 'no model yet: run vika pi and /login, or edit ~/.pi/agent/models.json'),
   });
 
-  const traex = which('traecli', env);
-  if (traex) {
-    runtimes.push({
-      id: 'traex', label: 'TraeX', model: 'traex', bin: traex, binEnv: 'TRAECLI_BIN',
-      available: true, note: t('已安装', 'installed'),
-    });
-  }
+  const traex = await detectTraex({ env, execFileImpl, probe });
+  if (traex) runtimes.push(traex);
   return runtimes;
+}
+
+async function detectTraex({ env, execFileImpl, probe }) {
+  // A configured binary is authoritative. Do not silently replace it with an
+  // unrelated login/configuration from PATH when it fails verification.
+  const explicit = env.TRAEX_BIN?.trim() || env.TRAECLI_BIN?.trim();
+  const candidates = explicit ? [explicit] : [which('traex', env), which('traecli', env)].filter(Boolean);
+  const seen = new Set();
+  let best = null;
+  for (const candidate of candidates) {
+    const located = path.isAbsolute(candidate) || candidate.includes(path.sep) ? path.resolve(candidate) : which(candidate, env);
+    let bin = located || candidate;
+    let installed = false;
+    try {
+      if (located) {
+        fs.accessSync(located, fs.constants.X_OK);
+        installed = fs.statSync(located).isFile();
+        if (installed) bin = fs.realpathSync(located);
+      }
+    } catch {}
+    if (seen.has(bin)) continue;
+    seen.add(bin);
+    const result = {
+      id: 'traex', label: 'TraeX', model: 'traex', bin, binEnv: 'TRAECLI_BIN',
+      installed, protocolCompatible: false, loggedIn: false, available: false,
+      note: t(`找不到可执行文件：${candidate}`, `Executable not found: ${candidate}`),
+    };
+    if (installed) {
+      const protocol = await probe(bin, { env });
+      result.protocolCompatible = protocol.compatible;
+      if (!protocol.compatible) {
+        result.note = t(`不支持 Vika 所需的 app-server 握手：${bin}；请安装或选择 TRAE CLI 2.0（保留 Coco 时用 traex）`,
+          `Required app-server handshake failed: ${bin}; install/select TRAE CLI 2.0 (use traex when keeping Coco)`);
+        if (protocol.reason) result.note += ` (${protocol.reason})`;
+      } else {
+        const login = await run(execFileImpl, bin, ['login', 'status'], env);
+        result.loggedIn = login.ok;
+        result.available = login.ok;
+        result.note = login.ok ? t('协议兼容，已登录', 'Protocol compatible, logged in')
+          : t(`协议兼容，但登录检查未通过：运行 ${bin} login`, `Protocol compatible, but login check failed: run ${bin} login`);
+      }
+    }
+    if (result.available) return result;
+    if (!best || result.protocolCompatible) best = result;
+  }
+  return best;
 }

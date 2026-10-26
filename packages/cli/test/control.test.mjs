@@ -63,7 +63,34 @@ test('start runs the installed release and leaves online apps alone; nothing is 
     `start ${fs.realpathSync(path.join(path.dirname(f.options.releaseLink), 'releases', '0.4.0-test', 'ecosystem.config.cjs'))} --only vika-updater --update-env`,
   ]);
   assert.match(f.output(), /vika-alpha 已经在运行/);
-  assert.deepEqual(f.ready, ['http://127.0.0.1:3739/ready', 'http://127.0.0.1:3737/ready']);
+  assert.deepEqual(f.ready, ['http://127.0.0.1:3738/ready', 'http://127.0.0.1:3739/ready', 'http://127.0.0.1:3737/ready']);
+});
+
+test('start refuses to report an online daemon as ready when its runtime has not started', async (t) => {
+  const f = fixture(t, ['vika-alpha']);
+  await assert.rejects(startCommand('alpha', {
+    ...f.options, fetchImpl: async () => ({ ok: false, status: 503 }),
+  }), /daemon did not become ready.*503/);
+  assert.doesNotMatch(f.output(), /已经在运行|已就绪/);
+  assert.ok(f.commands.every((command) => command === 'jlist'), 'must not restart/delete an online app');
+});
+
+test('start verifies the identity of an already online app before checking ready', async (t) => {
+  const f = fixture(t, ['vika-alpha']);
+  const outside = path.join(path.dirname(f.options.releaseLink), 'unrelated.mjs');
+  fs.writeFileSync(outside, '');
+  await assert.rejects(startCommand('alpha', {
+    ...f.options, execFileImpl: async () => ({ stdout: JSON.stringify([{
+      name: 'vika-alpha', pm2_env: { status: 'online', pm_exec_path: outside },
+    }]) }),
+  }), /outside the current release/);
+  assert.deepEqual(f.ready, []);
+});
+
+test('start checks an already online updater socket instead of announcing success', async (t) => {
+  const f = fixture(t, ['vika-updater']);
+  await assert.rejects(startCommand('updater', f.options), /updater did not become ready/);
+  assert.doesNotMatch(f.output(), /已经在运行/);
 });
 
 test('restart replaces a running app; stop leaves a stopped app; both save the pm2 list', async (t) => {
