@@ -49,6 +49,7 @@ fi
 say() { printf '%s\n' "$*" >&2; }
 ok() { if [ "$FANCY" = 1 ]; then say "  ${GREEN}✔${RESET} $*"; else say "$*"; fi; }
 note() { if [ "$FANCY" = 1 ]; then say "  ${GRAY}›${RESET} $*"; else say "$*"; fi; }
+warn() { if [ "$FANCY" = 1 ]; then say "  ${YELLOW}⚠${RESET} $*"; else say "$*"; fi; }
 die() {
   failed=$(m 'vika 安装失败：' 'vika install failed: ')
   if [ "$FANCY" = 1 ]; then say "  ${RED}✖${RESET} ${failed}$*"; else say "${failed}$*"; fi
@@ -316,8 +317,11 @@ case ":$PATH:" in
       *) RC="$HOME/.profile" ;;
     esac
     if ! grep -q '/.vika/bin' "$RC" 2>/dev/null; then
-      printf '\n# vika\nexport PATH="$HOME/.vika/bin:$PATH"\n' >> "$RC"
-      ok "$(m '命令' 'Command ')  ${GRAY}$(m "~/.vika/bin 已加进 $(short "$RC")，新开的终端里可以直接用 vika" "~/.vika/bin is added to $(short "$RC"); new terminals know vika")${RESET}"
+      if { printf '\n# vika\nexport PATH="$HOME/.vika/bin:$PATH"\n' >> "$RC"; } 2>/dev/null; then
+        ok "$(m '命令' 'Command ')  ${GRAY}$(m "~/.vika/bin 已加进 $(short "$RC")，新开的终端里可以直接用 vika" "~/.vika/bin is added to $(short "$RC"); new terminals know vika")${RESET}"
+      else
+        warn "$(m "写不了 $(short "$RC")；Vika 已安装完成。新终端要直接用 vika，请手动加入：export PATH=\"\$HOME/.vika/bin:\$PATH\"" "Could not write $(short "$RC"); Vika is installed. To use vika directly in new terminals, add this yourself: export PATH=\"\$HOME/.vika/bin:\$PATH\"")"
+      fi
     fi
     ;;
 esac

@@ -63,7 +63,34 @@ test('start runs the installed release and leaves online apps alone; nothing is 
     `start ${fs.realpathSync(path.join(path.dirname(f.options.releaseLink), 'releases', '0.4.0-test', 'ecosystem.config.cjs'))} --only vika-updater --update-env`,
   ]);
   assert.match(f.output(), /vika-alpha 已经在运行/);
-  assert.deepEqual(f.ready, ['http://127.0.0.1:3739/ready', 'http://127.0.0.1:3737/ready']);
+  assert.deepEqual(f.ready, ['http://127.0.0.1:3738/ready', 'http://127.0.0.1:3739/ready', 'http://127.0.0.1:3737/ready']);
+});
+
+test('start refuses to report an online daemon as ready when its runtime has not started', async (t) => {
+  const f = fixture(t, ['vika-alpha']);
+  await assert.rejects(startCommand('alpha', {
+    ...f.options, fetchImpl: async () => ({ ok: false, status: 503 }),
+  }), /daemon did not become ready.*503/);
+  assert.doesNotMatch(f.output(), /已经在运行|已就绪/);
+  assert.ok(f.commands.every((command) => command === 'jlist'), 'must not restart/delete an online app');
+});
+
+test('start verifies the identity of an already online app before checking ready', async (t) => {
+  const f = fixture(t, ['vika-alpha']);
+  const outside = path.join(path.dirname(f.options.releaseLink), 'unrelated.mjs');
+  fs.writeFileSync(outside, '');
+  await assert.rejects(startCommand('alpha', {
+    ...f.options, execFileImpl: async () => ({ stdout: JSON.stringify([{
+      name: 'vika-alpha', pm2_env: { status: 'online', pm_exec_path: outside },
+    }]) }),
+  }), /outside the current release/);
+  assert.deepEqual(f.ready, []);
+});
+
+test('start checks an already online updater socket instead of announcing success', async (t) => {
+  const f = fixture(t, ['vika-updater']);
+  await assert.rejects(startCommand('updater', f.options), /updater did not become ready/);
+  assert.doesNotMatch(f.output(), /已经在运行/);
 });
 
 test('restart replaces a running app; stop leaves a stopped app; both save the pm2 list', async (t) => {
@@ -80,6 +107,67 @@ test('start explains when no release is installed', async (t) => {
   const f = fixture(t);
   fs.rmSync(f.options.releaseLink);
   await assert.rejects(startCommand('alpha', f.options), /no Vika release is installed/);
+});
+
+test('start tolerates PM2 launching before the process becomes online', async (t) => {
+  const f = fixture(t);
+  let launching = true;
+  const base = f.options.execFileImpl;
+  f.options.execFileImpl = async (bin, args) => {
+    if (args[0] === 'jlist' && f.apps.has('vika-alpha') && launching) {
+      launching = false;
+      return { stdout: JSON.stringify([{
+        name: 'vika-alpha',
+        pm2_env: { status: 'one-launch-status', pm_exec_path: path.join(fs.realpathSync(f.options.releaseLink), 'packages', 'daemon', 'src', 'main.mjs') },
+      }]) };
+    }
+    return base(bin, args);
+  };
+  await startCommand('alpha', { ...f.options, readyOptions: { attempts: 2, intervalMs: 1 } });
+  assert.equal(f.apps.get('vika-alpha'), 'online');
+});
+
+test('start does not retry a terminal PM2 state', async (t) => {
+  const f = fixture(t);
+  const base = f.options.execFileImpl;
+  let jlistCalls = 0;
+  f.options.execFileImpl = async (bin, args, options) => {
+    if (args[0] === 'jlist' && f.apps.has('vika-alpha')) {
+      jlistCalls += 1;
+      return { stdout: JSON.stringify([{
+        name: 'vika-alpha',
+        pm2_env: { status: 'errored', exit_code: 1, unstable_restarts: 2, pm_exec_path: path.join(fs.realpathSync(f.options.releaseLink), 'packages', 'daemon', 'src', 'main.mjs') },
+      }]) };
+    }
+    return base(bin, args, options);
+  };
+  await assert.rejects(
+    startCommand('alpha', { ...f.options, readyOptions: { attempts: 40, intervalMs: 1, onlineTimeoutMs: 100 } }),
+    /status=errored, exit_code=1, unstable_restarts=2/,
+  );
+  assert.equal(jlistCalls, 1);
+});
+
+test('start gives each PM2 probe no more than the remaining online deadline', async (t) => {
+  const f = fixture(t);
+  const base = f.options.execFileImpl;
+  const timeouts = [];
+  f.options.execFileImpl = async (bin, args, options) => {
+    if (args[0] === 'jlist' && f.apps.has('vika-alpha')) {
+      timeouts.push(options.timeout);
+      return { stdout: JSON.stringify([{
+        name: 'vika-alpha',
+        pm2_env: { status: 'one-launch-status', pm_exec_path: path.join(fs.realpathSync(f.options.releaseLink), 'packages', 'daemon', 'src', 'main.mjs') },
+      }]) };
+    }
+    return base(bin, args, options);
+  };
+  await assert.rejects(
+    startCommand('alpha', { ...f.options, readyOptions: { attempts: 40, intervalMs: 1, onlineTimeoutMs: 5 } }),
+    /status=one-launch-status/,
+  );
+  assert.ok(timeouts.length >= 1);
+  assert.ok(timeouts.every((timeout) => timeout > 0 && timeout <= 5));
 });
 
 test('status lists every app with its pm2 state and readiness', async (t) => {

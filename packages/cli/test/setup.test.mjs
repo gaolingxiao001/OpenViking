@@ -64,6 +64,13 @@ function harness(t, answers, { ov = { configPath: null, url: 'http://127.0.0.1:1
   return { home, options, calls, written: () => written, manifest: () => JSON.parse(fs.readFileSync(path.join(home, '.vika', 'config.json'), 'utf8')) };
 }
 
+test('a startup failure points to the instance logs before retrying start', async (t) => {
+  const h = harness(t, ['Vika', '', '', '1', '1', '', 'y'], { failStart: true });
+  assert.equal(await setupCommand(h.options), 1);
+  assert.match(h.written(), /vika logs primary 查看具体错误/);
+  assert.match(h.written(), /vika start primary/);
+});
+
 test('a first setup: Feishu + Weixin, Codex, OpenViking; scans run only after every answer, then it starts', async (t) => {
   const ovSource = path.join(os.tmpdir(), `vika-ov-source-${process.pid}.conf`);
   fs.writeFileSync(ovSource, JSON.stringify({ url: 'https://ov.example', api_key: 'k' }));

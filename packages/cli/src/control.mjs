@@ -13,6 +13,7 @@ import {
   resolveRelease,
   startApp,
   verifyPm2App,
+  waitUntilReady,
 } from '../../updater/src/pm2.mjs';
 import { SHARED_WEB, defaultReleaseLink, defaultSocketPath, loadTargets } from '../../updater/src/targets.mjs';
 import { ignoredFieldsNotice, imList, loadInstances } from './instances.mjs';
@@ -131,7 +132,10 @@ export async function startCommand(target, options) {
   for (const spec of apps) {
     const current = running.get(spec.app);
     if (current?.pm2_env?.status === 'online') {
-      context.stdout.write(`${s.gray('·')} ${t(`${spec.app} 已经在运行`, `${spec.app} is running already`)}\n`);
+      await verifyPm2App({ ...context, app: spec.app });
+      if (spec.app === UPDATER_APP) await waitForUpdater(context.socketPath, context.readyOptions);
+      else await waitUntilReady(spec.readyUrl, context.fetchImpl, context.readyOptions);
+      context.stdout.write(`${s.gray('·')} ${t(`${spec.app} 已经在运行，已就绪`, `${spec.app} is running already and ready`)}\n`);
       continue;
     }
     await step(context, t(`启动 ${spec.app}`, `Starting ${spec.app}`), t(`${spec.app} 已就绪`, `${spec.app} is ready`), async () => {

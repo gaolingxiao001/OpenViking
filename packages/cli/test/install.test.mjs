@@ -87,6 +87,16 @@ test('keeps the download key for vika upgrade, private, and replaces it when it 
   assert.equal(fs.statSync(secrets).mode & 0o777, 0o600);
 });
 
+test('a shell rc file that cannot be written does not turn a completed install into a failure', (t) => {
+  const m = machine(t);
+  fs.mkdirSync(path.join(m.home, '.zshrc'));
+  const result = m.install('--file', m.archive('0.5.0'), { SHELL: '/bin/zsh' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fs.existsSync(path.join(m.vika, 'bin', 'vika')));
+  assert.match(result.stderr, /写不了 ~\/\.zshrc；Vika 已安装完成/);
+  assert.match(result.stderr, /export PATH="\$HOME\/\.vika\/bin:\$PATH"/);
+});
+
 test('refuses a corrupted archive, another platform, or a Node that cannot run here, leaving the install as it was', (t) => {
   const m = machine(t);
   assert.equal(m.install('--file', m.archive('0.5.0')).status, 0);
