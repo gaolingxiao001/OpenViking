@@ -364,14 +364,21 @@ export function validateInput(definition, value, label = 'input') {
     if (definition.maxItems !== undefined && value.length > definition.maxItems) throw new Error(`${label} allows at most ${definition.maxItems} items`);
     if (definition.items) value.forEach((item, index) => validateInput(definition.items, item, `${label}[${index}]`));
   }
-  if (actual === 'object' && definition.properties) {
+  if (actual === 'object') {
+    const count = Object.keys(value).length;
+    if (definition.minProperties !== undefined && count < definition.minProperties) throw new Error(`${label} needs at least ${definition.minProperties} entries`);
+    if (definition.maxProperties !== undefined && count > definition.maxProperties) throw new Error(`${label} allows at most ${definition.maxProperties} entries`);
     for (const key of definition.required ?? []) {
       if (value[key] === undefined) throw new Error(`${key} is required`);
     }
     for (const [key, item] of Object.entries(value)) {
-      const property = definition.properties[key];
+      if (definition.propertyNames) validateInput({ type: 'string', ...definition.propertyNames }, key, `${label} alias`);
+      const property = Object.hasOwn(definition.properties ?? {}, key) ? definition.properties[key] : null;
       if (!property) {
         if (definition.additionalProperties === false) throw new Error(`unknown field: ${key}`);
+        if (definition.additionalProperties && typeof definition.additionalProperties === 'object') {
+          validateInput(definition.additionalProperties, item, `${label}.${key}`);
+        }
         continue;
       }
       validateInput(property, item, key);

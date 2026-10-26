@@ -81,6 +81,18 @@ vika restart
 
 默认配置是 `~/.vika/config.json`。如需放在其他位置，给所有启动、部署和升级命令设置同一个绝对路径的 `VIKA_CONFIG`。
 
+### 飞书图片、文件收发的临时目录
+
+`lark-cli` 的路径保护会影响 `/root` 下的附件文件操作。安装时 `vika setup` 检测到 `dataDir` 是 `/root` 或其子目录，且没有显式临时目录配置时，会自动在实例配置中写入 `"tempDir": "/tmp/vika-<实例名>"`，例如 `/tmp/vika-primary`；不同实例使用独立目录。数据库、会话和工作目录保持原位，`TMPDIR` 不会改变这个默认值。用户仍可编辑 `~/.vika/config.json` 的 `agents[].tempDir`，setup 会保留显式设置。
+
+已运行的实例不会仅因升级而自动迁移：可在 setup 修改并保存该实例时补上默认值，或手动增加上述 `tempDir` 字段后执行 `vika restart primary`。不要把整个 `dataDir` 迁到 `/tmp`。
+
+也可以设置 `VIKA_TEMP_DIR=/tmp/vika-primary`，或将其放入配置顶层的 `env`；这是所有实例共享的默认值，多实例部署应分别设置 `agents[].tempDir`，该字段优先。路径必须为绝对路径，未配置时仍使用 `<dataDir>/tmp`，`TMPDIR` 不影响它。临时目录也承载发送文件的临时副本。
+
+上传和下载共用该临时根目录，均以 `0700` 创建并校验目录；已存在的目录必须属于 daemon 用户、仅该用户可访问，且不能是符号链接。使用专用目录，不要直接配置为 `/tmp`。上传先把工作区文件复制到 `<tempDir>/outbox` 中独立的私有子目录，以相对路径交给 lark-cli；图片、文件的发送、回复和主人通知均走此流程，成功或失败后删除副本。下载文件保存在 `<tempDir>/media`，供 MCP 和后续工具读取，按 `VIKA_RETENTION_MS`（默认 90 天）在 daemon 维护时清理过期下载。
+
+重启后重新读取一条之前失败的图片消息，并发送、回复一张工作区图片，确认图片内容正常。`lark-cli --dry-run` 只能验证本地参数，不能代替真实上传、下载验证。无需重启服务器或 OpenViking，也无需清空数据库。
+
 ### 微信扫码与单聊链路
 
 给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`、`ovConfig`。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。

@@ -23,6 +23,25 @@ afterEach(() => {
 });
 
 describe('configuration safety', { concurrency: false }, () => {
+  it('moves temporary files independently of persistent data and ignores TMPDIR', () => {
+    setEnv('VIKA_DATA_DIR', '/root/.local/share/vika-primary');
+    setEnv('VIKA_WORKSPACE', '/work/vika-primary');
+    setEnv('VIKA_TEMP_DIR', undefined);
+    setEnv('TMPDIR', '/tmp/system-temp');
+    const original = getConfig();
+    assert.equal(original.tempDir, '/root/.local/share/vika-primary/tmp');
+    setEnv('VIKA_TEMP_DIR', '/tmp/vika-primary/');
+    const configured = getConfig();
+    assert.equal(path.resolve(configured.tempDir), '/tmp/vika-primary');
+    for (const field of ['dataDir', 'databasePath', 'lockPath', 'workspace']) {
+      assert.equal(configured[field], original[field]);
+    }
+    setEnv('VIKA_TEMP_DIR', '');
+    assert.equal(getConfig().tempDir, original.tempDir);
+    setEnv('VIKA_TEMP_DIR', 'relative/tmp');
+    assert.throws(() => getConfig(), /VIKA_TEMP_DIR must be an absolute path/);
+  });
+
   it('accepts Telegram as primary and alongside existing connectors without putting keys in config', () => {
     setEnv('VIKA_CHANNEL', 'telegram');
     setEnv('VIKA_CONNECTORS_JSON', '["telegram","weixin"]');

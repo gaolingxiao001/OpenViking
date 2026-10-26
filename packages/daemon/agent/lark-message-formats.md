@@ -23,6 +23,27 @@
 
 ## 卡片与用户选择
 
+飞书 `send_message`、`reply_message`、`notify_owner` 可在 `card` 旁增加 `card_images`，将工作区图片嵌入 Card 1.0 或 2.0。它是卡片的附属资源，不是第二种正文，不能与 markdown、file_path、file_key 或 choices 搭配，也不适用于其他 Connector。
+
+```json
+{
+  "chat_id": "<真实 oc_ 会话 ID>",
+  "decision_id": "<最新入站 event= ID>",
+  "card": {
+    "elements": [{"tag": "img", "img_key": "{{image:cover}}", "alt": {"tag": "plain_text", "content": "cover"}}]
+  },
+  "card_images": {"cover": "artifacts/cover.png"}
+}
+```
+
+alias 必须唯一，以英文字母开头，后续只允许字母、数字、`_`、`-`，最长 32 字符，最多 32 项。只替换 `img_key` 字段中完整的 `{{image:alias}}`；每个占位符必须有资源，每个资源必须被使用，正文或其他字段中不能残留占位符。同一图片可在卡片中多次引用；内容相同的不同文件只上传一次。
+
+图片只接受 workspace 相对路径，拒绝 URL、绝对路径、`..`、逃出 workspace 的符号链接和非普通文件。支持 JPEG、PNG、GIF、WebP、BMP、ICO、TIFF，非空且最多 10 MiB；GIF 最大 2000×2000，其他格式最大 12000×12000。卡片替换前后都最多 30 KiB；发送前按每个占位符最多 256 字符的图片 key 预留空间，超限时应缩小卡片。不要自行调用上传 CLI，也不要拆成独立图片消息。
+
+daemon 先完整校验并冻结图片到私有临时目录，在 authority、新鲜度复核和 outbox 预留后，由选定 profile 的 bot 上传图片。每次成功的 key 会先写入 `<dataDir>/lark/image-uploads.sqlite3`，按 Connector 实例、profile、图片 SHA-256 复用；所有图片就绪后才发送卡片。重试与重启复用已落盘的 key，任何上传或持久化失败都不发送残缺卡片。临时快照在本次调用结束后清理，持久化缓存不在 `/tmp`。
+
+幂等依据为卡片模板、排序后的 alias 和内容摘要，不含源路径或临时路径。重试需要源文件仍可读取且内容不变。图片上传响应返回到 key 落盘之间崩溃，可能留下孤立资源；最终发送结果不明时仍按原 outbox 的 UNCERTAIN 语义和相同幂等 key 重试。缓存不假定固定 TTL、不自动换 key 重发，要求同一 profile 仍指向原应用且飞书继续接受该 image_key；应用重绑或资源失效会让投递报错，需人工处理。
+
 `card` 接受 inline Card 1.0（elements）或 Card 2.0（schema: "2.0"、body.elements）JSON，最多 30 KiB。不接受模板引用或原始 @ 标签。普通回调按钮、表单、下拉框的操作会作为新用户输入送给 Agent；daemon 不解释这些控件里的 action 为命令。
 
 询问用户单选时，优先使用 `choices`，避免手写 callback JSON：

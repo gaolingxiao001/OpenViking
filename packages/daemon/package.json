@@ -10,6 +10,7 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.2.0",
     "@larksuite/cli": "1.0.94",
+    "image-size": "2.0.4",
     "qrcode-terminal": "0.12.0"
   },
   "scripts": {

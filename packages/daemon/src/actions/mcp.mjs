@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { actionEndpoint, callTool, listTools } from './client.mjs';
+import { parseUniqueJson } from '../unique-json.mjs';
 
 // Stdio MCP adapter for local runtimes (Codex, TraeX, Claude, Pi). It relays
 // tools/list and tools/call to the Core and renders results; nothing else.
@@ -67,7 +68,7 @@ export async function serveMcp({ input, output, handle }) {
   const dispatch = (line) => {
     if (!line.trim()) return;
     let message;
-    try { message = JSON.parse(line); } catch {
+    try { message = parseUniqueJson(line); } catch {
       write({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
       return;
     }

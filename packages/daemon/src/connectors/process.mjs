@@ -252,6 +252,12 @@ export class ConnectorProcess {
 
   invoke(name, input, timeoutMs = this.config.sendTimeoutMs ?? 30_000) {
     if (!this.available) return Promise.reject(unavailable(this.id));
+    if (this.type === 'lark' && input.content?.card_images?.length) {
+      // One CLI timeout per unique image, plus the send and optional thread
+      // lookup. Core must not remove snapshots while this worker uses them.
+      const count = new Set(input.content.card_images.map((image) => image.digest)).size;
+      timeoutMs = (Math.min(count, 32) + 2) * timeoutMs + 1000;
+    }
     return this.request('action', { name, input }, timeoutMs);
   }
 

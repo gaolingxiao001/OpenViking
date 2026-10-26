@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import path from 'node:path';
 import { conversationKeyFor, eventIdentity } from '../event.mjs';
 import { registerCard } from '../card-messages.mjs';
 import {
@@ -461,11 +460,14 @@ export class ActionService {
 
   async content(input, connector, action, { chatId, fence, caller, answerer = fence.sender_id }) {
     const spec = this.manifest(connector).actions[action];
+    if (input.card_images !== undefined && (!spec.card_images || this.manifest(connector).name !== 'lark')) {
+      throw blocked('unsupported', `card_images is supported only by Lark card deliveries. ${NO_ACTION}`);
+    }
     let content;
     try {
       content = resolveContent(input, {
         workspace: this.config.workspace,
-        snapshotDir: path.join(this.config.tempDir, 'outbox'),
+        tempDir: this.config.tempDir,
         maxTextChars: this.config.maxReplyChars,
       });
     } catch (error) {
@@ -662,6 +664,9 @@ export class ActionService {
 
   async replyMessage(input, caller) {
     const connector = this.route(caller, 'message.reply', 'actions', input.source, { messageId: input.message_id });
+    if (input.card_images !== undefined && !this.manifest(connector).actions['message.reply'].card_images) {
+      throw blocked('unsupported', `card_images is supported only by Lark card deliveries. ${NO_ACTION}`);
+    }
     const inThread = input.reply_in_thread === true;
     if (inThread && !this.manifest(connector).actions['message.reply'].thread) {
       throw blocked('unsupported', `${connector} does not support thread replies. ${NO_ACTION}`);
@@ -720,7 +725,7 @@ export class ActionService {
     let draftText;
     try {
       const content = resolveContent(input, { workspace: this.config.workspace, maxTextChars: this.config.maxReplyChars,
-        snapshotDir: path.join(this.config.tempDir, 'outbox') });
+        tempDir: this.config.tempDir });
       content.cleanup();
       if (content.type !== 'markdown') throw new Error(`${connector} replies are plain text only; use markdown`);
       draftText = content.payload.text;

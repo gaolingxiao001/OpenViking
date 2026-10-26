@@ -116,6 +116,35 @@ test('defaults the manifest path under HOME and accepts an explicit absolute ove
   );
 });
 
+test('passes the temporary directory through deployment and supports isolated instance overrides', () => {
+  const manifest = validManifest();
+  manifest.env.VIKA_TEMP_DIR = '/tmp/vika-default';
+  manifest.agents[0].tempDir = '/tmp/vika-alpha';
+  manifest.agents[1].tempDir = '/tmp/vika-beta';
+  withManifest(manifest, (manifestPath) => {
+    const sourceEnv = { VIKA_CONFIG: manifestPath };
+    const deployment = loadDeploymentManifest(sourceEnv);
+    assert.deepEqual(deployment.ignoredFields, []);
+    assert.equal(deploymentDaemonEnvOverrides({ ...sourceEnv, VIKA_TEMP_DIR: '/tmp/from-shell' }).VIKA_TEMP_DIR, '/tmp/from-shell');
+    for (const [id, expected] of [['alpha', '/tmp/vika-alpha'], ['beta', '/tmp/vika-beta'], ['gamma', '/tmp/vika-default']]) {
+      const env = { ...sourceEnv };
+      applyDeploymentDaemonEnv(env, deployment);
+      applyDeploymentAgentEnv(env, deployment, id);
+      assert.equal(env.VIKA_TEMP_DIR, expected);
+      assert.equal(env.VIKA_DATA_DIR, `/srv/vika/data/${id}`);
+    }
+    assert.equal(resolvedDeploymentDaemonEnv(deployment, { VIKA_TEMP_DIR: '/tmp/from-shell' }).VIKA_TEMP_DIR, '/tmp/from-shell');
+  });
+  manifest.agents[1].tempDir = '/tmp/vika-alpha';
+  withManifest(manifest, (manifestPath) => {
+    assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /storage paths overlap/);
+  });
+  manifest.agents[1].tempDir = 'relative/tmp';
+  withManifest(manifest, (manifestPath) => {
+    assert.throws(() => loadDeploymentManifest({ VIKA_CONFIG: manifestPath }), /tempDir must be an absolute path/);
+  });
+});
+
 test('system environment overrides manifest daemon env while agent identity stays pinned', () => {
   withManifest(validManifest(), (manifestPath) => {
     const env = {

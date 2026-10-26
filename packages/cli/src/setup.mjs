@@ -13,7 +13,7 @@ import {
 } from './lark-app.mjs';
 import {
   ROLE_PRESETS, WEB_PORT, allocatePort, availableInstanceOvConfig, instanceIdProblem, readManifest, suggestInstanceId, validateManifest, vikaCommand,
-  vikaHome, withChangedInstance, withInstance, writeManifest,
+  vikaHome, withChangedInstance, withDefaultTempDir, withInstance, writeManifest,
 } from './manifest.mjs';
 import { detectOpenViking, writeInstanceOvConfig } from './ov.mjs';
 import { configureOpenViking, prepareInstanceOpenViking, saveOVConnection } from './ov-setup.mjs';
@@ -1282,7 +1282,7 @@ async function setupFlow({
     Object.assign(agent, state.switches);
     if (emailAccounts.length) agent.emailAccounts = emailAccounts;
     else delete agent.emailAccounts;
-    return agent;
+    return withDefaultTempDir(agent, { VIKA_TEMP_DIR: env.VIKA_TEMP_DIR ?? manifest?.env?.VIKA_TEMP_DIR });
   };
   // The IMs this run connects: the new ones, and Feishu again for another app.
   const toConnect = () => {

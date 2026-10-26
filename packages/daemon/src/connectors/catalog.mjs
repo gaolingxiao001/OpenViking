@@ -38,8 +38,8 @@ const MANIFESTS = Object.freeze({
     version: 'lark-cli-v1',
     capabilities: ['events', 'actions', 'search'],
     actions: {
-      'message.send': { content: LARK_CONTENT, mentions: true, idempotent: true },
-      'message.reply': { content: LARK_CONTENT, mentions: true, thread: true, idempotent: true },
+      'message.send': { content: LARK_CONTENT, mentions: true, idempotent: true, card_images: true },
+      'message.reply': { content: LARK_CONTENT, mentions: true, thread: true, idempotent: true, card_images: true },
       'message.react': {},
       'message.retract': {},
     },
