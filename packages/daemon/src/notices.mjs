@@ -20,6 +20,7 @@ export class FailurePolicy {
     runtime,
     recordActivity,
     isOwner = () => false,
+    mentionTarget = () => null,
     isStopping = () => false,
   }) {
     this.config = config;
@@ -29,6 +30,7 @@ export class FailurePolicy {
     this.runtime = runtime;
     this.recordActivity = recordActivity;
     this.isOwner = isOwner;
+    this.mentionTarget = mentionTarget;
     this.isStopping = isStopping;
     // scopeKey -> { summary, atMs } of the last delivered failure notice.
     // Repeats of the same error stay muted until a turn for that conversation
@@ -118,7 +120,9 @@ export class FailurePolicy {
     // Redeliver the failed turn to the fallback runtime. A failure of the retry
     // surfaces through the normal onTurnFailed path (runtime is codex now).
     this.runtime.submit(rows.map((row) => eventDeliveryItem(row, row.seq, {
-      text: formatInboundLine(row, null, { owner: this.isOwner(row), replyTo: resolveReplyTarget(this.store, row) }),
+      text: formatInboundLine(row, null, {
+        owner: this.isOwner(row), mention: this.mentionTarget(row), replyTo: resolveReplyTarget(this.store, row),
+      }),
       seq: row.seq,
     })));
     return true;
@@ -135,12 +139,13 @@ export class FailurePolicy {
     const seq = seqs.at(-1) ?? null;
     const inbound = seq === null || seq === undefined ? null : this.store.inboundBySeq(seq);
     const errorSummary = safeError(error);
-    // Mention bypass: like commandCandidate, the daemon does not know its own
-    // open_id, so any @-mention on any inbound of the failed turn counts as
-    // mentioning the bot and always gets the notice.
+    // Mention bypass: an inbound of the failed turn that @-mentions the bot
+    // always gets the notice. When the Connector does not know the bot's id,
+    // any @-mention counts.
     const mentioned = seqs.some((itemSeq) => {
       const row = itemSeq === seq ? inbound : this.store.inboundBySeq(itemSeq);
-      return Array.isArray(row?.mentions) && row.mentions.length > 0;
+      const target = row ? this.mentionTarget(row) : null;
+      return target ? target !== 'other' : Array.isArray(row?.mentions) && row.mentions.length > 0;
     });
     const scopeKey = inbound?.scopeKey ?? inbound?.conversationKey;
     const mute = scopeKey ? this.failureNoticeMutes.get(scopeKey) : null;

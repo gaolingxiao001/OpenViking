@@ -38,12 +38,12 @@ export function matchPrefix(token, candidates) {
 }
 
 // Where slash commands are accepted: a private chat takes bare /commands. Group
-// chats never do — the daemon has no reliable way to tell "@bot /cmd" apart from
-// "@someone-else /cmd" (it doesn't track its own open_id), so any mention in a
-// group used to be enough to trigger a command meant for a completely different
-// person. Group /command support can come back once mentions are resolved
-// against the bot's own id. Returns the parse candidate text, or null when the
-// message is not eligible (it then flows to codex as a normal message).
+// chats never do — any mention in a group used to be enough to trigger a
+// command meant for a completely different person. Group /command support could
+// come back on ConnectorManager.mentionTarget, which tells "@bot /cmd" from
+// "@someone-else /cmd" by the bot's own id. Returns the parse candidate text,
+// or null when the message is not eligible (it then flows to codex as a normal
+// message).
 export function commandCandidate(event) {
   if (event.kind !== 'message.created' || !event.chatId || !event.messageId
     || !event.replyRoute || !['text', 'post'].includes(event.messageType)) return null;

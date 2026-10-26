@@ -29,7 +29,13 @@ The Core starts a Connector and calls these operations in order:
    Weixin: the account that scanned the login code, `{ chat_id }`;
    Telegram: the account verified by the one-time Start link, `{ chat_id }`;
    Slack: the person who sent the one-time code to the bot, `{ chat_id }` of
-   that direct message). A mailbox reports none.
+   that direct message). A mailbox reports none. It may also name the bot
+   itself: `self: { id }`, where `id` is how the bot appears in an inbound
+   event's `message.mentions` (Lark: the app's bot `open_id` from
+   `/open-apis/bot/v3/info`). The Core then marks each chat input whose
+   mentions include anyone with `mention=me|other|mixed` by id, never by display
+   name; without `self` the field is left out. A failed lookup reports no
+   `self` rather than failing `check`.
 3. `start`: begin receiving events.
 4. `action`: execute a typed external action.
 5. `pause`: stop event intake while keeping actions available for Core shutdown draining.

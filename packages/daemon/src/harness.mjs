@@ -25,6 +25,7 @@ export class Harness {
     onInboundChat = null,
     afterEvent = null,
     isOwner = () => false,
+    mentionTarget = () => null,
     isStopping = () => false,
   }) {
     this.config = config;
@@ -41,6 +42,7 @@ export class Harness {
     this.onInboundChat = onInboundChat;
     this.afterEvent = afterEvent;
     this.isOwner = isOwner;
+    this.mentionTarget = mentionTarget;
     this.isStopping = isStopping;
     this.ingressBarrier = Promise.resolve();
     this.pendingIngress = 0;
@@ -178,6 +180,7 @@ export class Harness {
         text: formatInboundLine(event, null, {
           ...(idleHint ?? {}),
           owner: this.isOwner(event),
+          mention: this.mentionTarget(event),
           replyTo: event.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, event),
           // How long only bots have been talking here: the model's cue to stop.
           ...(BOT_SENDERS.has(event.senderType)
@@ -209,6 +212,7 @@ export class Harness {
       this.groupBurst.route(eventDeliveryItem(row, null, {
         text: formatInboundLine(row, null, {
           owner: this.isOwner(row),
+          mention: this.mentionTarget(row),
           replyTo: row.messageType === 'card_action' ? { kind: 'me' } : resolveReplyTarget(this.store, row),
           undecided: true,
         }),

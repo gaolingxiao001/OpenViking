@@ -88,9 +88,30 @@ describe('daemon event path (mock env)', { concurrency: false }, () => {
       await env.waitForCodexInput(/om-other-bot/);
 
       const delivered = env.codexInput().find((entry) => /om-other-bot/.test(entry.text));
-      assert.match(delivered.text, /@吴郑啸的DevBox飞书 CLI 飞书CLI/);
+      assert.match(delivered.text, / mention=other\] @吴郑啸的DevBox飞书 CLI 飞书CLI/);
       assert.doesNotMatch(delivered.text, /@_user_1/);
       assert.doesNotMatch(delivered.text, /\[mentions:/);
+    } finally {
+      await env.stop();
+    }
+  });
+
+  it('tells a mention of the bot from one of a same-named bot by open_id', async () => {
+    const env = await startMockEnv();
+    try {
+      // The Lark bot is SRE_OPPO, which is not the agent's configured name.
+      const mention = (openId) => ({ key: '@_user_1', name: 'SRE_OPPO', id: { open_id: openId } });
+      const send = async (messageId, mentions) => {
+        env.receive(textMessage({ messageId, chatId: 'oc-group', chatType: 'group', text: '@_user_1 帮看看', mentions }));
+        await env.waitForCodexInput(new RegExp(messageId));
+        await env.daemon.agentRuntime.whenIdle();
+        return env.codexInput().find((entry) => entry.text.includes(messageId)).text;
+      };
+      assert.match(await send('om-to-me', [mention('ou_mockSelf123456')]), / mention=me\] @SRE_OPPO 帮看看$/);
+      assert.match(await send('om-to-twin', [mention('ou_twin1234567890')]), / mention=other\] @SRE_OPPO 帮看看$/);
+      assert.match(await send('om-to-both', [mention('ou_mockSelf123456'), { key: '@_user_2', name: '刘维汉', id: { open_id: 'ou_person12345678' } }]),
+        / mention=mixed\] /);
+      assert.doesNotMatch(await send('om-to-none', null), /mention=/);
     } finally {
       await env.stop();
     }
