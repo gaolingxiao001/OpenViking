@@ -2,15 +2,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { preparePrivateDirectory } from '../private-temp.mjs';
+import { readWorkspaceFile } from '../workspace-file.mjs';
+import { IMAGE_ALIAS, MAX_CARD_IMAGES, MAX_CARD_IMAGE_BYTES, cardImageFormat, checkCardImageTemplate, validateCard } from '../card-images.mjs';
+export { MAX_CARD_BYTES } from '../card-images.mjs';
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
-export const MAX_CARD_BYTES = 30 * 1024;
 
 export const CONTENT_PROPERTIES = {
   markdown: { type: 'string', minLength: 1, description: 'Message text (Markdown where the connector supports it). Mutually exclusive with file_path/file_key/card/choices.' },
   file_path: { type: 'string', minLength: 1, description: 'Local file relative to the agent workspace, at most 20 MiB; images are sent as images. No URLs, absolute paths, traversal, or symlinks escaping the workspace.' },
   file_key: { type: 'string', pattern: '^file_[A-Za-z0-9_-]{8,}$', description: 'Lark only: existing IM file key from trusted tool output, sent without uploading.' },
   card: { type: 'object', description: 'Lark only: inline interactive card JSON (Card 1.0 elements or Card 2.0 body.elements), at most 30 KiB. Callback controls arrive as user input, never executed by the daemon. For a single-choice question prefer choices.' },
+  card_images: { type: 'object', minProperties: 1, maxProperties: MAX_CARD_IMAGES,
+    propertyNames: { pattern: IMAGE_ALIAS }, additionalProperties: { type: 'string', minLength: 1, maxLength: 4096 },
+    description: 'Lark only, only with card: map unique aliases to workspace-relative images (JPEG/PNG/GIF/WebP/BMP/ICO/TIFF, nonempty, at most 10 MiB each). Use each alias in a complete img_key value {{image:alias}}. Up to 32 aliases; identical bytes upload once. Resources belong to the card, not a second body.' },
   choices: { type: 'object', additionalProperties: false, required: ['prompt', 'options'], description: 'Lark only: a single-choice question card. The selected key later arrives as authenticated card input.', properties: {
     prompt: { type: 'string', minLength: 1, maxLength: 2000 },
     options: { type: 'array', minItems: 2, maxItems: 10, items: {
@@ -25,6 +30,36 @@ export const CONTENT_PROPERTIES = {
 };
 
 const BODY_FIELDS = ['markdown', 'file_path', 'file_key', 'card', 'choices'];
+
+function freezeCardImages(card, images, { workspace, tempDir }) {
+  if (!images || typeof images !== 'object' || Array.isArray(images) || !Object.keys(images).length) {
+    throw new Error('card_images must be a nonempty alias-to-path object');
+  }
+  const aliases = Object.keys(images).sort();
+  checkCardImageTemplate(card, aliases);
+  preparePrivateDirectory(tempDir);
+  const directory = fs.mkdtempSync(path.join(preparePrivateDirectory(path.join(tempDir, 'outbox')), 'card-'));
+  const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
+  const byDigest = new Map();
+  const assets = [];
+  try {
+    for (const alias of aliases) {
+      const { bytes } = readWorkspaceFile(images[alias], workspace, MAX_CARD_IMAGE_BYTES);
+      const format = cardImageFormat(bytes);
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      if (!byDigest.has(digest)) {
+        const filename = path.join(directory, `${digest}.${format}`);
+        fs.writeFileSync(filename, bytes, { mode: 0o600 });
+        byDigest.set(digest, filename);
+      }
+      assets.push({ alias, digest, path: byDigest.get(digest) });
+    }
+    const json = validateCard(card);
+    return { type: 'card', payload: { type: 'card', card: JSON.parse(json), card_images: assets },
+      canonical: ['card', json, assets.map(({ alias, digest }) => [alias, digest])],
+      summary: '[interactive card with images]', cleanup };
+  } catch (error) { cleanup(); throw error; }
+}
 
 export function choiceCard(question, answer = null) {
   const elements = [{ tag: 'div', text: { tag: 'plain_text', content: question.prompt } }];
@@ -41,42 +76,6 @@ export function choiceCard(question, answer = null) {
   return { config: { wide_screen_mode: true, update_multi: true }, elements };
 }
 
-function validateCard(card) {
-  if (card.schema && card.schema !== '2.0'
-    || !Array.isArray(card.schema === '2.0' ? card.body?.elements : card.elements)) {
-    throw new Error('card must be an inline Card 1.0 or Card 2.0 object with elements');
-  }
-  const json = JSON.stringify(card);
-  if (Buffer.byteLength(json) > MAX_CARD_BYTES) throw new Error('card exceeds 30 KiB');
-  // Raw card mentions would bypass the typed mention resolver and could @all.
-  if (/<at\b/i.test(json) || /"tag"\s*:\s*"at"/i.test(json)) {
-    throw new Error('raw card mention tags are unsupported; use a separate explicit message');
-  }
-  return json;
-}
-
-function readWorkspaceFile(relative, workspace) {
-  if (path.isAbsolute(relative) || relative.includes('\0') || relative.includes('\\')
-    || relative.split('/').includes('..') || /^[a-z]+:/i.test(relative)) {
-    throw new Error('file_path must be relative to the workspace without traversal or URLs');
-  }
-  const root = fs.realpathSync(workspace);
-  const filename = fs.realpathSync(path.resolve(root, relative));
-  if (!filename.startsWith(root + path.sep)) throw new Error('file_path escapes the workspace');
-  const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-  try {
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.size < 1 || stat.size > MAX_FILE_BYTES) {
-      throw new Error('file must be a nonempty regular file of at most 20 MiB');
-    }
-    // Bound the read even if another process grows the file after fstat.
-    const bytes = Buffer.alloc(stat.size);
-    const size = fs.readSync(fd, bytes, 0, stat.size, 0);
-    if (size !== stat.size) throw new Error('file changed while it was being read');
-    return { name: path.basename(filename), bytes };
-  } finally { fs.closeSync(fd); }
-}
-
 // Resolves exactly one message body into the Connector payload, the canonical
 // form hashed into the idempotency key, and a journal summary. A file is frozen
 // into a private snapshot so the upload cannot change after validation; the
@@ -91,6 +90,7 @@ export function resolveContent(input, { workspace, tempDir, maxTextChars }) {
   const kind = present[0];
   const value = input[kind];
   const none = () => {};
+  if (input.card_images !== undefined && kind !== 'card') throw new Error('card_images can only accompany card');
   if (kind === 'markdown') {
     if (typeof value !== 'string' || !value.trim()) throw new Error('markdown must not be empty');
     if (value.length > maxTextChars) throw new Error(`text exceeds the ${maxTextChars}-character limit`);
@@ -134,5 +134,7 @@ export function resolveContent(input, { workspace, tempDir, maxTextChars }) {
       summary: `[question] ${question.prompt}`, question, cleanup: none };
   }
   const json = validateCard(value);
+  if (input.card_images !== undefined) return freezeCardImages(value, input.card_images, { workspace, tempDir });
+  checkCardImageTemplate(value, []);
   return { type: 'card', payload: { type: 'card', card: value }, canonical: ['card', json], summary: '[interactive card]', cleanup: none };
 }

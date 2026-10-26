@@ -6,6 +6,9 @@ import { redactSensitive } from './logger.mjs';
 import { sanitizeNonArkChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { MEETING_EVENT_TYPES } from './meeting/index.mjs';
 import { prepareLarkMediaDirectory } from './lark-media.mjs';
+import { MAX_CARD_IMAGE_BYTES, cardImageFormat, checkCardImageTemplate, replaceCardImages, validImageKey } from './card-images.mjs';
+import { readWorkspaceFile } from './workspace-file.mjs';
+import { LarkImageCache } from './lark-image-cache.mjs';
 
 export const SUBSCRIBED_EVENT_TYPES = Object.freeze([
   'im.message.receive_v1',
@@ -103,6 +106,8 @@ export class LarkClient {
     this.subscriber = null;
     this.stopping = false;
     this.profile = config.profile || null;
+    this.imageCache = null;
+    this.imageUploads = new Map();
   }
 
   async preflight() {
@@ -260,11 +265,56 @@ export class LarkClient {
     } else if (content.type === 'file_key') {
       data = await this.im([...target, '--file', content.key, ...suffix], 'send attachment');
     } else if (content.type === 'card') {
-      data = await this.im([...target, '--msg-type', 'interactive', '--content', JSON.stringify(content.card), ...suffix], 'send card');
+      const card = content.card_images ? await this.cardWithImages(content) : content.card;
+      data = await this.im([...target, '--msg-type', 'interactive', '--content', JSON.stringify(card), ...suffix], 'send card');
     } else {
       throw new Error(`unsupported Lark content type: ${content.type}`);
     }
     return deliveredMessage(data);
+  }
+
+  async cardWithImages({ card, card_images: assets }) {
+    if (!this.profile) throw new Error('card image upload requires an explicit daemon Lark profile');
+    if (!Array.isArray(assets) || !assets.length) throw new Error('card_images requires frozen image resources');
+    checkCardImageTemplate(card, assets.map((asset) => asset.alias));
+    // Check every frozen resource before the first external side effect.
+    const root = path.join(this.config.tempDir, 'outbox');
+    for (const asset of assets) {
+      const { bytes } = readWorkspaceFile(path.relative(root, asset.path), root, MAX_CARD_IMAGE_BYTES);
+      cardImageFormat(bytes);
+      if (createHash('sha256').update(bytes).digest('hex') !== asset.digest) throw new Error('card image snapshot changed');
+    }
+    this.imageCache ??= new LarkImageCache(this.config.dataDir);
+    for (const asset of assets) {
+      const cached = this.imageCache.get(this.config.instance || 'lark', this.profile, asset.digest);
+      if (cached && !validImageKey(cached)) throw new Error('cached Lark image_key is invalid');
+    }
+    const keys = new Map();
+    for (const asset of assets) keys.set(asset.alias, await this.uploadCardImage(asset));
+    return replaceCardImages(card, keys);
+  }
+
+  async uploadCardImage(asset) {
+    const instance = this.config.instance || 'lark';
+    const profile = this.profile;
+    const cached = this.imageCache.get(instance, profile, asset.digest);
+    if (cached) {
+      if (!validImageKey(cached)) throw new Error('cached Lark image_key is invalid');
+      return cached;
+    }
+    const pendingKey = JSON.stringify([instance, profile, asset.digest]);
+    if (this.imageUploads.has(pendingKey)) return this.imageUploads.get(pendingKey);
+    const upload = (async () => {
+      const data = await this.im(['images', 'create', '--as', 'bot', '--data', '{"image_type":"message"}',
+        '--file', `image=./${path.basename(asset.path)}`, '--format', 'json'], 'upload card image', { cwd: path.dirname(asset.path) });
+      const key = data.image_key;
+      // A failed durable write aborts the whole card. Restart/retry can reuse
+      // each preceding success; a crash before this commit may orphan a key.
+      this.imageCache.put(instance, profile, asset.digest, key);
+      return key;
+    })();
+    this.imageUploads.set(pendingKey, upload);
+    try { return await upload; } finally { this.imageUploads.delete(pendingKey); }
   }
 
   // A chat, or one user's direct chat with the bot (the owner, for a notice).
@@ -505,5 +555,7 @@ export class LarkClient {
 
   async stop() {
     await this.stopSubscription();
+    this.imageCache?.close();
+    this.imageCache = null;
   }
 }

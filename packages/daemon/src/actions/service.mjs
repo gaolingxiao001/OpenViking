@@ -460,6 +460,9 @@ export class ActionService {
 
   async content(input, connector, action, { chatId, fence, caller, answerer = fence.sender_id }) {
     const spec = this.manifest(connector).actions[action];
+    if (input.card_images !== undefined && (!spec.card_images || this.manifest(connector).name !== 'lark')) {
+      throw blocked('unsupported', `card_images is supported only by Lark card deliveries. ${NO_ACTION}`);
+    }
     let content;
     try {
       content = resolveContent(input, {
@@ -661,6 +664,9 @@ export class ActionService {
 
   async replyMessage(input, caller) {
     const connector = this.route(caller, 'message.reply', 'actions', input.source, { messageId: input.message_id });
+    if (input.card_images !== undefined && !this.manifest(connector).actions['message.reply'].card_images) {
+      throw blocked('unsupported', `card_images is supported only by Lark card deliveries. ${NO_ACTION}`);
+    }
     const inThread = input.reply_in_thread === true;
     if (inThread && !this.manifest(connector).actions['message.reply'].thread) {
       throw blocked('unsupported', `${connector} does not support thread replies. ${NO_ACTION}`);
