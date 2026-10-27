@@ -1,7 +1,11 @@
 import { updateManifest } from './deployment-manifest.mjs';
 
-const IM_NAMES = { lark: '飞书', weixin: '微信', telegram: 'Telegram', slack: 'Slack' };
+const IM_NAMES = { lark: '飞书', weixin: '微信', telegram: 'Telegram', slack: 'Slack', qq: 'QQ' };
 const label = (id) => IM_NAMES[id] ? `${IM_NAMES[id]}（${id}）` : '未设置';
+const PRIMARY_NOTES = {
+  weixin: '\n微信主动通知依赖会话上下文；长时间未互动后，可能需要再给机器人发一条消息才能恢复接收。',
+  qq: '\nQQ 主动通知需要机器人已开通主动消息权限且有剩余配额；配额用尽时通知会发送失败，不会自动重试。',
+};
 const USAGE = '/primary — 将当前 IM 设为主 IM\n/primary status — 查看当前主 IM';
 
 // A Core setting, independent of the model/session. The owner is verified on
@@ -50,6 +54,5 @@ export function executePrimaryCommand(command, { event, config, connectors }) {
   const text = previous === target
     ? `当前主 IM 已是${label(target)}。`
     : `主 IM 已从${label(previous)}切换为${label(target)}，已保存并立即生效，无需重启。\n后续主动通知和新的邮件审批将发到这里；已有待审批消息仍在原 IM 处理。`;
-  return { ok: true, text: text + (target === 'weixin'
-    ? '\n微信主动通知依赖会话上下文；长时间未互动后，可能需要再给机器人发一条消息才能恢复接收。' : '') };
+  return { ok: true, text: text + (PRIMARY_NOTES[target] ?? '') };
 }

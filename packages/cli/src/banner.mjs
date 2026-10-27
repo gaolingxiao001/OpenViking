@@ -26,7 +26,7 @@ const WORDMARK = [
 
 // Beside the wordmark, short of an 80-column window's edge: at most 31 columns each.
 const tagline = () => t('把本机的 coding agent 带上船', 'Bring your coding agent aboard');
-const subline = () => t('飞书 · 微信 · Telegram · 邮箱', 'Lark · WeChat · Telegram · Mail');
+const subline = () => t('飞书·微信·Telegram·QQ·邮箱', 'Lark·WeChat·Telegram·QQ·Mail');
 
 function put(cells, x, y, ch, rgb) {
   if (y < 0 || y >= cells.length || x < 0 || x >= cells[0].length) return;

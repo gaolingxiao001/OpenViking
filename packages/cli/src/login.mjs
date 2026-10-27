@@ -1,6 +1,7 @@
 import { bundledLarkCli } from '../../daemon/src/lark-cli-bin.mjs';
 import { restartCommand, stopCommand } from './control.mjs';
 import { connectTelegram } from './telegram.mjs';
+import { connectQQ } from './qq.mjs';
 import { connectSlack } from './slack.mjs';
 import { askEmail, mailboxesOf, writeEmailAccount } from './email.mjs';
 import { t } from './i18n.mjs';
@@ -11,7 +12,7 @@ import { showScan } from './qr.mjs';
 import { which } from './runtimes.mjs';
 import { connectWeixin, larkScopes, registerApp, reportApp, weixinFirstMessage } from './setup.mjs';
 
-// `vika login <lark|weixin|email|telegram|slack> [instance]`: authorize again what an
+// `vika login <lark|weixin|email|telegram|slack|qq> [instance]`: authorize again what an
 // instance already has, after a login expired or a password changed. For
 // Feishu/Lark it first checks the app has what Vika needs, and an owner or
 // administrator of the app can add what it lacks with one scan.
@@ -19,9 +20,9 @@ import { connectWeixin, larkScopes, registerApp, reportApp, weixinFirstMessage }
 // instance may be left out when there is only one, and is chosen otherwise.
 
 const usage = () => t(
-  '用法：vika login <lark|weixin|email|telegram|slack> [实例]\n'
+  '用法：vika login <lark|weixin|email|telegram|slack|qq> [实例]\n'
   + '  登录过期或改了密码后重新授权；要接入新的 IM，运行 vika setup 修改实例。只有一个实例时可以不写实例名。\n',
-  'Usage: vika login <lark|weixin|email|telegram|slack> [instance]\n'
+  'Usage: vika login <lark|weixin|email|telegram|slack|qq> [instance]\n'
   + '  Authorize again after a login expired or a password changed; to connect a new IM, change the instance with vika setup. With one instance the name can be left out.\n',
 );
 
@@ -89,10 +90,10 @@ async function restart({ agent, prompter, env, control }) {
 export async function loginCommand([connector, requested, ...extra], {
   prompter,
   env = process.env,
-  connect = { weixin: connectWeixin, telegram: connectTelegram, slack: connectSlack, email: askEmail },
+  connect = { weixin: connectWeixin, telegram: connectTelegram, slack: connectSlack, qq: connectQQ, email: askEmail },
   control = { restart: restartCommand, stop: stopCommand },
 } = {}) {
-  if (!['lark', 'weixin', 'email', 'telegram', 'slack'].includes(connector) || extra.length) {
+  if (!['lark', 'weixin', 'email', 'telegram', 'slack', 'qq'].includes(connector) || extra.length) {
     prompter.write(usage());
     return 2;
   }
@@ -110,9 +111,9 @@ export async function loginCommand([connector, requested, ...extra], {
   const agent = await chooseInstance({ deployment: having, requested, prompter, question: t(`重新授权哪个实例的${label}`, `Which instance's ${label} to authorize again`) });
 
   // Only one receiver at a time: the instance stops while the new tokens are checked.
-  if (connector === 'telegram' || connector === 'slack') {
+  if (['telegram', 'slack', 'qq'].includes(connector)) {
     prompter.write(t(`验证新密钥时会暂时停止这个实例，避免同时接收 ${label} 消息；完成后重新启动。\n`,
-      'The instance stops while the new token is checked, so nothing else receives its messages; it starts again afterwards.\n'));
+      'The instance stops while the new credentials are checked, so nothing else receives its messages; it starts again afterwards.\n'));
     await control.stop(agent.id, { env });
     try { await connect[connector]({ plan: agent, prompter }); } catch (error) {
       await control.restart(agent.id, { env }).catch(() => {

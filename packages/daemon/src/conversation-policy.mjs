@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 export const DEFAULT_PROMPT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'agent');
 
 // Connector sections, in the order they are assembled.
-const CONNECTOR_SECTIONS = Object.freeze(['lark', 'slack', 'weixin', 'telegram', 'email']);
+const CONNECTOR_SECTIONS = Object.freeze(['lark', 'slack', 'weixin', 'telegram', 'qq', 'email']);
 
 function promptDir(config) {
   return config?.promptDir || DEFAULT_PROMPT_DIR;

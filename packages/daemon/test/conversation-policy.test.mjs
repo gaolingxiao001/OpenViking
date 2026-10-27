@@ -32,8 +32,8 @@ function withRoleFile(body, callback) {
 
 describe('conversation policy assemble', () => {
   it('assembles one Core for every connector set, with a section per connector in use', () => {
-    const order = ['## Lark', '## Slack', '## Weixin', '## Telegram', '## Email'];
-    for (const connectors of [['lark'], ['weixin'], ['telegram', 'email'], ['slack'], ['lark', 'slack', 'weixin', 'telegram', 'email']]) {
+    const order = ['## Lark', '## Slack', '## Weixin', '## Telegram', '## QQ', '## Email'];
+    for (const connectors of [['lark'], ['weixin'], ['telegram', 'email'], ['slack'], ['qq'], ['qq', 'email'], ['slack', 'qq'], ['lark', 'slack', 'weixin', 'telegram', 'qq', 'email']]) {
       const text = assembleConversationPolicy({ connectors, agentName: 'Vee' });
       const label = connectors.join('+');
       assert.ok(text.startsWith('# Operating policy\n'), label);
@@ -47,6 +47,21 @@ describe('conversation policy assemble', () => {
     const weixin = assembleConversationPolicy({ connectors: ['weixin'] });
     assert.doesNotMatch(weixin, /lark-cli|ca_|om_|image_key/);
     assert.match(assembleConversationPolicy({ connectors: ['lark'] }), /never pass `--profile`/);
+  });
+
+  it('keeps QQ owner routing and reply limits in single and mixed sessions', () => {
+    for (const connectors of [['qq'], ['qq', 'email'], ['lark', 'slack', 'telegram', 'qq']]) {
+      const text = assembleConversationPolicy({ connectors, rolePromptPath: role('assistant') });
+      assert.match(text, /^## QQ$/m);
+      assert.match(text, /source=qq/);
+      assert.match(text, /4000 characters/);
+      assert.match(text, /four passive replies/);
+      assert.match(text, /Never bypass a reply limit/);
+      assert.ok(text.indexOf('## QQ') < text.indexOf('## Role'));
+    }
+    const single = assembleConversationPolicy({ connectors: ['qq', 'email'] });
+    assert.doesNotMatch(single, /lark-cli|voice transcript|^## (Slack|Telegram|Weixin)$/m);
+    assert.doesNotMatch(assembleConversationPolicy({ connectors: ['lark'] }), /^## QQ$/m);
   });
 
   it('delivers only through the Core tools and keeps the final text internal', () => {
@@ -161,7 +176,7 @@ describe('natural writing', () => {
 
 describe('explicit silence is opt-in per instance', () => {
   const base = { workspace: '/srv/vika/workspace', agentName: 'Tester', rolePromptPath: role('colleague') };
-  const sessions = [['lark'], ['lark', 'weixin', 'telegram', 'email'], ['weixin'], ['telegram', 'email']]
+  const sessions = [['lark'], ['lark', 'weixin', 'telegram', 'qq', 'email'], ['weixin'], ['telegram', 'email']]
     .map((connectors) => ({ ...base, connectors }));
   const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
   const codexHash = (config) => new CodexAgent(config, {

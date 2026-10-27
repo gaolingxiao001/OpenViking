@@ -28,6 +28,7 @@ The Core starts a Connector and calls these operations in order:
    direct chat (Lark: the profile's logged-in user, `{ user_id: "ou_..." }`;
    Weixin: the account that scanned the login code, `{ chat_id }`;
    Telegram: the account verified by the one-time Start link, `{ chat_id }`;
+   QQ: the account verified by the one-time private-chat code, `{ chat_id }`;
    Slack: the person who sent the one-time code to the bot, `{ chat_id }` of
    that direct message). A mailbox reports none. It may also name the bot
    itself: `self: { id }`, where `id` is how the bot appears in an inbound
@@ -115,7 +116,7 @@ should reuse `spec/check/discover/read` and `RECORD/SCHEMA/STATE` semantics.
 
 `connector` identifies the provider; `instance` identifies a configured source
 instance/account and is unique within a Core. Built-in chat connectors currently
-use `instance=lark`, `instance=weixin`, `instance=telegram`, or `instance=slack`. The source process authenticates both
+use `instance=lark`, `instance=weixin`, `instance=telegram`, `instance=slack`, or `instance=qq`. The source process authenticates both
 identities; input cannot select another Connector's identity.
 
 `id` is required and stable across retries. The Core deduplicates on
@@ -167,7 +168,7 @@ Failure-notice muting uses the event scope, and its outbound history keeps the
 source, subject and action without inventing a chat.
 
 Lark's Connector decodes message, card-action, and meeting envelopes. Weixin,
-Telegram and Slack produce canonical chat events directly. The Core validates and
+Telegram, QQ and Slack produce canonical chat events directly. The Core validates and
 consumes only the fields above, plus optional typed extension `data`. Provider
 raw envelopes are not required, forwarded to the runtime, or persisted. A
 `provider_event` diagnostic field is ignored. Protocol 0.1 is rejected.
@@ -345,15 +346,15 @@ Results report the delivered `message_id` and, where known, `chat_id`,
 
 ## Current actions
 
-| Operation | Lark | Weixin | Telegram | Slack | Email |
-| --- | --- | --- | --- | --- | --- |
-| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | markdown (plain text), file; verified owner only | markdown (as mrkdwn), file; mentions; to a channel the bot is in, or a DM | — |
-| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | as `message.send`, with quoted reply | as `message.send`, into the target's thread | markdown (plain text); owner approval on the primary IM |
-| `message.react`, `message.retract` | yes | — | — | yes | — |
-| `message.media` (query) | download by image/file key | downloaded inbound media | lazy download by message ID | lazy download by message ID and file ID | — |
-| `chat.list`, `chat.messages`, `thread.messages` (queries) | yes | — | — | bot identity, cursor pagination | — |
-| `chat.members.list` (query) | — | — | — | member IDs and optional profiles | — |
-| `message.search` (query) | yes | — | — | — | — |
+| Operation | Lark | Weixin | Telegram | Slack | QQ | Email |
+| --- | --- | --- | --- | --- | --- | --- |
+| `message.send` | markdown, file, file key, card; mentions; idempotent; to a chat or the owner | markdown (plain text), file | markdown (plain text), file; verified owner only | markdown (as mrkdwn), file; mentions; to a channel the bot is in, or a DM | plain text, file; verified owner, proactive quota | — |
+| `message.reply` | as `message.send`, plus threads | markdown (plain text), file | as `message.send`, with quoted reply | as `message.send`, into the target's thread | plain text, file; passive quota, quote when indexed | markdown (plain text); owner approval on the primary IM |
+| `message.react`, `message.retract` | yes | — | — | yes | — | — |
+| `message.media` (query) | download by image/file key | downloaded inbound media | lazy download by message ID | lazy download by message ID and file ID | lazy download by message ID | — |
+| `chat.list`, `chat.messages`, `thread.messages` (queries) | yes | — | — | bot identity, cursor pagination | — | — |
+| `chat.members.list` (query) | — | — | — | member IDs and optional profiles | — | — |
+| `message.search` (query) | yes | — | — | — | — | — |
 
 The Email Connector watches one mailbox's `INBOX` over IMAP, opened read-only
 (`EXAMINE`, `BODY.PEEK[]`): it never marks, moves or deletes mail. It starts
@@ -367,6 +368,47 @@ is never resent.
 The Lark Connector also serves Core-internal operations that are not agent
 tools: `message.reaction.delete` (temporary working reactions), `card.update`,
 `chat.members.list`, `chat.get` and the meeting operations.
+
+## QQ provider contract
+
+QQ uses [Tencent's Bot API v2](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)
+at `https://api.bot.qq.com` and the pinned MIT `@tencent-connect/qqbot-nodejs`
+gateway transport (Identify/heartbeat/Resume/reconnect, intent `1 << 25`). HTTP
+requests use bounded, cancellable fetches with no raw provider diagnostics.
+Only `C2C_MESSAGE_CREATE` from the verified owner's OpenID is admitted; group,
+guild and stranger messages are ignored. The independent QR credential SDK is
+not bundled. Setup takes AppID/AppSecret, then a fresh random `vika-bind` C2C
+proof within three minutes. Reauthorization keeps old credentials until proof,
+stages the old owner's events during the handshake, and holds a local PID lease.
+
+The private `<dataDir>/qq/state.sqlite3` stores credentials, owner, reply routes,
+reference indices, passive reply counters and pairing's staged events. An
+account/owner change clears old routes/counters/staged events. Both event and
+message IDs are `qq:<appId>:<sha256(nativeId + NUL + msgIdx)>`; signed attachment
+URLs and scene `auth_token` stay out of canonical events, logs and tool output.
+Quote parents resolve only against locally known reference indices. `msg_id`
+is the inbound native ID; visual `message_reference.message_id` is `msg_idx`
+or the send response's `ext_info.ref_idx`, not the native ID.
+
+Each native inbound ID allows four attempts. `msg_seq` is reserved durably
+before POST, including uncertain attempts; duplicate events do not reset it.
+The local expiry is occurrence time plus 60 minutes. Tencent's current docs
+also retain a contradictory five-minute field description: earlier provider
+expiry errors are respected without switching to proactive sends. Explicit
+`message.send` and owner notifications omit `msg_id` and require proactive
+permission/quota. Sends are paced, are never automatically retried, and do not
+declare `idempotent`. HTTP-200 business errors and HTTP-201/202 pending review
+responses are not reported as successful delivery.
+
+Text is literal plain text (4000 characters); files/downloads are capped at
+20 MiB. Uploads below 5 MB use base64, larger files use prepare/PUT/part-finish/
+complete, always `srv_send_msg=false`; only the final Core action sends a
+message. Part acknowledgement retries only explicit transient code 40093001,
+within the action's deadline. No Bot authorization is sent to CDN/COS hosts;
+redirects are forbidden and hosts/stream sizes are checked. Files are private
+and pruned by retention. Voice, video, groups, buttons and history are outside
+this version. Resume is in-process only; this connector adds no shared durable
+ACK, cross-process replay guarantee or outbox reliability changes.
 
 ## Telegram provider contract
 

@@ -23,6 +23,15 @@ afterEach(() => {
 });
 
 describe('configuration safety', { concurrency: false }, () => {
+  it('accepts QQ as the primary channel without putting credentials in config', () => {
+    setEnv('VIKA_CHANNEL', 'qq');
+    setEnv('VIKA_CONNECTORS_JSON', '["qq","telegram"]');
+    const config = getConfig();
+    assert.equal(config.channel, 'qq');
+    assert.deepEqual(config.connectors, ['qq', 'telegram']);
+    assert.equal(config.qqAppSecret, undefined);
+  });
+
   it('moves temporary files independently of persistent data and ignores TMPDIR', () => {
     setEnv('VIKA_DATA_DIR', '/root/.local/share/vika-primary');
     setEnv('VIKA_WORKSPACE', '/work/vika-primary');

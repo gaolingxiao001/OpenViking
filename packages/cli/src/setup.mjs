@@ -30,6 +30,7 @@ import { EmailCancelled, askEmail, emailAccountPath, emailInstanceId, mailboxesO
 import { GoBack } from './prompt.mjs';
 import { IM_LABELS, connectorsOf, ignoredFieldsNotice, imList, primaryMeaning } from './instances.mjs';
 import { connectTelegram } from './telegram.mjs';
+import { connectQQ } from './qq.mjs';
 import { connectSlack } from './slack.mjs';
 
 // `vika setup`: add, change or remove an instance. A new instance is asked
@@ -69,10 +70,12 @@ const imChoices = () => [
     hint: t('官方 Bot API；需要 @BotFather 创建 Bot 和 token', 'official Bot API; needs a bot and its token from @BotFather') },
   { label: 'Slack', value: 'slack',
     hint: t('工作区里的 Slack App（新建或用已有的，Socket Mode）；需要粘贴两个 token', 'a new or existing app in your Slack workspace (Socket Mode); paste two tokens') },
+  { label: 'QQ', value: 'qq',
+    hint: t('腾讯官方机器人；需要 AppID / AppSecret 和本人私聊验证码', 'official Tencent bot; needs AppID / AppSecret and a private-chat verification code') },
 ];
 
 // IMs connected by pasting tokens rather than scanning a code.
-const TOKEN_IMS = ['telegram', 'slack'];
+const TOKEN_IMS = ['telegram', 'slack', 'qq'];
 
 // Where the Feishu/Lark bot app comes from. A scan can only pick an app the
 // scanner owns or administers, and a test tenant cannot scan at all; then the
@@ -346,8 +349,8 @@ async function askIms(ctx, state) {
     connectors = await ctx.prompter.multiselect(t('接入哪些 IM', 'Which IMs to connect'), choices,
       { initial: choices.map(({ value }, index) => (state.connectors.includes(value) ? index : -1)).filter((index) => index >= 0) });
     if (connectors.some((connector) => connector !== 'email')) break;
-    ctx.prompter.warn(t('邮箱不能单独接：新邮件提醒和回信确认要发到飞书、微信、Telegram 或 Slack，再选一个。',
-      'Email cannot be the only one: its alerts and reply approvals go to Feishu/Lark, WeChat, Telegram or Slack, so pick one of those too.'));
+    ctx.prompter.warn(t('邮箱不能单独接：新邮件提醒和回信确认要发到飞书、微信、Telegram、Slack 或 QQ，再选一个。',
+      'Email cannot be the only one: its alerts and reply approvals go to Feishu/Lark, WeChat, Telegram, Slack or QQ, so pick one of those too.'));
   }
   const hadEmail = state.connectors.includes('email');
   const hadLark = state.connectors.includes('lark');
@@ -1106,6 +1109,7 @@ function connectionSteps(prompter, connectors, { saving = false, larkSource = 'c
   const telegram = connectors.some((im) => TOKEN_IMS.includes(im));
   const steps = connectors.map((im) => {
     if (im === 'telegram') return t('Telegram Bot token + Start 绑定', 'Telegram bot token + Start');
+    if (im === 'qq') return t('QQ AppID / AppSecret + 私聊验证码绑定', 'QQ AppID / AppSecret + private-chat verification code');
     if (im === 'slack') return t('Slack 新建或选已有 App + 两个 token + 私聊口令绑定', 'Slack app (new or existing) + two tokens + a code in a direct message');
     const scans = scansOf(im, larkSource);
     return t(`${IM_LABELS[im]} ${scans} 次`, `${IM_LABELS[im]} ${scans} ${scans === 1 ? 'scan' : 'scans'}`);
@@ -1166,7 +1170,7 @@ async function setupFlow({
   fetchImpl = globalThis.fetch,
   detect = { runtimes: detectRuntimes, openViking: detectOpenViking },
   configureOV = configureOpenViking,
-  connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, slack: connectSlack, email: askEmail, greet, pi: loginPi },
+  connect = { lark: connectLark, weixin: connectWeixin, telegram: connectTelegram, slack: connectSlack, qq: connectQQ, email: askEmail, greet, pi: loginPi },
   control = { start: startCommand, restart: restartCommand, autostart: autostartCommand },
   listen = larkMessageListener,
   allocate = allocatePort,
@@ -1415,7 +1419,11 @@ async function setupFlow({
         await connect.telegram({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
         bound = true;
       }
-      if (newIms.includes('slack')) await connect.slack({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
+      if (newIms.includes('slack')) {
+        await connect.slack({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
+        bound = true;
+      }
+      if (newIms.includes('qq')) await connect.qq({ plan, prompter, fetchImpl, canGoBack: prompter.tty && !bound });
       break;
     } catch (error) {
       if (!(error instanceof GoBack)) throw error;
@@ -1493,6 +1501,7 @@ async function setupFlow({
     next.push([IM_LABELS.weixin, t('先给它发一句「你好」，在那之前它没法主动找你', 'Say "hi" to it first; until then it cannot reach you')]);
   }
   if (newIms.includes('telegram')) next.push(['Telegram', t('在刚绑定的 Bot 私聊中发一条任务', 'Message the bot you just bound')]);
+  if (newIms.includes('qq')) next.push(['QQ', t('在刚绑定的机器人私聊中发一条任务', 'Message the bot you just bound')]);
   if (newIms.includes('slack')) {
     next.push(['Slack', t('私聊机器人发任务；要它参与频道，在频道里 /invite 它；命令前加个空格（ /new）',
       'Message the bot directly; /invite it to channels it should join; put a space before commands ( /new)')]);
@@ -1559,9 +1568,10 @@ function describeChanges(before, after, mailboxes, homeDir, state) {
     const policy = POLICY_SWITCHES.has(key);
     changes.push(t(`${label}：${arrow}${policy ? '（模型会开一次新的会话）' : ''}`, `${label}: ${arrow}${policy ? ' (the model starts a new session)' : ''}`));
   }
-  for (const im of ['lark', 'weixin', 'telegram', 'slack']) {
+  for (const im of ['lark', 'weixin', 'telegram', 'slack', 'qq']) {
     if (!was.includes(im) && after.connectors.includes(im)) {
-      changes.push(im === 'telegram' ? t(`接入${IM_LABELS[im]}（需要 Bot token 和 Start 绑定）`, `Connect ${IM_LABELS[im]} (needs a bot token and Start)`)
+      changes.push(im === 'qq' ? t('接入QQ（需要 AppID / AppSecret 和私聊验证码）', 'Connect QQ (needs AppID / AppSecret and a private-chat verification code)')
+        : im === 'telegram' ? t(`接入${IM_LABELS[im]}（需要 Bot token 和 Start 绑定）`, `Connect ${IM_LABELS[im]} (needs a bot token and Start)`)
         : im === 'slack' ? t(`接入${IM_LABELS[im]}（需要新建或选已有 App、两个 token 和私聊口令绑定）`, `Connect ${IM_LABELS[im]} (needs a new or existing app, two tokens and a code)`)
           : t(`接入${IM_LABELS[im]}（需要扫码）`, `Connect ${IM_LABELS[im]} (needs a scan)`));
     }

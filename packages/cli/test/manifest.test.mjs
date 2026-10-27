@@ -140,3 +140,13 @@ test('Telegram can be primary or secondary; Ark and a stray Lark profile are rej
   assert.throws(() => validateManifest(filename, withInstance(null, { ...wa, model: 'ark',
     volcSessionId: 'session-test', volcEnvironmentId: 'env-test' })), /telegram connector cannot use the ark runtime/);
 });
+
+test('QQ can be primary or secondary, and cannot select Ark or a Lark-only profile', (t) => {
+  const filename = path.join(tempHome(t), '.vika', 'config.json');
+  const qq = agent('qq', { channel: 'qq', connectors: ['qq'], profile: undefined, model: 'pi' });
+  assert.doesNotThrow(() => validateManifest(filename, withInstance(null, qq)));
+  assert.doesNotThrow(() => validateManifest(filename, withInstance(null, agent('qq', { connectors: ['lark', 'qq'] }))));
+  assert.throws(() => validateManifest(filename, withInstance(null, { ...qq, profile: 'stray' })), /profile/);
+  assert.throws(() => validateManifest(filename, withInstance(null, { ...qq, model: 'ark',
+    volcSessionId: 'session-test', volcEnvironmentId: 'env-test' })), /qq connector cannot use the ark runtime/);
+});

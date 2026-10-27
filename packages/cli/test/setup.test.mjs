@@ -43,6 +43,7 @@ function harness(t, answers, { ov = { configPath: null, url: 'http://127.0.0.1:1
       return preferredConfigPath ? { ...detected, configPath: preferredConfigPath } : detected;
     },
     connect: {
+      qq: async ({ plan }) => { calls.push(['qq', plan.dataDir]); },
       telegram: async ({ plan }) => { calls.push(['telegram', plan.dataDir]); },
       lark: async ({ plan, profile }) => { calls.push(['lark', plan.id, profile]); return { profile, ownerOpenId: 'ou_owner' }; },
       weixin: async ({ plan }) => { calls.push(['weixin', plan.dataDir]); },
@@ -372,6 +373,30 @@ test('Telegram-only setup binds a private Start challenge and saves no token in 
   try { assert.equal(state.account().ownerId, '99'); } finally { state.close(); }
   assert.match(h.written(), /Telegram Bot token \+ Start 绑定/);
   assert.doesNotMatch(h.written(), /Telegram undefined|abcdefghijklmnopqrstuvwxyz/);
+});
+
+test('QQ-only setup needs no Lark profile, selects QQ as primary and binds before saving', async (t) => {
+  const h = harness(t, ['QQ Agent', '', '', '3', '6', 'y']);
+  h.options.connect.qq = async ({ plan }) => {
+    assert.equal(fs.existsSync(path.join(h.home, '.vika', 'config.json')), false);
+    h.calls.push(['qq', plan.dataDir]);
+  };
+  assert.equal(await setupCommand(h.options), 0);
+  const agent = h.manifest().agents[0];
+  assert.equal(agent.channel, 'qq'); assert.deepEqual(agent.connectors, ['qq']);
+  assert.equal(agent.profile, undefined);
+  assert.equal(h.calls[0][0], 'qq');
+  assert.match(h.written(), /QQ AppID \/ AppSecret \+ 私聊验证码绑定/);
+  assert.doesNotMatch(h.written(), /undefined 次/);
+});
+
+test('adding QQ to an existing instance binds only QQ and can choose it as primary', async (t) => {
+  const h = harness(t, ['2', '5', '1,6', '7', '2', '11']);
+  const before = existing(h, {});
+  assert.equal(await setupCommand(h.options), 0);
+  assert.deepEqual(h.manifest().agents, [{ ...before, connectors: ['lark', 'qq'], channel: 'qq' }]);
+  assert.deepEqual(h.calls, [['qq', before.dataDir], ['restart', 'asd']]);
+  assert.match(h.written(), /接入QQ（需要 AppID \/ AppSecret 和私聊验证码）/);
 });
 
 test('adding Telegram to an existing instance verifies only the new IM and can change the primary', async (t) => {
@@ -755,6 +780,24 @@ function terminalHarness(t, options) {
 const LEFT = '\x1b[D';
 const RIGHT = '\x1b[C';
 const DOWN = '\x1b[B';
+
+test('QQ verification cannot go back after Slack has already bound in the same setup', async (t) => {
+  const h = terminalHarness(t);
+  const verified = [];
+  h.options.connect.slack = async ({ canGoBack }) => { verified.push(['slack', canGoBack]); };
+  h.options.connect.qq = async ({ canGoBack }) => { verified.push(['qq', canGoBack]); };
+  const driving = h.drive([
+    ['机器人名字', RIGHT], ['它的角色', RIGHT], ['工作目录', RIGHT], ['Agent 运行时', RIGHT],
+    ['接入哪些 IM', ' ', DOWN, DOWN, DOWN, DOWN, ' ', DOWN, ' ', RIGHT],
+    ['主渠道', DOWN, RIGHT], ['开始接入', '\r'],
+  ]);
+  assert.equal(await setupCommand(h.options), 0);
+  await driving;
+  assert.deepEqual(verified, [['slack', true], ['qq', false]]);
+  const [agent] = h.manifest().agents;
+  assert.deepEqual(agent.connectors, ['slack', 'qq']);
+  assert.equal(agent.channel, 'qq');
+});
 
 test('back from removal confirmation returns to the setup menu without changing anything', async (t) => {
   const h = terminalHarness(t);
@@ -1316,6 +1359,17 @@ test('when the scan confirmation never arrives, m switches to typing the App ID 
 });
 
 const ENGLISH_RUNTIMES = RUNTIMES.map((runtime) => ({ ...runtime, label: runtime.id === 'pi' ? 'Pi (built in)' : runtime.label, note: 'ok' }));
+
+test('English setup offers QQ and describes credentials and private-chat binding', async (t) => {
+  const h = harness(t, ['QQ Agent', '', '', '1', '6', 'y'], { runtimes: ENGLISH_RUNTIMES });
+  h.options.env.VIKA_LANG = 'en';
+  assert.equal(await setupCommand(h.options), 0);
+  assert.equal(h.manifest().agents[0].channel, 'qq');
+  assert.equal(h.calls[0][0], 'qq');
+  assert.doesNotMatch(h.written(), /[一-鿿]|undefined/);
+  assert.match(h.written(), /Next, connecting: QQ AppID \/ AppSecret \+ private-chat verification code/);
+  assert.match(h.written(), /QQ: Message the bot you just bound/);
+});
 
 test('in English, a first setup says it all in English, and the bot says hello in English', async (t) => {
   //                   name   role  workspace  runtime IMs    channel feishu confirm
