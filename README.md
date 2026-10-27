@@ -75,7 +75,7 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 使用腾讯官方 QQ Bot API v2 和 WebSocket，不需要公网 Webhook，也不是个人 QQ 账号协议。在包含 QQ 功能的 release 中：
 
-1. 在腾讯 [QQ 机器人入口](https://q.qq.com/qqbot/openclaw/) 创建独立机器人，取得 AppID / AppSecret，并用本人 QQ 添加机器人。这个入口提供的机器人凭证可以用于 Vika；无需运行 OpenClaw。
+1. 先在 [QQ 开放平台](https://q.qq.com/#/) 按页面引导注册开发者账号（已有可跳过），没有开发者账号无法创建机器人。再到腾讯 [QQ 机器人入口](https://q.qq.com/qqbot/openclaw/) 创建独立机器人，取得 AppID / AppSecret，并用本人 QQ 添加机器人。这个入口提供的机器人凭证可以用于 Vika；无需运行 OpenClaw。
 2. 运行 `vika setup`，新建或修改实例，勾选 QQ。输入 AppID 和 AppSecret（密钥隐藏输入），确认机器人已上线并具备单聊消息权限。
 3. 向机器人私聊发送终端显示的完整 `vika-bind …` 验证码，三分钟内有效。收到匹配的私聊后才保存新账号；其他人先发消息不会成为 owner。
 4. 实例启动后在私聊中发送任务。重新绑定或换密钥使用 `vika login qq [实例]`；验证期间暂时停止实例，成功或取消后恢复启动，失败不覆盖旧凭证。

@@ -42,6 +42,9 @@ for (const language of ['zh', 'en']) test(`QQ UI retries invalid credentials, hi
     await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
   } });
   await connectQQ(f.options);
+  // A bot can only be created after registering as a QQ Open Platform developer.
+  const register = f.text().indexOf('https://q.qq.com/#/');
+  assert.ok(register >= 0 && register < f.text().indexOf('https://q.qq.com/qqbot/openclaw/'));
   assert.equal(f.state.account().appSecret, SECRET);
   assert.equal(f.state.account().ownerId, 'NEW_OWNER');
   if (language === 'zh') assert.match(f.text(), /100007[\s\S]*等待 QQ 私聊验证[\s\S]*QQ 已接好/);

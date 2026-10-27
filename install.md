@@ -112,7 +112,7 @@ VIKA_INSTANCE_ID=weixin npm run start:daemon
 
 ### QQ 机器人接入
 
-在包含 QQ 功能的 release 中运行 `vika setup`，勾选 QQ。先在腾讯 [QQ 机器人入口](https://q.qq.com/qqbot/openclaw/) 创建机器人并取得 AppID / AppSecret，开启单聊消息权限、用本人 QQ 添加机器人。向导会隐藏输入 AppSecret，再要求在机器人私聊中发送一次性 `vika-bind …` 验证码，三分钟内有效；验证成功后才保存。主机需能访问 `https://api.bot.qq.com`、腾讯 WebSocket 网关和附件 CDN，不需要公网监听端口。
+在包含 QQ 功能的 release 中运行 `vika setup`，勾选 QQ。先在 [QQ 开放平台](https://q.qq.com/#/) 按页面引导注册开发者账号（没有开发者账号无法创建机器人），再到腾讯 [QQ 机器人入口](https://q.qq.com/qqbot/openclaw/) 创建机器人并取得 AppID / AppSecret，开启单聊消息权限、用本人 QQ 添加机器人。向导会隐藏输入 AppSecret，再要求在机器人私聊中发送一次性 `vika-bind …` 验证码，三分钟内有效；验证成功后才保存。主机需能访问 `https://api.bot.qq.com`、腾讯 WebSocket 网关和附件 CDN，不需要公网监听端口。
 
 支持 owner 私聊的文本、图片、文件、引用回复与 slash 命令，也可以选为主渠道接收通知和编号邮件审批；主动通知取决于平台权限与配额。纯 QQ 实例不填 `profile`，支持 Codex、TraeX、Claude、Pi，暂不支持 Ark。每个实例使用独立机器人，凭证保存在 `<dataDir>/qq/state.sqlite3`，不写入 `config.json`。
 
