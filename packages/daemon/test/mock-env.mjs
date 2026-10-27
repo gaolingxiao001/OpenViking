@@ -66,7 +66,8 @@ function writeExecutable(file, source) {
   fs.writeFileSync(file, `#!/usr/bin/env node\n${source}`, { mode: 0o700 });
 }
 
-// Fake lark-cli: --version/--help/doctor answer preflight; `event +subscribe`
+// Fake lark-cli: --version/--help/doctor/auth status/bot info answer preflight
+// (the bot is SRE_OPPO, ou_mockSelf123456); `event +subscribe`
 // records its pid in SUBSCRIBER and tails EVENTS (NDJSON, appended by
 // env.receive) from the start until SIGTERM; +messages-reply
 // and +messages-send append their argv to REPLIES. Everything else gets a
@@ -86,6 +87,10 @@ function fakeLarkSource(dir) {
     if (args.includes('doctor')) { console.log(JSON.stringify({ ok: true })); process.exit(0); }
     if (args.includes('auth') && args.includes('status')) {
       console.log(JSON.stringify({ identities: { user: { openId: 'ou_mockOwner12345' } } }));
+      process.exit(0);
+    }
+    if (args.includes('/open-apis/bot/v3/info')) {
+      console.log(JSON.stringify({ ok: true, identity: 'bot', data: { app_name: 'SRE_OPPO', open_id: 'ou_mockSelf123456' } }));
       process.exit(0);
     }
     if (args.includes('+messages-reply') || args.includes('+messages-send')) {

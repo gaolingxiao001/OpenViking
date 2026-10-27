@@ -120,7 +120,6 @@ function config(overrides = {}) {
     volcBaseUrl: 'https://ark.example.test/api/v3',
     volcRequestTimeoutMs: 5_000,
     volcStreamIdleTimeoutMs: 5_000,
-    cognitionMaxChars: 120_000,
     ...overrides,
   };
 }

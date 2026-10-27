@@ -76,6 +76,7 @@ function buildEcosystem(sourceEnv = process.env) {
       LARKSUITE_CLI_PROFILE: agent.profile || '',
       VIKA_AGENT_NAME: agent.displayName,
       VIKA_DATA_DIR: agent.dataDir,
+      VIKA_TEMP_DIR: agent.tempDir || sharedDaemonEnv.VIKA_TEMP_DIR || '',
       VIKA_WORKSPACE: agent.workspace,
       VIKA_MODEL: agent.model,
       // Empty values deliberately override any legacy global seed. Managed

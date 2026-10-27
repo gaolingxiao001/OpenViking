@@ -128,6 +128,10 @@ export function getConfig() {
   const dataDir = path.resolve(
     process.env.VIKA_DATA_DIR || path.join(os.homedir(), '.vika', 'data'),
   );
+  const configuredTempDir = (process.env.VIKA_TEMP_DIR ?? '').trim();
+  if (configuredTempDir && !path.isAbsolute(configuredTempDir)) {
+    throw new Error('VIKA_TEMP_DIR must be an absolute path');
+  }
   const workspace = path.resolve(
     process.env.VIKA_WORKSPACE
       || path.join(os.homedir(), 'Documents', 'work', 'vika-workspace'),
@@ -200,7 +204,7 @@ export function getConfig() {
     dataDir,
     databasePath: path.join(dataDir, 'vika.sqlite3'),
     lockPath: path.join(dataDir, 'daemon.lock'),
-    tempDir: path.join(dataDir, 'tmp'),
+    tempDir: configuredTempDir ? path.normalize(configuredTempDir) : path.join(dataDir, 'tmp'),
     workspace,
     promptDir,
     rolePromptPath: rolePromptEnv(promptDir),
@@ -273,11 +277,13 @@ export function getConfig() {
     // decisions ledger and the turn-end decision check. Off, the daemon offers
     // the same tools and assembles the same policy text as without them.
     explicitSilence: boolEnv('VIKA_EXPLICIT_SILENCE', false),
+    // Opt-in per instance (agents[].stagedReplies): a longer task may get an
+    // OnIt and interim findings before its final delivery.
+    stagedReplies: boolEnv('VIKA_STAGED_REPLIES', false),
     historyLimit: intEnv('VIKA_HISTORY_LIMIT', 30, { min: 0, max: 200 }),
     // Replies to bot messages in one chat/thread with no person writing there
     // before the safety fuse holds further ones; 0 turns the fuse off.
     botReplyFuse: intEnv('VIKA_BOT_REPLY_FUSE', 20, { min: 0, max: 1_000 }),
-    cognitionMaxChars: intEnv('VIKA_COGNITION_MAX_CHARS', 120_000, { min: 10_000, max: 1_000_000 }),
     retentionMs: intEnv('VIKA_RETENTION_MS', 7_776_000_000, { min: 86_400_000 }),
     dryRun: boolEnv('VIKA_DRY_RUN', false),
     meetingAudio,

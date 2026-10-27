@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { redactSensitive, safeError } from '../logger.mjs';
+import { parseUniqueJson } from '../unique-json.mjs';
 
 const MAX_BODY_BYTES = 300_000;
 export const AUTHORITY_HEADER = 'x-agent-authority';
@@ -23,7 +24,7 @@ async function readJson(request) {
     body += chunk;
     if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) throw new Error('request body too large');
   }
-  const parsed = JSON.parse(body);
+  const parsed = parseUniqueJson(body);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('request body must be an object');
   return parsed;
 }

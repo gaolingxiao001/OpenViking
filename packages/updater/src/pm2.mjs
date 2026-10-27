@@ -85,21 +85,84 @@ export function parseJlist(stdout) {
   }
 }
 
-export async function verifyPm2App({ app, release, pm2Bin, execFileImpl, pm2Env }) {
+const TRANSITIONAL_PM2_STATES = new Set([
+  'launching',
+  'one-launch-status',
+  'stopping',
+  'waiting restart',
+]);
+
+function retryablePm2Error(message) {
+  const error = new Error(message);
+  error.retryablePm2State = true;
+  return error;
+}
+
+export async function verifyPm2App({
+  app,
+  release,
+  pm2Bin,
+  execFileImpl,
+  pm2Env,
+  commandTimeoutMs = 30_000,
+}) {
   const result = await execFileImpl(pm2Bin, ['jlist'], {
-    timeout: 30_000,
+    timeout: commandTimeoutMs,
     env: pm2Env || cleanPm2ControlEnv(),
   });
   const processes = parseJlist(result?.stdout);
   const matches = processes.filter((processInfo) => processInfo?.name === app);
-  if (matches.length !== 1) throw new Error(`expected exactly one PM2 app named ${app}`);
+  if (matches.length === 0) throw retryablePm2Error(`expected exactly one PM2 app named ${app} (found 0)`);
+  if (matches.length !== 1) throw new Error(`expected exactly one PM2 app named ${app} (found ${matches.length})`);
   const [processInfo] = matches;
-  if (processInfo.pm2_env?.status !== 'online') throw new Error(`${app} is not online`);
+  if (processInfo.pm2_env?.status !== 'online') {
+    const state = processInfo.pm2_env ?? {};
+    const details = [
+      `status=${state.status ?? 'unknown'}`,
+      Number.isInteger(state.exit_code) ? `exit_code=${state.exit_code}` : null,
+      Number.isInteger(state.unstable_restarts) ? `unstable_restarts=${state.unstable_restarts}` : null,
+      state.pm_err_log_path ? `error_log=${state.pm_err_log_path}` : null,
+    ].filter(Boolean).join(', ');
+    const message = `${app} is not online (${details})`;
+    if (TRANSITIONAL_PM2_STATES.has(state.status)) throw retryablePm2Error(message);
+    throw new Error(message);
+  }
   const execPath = await realpath(processInfo.pm2_env?.pm_exec_path || '');
   if (!isInside(release, execPath)) {
     throw new Error(`${app} is running outside the current release`);
   }
   return processInfo;
+}
+
+// PM2 can answer `start` while a process is still in one-launch-status. A
+// one-shot verification made setup report failure even though the same
+// process became online moments later. Poll the process identity and status
+// before moving on to the HTTP readiness check.
+export async function waitUntilOnline(options, {
+  attempts = 40,
+  intervalMs = 250,
+  onlineTimeoutMs = 10_000,
+} = {}) {
+  const deadline = Date.now() + onlineTimeoutMs;
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    try {
+      return await verifyPm2App({
+        ...options,
+        commandTimeoutMs: Math.max(1, Math.min(remainingMs, 1_000)),
+      });
+    } catch (error) {
+      lastError = error;
+      if (!error?.retryablePm2State) throw error;
+    }
+    if (attempt + 1 < attempts) {
+      const sleepMs = Math.min(intervalMs, Math.max(0, deadline - Date.now()));
+      if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs));
+    }
+  }
+  throw lastError;
 }
 
 export async function pm2Processes({ pm2Bin, execFileImpl, pm2Env }) {
@@ -121,7 +184,7 @@ export function appControlEnv(app, pm2Env) {
 export async function startApp(spec, { release, configPath, pm2Bin, execFileImpl, fetchImpl, readyOptions, pm2Env }) {
   const env = appControlEnv(spec.app, pm2Env);
   await execFileImpl(pm2Bin, ['start', configPath, '--only', spec.app, '--update-env'], { timeout: 60_000, env });
-  await verifyPm2App({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env: env });
+  await waitUntilOnline({ app: spec.app, release, pm2Bin, execFileImpl, pm2Env: env }, readyOptions);
   await waitUntilReady(spec.readyUrl, fetchImpl, readyOptions);
 }
 

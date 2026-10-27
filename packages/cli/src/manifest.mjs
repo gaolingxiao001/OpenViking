@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { list, t } from './i18n.mjs';
+import { writeManifest as saveManifest } from '../../daemon/src/deployment-manifest.mjs';
+export { validateManifest } from '../../daemon/src/deployment-manifest.mjs';
 
 // Setup edits ~/.vika/config.json as plain JSON, and only ever saves a file
 // that the daemon's own loader accepts.
@@ -26,6 +28,15 @@ export function vikaHome(env = process.env) {
   return path.join(env.HOME || os.homedir(), '.vika');
 }
 
+// setup persists the default so users can inspect/change it. A global or
+// per-instance explicit choice wins; the durable data directory never moves.
+export function withDefaultTempDir(agent, env = {}) {
+  if (agent.tempDir != null || String(env.VIKA_TEMP_DIR ?? '').trim()) return agent;
+  const dataDir = path.resolve(agent.dataDir);
+  if (dataDir !== '/root' && !dataDir.startsWith('/root/')) return agent;
+  return { ...agent, tempDir: `/tmp/vika-${agent.id}` };
+}
+
 // How to call the vika command from here: by name once ~/.vika/bin is on
 // PATH, by its full path in the shell the installer ran from.
 export function vikaCommand(env = process.env) {
@@ -41,9 +52,9 @@ export function manifestPath(env = process.env) {
 // but does not load is an error: setup never overwrites a broken manifest.
 export function readManifest(env = process.env) {
   const filePath = manifestPath(env);
-  if (!fs.existsSync(filePath)) return { path: filePath, value: null };
-  loadDeploymentManifest({ ...env, VIKA_CONFIG: filePath });
-  return { path: filePath, value: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
+  if (!fs.existsSync(filePath)) return { path: filePath, value: null, ignored: [] };
+  const { ignoredFields } = loadDeploymentManifest({ ...env, VIKA_CONFIG: filePath });
+  return { path: filePath, value: JSON.parse(fs.readFileSync(filePath, 'utf8')), ignored: ignoredFields };
 }
 
 export function availableInstanceOvConfig(env, id, reserved = new Set()) {
@@ -111,27 +122,12 @@ export function withChangedInstance(manifest, agent, env = {}) {
   return next;
 }
 
-function stage(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  try {
-    loadDeploymentManifest({ VIKA_CONFIG: temporary, HOME: os.homedir() });
-  } catch (error) {
-    fs.rmSync(temporary, { force: true });
+export function writeManifest(filePath, value, options) {
+  try { return saveManifest(filePath, value, options); } catch (error) {
+    if (error.code === 'manifest_conflict') {
+      error.message = t('实例配置已被其他操作修改，请重新运行 vika setup。', 'The instance configuration changed elsewhere; run vika setup again.');
+    }
     throw error;
   }
-  return temporary;
-}
-
-// Throws what the daemon's loader would reject, without touching the file.
-export function validateManifest(filePath, value) {
-  fs.rmSync(stage(filePath, value), { force: true });
-}
-
-export function writeManifest(filePath, value) {
-  const temporary = stage(filePath, value);
-  if (fs.existsSync(filePath)) fs.copyFileSync(filePath, `${filePath}.bak`);
-  fs.renameSync(temporary, filePath);
 }
 

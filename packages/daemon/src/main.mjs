@@ -12,11 +12,13 @@ const {
 } = require('../../../deployment-config.cjs');
 
 let config;
+let deployment;
 try {
-  const deployment = loadDeploymentManifest(process.env);
+  deployment = loadDeploymentManifest(process.env);
   applyDeploymentDaemonEnv(process.env, deployment);
   applyDeploymentAgentEnv(process.env, deployment);
   config = getConfig();
+  config.manifestPath = deployment.manifestPath;
 } catch (error) {
   process.stderr.write(`${JSON.stringify({
     time: new Date().toISOString(),
@@ -28,6 +30,9 @@ try {
 }
 
 const logger = createLogger(config.logLevel, { service: 'personal-agent-core' });
+if (deployment.ignoredFields.length > 0) {
+  logger.warn('config_fields_ignored', { fields: deployment.ignoredFields, manifest: deployment.manifestPath });
+}
 const daemon = new PersonalAgentDaemon(config, logger);
 let signalHandled = false;
 

@@ -19,6 +19,7 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'PI_BIN',
   'VIKA_WEIXIN_LONG_POLL_TIMEOUT_MS',
   'VIKA_LOG_LEVEL',
+  'VIKA_TEMP_DIR',
   'VIKA_DRY_RUN',
   'VIKA_IGNORED_SENDER_IDS',
   'VIKA_SEND_TIMEOUT_MS',
@@ -40,7 +41,6 @@ const DAEMON_ENV_FIELDS = Object.freeze([
   'VIKA_VOLC_REQUEST_TIMEOUT_MS',
   'VIKA_VOLC_STREAM_IDLE_TIMEOUT_MS',
   'FALLBACK_MODEL',
-  'VIKA_COGNITION_MAX_CHARS',
   'VIKA_HISTORY_LIMIT',
 ]);
 // Secrets may flow from the operator environment into daemon/updater PM2
@@ -62,10 +62,12 @@ const AGENT_FIELDS = Object.freeze([
   'profile',
   'port',
   'dataDir',
+  'tempDir',
   'workspace',
   'ovConfig',
   'ovAutoRecall',
   'explicitSilence',
+  'stagedReplies',
   'role',
   'naturalWriting',
   'model',
@@ -136,10 +138,14 @@ function loadSecretsFile(env = process.env) {
   return result;
 }
 
-function assertKnownFields(value, allowed, label) {
+// A field this release does not know is skipped and reported, never fatal: a
+// manifest written for another release (or naming a retired setting) still
+// loads. Known fields stay strictly validated.
+function ignoreUnknownFields(value, allowed, prefix, ignored) {
   const allowedSet = new Set(allowed);
-  const unknown = Object.keys(value).find((name) => !allowedSet.has(name));
-  if (unknown) throw new Error(`unknown ${label} field: ${unknown}`);
+  for (const name of Object.keys(value)) {
+    if (!allowedSet.has(name)) ignored.push(`${prefix}${name}`);
+  }
 }
 
 function manifestString(value, name, { maxLength = 128 } = {}) {
@@ -162,14 +168,19 @@ function optionalManifestString(value, name) {
   return manifestString(value, name);
 }
 
-function parseDaemonEnv(value) {
+// An unknown key is dropped, never passed on: this list is also what reaches
+// the daemon and pm2 process environments.
+function parseDaemonEnv(value, ignored) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('deployment manifest env must be an object');
   }
   const allowed = new Set(DAEMON_ENV_FIELDS);
   const result = {};
   for (const [key, envValue] of Object.entries(value)) {
-    if (!allowed.has(key)) throw new Error(`deployment manifest env field is not allowed: ${key}`);
+    if (!allowed.has(key)) {
+      ignored.push(`env.${key}`);
+      continue;
+    }
     if (typeof envValue !== 'string') throw new Error(`deployment manifest env.${key} must be a string`);
     if (envValue.length > 4096 || /[\u0000-\u001f\u007f]/.test(envValue)) {
       throw new Error(`deployment manifest env.${key} is invalid`);
@@ -179,12 +190,12 @@ function parseDaemonEnv(value) {
   return Object.freeze(result);
 }
 
-function parseAgent(value, index) {
+function parseAgent(value, index, ignored) {
   const label = `agents[${index}]`;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
   }
-  assertKnownFields(value, AGENT_FIELDS, label);
+  ignoreUnknownFields(value, AGENT_FIELDS, `${label}.`, ignored);
   const id = manifestString(value.id, `${label}.id`);
   if (!INSTANCE_ID.test(id) || RESERVED_INSTANCE_IDS.includes(id)) {
     throw new Error(`${label}.id must match ${INSTANCE_ID} and cannot be ${RESERVED_INSTANCE_IDS.join(', ')}`);
@@ -197,7 +208,7 @@ function parseAgent(value, index) {
     if (typeof value.meetingAudio !== 'object' || Array.isArray(value.meetingAudio)) {
       throw new Error(`${label}.meetingAudio must be an object`);
     }
-    assertKnownFields(value.meetingAudio, MEETING_AUDIO_FIELDS, `${label}.meetingAudio`);
+    ignoreUnknownFields(value.meetingAudio, MEETING_AUDIO_FIELDS, `${label}.meetingAudio.`, ignored);
     meetingAudio = Object.freeze({
       pythonCommand: manifestAbsolutePath(
         value.meetingAudio.pythonCommand,
@@ -260,7 +271,7 @@ function parseAgent(value, index) {
   if (meetingAudio && !connectors.includes('lark')) {
     throw new Error(`${label}.meetingAudio requires the lark connector`);
   }
-  const emailAccounts = manifestEmailAccounts(value.emailAccounts, `${label}.emailAccounts`);
+  const emailAccounts = manifestEmailAccounts(value.emailAccounts, `${label}.emailAccounts`, ignored);
   if (connectors.includes('email') !== (emailAccounts.length > 0)) {
     throw new Error(`${label}.emailAccounts and the email connector must be configured together`);
   }
@@ -280,6 +291,9 @@ function parseAgent(value, index) {
   if (value.naturalWriting !== undefined && typeof value.naturalWriting !== 'boolean') {
     throw new Error(`${label}.naturalWriting must be a boolean`);
   }
+  if (value.stagedReplies !== undefined && typeof value.stagedReplies !== 'boolean') {
+    throw new Error(`${label}.stagedReplies must be a boolean`);
+  }
   return Object.freeze({
     id,
     displayName: manifestString(value.displayName, `${label}.displayName`, { maxLength: 40 }),
@@ -288,10 +302,12 @@ function parseAgent(value, index) {
     profile: connectors.includes('lark') ? manifestString(value.profile, `${label}.profile`) : null,
     port: value.port,
     dataDir: manifestAbsolutePath(value.dataDir, `${label}.dataDir`),
+    tempDir: value.tempDir == null ? null : manifestAbsolutePath(value.tempDir, `${label}.tempDir`),
     workspace: manifestAbsolutePath(value.workspace, `${label}.workspace`),
     ovConfig: manifestAbsolutePath(value.ovConfig, `${label}.ovConfig`),
     ovAutoRecall: value.ovAutoRecall ?? false,
     explicitSilence: value.explicitSilence ?? false,
+    stagedReplies: value.stagedReplies ?? false,
     role: manifestRole(value.role, `${label}.role`),
     naturalWriting: value.naturalWriting ?? true,
     model,
@@ -309,14 +325,14 @@ function manifestRole(value, label) {
   throw new Error(`${label} must be ${ROLE_PRESETS.join(', ')} or an absolute path`);
 }
 
-function manifestEmailAccounts(value, label) {
+function manifestEmailAccounts(value, label, ignored) {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   const ids = new Set();
   return value.map((entry, index) => {
     const entryLabel = `${label}[${index}]`;
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`${entryLabel} must be an object`);
-    assertKnownFields(entry, ['id', 'config'], entryLabel);
+    ignoreUnknownFields(entry, ['id', 'config'], `${entryLabel}.`, ignored);
     const id = manifestString(entry.id, `${entryLabel}.id`, { maxLength: 46 });
     if (!EMAIL_INSTANCE_ID.test(id)) throw new Error(`${entryLabel}.id must be email-<name> in lowercase letters, digits and -`);
     if (ids.has(id)) throw new Error(`${label} has two mailboxes called ${id}`);
@@ -363,6 +379,7 @@ function assertIsolatedAgentStorage(agents) {
   const paths = agents.flatMap((agent, index) => [
     { name: `agents[${index}].dataDir`, value: agent.dataDir },
     { name: `agents[${index}].workspace`, value: agent.workspace },
+    ...(agent.tempDir ? [{ name: `agents[${index}].tempDir`, value: agent.tempDir }] : []),
   ]);
   for (let leftIndex = 0; leftIndex < paths.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < paths.length; rightIndex += 1) {
@@ -395,14 +412,15 @@ function loadDeploymentManifest(env) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('deployment manifest must be an object');
   }
-  assertKnownFields(value, TOP_LEVEL_FIELDS, 'deployment manifest');
+  const ignored = [];
+  ignoreUnknownFields(value, TOP_LEVEL_FIELDS, '', ignored);
   if (value.version !== 1) throw new Error('deployment manifest version must be 1');
   if (!Array.isArray(value.agents) || value.agents.length === 0) {
     throw new Error('deployment manifest agents must be a non-empty array');
   }
   const defaultInstance = manifestString(value.defaultInstance, 'deployment manifest defaultInstance');
-  const daemonEnv = parseDaemonEnv(value.env);
-  const agents = value.agents.map(parseAgent);
+  const daemonEnv = parseDaemonEnv(value.env, ignored);
+  const agents = value.agents.map((agent, index) => parseAgent(agent, index, ignored));
   assertUniqueAgentFields(agents);
   assertIsolatedAgentStorage(agents);
   const deployment = Object.freeze({
@@ -411,6 +429,8 @@ function loadDeploymentManifest(env) {
     env: daemonEnv,
     agents: Object.freeze(agents),
     manifestPath,
+    // Paths such as `env.VIKA_OLD_SETTING` or `agents[0].oldField`, for a warning.
+    ignoredFields: Object.freeze(ignored),
   });
   selectDeploymentAgent(deployment);
   return deployment;
@@ -473,6 +493,7 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
     VIKA_WORKSPACE: agent.workspace,
     VIKA_MODEL: agent.model,
   });
+  if (agent.tempDir) env.VIKA_TEMP_DIR = agent.tempDir;
   if (agent.profile) {
     env.VIKA_LARK_PROFILE = agent.profile;
     env.LARKSUITE_CLI_PROFILE = agent.profile;
@@ -484,6 +505,7 @@ function applyDeploymentAgentEnv(env, deployment, requestedId) {
   // Always set, so neither the shell nor another instance's value leaks in.
   env.VIKA_EXPLICIT_SILENCE = agent.explicitSilence ? 'true' : 'false';
   env.VIKA_NATURAL_WRITING = agent.naturalWriting ? 'true' : 'false';
+  env.VIKA_STAGED_REPLIES = agent.stagedReplies ? 'true' : 'false';
   if (agent.role) env.VIKA_ROLE = agent.role;
   else delete env.VIKA_ROLE;
   env.VIKA_CHANNEL = agent.channel;

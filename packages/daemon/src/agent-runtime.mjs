@@ -15,7 +15,6 @@ import {
   isModelUnavailableError,
 } from './runtime-catalog.mjs';
 
-const SWITCH_JOURNAL_HEADROOM = 4_096;
 
 export class AgentRuntime {
   constructor(config, store, logger, options = {}) {
@@ -27,6 +26,7 @@ export class AgentRuntime {
     this.onTurnAbandoned = options.onTurnAbandoned ?? null;
     this.onAvailable = options.onAvailable ?? null;
     this.onAuthorityChanged = options.onAuthorityChanged ?? null;
+    this.persistRuntimePreference = options.persistRuntimePreference ?? null;
     this.factories = createRuntimeFactories(config, store, logger, options);
     this.backend = null;
     this.stagedBackend = null;
@@ -103,14 +103,23 @@ export class AgentRuntime {
     const persistedRuntime = RUNTIME_IDS.includes(cognition.runtime)
       ? cognition.runtime
       : DEFAULT_RUNTIME_ID;
-    const freshTarget = resolveRuntimeModelTarget(this.config.initialModel || '');
+    const configuredSelector = String(this.config.initialModel || '').trim();
+    const freshTarget = resolveRuntimeModelTarget(configuredSelector);
     const freshCognition = this.store.hasCognitionRuntime?.() === false;
+    this._assertConnectorSupport(freshTarget.runtime);
     this.runtime = freshCognition ? freshTarget.runtime : persistedRuntime;
-    this._assertConnectorSupport(this.runtime);
     // A daemon generation must never inherit the previous process's authority.
     // If that process crashed with a detached MCP sidecar still alive, rotating
     // the token here fences it before the replacement backend starts.
     cognition = this.store.initializeCognition(this.runtime, randomUUID());
+    if (!freshCognition && configuredSelector && freshTarget.runtime !== persistedRuntime) {
+      // Setup has changed the desired runtime since SQLite last committed one.
+      // Reuse the same staged handoff as /runtime. There is no old backend in
+      // this daemon generation, and the fresh token above has already fenced a
+      // sidecar that may have survived the previous process.
+      await this._selectRuntime(freshTarget.runtime, undefined, { persistPreference: false });
+      return;
+    }
     this.backend = this._instantiate(this.runtime, freshCognition ? { initialModel: freshTarget.model } : {});
     await this.backend.start();
     this._authorityChanged(cognition);
@@ -325,11 +334,12 @@ export class AgentRuntime {
       unchanged: unchanged && !effortChanged, effort, previousEffort, effortChanged };
   }
 
-  async _selectRuntime(value, requestedModel) {
+  async _selectRuntime(value, requestedModel, { persistPreference = true } = {}) {
     const definition = getRuntimeDefinition(value);
     if (!definition) throw new Error(`Unknown runtime: ${value}`);
     this._assertConnectorSupport(definition.id);
     if (definition.id === this.runtime) {
+      if (persistPreference) await this.persistRuntimePreference?.(definition.id);
       return { runtimeChanged: false, runtime: this.runtime, model: this.model, unchanged: true };
     }
     const initial = resolveRuntimeModelTarget(this.config.initialModel || '');
@@ -337,7 +347,7 @@ export class AgentRuntime {
       ?? (this.config[`${definition.id}Model`] || undefined)
       ?? (initial.runtime === definition.id ? initial.model : definition.defaultModel);
     return this._hardSwitch({ runtime: definition.id, model, canonical: model || definition.canonicalDefault,
-      allowModelFallback: requestedModel === undefined });
+      allowModelFallback: requestedModel === undefined, persistPreference });
   }
 
   async _hardSwitch(target) {
@@ -352,9 +362,9 @@ export class AgentRuntime {
     let previousEffort;
     try {
       // Never wait for a stuck in-flight turn: interrupt/abandon it. Its
-      // inbound rows are already in the cognition journal, which the target
-      // replays as a catch-up prefix on its first real turn.
-      await previous.interrupt();
+      // inbound rows are already in the cognition journal, synced to OV, whose
+      // recent history the target receives on its first real turn.
+      await previous?.interrupt();
       if (this.stopping) throw new Error('agent runtime stopped during runtime switch');
       const cognition = this.store.getCognitionState();
       const journalThrough = this.store.cognitionJournalHead(cognition.epoch);
@@ -418,16 +428,20 @@ export class AgentRuntime {
         if (!staged.state?.connected) throw new Error('target runtime exited before switch commit');
         break;
       }
-      const catchup = cognitionHistoryPrefix(
-        this.store,
-        cognition.epoch,
-        journalThrough,
-        Math.max(1, (this.config.cognitionMaxChars ?? 120_000) - SWITCH_JOURNAL_HEADROOM),
-      );
+      const catchup = cognitionHistoryPrefix(this.store, cognition.epoch, journalThrough);
       const session = staged.sessionDescriptor;
       if (!session.sessionId) throw new Error('target runtime produced no global session id');
       if (this.stopping || this.stagedBackend !== staged) {
         throw new Error('agent runtime stopped during runtime switch');
+      }
+
+      // Config is desired state, SQLite is committed state. Persist the desire
+      // only after the target has proved it can start, but before the SQLite
+      // authority handoff. A failed config write leaves the old runtime active;
+      // a later SQLite failure leaves an explicit desired/actual mismatch that
+      // startup can reconcile safely.
+      if (target.persistPreference !== false) {
+        await this.persistRuntimePreference?.(target.runtime);
       }
 
       // Commit is the authority hand-off. The target sidecar was unable to send
@@ -455,7 +469,7 @@ export class AgentRuntime {
       this._authorityChanged({ runtime: target.runtime, epoch: cognition.epoch, authorityToken });
       this.stagedBackend = null;
       staged = null;
-      try { await previous.stop(); } catch (error) {
+      try { await previous?.stop(); } catch (error) {
         this.logger.warn('retired_runtime_stop_failed', { runtime: previousRuntime, error: error.message });
       }
       try {
@@ -483,7 +497,7 @@ export class AgentRuntime {
       };
     } catch (error) {
       try { await staged?.stop(); } catch {}
-      previous.cancelSession?.();
+      previous?.cancelSession?.();
       throw error;
     } finally {
       if (this.stagedBackend === staged) this.stagedBackend = null;

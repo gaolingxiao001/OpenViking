@@ -25,7 +25,6 @@
     "VIKA_PI_EFFORT": "medium",
     "VIKA_PI_MODEL": "",
     "FALLBACK_MODEL": "gpt-5.6-sol",
-    "VIKA_COGNITION_MAX_CHARS": "120000",
     "VIKA_HISTORY_LIMIT": "30"
   },
   "agents": [
@@ -41,6 +40,7 @@
       "ovConfig": "/Users/you/.openviking/ovcli.conf.primary",
       "ovAutoRecall": false,
       "explicitSilence": false,
+      "stagedReplies": false,
       "role": "assistant",
       "naturalWriting": true,
       "model": "ark",
@@ -64,6 +64,7 @@
       "ovConfig": "/Users/you/.openviking/ovcli.conf.research",
       "ovAutoRecall": false,
       "explicitSilence": false,
+      "stagedReplies": false,
       "role": "/Users/you/.vika/roles/research.md",
       "naturalWriting": false,
       "model": "gpt-5.6-sol"

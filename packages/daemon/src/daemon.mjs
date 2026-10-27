@@ -5,15 +5,17 @@ import { ProcessRegistry } from './process-utils.mjs';
 import { AgentRuntime } from './agent-runtime.mjs';
 import { Harness } from './harness.mjs';
 import { executeCommand } from './commands.mjs';
+import { executePrimaryCommand } from './primary-channel.mjs';
 import { ConnectorManager } from './connectors/process.mjs';
 import { ActionService } from './actions/service.mjs';
 import { startActionApi, stopActionApi } from './actions/api.mjs';
 import { ChatRoster, registerNameResolver } from './roster.mjs';
 import { ChatNameTracker } from './chat-names.mjs';
 import { FailurePolicy } from './notices.mjs';
-import { DecisionPolicy, warnIfSilenceInert } from './decisions.mjs';
+import { DecisionPolicy, warnIfSilenceInert, warnIfStagedRepliesInert } from './decisions.mjs';
 import { startHttpApi } from './http-api.mjs';
 import { InstanceLock } from './lock.mjs';
+import { pruneLarkMedia } from './lark-media.mjs';
 import { safeChatLookupError, safeError } from './logger.mjs';
 import { approvalNote } from './actions/approval.mjs';
 import { resolveCardAction, settledChoiceCard } from './card-messages.mjs';
@@ -21,6 +23,7 @@ import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import { OVUnavailableError } from './ov-connection.mjs';
 import { TimerConnector, TimerRepository } from './timers.mjs';
+import { updateRuntimePreference } from './runtime-preference.mjs';
 import {
   MeetingPlugin,
 } from './meeting/index.mjs';
@@ -132,8 +135,7 @@ export class PersonalAgentDaemon {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
       this.timers = new TimerRepository(this.store.db);
       const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
-      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger,
-        { canCommit: () => !this.connectors?.subscribed });
+      this.ovContext = new OVSessionContext(this.store, ovClient, this.logger);
       this.recordSystemActivity('system.starting', {
         summary: `本机 Personal Agent 正在启动（${this.connectorIds.join('、')}）`,
         status: 'STARTING',
@@ -212,7 +214,9 @@ export class PersonalAgentDaemon {
       });
 
       this.agentRuntime = new AgentRuntime(this.config, this.store, this.logger.child({ component: 'agent-runtime' }), {
+        // A turn that ended leaves no OnIt behind, whatever it delivered.
         onTurnFailed: (info) => {
+          void this.actions.clearTemporaryReactions('turn_end');
           this.meeting?.onTurnFailed(info);
           void this.failurePolicy.onTurnFailed(info)
             .catch((error) => {
@@ -220,11 +224,13 @@ export class PersonalAgentDaemon {
             });
         },
         onTurnSucceeded: (info) => {
+          void this.actions.clearTemporaryReactions('turn_end');
           this.meeting?.onTurnSucceeded(info);
           this.failurePolicy.onTurnSucceeded(info);
           this.decisionPolicy?.onTurnSucceeded(info);
         },
         onTurnAbandoned: (info) => {
+          void this.actions.clearTemporaryReactions('turn_end');
           this.meeting?.onTurnAbandoned(info);
         },
         onAvailable: () => { this.harness?.onAvailable(); },
@@ -235,8 +241,12 @@ export class PersonalAgentDaemon {
           if (runtime !== this.silenceRuntime) {
             this.silenceRuntime = runtime;
             warnIfSilenceInert(this.config, runtime, this.logger);
+            warnIfStagedRepliesInert(this.config, runtime, this.logger);
           }
         },
+        persistRuntimePreference: this.config.manifestPath && this.config.instanceId
+          ? (runtime) => updateRuntimePreference(this.config, runtime)
+          : null,
       });
       this.failurePolicy = new FailurePolicy({
         config: this.config,
@@ -246,6 +256,7 @@ export class PersonalAgentDaemon {
         runtime: this.agentRuntime,
         recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
         isOwner: (event) => this.connectors.isOwner(event),
+        mentionTarget: (event) => this.connectors.mentionTarget(event),
         isStopping: () => this.shuttingDown,
       });
       this.harness = new Harness({
@@ -286,6 +297,7 @@ export class PersonalAgentDaemon {
           if (card) return this.connectors.updateCard(event.parentId, card);
         },
         isOwner: (event) => this.connectors.isOwner(event),
+        mentionTarget: (event) => this.connectors.mentionTarget(event),
         isStopping: () => this.shuttingDown,
       });
       // Checks at each successful turn's end that every input it consumed got a
@@ -393,7 +405,11 @@ export class PersonalAgentDaemon {
     });
     let outcome;
     try {
-      outcome = await executeCommand(command, this.agentRuntime);
+      outcome = await executeCommand(command, this.agentRuntime, {
+        primary: (parsed) => executePrimaryCommand(parsed, {
+          event, config: this.config, connectors: this.connectors,
+        }),
+      });
     } catch (error) {
       outcome = { ok: false, text: `命令执行失败：${safeError(error)}` };
     }
@@ -418,6 +434,11 @@ export class PersonalAgentDaemon {
   runMaintenance() {
     if (!this.store) return;
     const removed = this.store.prune(this.config.retentionMs);
+    try {
+      removed.larkMedia = pruneLarkMedia(this.config.tempDir, this.config.retentionMs);
+    } catch (error) {
+      this.logger.warn('lark_media_prune_failed', { error: safeError(error) });
+    }
     if (Object.values(removed).some((count) => count > 0)) {
       this.logger.info('state_maintenance_completed', { removed });
       this.recordSystemActivity('system.maintenance', {

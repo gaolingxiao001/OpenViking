@@ -40,3 +40,33 @@ it('reports the owner as the user the profile is logged in as, or none without a
   assert.equal((await preflight(botOnly)).owner, null);
   assert.equal((await preflight({ code: 1, stdout: '', stderr: 'boom' })).owner, null);
 });
+
+it('reports the bot itself from bot info, and runs on without it', async () => {
+  const preflight = (info) => new LarkClient({ profile: 'test-profile', larkCliBin: '/fake/lark-cli', projectDir: '/tmp' }, {
+    async run(_command, args) {
+      if (args.includes('/open-apis/bot/v3/info')) {
+        assert.deepEqual(args, ['--profile', 'test-profile', 'api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--json']);
+        return info;
+      }
+      if (args.includes('event')) return { code: 0, stdout: '--event-types --quiet', stderr: '' };
+      if (args.includes('im')) return { code: 0, stdout: '+chat-list +messages-reply +messages-send', stderr: '' };
+      return { code: 0, stdout: 'lark-cli 1.0.94', stderr: '' };
+    },
+  }, quietLogger).preflight();
+  // What lark-cli 1.0.94 (the pinned version) prints for this call.
+  const real = { code: 0, stderr: '', stdout: JSON.stringify({
+    ok: true,
+    identity: 'bot',
+    data: { activate_status: 2, app_name: 'SRE_OPPO', avatar_url: 'https://example.invalid/a.png', ip_white_list: [], open_id: 'ou_self12345678' },
+    _notice: { update: { command: 'lark-cli update', current: '1.0.94', latest: '1.0.98' } },
+  }) };
+  assert.deepEqual((await preflight(real)).self, { id: 'ou_self12345678' });
+  for (const broken of [
+    { code: 1, stdout: '', stderr: 'permission denied' },
+    { code: 0, stdout: 'not json', stderr: '' },
+    { code: 0, stdout: JSON.stringify({ ok: true, data: { app_name: 'SRE_OPPO' } }), stderr: '' },
+    { code: 0, stdout: JSON.stringify({ ok: true, data: { open_id: 'cli_notauser' } }), stderr: '' },
+  ]) {
+    assert.equal((await preflight(broken)).self, null);
+  }
+});

@@ -93,6 +93,17 @@ function fromLabel(chatId, senderId, resolveName = null, source = 'lark', sender
   return lookupMemberName(chatId, senderId) ?? shortenId(senderId);
 }
 
+// How a quoted message of the agent's own begins, as one tag value: no
+// whitespace, brackets or `=`, so it can neither end the tag nor pass for
+// another field.
+const QUOTE_CHARS = 60;
+
+function quoteTag(text) {
+  const words = String(text ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029[\]=]/g, ' ').trim().split(/\s+/).join('_');
+  const chars = [...words];
+  return chars.length > QUOTE_CHARS ? `${chars.slice(0, QUOTE_CHARS).join('')}…` : words;
+}
+
 export function chatTag(chatId, threadId) {
   const chat = chatId || 'unknown';
   return threadId ? `${chat} thread=${shortenId(threadId)}` : chat;
@@ -103,6 +114,20 @@ export function oneLine(text) {
     .replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ⏎ ')
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
+
+// Whom a message's @mentions call, by id against the bot's own id on that
+// Connector: 'me', 'other' or 'mixed' (the bot and someone else). null when
+// nothing is mentioned or the bot's id is unknown, never a guess from names.
+export function mentionTarget(mentions, selfId) {
+  if (!Array.isArray(mentions) || mentions.length === 0) return null;
+  if (typeof selfId !== 'string' || !selfId) return null;
+  const me = mentions.some((mention) => mention?.id === selfId);
+  const other = mentions.some((mention) => mention?.id !== selfId);
+  if (me && other) return 'mixed';
+  return me ? 'me' : 'other';
+}
+
+const MENTION_TARGETS = new Set(['me', 'other', 'mixed']);
 
 function renderInboundContent(message) {
   let content = eventContent(message);
@@ -127,21 +152,23 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
   // The sender is the owner this connector reported at check.
   const ownerTag = authenticated?.owner ? ' owner=1' : '';
   const replyTo = authenticated?.replyTo;
+  const quote = replyTo?.kind === 'me' ? quoteTag(replyTo.text) : '';
   const replyTag = replyTo
     ? ` reply_to=${replyTo.kind === 'me'
-      ? 'me'
+      ? `me${quote ? ` quote=${quote}` : ''}`
       : replyTo.kind === 'user'
         ? fromLabel(replyTo.chatId ?? message.chatId, replyTo.senderId, resolveName, message.source)
         : shortenId(replyTo.id)}`
     : '';
   const bots = authenticated?.botsSinceHuman;
   const botsTag = Number.isSafeInteger(bots) && bots > 0 ? ` bots_since_human=${bots}` : '';
+  const mentionTag = MENTION_TARGETS.has(authenticated?.mention) ? ` mention=${authenticated.mention}` : '';
   const line = `[chat=${chatTag(metadataTag(message.chatId), message.threadId)}${message.external ? ' external=true' : ''} source=${message.source || 'lark'}`
     + (message.connectorInstance && message.connectorInstance !== message.source ? ` instance=${metadataTag(message.connectorInstance)}` : '')
     + ` msg=${metadataTag(message.messageId)} event=${metadataTag(message.eventId)}`
     + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
     + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source, message.senderName)}${ownerTag}`
-    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
+    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${mentionTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
   return line;
 }
 

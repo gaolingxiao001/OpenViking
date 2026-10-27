@@ -18,7 +18,9 @@ class SimulationStore {
     }];
   }
 
-  getOVContext() { return { sessionId: 'ov-simulation', latest_archive_overview: 'prior message', messages: [], archiveThroughSeq: 0 }; }
+  getOVContext() {
+    return { sessionId: 'ov-simulation', messages: [{ parts: [{ type: 'text', text: 'prior message' }], source_message_ids: ['lark:1:1'] }] };
+  }
   getCognitionState() { return { ...this.cognition }; }
   initializeCognition(runtime, authorityToken) {
     this.cognition = { runtime, epoch: this.cognition.epoch, authorityToken };
@@ -125,7 +127,7 @@ export async function runClaudeRuntimeSimulation() {
     instances.push(backend);
     return backend;
   };
-  const runtime = new AgentRuntime({ cognitionMaxChars: 120_000 }, store, quietLogger, {
+  const runtime = new AgentRuntime({}, store, quietLogger, {
     codexFactory: factory('codex'),
     claudeFactory: factory('claude'),
   });
@@ -150,7 +152,7 @@ export async function runClaudeRuntimeSimulation() {
   // Same-runtime changes do not construct a second runtime; use a fresh
   // manager to exercise target-start failure before authority commit.
   const failingStore = new SimulationStore();
-  const failing = new AgentRuntime({ cognitionMaxChars: 120_000 }, failingStore, quietLogger, {
+  const failing = new AgentRuntime({}, failingStore, quietLogger, {
     codexFactory: factory('codex'),
     claudeFactory: (options) => new ScriptedBackend('claude', options, events, { failStart: true }),
   });

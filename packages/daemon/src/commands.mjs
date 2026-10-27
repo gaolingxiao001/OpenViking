@@ -16,7 +16,7 @@ import {
 // Default vocabulary for callers; command validation uses current model metadata.
 export const EFFORT_LEVELS = getRuntimeDefinition(DEFAULT_RUNTIME_ID).efforts;
 
-const COMMANDS = ['new', 'help', 'status', 'runtime', 'model', 'effort'];
+const COMMANDS = ['new', 'help', 'status', 'runtime', 'model', 'effort', 'primary'];
 
 const MODEL_NAME = /^[A-Za-z0-9._:\/\[\]-]{1,256}$/;
 
@@ -38,12 +38,12 @@ export function matchPrefix(token, candidates) {
 }
 
 // Where slash commands are accepted: a private chat takes bare /commands. Group
-// chats never do — the daemon has no reliable way to tell "@bot /cmd" apart from
-// "@someone-else /cmd" (it doesn't track its own open_id), so any mention in a
-// group used to be enough to trigger a command meant for a completely different
-// person. Group /command support can come back once mentions are resolved
-// against the bot's own id. Returns the parse candidate text, or null when the
-// message is not eligible (it then flows to codex as a normal message).
+// chats never do — any mention in a group used to be enough to trigger a
+// command meant for a completely different person. Group /command support could
+// come back on ConnectorManager.mentionTarget, which tells "@bot /cmd" from
+// "@someone-else /cmd" by the bot's own id. Returns the parse candidate text,
+// or null when the message is not eligible (it then flows to codex as a normal
+// message).
 export function commandCandidate(event) {
   if (event.kind !== 'message.created' || !event.chatId || !event.messageId
     || !event.replyRoute || !['text', 'post'].includes(event.messageType)) return null;
@@ -71,12 +71,15 @@ export function helpText(snapshot) {
     '/new — 开启新会话，丢弃当前上下文',
     '/help — 显示帮助与当前状态',
     '/status — 查看模型是否在工作以及持续时间',
+    '/primary — 将当前 IM 设为主 IM（仅限 owner 私聊，无需重启）',
+    '/primary status — 查看当前主 IM（仅限 owner 私聊）',
     '/runtime [名称] — 查看或切换 Runtime（可简写 /run）',
     '/model [名称] — 查看或切换当前 Runtime 的模型，保留会话',
   ];
   if (supportsEffort) lines.push('/effort [档位] — 查看或切换当前模型的推理档位，保留会话');
   else lines.push('/effort [档位] — 当前 Runtime 不支持 daemon 侧推理档位配置');
   lines.push(
+    'Slack 中请在命令前加一个空格，例如「 /primary」。',
     '',
     `当前会话：${snapshot.session?.id ?? snapshot.threadId ?? '（未连接）'}`,
     `Runtime：${snapshot.runtime ?? 'codex'}`,
@@ -121,10 +124,13 @@ export function statusText(snapshot, nowMs = Date.now()) {
   return lines.join('\n');
 }
 
-// Executes one parsed command against the codex agent. Returns { ok, text }; the
-// caller replies with text and records ok as the activity status. Throws only on
-// unexpected agent errors (rotate/apply failures), which the caller reports.
-export async function executeCommand(command, runtime) {
+// Executes a runtime or Core command. Returns { ok, text }; the caller replies
+// on the incoming route and records the outcome. Core controls receive their
+// own event/config context and do not wait for or change the model session.
+export async function executeCommand(command, runtime, { primary } = {}) {
+  if (command.name === 'primary') {
+    return primary ? primary(command) : { ok: false, text: '当前环境不支持 /primary。' };
+  }
   const cached = await runtime.snapshot({ catalog: 'cached' });
   if (!command.name) {
     const head = command.matches.length > 1

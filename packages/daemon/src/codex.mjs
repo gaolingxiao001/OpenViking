@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { sanitizeAgentChildEnv, terminateProcessTree } from './process-utils.mjs';
 import { agentToolEnv, agentToolServer } from './actions/api.mjs';
 import { safeError as safe } from './logger.mjs';
+import { captureStartupStderr } from './runtime-diagnostics.mjs';
 import { activityPayload } from './activity.mjs';
 import { cognitionHistoryPrefix, CognitionLimitError } from './cognition.mjs';
 import { assembleConversationPolicy } from './conversation-policy.mjs';
@@ -398,7 +399,6 @@ export class CodexAgent {
           this.store,
           this.cognitionEpoch,
           throughSeq,
-          this.config.cognitionMaxChars,
           hadPrefix ? 0 : this.syncedThroughSeq,
         );
         journalThroughSeq = catchup.throughSeq;
@@ -920,6 +920,7 @@ export class CodexAgent {
       this.pending.clear();
       this.nextId = 0;
 
+      const stderr = captureStartupStderr(child.stderr);
       let settled = false;
       const timer = setTimeout(() => finish(new Error(`${this.runtimeLabel} handshake timed out`)), this.handshakeTimeoutMs);
       timer.unref?.();
@@ -927,19 +928,20 @@ export class CodexAgent {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        const diagnostic = stderr.text();
+        stderr.stop();
         if (!error) { resolve(); return; }
         // A handshake can fail while the child is still alive (timeout, rpc error
         // response); detach and kill it so a retry does not orphan a live runtime.
         this._handleExit(child);
         if (child.exitCode === null) terminateProcessTree(child, 'SIGKILL');
-        reject(error);
+        const hint = this.runtime === 'traex' ? '; requires TRAE CLI 2.0 app-server (use traex when keeping Coco)' : '';
+        reject(new Error(`${safe(error)}${hint}${diagnostic ? `; stderr: ${diagnostic}` : ''}`));
       };
 
       child.stdin?.on('error', () => {});
       child.stdout?.setEncoding('utf8');
-      child.stderr?.setEncoding('utf8');
       child.stdout?.on('data', (chunk) => { if (this.child === child) this._onStdout(chunk); });
-      child.stderr?.on('data', () => {});
       child.once('error', (error) => { this._handleExit(child); finish(error); });
       child.once('exit', (code, signal) => {
         this._handleExit(child, code, signal);

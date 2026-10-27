@@ -8,6 +8,8 @@ import { OVConnection, OVUnavailableError, readOVConfig } from '../../daemon/src
 // to another identity when that config is missing, invalid, or unavailable.
 
 export const LOCAL_OV_URL = 'http://127.0.0.1:1933';
+// Volcengine's hosted OpenViking Service, the address `ov config` uses for it.
+export const HOSTED_OV_URL = 'https://api.vikingdb.cn-beijing.volces.com/openviking';
 
 export const savedOVConfigPath = (homeDir = os.homedir()) => path.join(homeDir, '.vika', 'ov-connection.json');
 
@@ -29,8 +31,10 @@ export async function detectOpenViking({ env = process.env, homeDir = os.homedir
       return { configPath: null, url: connection.url, usable: false, user: null, authMode: health.auth_mode ?? null,
         reason: t('OpenViking 服务已启动，请配置身份信息和凭据', 'OpenViking is running; configure identity and credentials') };
     }
+    // Under an API key the configured user is not who the server sees.
     return { configPath: selected, url: connection.url, usable: true,
-      user: user ?? health.user_id ?? config.user ?? null, authMode: health.auth_mode ?? null, reason: null };
+      user: user ?? health.user_id ?? (health.auth_mode === 'api_key' ? null : config.user) ?? null,
+      authMode: health.auth_mode ?? null, reason: null };
   } catch (error) {
     let reason;
     if (!(error instanceof OVUnavailableError)) {
@@ -41,6 +45,10 @@ export async function detectOpenViking({ env = process.env, homeDir = os.homedir
     } else if (health && [401, 403].includes(error.httpStatus)) {
       reason = t(`OpenViking 服务已启动，但认证或权限检查失败（HTTP ${error.httpStatus}），请检查凭据和身份配置`,
         `OpenViking is running, but authentication or authorization failed (HTTP ${error.httpStatus}); check credentials and identity`);
+    } else if (!health && [401, 403].includes(error.httpStatus)) {
+      // The hosted service checks the key before it answers /health.
+      reason = t(`OpenViking 拒绝了 API Key（HTTP ${error.httpStatus}），请检查 API Key 是否填写正确`,
+        `OpenViking rejected the API key (HTTP ${error.httpStatus}); check that it is entered correctly`);
     } else if (health) {
       reason = error.httpStatus
         ? t(`OpenViking 健康检查通过，但身份检查失败（HTTP ${error.httpStatus}），请检查服务和配置`,

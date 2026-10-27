@@ -20,7 +20,6 @@ const baseConfig = {
   actionSocketPath: '/data/actions.sock',
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
-  cognitionMaxChars: 120_000,
   dryRun: true,
 };
 
@@ -471,15 +470,7 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
   it('surfaces a receipt when prompt preparation fails before Claude owns the turn', async () => {
     const store = makeStore();
     store.cognitionJournalBeforeInbound = () => 1;
-    store.getOVContext = () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: 'x'.repeat(130_000), messages: [] });
-    store.cognitionJournal = () => [{
-      seq: 1,
-      epoch: 1,
-      kind: 'control',
-      status: 'COMMITTED',
-      atMs: 1,
-      text: 'x'.repeat(130_000),
-    }];
+    store.getOVContext = () => undefined;
     const { agent, persistent, failures } = harness({ store });
     await agent.start();
 
@@ -488,7 +479,7 @@ describe('ClaudeAgent persistent stream-json runtime', () => {
     assert.equal(failures.length, 1);
     assert.deepEqual(failures[0].inboundSeqs, []);
     assert.deepEqual(failures[0].receiptIds, ['receipt-terminal']);
-    assert.match(failures[0].error, /above the 120000-char handoff limit/);
+    assert.match(failures[0].error, /OpenViking context is not prepared/);
     await agent.stop();
   });
 

@@ -28,7 +28,6 @@ const baseConfig = {
   actionMcpPath: '/release/packages/daemon/src/actions/mcp.mjs',
   sendTimeoutMs: 5_000,
   maxReplyChars: 1_000,
-  cognitionMaxChars: 120_000,
   dryRun: true,
 };
 

@@ -182,7 +182,7 @@ test('upgradeTarget cold-starts only the allowlisted Sally app from current rele
       command: '/fake/pm2',
       args: ['jlist'],
       options: {
-        timeout: 30_000,
+        timeout: 1_000,
         env: { HOME: '/safe-home', PATH: '/safe-bin' },
       },
     },

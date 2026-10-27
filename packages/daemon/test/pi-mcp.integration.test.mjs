@@ -122,7 +122,7 @@ async function fixture(t, { conflict = false, dialogs = false } = {}) {
     piBin: managedPiBin(), piModel: 'fixture/fixture', piEffort: 'off', workspace,
     dataDir: path.join(root, 'data'), connectors: ['lark'], profile: 'fixture',
     actionSocketPath: socketPath, actionMcpPath: modulePath('../src/actions/mcp.mjs'),
-    sendTimeoutMs: 1000, cognitionMaxChars: 120_000,
+    sendTimeoutMs: 1000,
   };
   const failures = [];
   const options = {

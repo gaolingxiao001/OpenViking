@@ -36,6 +36,10 @@ curl -fsSL <下载地址>/install.sh | sh
 
 Codex、TraeX、Claude、Pi 都要先完成各自 CLI 登录。方舟只支持 Self-hosted Managed Agent，需要 `ARK_API_KEY` 和已绑定 Agent、Environment 的 seed session；完整字段看 [config.example.json](./config.example.json)。
 
+TraeX 需要支持 `app-server` 的 **TRAE CLI 2.0**，旧 Coco / TRAE CLI 1.0 的 `acp serve` 不能替代它。安装时若保留 Coco，`traecli` 可能仍指向旧版，新版使用 `traex`。setup 会依次检查 `traex`、`traecli`，解析软链接并去重，只有 stdio `initialize` 握手和 `login status` 都通过才提供该选项；探测不会创建会话或调用模型。显式设置 `TRAECLI_BIN`（兼容旧变量 `TRAEX_BIN`，优先级更高）时只检查指定文件，失败不会悄悄换另一个 CLI。setup 保存通过检查的实际路径，不修改用户的命令别名。
+
+如果启动失败，先运行 `vika logs <实例>` 查看具体错误。app-server 握手失败会附上有长度上限、经过脱敏的 stderr。`vika start <实例>` 对已经 online 的 PM2 进程也会验证所属 release 和 ready 状态，服务未就绪会返回失败，不会重启或覆盖该进程。PATH 提示找不到 `vika` 时，可先用 `~/.vika/bin/vika`；安装器依据 shell 写 rc，macOS 的 bash 使用 `.bash_profile`，Linux 的 bash 使用 `.bashrc`，zsh 使用 `.zshrc`，当前终端需加载对应文件或重新打开。
+
 Claude Code 需要 2.1.259 或以上，支持 `--permission-prompts none`；启动预检会检查该参数。daemon 是无人值守会话：Pi 扩展对话框、Codex/TraeX 的审批和用户输入请求会被明确取消或拒绝；Claude 使用官方无人值守设置，并拒绝意外的控制请求。需要向人提问时，模型应通过消息工具发文字或支持的选项卡，结束当前轮次，再等待用户消息或卡片答案。用户的扩展、provider 和其他会话配置不因此被关闭。
 
 Pi 1.2.0 在启动扩展完成后才开始读取 RPC 回复，因此扩展在 `session_start` 中要求人工输入时，daemon 会立即拒绝启动并提示关闭该启动交互；运行期间的对话框则正常返回取消。
@@ -81,6 +85,18 @@ vika restart
 
 默认配置是 `~/.vika/config.json`。如需放在其他位置，给所有启动、部署和升级命令设置同一个绝对路径的 `VIKA_CONFIG`。
 
+### 飞书图片、文件收发的临时目录
+
+`lark-cli` 的路径保护会影响 `/root` 下的附件文件操作。安装时 `vika setup` 检测到 `dataDir` 是 `/root` 或其子目录，且没有显式临时目录配置时，会自动在实例配置中写入 `"tempDir": "/tmp/vika-<实例名>"`，例如 `/tmp/vika-primary`；不同实例使用独立目录。数据库、会话和工作目录保持原位，`TMPDIR` 不会改变这个默认值。用户仍可编辑 `~/.vika/config.json` 的 `agents[].tempDir`，setup 会保留显式设置。
+
+已运行的实例不会仅因升级而自动迁移：可在 setup 修改并保存该实例时补上默认值，或手动增加上述 `tempDir` 字段后执行 `vika restart primary`。不要把整个 `dataDir` 迁到 `/tmp`。
+
+也可以设置 `VIKA_TEMP_DIR=/tmp/vika-primary`，或将其放入配置顶层的 `env`；这是所有实例共享的默认值，多实例部署应分别设置 `agents[].tempDir`，该字段优先。路径必须为绝对路径，未配置时仍使用 `<dataDir>/tmp`，`TMPDIR` 不影响它。临时目录也承载发送文件的临时副本。
+
+上传和下载共用该临时根目录，均以 `0700` 创建并校验目录；已存在的目录必须属于 daemon 用户、仅该用户可访问，且不能是符号链接。使用专用目录，不要直接配置为 `/tmp`。上传先把工作区文件复制到 `<tempDir>/outbox` 中独立的私有子目录，以相对路径交给 lark-cli；图片、文件的发送、回复和主人通知均走此流程，成功或失败后删除副本。下载文件保存在 `<tempDir>/media`，供 MCP 和后续工具读取，按 `VIKA_RETENTION_MS`（默认 90 天）在 daemon 维护时清理过期下载。
+
+重启后重新读取一条之前失败的图片消息，并发送、回复一张工作区图片，确认图片内容正常。`lark-cli --dry-run` 只能验证本地参数，不能代替真实上传、下载验证。无需重启服务器或 OpenViking，也无需清空数据库。
+
 ### 微信扫码与单聊链路
 
 给微信单独增加一个 agent 时，设置 `"channel": "weixin"`、`"connectors": ["weixin"]`，`model` 可选 Codex、TraeX、Claude 或 Pi（方舟的工具执行在 Worker 里，访问不到 Core 的 Agent 工具，不支持微信），并使用独立的 `port`、`dataDir`、`workspace`、`ovConfig`。要让一个实例的 session 和 OV 同时接收飞书和微信，保留 `"channel": "lark"` 并设置 `"connectors": ["lark", "weixin"]`。纯微信实例不填 `profile`，填了会被拒绝。完整片段见 [README 的微信单聊 MVP](./README.md#微信单聊-mvp)。
@@ -118,7 +134,7 @@ vika login telegram [实例]
 
 ### Slack 接入
 
-运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装，再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
+运行 `vika setup`，新建或修改实例，勾选 Slack。Slack 不能扫码建应用：向导给出一个预填好配置的链接，在你的工作区里创建一个内部 App 并安装（也可以用已有的 App，按向导生成的 manifest 补齐配置，条件见 [README 的 Slack](./README.md#slack)），再把 Bot User OAuth Token（`xoxb-`）和带 `connections:write` 的 App-Level Token（`xapp-`）粘贴到隐藏输入框。接着在 Slack 里私聊机器人发送终端显示的一次性口令，绑定 owner；成功后才保存凭证并启动实例。收消息走 Socket Mode，不需要公网地址，Vika 主机须能访问 `slack.com`。每个实例用独立的 App。凭证在 `<dataDir>/slack/state.sqlite3`，不写入 `config.json`。范围与限制见 [README 的 Slack](./README.md#slack)。
 
 成员查询使用 `conversations.members` 和 `users.info`。新建 App 的模板已包含 `channels:read`（公开频道）、`groups:read`（私有频道）、`mpim:read`（多人私聊）、`im:read`（私聊）和 `users:read`（姓名与机器人标记）。已有 App 升级 Vika 不会自动获得新权限：到 **OAuth & Permissions → Bot Token Scopes** 添加对应会话类型的权限，再 **Reinstall to Workspace** 完成授权。查询报 `missing_scope` 时会提示这些步骤，原有收发消息能力仍可使用。
 

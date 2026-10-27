@@ -66,7 +66,7 @@ function makeStore({ history = [] } = {}) {
     getGlobalSession: () => session,
     setGlobalSession(sessionId, policyHash) { session = { sessionId, policyHash }; },
     recordActivity() {},
-    getOVContext: () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: '',
+    getOVContext: () => ({ sessionId: 'ov-test', latest_archive_overview: '',
       messages: history.map((item) => ({ parts: [{ type: 'text', text: item.text }] })) }),
   };
 }
@@ -398,22 +398,14 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(notifications, 1);
   });
 
-  it('fails a receipt through the callback when cognition limits reject it before turn ownership', async () => {
+  it('fails a receipt through the callback when unprepared history rejects it before turn ownership', async () => {
     const failures = [];
     const store = makeStore();
     store.cognitionJournalBeforeInbound = () => 1;
-    store.getOVContext = () => ({ sessionId: 'ov-test', archiveThroughSeq: 0, latest_archive_overview: 'too large', messages: [] });
-    store.cognitionJournal = () => [{
-      seq: 1,
-      epoch: 1,
-      kind: 'control',
-      status: 'COMMITTED',
-      atMs: 1,
-      text: 'too large',
-    }];
+    store.getOVContext = () => undefined;
     const { agent, children } = newAgent(store, {
       onTurnFailed: (info) => failures.push(info),
-    }, { ...baseConfig, cognitionMaxChars: 1 });
+    });
     const child = await handshake(agent, children);
 
     agent.deliver('cannot start', null, 'receipt-terminal');
@@ -421,7 +413,7 @@ describe('CodexAgent turn/steer state machine', () => {
     assert.equal(failures.length, 1);
     assert.deepEqual(failures[0].inboundSeqs, []);
     assert.deepEqual(failures[0].receiptIds, ['receipt-terminal']);
-    assert.match(failures[0].error, /above the 1-char handoff limit/);
+    assert.match(failures[0].error, /OpenViking context is not prepared/);
   });
 
   it('demotes the stored thread when stopped mid-turn, not after a clean stop', async () => {

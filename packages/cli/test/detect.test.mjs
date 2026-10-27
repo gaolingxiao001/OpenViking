@@ -169,3 +169,86 @@ test('runtimes: a Pi with no model points the user at vika pi', async () => {
   assert.deepEqual(runtimes.map(({ id, available }) => [id, available]), [['codex', false], ['claude', false], ['pi', false]]);
   assert.match(runtimes[2].note, /vika pi/);
 });
+
+function traexFixture(t, names) {
+  const bin = tempDir(t, 'vika-traex-');
+  for (const name of names) fs.writeFileSync(path.join(bin, name), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const probed = [];
+  const logins = [];
+  const options = {
+    env: { PATH: bin }, piBin: '/managed/pi.js',
+    probe: async (command) => { probed.push(command); return { compatible: true }; },
+    execFileImpl: async (command, args) => {
+      if (args.includes('--list-models')) return { stdout: '' };
+      assert.deepEqual(args, ['login', 'status']);
+      logins.push(command);
+      return { stdout: '' };
+    },
+  };
+  return { bin, options, probed, logins, detect: async () => (await detectRuntimes(options)).find(({ id }) => id === 'traex') };
+}
+
+test('TraeX: rejects old Coco instead of equating an executable traecli with a usable runtime', async (t) => {
+  const f = traexFixture(t, ['traecli']);
+  delete f.options.probe; // Exercise the real subprocess probe against exit 1.
+  const runtime = await f.detect();
+  assert.equal(runtime.installed, true);
+  assert.equal(runtime.protocolCompatible, false);
+  assert.equal(runtime.available, false);
+  assert.match(runtime.note, /TRAE CLI 2.0.*Coco.*traex/);
+  assert.deepEqual(f.logins, [], 'never invoke the old CLI login flow');
+});
+
+test('TraeX: discovers a new-only traex installation and prefers it when Coco coexists', async (t) => {
+  for (const names of [['traex'], ['traecli', 'traex']]) {
+    const f = traexFixture(t, names);
+    const runtime = await f.detect();
+    assert.equal(runtime.bin, path.join(f.bin, 'traex'));
+    assert.equal(runtime.protocolCompatible, true);
+    assert.equal(runtime.loggedIn, true);
+    assert.equal(runtime.available, true);
+    assert.deepEqual(f.probed, [runtime.bin]);
+  }
+});
+
+test('TraeX: a compatible traecli alias remains supported', async (t) => {
+  const f = traexFixture(t, ['traecli']);
+  assert.equal((await f.detect()).available, true);
+});
+
+test('TraeX: reports login failure separately from protocol incompatibility', async (t) => {
+  const f = traexFixture(t, ['traex']);
+  const base = f.options.execFileImpl;
+  f.options.execFileImpl = async (command, args) => {
+    if (args[0] === 'login') throw new Error('not logged in');
+    return base(command, args);
+  };
+  const runtime = await f.detect();
+  assert.equal(runtime.protocolCompatible, true);
+  assert.equal(runtime.loggedIn, false);
+  assert.equal(runtime.available, false);
+  assert.match(runtime.note, /登录检查未通过/);
+});
+
+test('TraeX: falls back to a compatible alias, but never overrides an explicit binary', async (t) => {
+  const f = traexFixture(t, ['traex', 'traecli']);
+  f.options.probe = async (bin) => ({ compatible: bin.endsWith('traecli') });
+  assert.equal((await f.detect()).bin, path.join(f.bin, 'traecli'));
+  f.options.env.TRAECLI_BIN = path.join(f.bin, 'traex');
+  assert.equal((await f.detect()).available, false);
+  f.options.env.TRAECLI_BIN = path.join(f.bin, 'missing');
+  const missing = await f.detect();
+  assert.equal(missing.installed, false);
+  assert.match(missing.note, /找不到可执行文件/);
+  f.options.env.TRAEX_BIN = path.join(f.bin, 'traecli');
+  assert.equal((await f.detect()).available, true, 'legacy explicit override has the same priority as daemon config');
+});
+
+test('TraeX: resolves and deduplicates aliases before probing or pinning a binary', async (t) => {
+  const f = traexFixture(t, ['actual']);
+  for (const name of ['traex', 'traecli']) fs.symlinkSync(path.join(f.bin, 'actual'), path.join(f.bin, name));
+  f.options.probe = async (bin) => { f.probed.push(bin); return { compatible: false }; };
+  const runtime = await f.detect();
+  assert.deepEqual(f.probed, [path.join(f.bin, 'actual')]);
+  assert.equal(runtime.bin, path.join(f.bin, 'actual'));
+});
