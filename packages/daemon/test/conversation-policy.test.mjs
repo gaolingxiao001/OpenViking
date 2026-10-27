@@ -72,6 +72,14 @@ describe('conversation policy assemble', () => {
     assert.match(text, /made only at the owner's request \(`owner=1`\) or in a chat the Role names/);
   });
 
+  it('routes @mentions by the authenticated mention= marker, by name only without it', () => {
+    const text = assembleConversationPolicy({ connectors: ['lark'], agentName: 'Vika' });
+    assert.match(text, /`mention=` says, by id, whom the message's @mentions call/);
+    assert.match(text, /only then compare a visible @name with your name/);
+    assert.match(text, /`mention=me` or `mention=mixed`, a visible @mention matching your name when there is no `mention=`/);
+    assert.match(text, /`mention=` says whether one of them is you/);
+  });
+
   it('adds meeting audio only when the feature is on', () => {
     assert.doesNotMatch(assembleConversationPolicy({ connectors: ['lark'] }), /## Meeting audio input/);
     assert.match(assembleConversationPolicy({ connectors: ['lark'], meetingAudio: {} }), /## Meeting audio input/);
@@ -239,7 +247,8 @@ describe('Volc', () => {
       const text = assemble(config);
       assert.match(text, /^## Inputs\n/);
       assert.match(text, /"owner=1" means the daemon verified the sender as the owner/);
-      assert.match(text, /an @mention of Zayn/);
+      assert.match(text, /an @mention of Zayn when there is no mention=/);
+      assert.match(text, /"mention=me\|other\|mixed" says by id whom they call/);
       assert.match(text, /source=github kind=issue\.opened/);
       assert.match(text, /otherwise deliver nothing/);
       assert.match(text, /## Role\n/);

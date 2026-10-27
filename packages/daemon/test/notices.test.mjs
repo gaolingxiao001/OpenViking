@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createLogger } from '../src/logger.mjs';
 import { FailurePolicy } from '../src/notices.mjs';
+import { mentionTarget as mentionTargetOf } from '../src/runtime-input.mjs';
 import { chatEvent } from './event-fixture.mjs';
 
 describe('automatic claude fallback', () => {
@@ -119,11 +120,12 @@ describe('automatic claude fallback', () => {
 });
 
 describe('failure notice mute', () => {
-  function makePolicy(inboundRows) {
+  function makePolicy(inboundRows, { mentionTarget } = {}) {
     const replies = [];
     const activities = [];
     const policy = new FailurePolicy({
       config: {},
+      mentionTarget,
       store: {
         getCognitionState: () => ({ runtime: 'codex' }),
         inboundBySeq: (seq) => inboundRows[seq] ?? null,
@@ -209,5 +211,18 @@ describe('failure notice mute', () => {
     assert.equal(replies.length, 2);
     const notices = activities.filter((entry) => entry.kind === 'agent.failure_notice');
     assert.deepEqual(notices.map((entry) => entry.status), ['NOTIFYING', 'NOTIFYING']);
+  });
+
+  it('keeps the mute for a message that only mentions someone else, once the bot knows its id', async () => {
+    const rows = {
+      1: inbound(1),
+      2: inbound(2, { mentions: [{ key: '@_user_1', name: 'Zayn', id: 'ou_other123456' }] }),
+      3: inbound(3, { mentions: [{ key: '@_user_1', name: 'Zayn', id: 'ou_bot123456' }] }),
+    };
+    const mentionTarget = (row) => mentionTargetOf(row.mentions, 'ou_bot123456');
+    const { policy, activities } = makePolicy(rows, { mentionTarget });
+    for (const seq of [1, 2, 3]) await policy.notifyTurnFailure({ inboundSeqs: [seq], error: 'model exploded' });
+    const notices = activities.filter((entry) => entry.kind === 'agent.failure_notice');
+    assert.deepEqual(notices.map((entry) => entry.status), ['NOTIFYING', 'MUTED', 'NOTIFYING']);
   });
 });

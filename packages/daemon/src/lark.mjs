@@ -153,7 +153,24 @@ export class LarkClient {
       profile: this.profile,
       version: `${version.stdout}\n${version.stderr}`.trim().split(/\r?\n/).at(-1),
       owner: await this.owner(prefix),
+      self: await this.self(prefix),
     };
+  }
+
+  // The bot itself as this app sees it: an inbound mention whose id is this
+  // open_id calls the bot, whatever name it shows. Renaming the bot keeps the
+  // open_id. Without it mentions stay unclassified; the Connector still runs.
+  async self(prefix) {
+    const info = await this.registry.run(this.config.larkCliBin, [
+      ...prefix, 'api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--json',
+    ], { timeoutMs: 10_000 });
+    let openId = null;
+    try { openId = JSON.parse(info.stdout)?.data?.open_id ?? null; } catch {}
+    if (info.code !== 0 || typeof openId !== 'string' || !/^ou_[A-Za-z0-9_-]+$/.test(openId)) {
+      this.logger.warn('lark_self_unknown', { reason: info.code !== 0 ? 'bot_info_failed' : 'no_open_id' });
+      return null;
+    }
+    return { id: openId };
   }
 
   // The owner is the user this profile is logged in as (the identity

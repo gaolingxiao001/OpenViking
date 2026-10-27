@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { sanitizeNonArkChildEnv, terminateProcessTree } from '../process-utils.mjs';
 import { safeError } from '../logger.mjs';
 import { connectorManifest, parseProtocolLine, requestMessage } from './protocol.mjs';
+import { mentionTarget } from '../runtime-input.mjs';
 
 const defaultWorkerPath = fileURLToPath(new URL('./worker.mjs', import.meta.url));
 // Backoff between restarts of one failed Connector; the last delay repeats.
@@ -22,6 +23,13 @@ function ownerIdentity(value) {
   const { id, target } = value;
   if (typeof id !== 'string' || !id || !target || typeof target !== 'object' || Array.isArray(target)) return null;
   return Object.freeze({ id, target: Object.freeze({ ...target }) });
+}
+
+// The bot itself as a Connector reported it at check: `id` is how the bot
+// appears in an inbound event's mentions there.
+function selfIdentity(value) {
+  if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !value.id) return null;
+  return Object.freeze({ id: value.id });
 }
 
 function appendTail(current, chunk, limit = 8_000) {
@@ -75,8 +83,9 @@ export class ConnectorProcess {
     this.pending = new Map();
     this.manifest = null;
     this.profile = this.type === 'lark' ? config.profile : null;
-    // Kept across restarts: the last owner this Connector reported.
+    // Kept across restarts: the last owner and bot identity this Connector reported.
     this.owner = null;
+    this.self = null;
     this.checked = false;
     this.started = false;
     this.stopping = false;
@@ -227,6 +236,7 @@ export class ConnectorProcess {
     this.checked = true;
     this.profile = checked?.profile || this.profile;
     this.owner = ownerIdentity(checked?.owner) ?? this.owner;
+    this.self = selfIdentity(checked?.self) ?? this.self;
     return {
       profile: this.profile,
       version: checked?.version || this.manifest.version,
@@ -440,6 +450,13 @@ export class ConnectorManager {
   isOwner(event) {
     const owner = this.owner(event?.connectorInstance ?? event?.source);
     return Boolean(owner && event.senderId && owner.id === event.senderId);
+  }
+
+  // Whom an event's @mentions call, against the bot identity its Connector
+  // reported at check (see mentionTarget).
+  mentionTarget(event) {
+    const self = this.connectors.get(event?.connectorInstance ?? event?.source)?.self;
+    return mentionTarget(event?.mentions, self?.id);
   }
 
   get subscriptionRunning() {

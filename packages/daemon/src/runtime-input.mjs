@@ -115,6 +115,20 @@ export function oneLine(text) {
     .replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
+// Whom a message's @mentions call, by id against the bot's own id on that
+// Connector: 'me', 'other' or 'mixed' (the bot and someone else). null when
+// nothing is mentioned or the bot's id is unknown, never a guess from names.
+export function mentionTarget(mentions, selfId) {
+  if (!Array.isArray(mentions) || mentions.length === 0) return null;
+  if (typeof selfId !== 'string' || !selfId) return null;
+  const me = mentions.some((mention) => mention?.id === selfId);
+  const other = mentions.some((mention) => mention?.id !== selfId);
+  if (me && other) return 'mixed';
+  return me ? 'me' : 'other';
+}
+
+const MENTION_TARGETS = new Set(['me', 'other', 'mixed']);
+
 function renderInboundContent(message) {
   let content = eventContent(message);
   for (const mention of message.mentions ?? []) {
@@ -148,12 +162,13 @@ export function formatInboundLine(message, resolveName = null, authenticated = {
     : '';
   const bots = authenticated?.botsSinceHuman;
   const botsTag = Number.isSafeInteger(bots) && bots > 0 ? ` bots_since_human=${bots}` : '';
+  const mentionTag = MENTION_TARGETS.has(authenticated?.mention) ? ` mention=${authenticated.mention}` : '';
   const line = `[chat=${chatTag(metadataTag(message.chatId), message.threadId)}${message.external ? ' external=true' : ''} source=${message.source || 'lark'}`
     + (message.connectorInstance && message.connectorInstance !== message.source ? ` instance=${metadataTag(message.connectorInstance)}` : '')
     + ` msg=${metadataTag(message.messageId)} event=${metadataTag(message.eventId)}`
     + (message.messageType === 'card_action' ? ` card=${message.parentId}` : '')
     + ` time=${isoMinute(message.createTimeMs)} from=${fromLabel(message.chatId, message.senderId, resolveName, message.source, message.senderName)}${ownerTag}`
-    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
+    + `${BOT_SENDERS.has(message.senderType) ? ' sender=bot' : ''}${botsTag}${replyTag}${mentionTag}${idleTag}${undecidedTag}] ${renderInboundContent(message)}`;
   return line;
 }
 

@@ -256,6 +256,7 @@ export class PersonalAgentDaemon {
         runtime: this.agentRuntime,
         recordActivity: (kind, fields) => this.recordSystemActivity(kind, fields),
         isOwner: (event) => this.connectors.isOwner(event),
+        mentionTarget: (event) => this.connectors.mentionTarget(event),
         isStopping: () => this.shuttingDown,
       });
       this.harness = new Harness({
@@ -296,6 +297,7 @@ export class PersonalAgentDaemon {
           if (card) return this.connectors.updateCard(event.parentId, card);
         },
         isOwner: (event) => this.connectors.isOwner(event),
+        mentionTarget: (event) => this.connectors.mentionTarget(event),
         isStopping: () => this.shuttingDown,
       });
       // Checks at each successful turn's end that every input it consumed got a
