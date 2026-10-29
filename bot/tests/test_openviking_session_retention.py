@@ -43,7 +43,7 @@ async def test_session_context_commit_uses_turn_budget_retention():
         HookContext(event_type="message.compact", session_key=session_key),
         session,
         FakeClient(),
-        SimpleNamespace(commit_token_threshold=200_000),
+        SimpleNamespace(),
         "admin",
         force_commit=True,
         keep_recent_turn_count=3,

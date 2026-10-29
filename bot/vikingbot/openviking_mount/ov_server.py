@@ -1298,6 +1298,10 @@ class VikingClient:
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
+        session_window_context: Optional[int] = None,
+        summary_token_ratio: Optional[float] = None,
+        retained_token_ratio: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         await self.ensure_session(
             session_id,
@@ -1315,6 +1319,10 @@ class VikingClient:
                 "keep_recent_turn_count": keep_recent_turn_count,
                 "retained_message_token_budget": retained_message_token_budget,
                 "min_raw_tail_steps": min_raw_tail_steps,
+                "session_window_context": session_window_context,
+                "summary_token_ratio": summary_token_ratio,
+                "retained_token_ratio": retained_token_ratio,
+                "reasoning_effort": reasoning_effort,
             }.items()
             if value is not None
         }
@@ -1336,6 +1344,10 @@ class VikingClient:
         keep_recent_turn_count: Optional[int] = None,
         retained_message_token_budget: Optional[int] = None,
         min_raw_tail_steps: Optional[int] = None,
+        session_window_context: Optional[int] = None,
+        summary_token_ratio: Optional[float] = None,
+        retained_token_ratio: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
     ):
         """Append messages to a stable session and commit it."""
         session_user_id = self._effective_session_user_id(user_id)
@@ -1360,6 +1372,10 @@ class VikingClient:
                 "keep_recent_turn_count": keep_recent_turn_count,
                 "retained_message_token_budget": retained_message_token_budget,
                 "min_raw_tail_steps": min_raw_tail_steps,
+                "session_window_context": session_window_context,
+                "summary_token_ratio": summary_token_ratio,
+                "retained_token_ratio": retained_token_ratio,
+                "reasoning_effort": reasoning_effort,
             }.items()
             if value is not None
         }

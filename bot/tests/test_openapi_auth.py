@@ -481,9 +481,9 @@ class TestOpenAPIAuth:
         assert created.status_code == 200
         session_id = created.json()["session_id"]
 
-        assert (
-            client.get(f"/bot/v1/sessions/{session_id}", headers=alice_headers).status_code == 200
-        )
+        detail = client.get(f"/bot/v1/sessions/{session_id}", headers=alice_headers)
+        assert detail.status_code == 200
+        assert detail.json()["estimated_tokens"] == 0
         assert client.get(f"/bot/v1/sessions/{session_id}", headers=bob_headers).status_code == 404
         assert client.get("/bot/v1/sessions", headers=bob_headers).json()["total"] == 0
 
