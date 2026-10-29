@@ -29,6 +29,10 @@ variables:
     description: "Optional instructions for checkpoint summaries produced by the same call."
     required: false
     default: ""
+  - name: "created_at"
+    type: "string"
+    description: "Message created date for resolving relative dates in the session content."
+    required: true
 
 template: |
   You are the Working Memory maintainer for a long-running session. Produce a
@@ -36,6 +40,9 @@ template: |
   and the explicitly requested checkpoint summaries in that same tool call{% endif %}.
   The session will keep going for many more rounds, so information you drop now
   is GONE — nobody else will put it back.
+
+  Message created date:
+  <created_at>{{ created_at }}</created_at>
 
   <current_wm>
   {{ latest_archive_overview }}

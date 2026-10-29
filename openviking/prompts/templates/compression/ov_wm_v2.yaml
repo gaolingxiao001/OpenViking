@@ -25,12 +25,19 @@ variables:
     description: "Optional instructions for checkpoint summaries produced by the same call."
     required: false
     default: ""
+  - name: "created_at"
+    type: "string"
+    description: "Message created date for resolving relative dates in the session content."
+    required: true
 
 template: |
   You are a session note-taker. Produce a structured Working Memory document
   that captures everything a future assistant would need to seamlessly continue
   this conversation — whether the topic is coding, personal stories, research,
   planning, or anything else.
+
+  Message created date:
+  <created_at>{{ created_at }}</created_at>
 
   {% if latest_archive_overview %}
   Previous Working Memory (carry forward still-valid information):

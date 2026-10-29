@@ -82,7 +82,7 @@ from openviking.session.working_memory import (
 from openviking.storage.abstract_overview import render_abstract_overview
 from openviking.telemetry import get_current_telemetry, tracer
 from openviking.utils.model_retry import is_retryable_api_error, retry_async
-from openviking.utils.time_utils import get_current_timestamp
+from openviking.utils.time_utils import get_current_timestamp, parse_iso_datetime
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.exceptions import (
     InternalError,
@@ -215,6 +215,17 @@ def _message_peer_ids(messages: List[Message]) -> set[str]:
         for message in messages
         if (peer_id := safe_peer_id(getattr(message, "peer_id", None)))
     }
+
+
+def _compression_created_at(messages: List[Message]) -> str:
+    for message in reversed(messages):
+        if not message.created_at:
+            continue
+        try:
+            return parse_iso_datetime(str(message.created_at)).date().isoformat()
+        except Exception:
+            continue
+    return get_current_timestamp().split("T", 1)[0]
 
 
 @dataclass(frozen=True)
@@ -3218,6 +3229,7 @@ class Session:
             language_conversation, config=get_openviking_config()
         )
         checkpoint_instructions = wm.checkpoint_prompt_instructions(len(checkpoint_requests))
+        created_at = _compression_created_at(messages)
 
         vlm = await self._get_vlm_config()
         if not (vlm and vlm.is_available()):
@@ -3257,6 +3269,7 @@ class Session:
                     "latest_archive_overview": latest_archive_overview or "",
                     "checkpoint_instructions": checkpoint_instructions,
                     "output_language": output_language,
+                    "created_at": created_at,
                 },
             )
             if checkpoint_requests:
@@ -3306,6 +3319,7 @@ class Session:
                 "wm_section_reminders": reminders,
                 "checkpoint_instructions": checkpoint_instructions,
                 "output_language": output_language,
+                "created_at": created_at,
             },
         )
         resp = await vlm.get_completion_async(
@@ -3332,7 +3346,7 @@ class Session:
                 raise ValueError("Working Memory update returned no tool call for checkpoints")
             logger.warning("WM update: LLM returned no tool_call; falling back to creation prompt")
             return await self._fallback_generate_wm_creation(
-                formatted, messages, latest_archive_overview, output_language
+                formatted, messages, latest_archive_overview, output_language, created_at
             )
 
         checkpoint_summaries: tuple[str, ...] = ()
@@ -3433,7 +3447,7 @@ class Session:
                 e,
             )
             return await self._fallback_generate_wm_creation(
-                formatted, messages, latest_archive_overview, output_language
+                formatted, messages, latest_archive_overview, output_language, created_at
             )
 
         wm.wm_debug(
@@ -3454,6 +3468,7 @@ class Session:
         messages: List[Message],
         prior_overview: str = "",
         output_language: str = "en",
+        created_at: Optional[str] = None,
     ) -> str:
         """Regenerate WM when a successful update response cannot be parsed.
 
@@ -3473,6 +3488,7 @@ class Session:
                 "latest_archive_overview": prior_overview,
                 "checkpoint_instructions": "",
                 "output_language": output_language,
+                "created_at": created_at or get_current_timestamp().split("T", 1)[0],
             },
         )
         vlm = await self._get_vlm_config()
