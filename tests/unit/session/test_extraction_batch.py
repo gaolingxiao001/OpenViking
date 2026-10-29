@@ -185,7 +185,7 @@ async def test_working_memory_propagates_model_errors(monkeypatch, path, message
 
 
 @pytest.mark.asyncio
-async def test_working_memory_prompt_uses_message_created_at(monkeypatch):
+async def test_working_memory_prompt_uses_turn_created_at_in_messages(monkeypatch):
     prompts = []
 
     def render_prompt(_prompt_id, variables):
@@ -228,7 +228,9 @@ async def test_working_memory_prompt_uses_message_created_at(monkeypatch):
         latest_archive_overview="## Current State\nPrevious work",
     )
 
-    assert [prompt["created_at"] for prompt in prompts] == ["2026-10-28", "2026-10-29"]
+    assert all("created_at" not in prompt for prompt in prompts)
+    assert '<turn created_at="2026-10-28">' in prompts[0]["messages"]
+    assert '<turn created_at="2026-10-29">' in prompts[1]["messages"]
 
 
 @pytest.mark.asyncio
