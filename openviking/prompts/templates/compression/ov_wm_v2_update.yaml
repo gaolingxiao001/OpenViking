@@ -64,6 +64,11 @@ template: |
   than 5 separate entries. The test: can a new assistant answer the user's
   likely follow-up questions from this WM alone?
 
+  <new_content> is grouped into <turn created_at="YYYY-MM-DD"> blocks. Interpret
+  relative time expressions such as "today", "yesterday", and "last week" using
+  the created_at of the turn that contains that statement. For temporal facts,
+  record the event date, not the compression/update date.
+
   Before you choose an op for a section, mentally list the CONCRETE FACTS it
   currently holds:
     * names, relationships, and personal details of people mentioned
