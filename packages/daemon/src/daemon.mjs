@@ -320,6 +320,7 @@ export class PersonalAgentDaemon {
         repository: this.timers,
         submitEvent: (event) => this.harness.handleConnectorEvent(event),
         logger: this.logger.child({ component: 'timer' }),
+        occurrenceCheckDelayMs: this.config.timerOccurrenceCheckDelayMs,
       });
       this.meeting.onAuthorityChanged(this.store.getCognitionState().authorityToken);
       void this.meeting.start().catch((error) => {

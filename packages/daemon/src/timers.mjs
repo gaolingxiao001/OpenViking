@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 const TIMER_ID_PREFIX = 'tm_';
-const OCCURRENCE_CHECK_DELAY_MS = 5 * 60 * 1000;
+export const DEFAULT_OCCURRENCE_CHECK_DELAY_MS = 5 * 60 * 1000;
 
 function number(value) {
   return typeof value === 'bigint' ? Number(value) : value;
@@ -475,6 +475,7 @@ export class TimerConnector {
     now = () => Date.now(),
     logger,
     idlePollMs = 60_000,
+    occurrenceCheckDelayMs = DEFAULT_OCCURRENCE_CHECK_DELAY_MS,
     autoStart = true,
   }) {
     this.repository = repository;
@@ -482,6 +483,7 @@ export class TimerConnector {
     this.now = now;
     this.logger = logger;
     this.idlePollMs = idlePollMs;
+    this.occurrenceCheckDelayMs = occurrenceCheckDelayMs;
     this.timer = null;
     this.stopped = false;
     this.running = false;
@@ -531,7 +533,7 @@ export class TimerConnector {
     this.repository.createOccurrenceCheck({
       occurrenceId,
       eventId: event.id,
-      nextCheckAtMs: nowMs + OCCURRENCE_CHECK_DELAY_MS,
+      nextCheckAtMs: nowMs + this.occurrenceCheckDelayMs,
       event,
     });
     try {
@@ -568,7 +570,7 @@ export class TimerConnector {
     } finally {
       this.repository.rescheduleOccurrenceCheck(check.occurrenceId, {
         attempt,
-        nextCheckAtMs: nowMs + OCCURRENCE_CHECK_DELAY_MS,
+        nextCheckAtMs: nowMs + this.occurrenceCheckDelayMs,
       });
     }
     return true;

@@ -80,7 +80,7 @@ describe('timer MCP tools', () => {
     assert.equal((await call('list_timers')).data.timers.length, 0);
   });
 
-  it('fires a due once timer as a reminder event and deletes it after the attempt', async (t) => {
+  it('fires a due once timer as a reminder event and schedules the default completion check', async (t) => {
     const { repository } = setup(t);
     const submitted = [];
     const timer = repository.create({
@@ -125,6 +125,45 @@ describe('timer MCP tools', () => {
     assert.equal(check.attempt, 0);
     assert.equal(check.nextCheckAtMs, 1_790_000_305_123);
     assert.equal(repository.get('tm_once_pr_001'), null);
+  });
+
+  it('uses the configured completion check delay for first and follow-up checks', async (t) => {
+    let nowMs = 1_790_000_000_000;
+    const { repository } = setup(t, { now: () => nowMs });
+    const submitted = [];
+    repository.create({
+      timerId: 'tm_once_pr_configured',
+      title: '看 PR',
+      text: '提醒我看 PR #987',
+      timezone: 'Asia/Shanghai',
+      schedule: { type: 'once', run_at: '2026-10-20T09:00:00+08:00' },
+      nextRunAtMs: 1_790_000_000_000,
+      maxRuns: 1,
+      delivery: { mode: 'owner' },
+      createdFromEventId: 'evt-create',
+      createdFromSource: 'lark',
+      createdAtMs: 1_789_999_000_000,
+    });
+    const connector = new TimerConnector({
+      repository,
+      submitEvent: (event) => submitted.push(event),
+      now: () => nowMs,
+      logger,
+      autoStart: false,
+      occurrenceCheckDelayMs: 120_000,
+    });
+
+    await connector.fireDueOnce();
+    let check = repository.getOccurrenceCheck('tm_once_pr_configured:1790000000000');
+    assert.equal(check.nextCheckAtMs, 1_790_000_120_000);
+
+    nowMs = 1_790_000_120_000;
+    await connector.fireDueOnce();
+
+    assert.equal(submitted.length, 2);
+    check = repository.getOccurrenceCheck('tm_once_pr_configured:1790000000000');
+    assert.equal(check.attempt, 1);
+    assert.equal(check.nextCheckAtMs, 1_790_000_240_000);
   });
 
   it('marks a timer occurrence completed and deletes its check record when the check is due', async (t) => {
