@@ -1562,6 +1562,20 @@ export class Store {
       .all(eventId).filter((row) => instance === null || row.connector_instance === instance);
   }
 
+  sentTimerOccurrenceDelivery(occurrenceId) {
+    return this.db.prepare(`
+      SELECT o.* FROM outbox o
+      JOIN connector_events e ON e.seq = o.inbound_seq
+      WHERE o.status = 'SENT'
+        AND o.action IN ('message.send', 'message.reply')
+        AND e.connector_instance = 'timer'
+        AND e.kind = 'reminder.due'
+        AND json_extract(e.event_json, '$.data.timer.occurrence_id') = ?
+      ORDER BY o.sent_at_ms DESC, o.id DESC
+      LIMIT 1
+    `).get(occurrenceId) ?? null;
+  }
+
   // Accepted inbound events that carried this message on one instance.
   acceptedMessageEvents(messageId, instance) {
     return this.db.prepare(`SELECT * FROM connector_events
