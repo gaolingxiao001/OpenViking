@@ -1,7 +1,5 @@
 """Configuration schema using Pydantic."""
 
-import logging
-
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
@@ -607,32 +605,13 @@ class AgentsConfig(BaseModel):
     @model_validator(mode="after")
     def map_deprecated_session_budget_fields(self) -> "AgentsConfig":
         configured_fields = self.model_fields_set
-        read_budget = self.session_context_token_budget
         threshold = self.commit_token_threshold
         if (
             threshold is not None
-            and (
-                threshold > self.context_window_tokens
-                or (read_budget is not None and read_budget < threshold)
-            )
-        ) or (read_budget is not None and read_budget > self.context_window_tokens):
-            logging.getLogger(__name__).warning(
-                "Ignoring deprecated session budgets: read_budget=%s, threshold=%s, "
-                "model_window=%s. Configure context_window_tokens and async_compress_ratio.",
-                read_budget,
-                threshold,
-                self.context_window_tokens,
-            )
-            self.session_context_token_budget = None
-            self.commit_token_threshold = None
-            self.commit_retained_message_token_budget = None
-        if (
-            self.commit_token_threshold is not None
+            and threshold <= self.context_window_tokens
             and "async_compress_ratio" not in configured_fields
         ):
-            self.async_compress_ratio = float(
-                self.commit_token_threshold / max(1, self.context_window_tokens)
-            )
+            self.async_compress_ratio = threshold / self.context_window_tokens
         if (
             self.commit_retained_message_token_budget is not None
             and "retained_token_ratio" not in configured_fields
@@ -641,6 +620,15 @@ class AgentsConfig(BaseModel):
                 self.commit_retained_message_token_budget / max(1, self.context_window_tokens)
             )
         return self
+
+    @property
+    def effective_commit_token_threshold(self) -> int:
+        if (
+            self.commit_token_threshold is not None
+            and "async_compress_ratio" not in self.model_fields_set
+        ):
+            return self.commit_token_threshold
+        return max(1, int(self.context_window_tokens * self.async_compress_ratio))
 
     @property
     def effective_session_context_token_budget(self) -> int:

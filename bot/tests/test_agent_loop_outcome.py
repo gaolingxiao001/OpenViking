@@ -69,18 +69,24 @@ class _FakeOVClient:
         return self.context_payload
 
 
-def test_agents_config_validates_deprecated_session_budget_fields(caplog):
+def test_agents_config_preserves_independent_deprecated_session_budgets():
     legacy_only = AgentsConfig(
         commit_token_threshold=200000,
         session_context_token_budget=3000,
-        commit_retained_message_token_budget=3200,
+        commit_retained_message_token_budget=6000,
     )
 
     assert legacy_only.context_window_tokens == 128000
     assert legacy_only.async_compress_ratio == 0.7
-    assert legacy_only.effective_session_context_token_budget == 128000
-    assert legacy_only.retained_token_ratio == 0.05
-    assert "Ignoring deprecated session budgets" in caplog.text
+    assert legacy_only.effective_session_context_token_budget == 3000
+    assert legacy_only.effective_commit_token_threshold == 200000
+    assert legacy_only.retained_token_ratio == 6000 / 128000
+    assert legacy_only.commit_token_threshold == 200000
+    assert legacy_only.session_context_token_budget == 3000
+    assert legacy_only.commit_retained_message_token_budget == 6000
+    from vikingbot.openviking_mount.session_budget import session_budget
+
+    assert session_budget(legacy_only) == (128000, 3000, 200000)
 
     valid_legacy = AgentsConfig(
         commit_token_threshold=64000,
@@ -98,6 +104,7 @@ def test_agents_config_validates_deprecated_session_budget_fields(caplog):
     )
     assert config.effective_session_context_token_budget == 1000
     assert config.async_compress_ratio == 0.7
+    assert config.effective_commit_token_threshold == 700
 
 
 class _BlockingFirstProvider(_RecordingProvider):
