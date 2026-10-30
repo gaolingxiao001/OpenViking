@@ -235,7 +235,7 @@ agents:
 
 在新一轮开始前，如果历史达到阈值，AgentLoop 会先同步和 commit OpenViking Session，再构建新的提示上下文，从而避免超长对话持续膨胀。
 
-压缩材料超过模型窗口的 `0.7` 时，使用 rolling summary 按顺序分段处理。摘要超预算后的第 2、3 轮再生成由 OpenViking 服务端 `memory.summary_budget_retry_enabled` 控制，默认关闭；开启后才执行摘要目标预算检查和再生成，关闭时不保证摘要满足 `summary_token_ratio` 目标预算。
+压缩材料超过模型窗口的 `0.7` 时，使用 rolling summary 按顺序分段处理。摘要超预算后的第 2、3 轮再生成由 OpenViking 服务端 `memory.summary_budget_retry_enabled` 控制，默认开启；开启后会执行摘要目标预算检查和再生成。
 
 ## 显式记忆提交
 

@@ -44,7 +44,7 @@ class MemoryConfig(BaseModel):
     """Memory configuration for OpenViking."""
 
     summary_budget_retry_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Regenerate over-budget session summaries with the second and third prompts.",
     )
     version: str = Field(

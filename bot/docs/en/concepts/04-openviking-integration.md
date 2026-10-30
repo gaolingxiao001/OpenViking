@@ -236,7 +236,7 @@ Messages use local indexes for incremental synchronization, avoiding repeated ap
 
 Before a new turn, if history reaches the threshold, AgentLoop first synchronizes and commits the OpenViking Session, then builds the new prompt context. This prevents long conversations from growing without bound.
 
-Compression material exceeding `0.7` of the model window is processed sequentially using rolling summary. The OpenViking server setting `memory.summary_budget_retry_enabled` controls the second and third generation attempts for over-budget summaries and defaults to `false`. Target-budget checks and regeneration run only when enabled; when disabled, summaries are not guaranteed to fit the `summary_token_ratio` target.
+Compression material exceeding `0.7` of the model window is processed sequentially using rolling summary. The OpenViking server setting `memory.summary_budget_retry_enabled` controls the second and third generation attempts for over-budget summaries and defaults to `true`; when enabled, target-budget checks and regeneration are applied.
 
 ## Explicit Memory Commit
 
