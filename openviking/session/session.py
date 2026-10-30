@@ -3391,6 +3391,13 @@ class Session:
             if actual_tokens <= summary_budget_tokens:
                 return overview
 
+            logger.warning(
+                "Working Memory summary exceeded budget; retrying compact summary "
+                "actual_tokens=%s summary_budget_tokens=%s overage_tokens=%s",
+                actual_tokens,
+                summary_budget_tokens,
+                actual_tokens - summary_budget_tokens,
+            )
             second_system = (
                 "The previous Working Memory exceeded the hard summary budget.\n\n"
                 f"Hard budget: {summary_budget_tokens} tokens\n"
@@ -3413,8 +3420,22 @@ class Session:
             )
             actual_tokens = estimate_text_tokens(second)
             if actual_tokens <= summary_budget_tokens:
+                logger.info(
+                    "Working Memory summary budget retry succeeded "
+                    "actual_tokens=%s summary_budget_tokens=%s",
+                    actual_tokens,
+                    summary_budget_tokens,
+                )
                 return second
 
+            logger.warning(
+                "Working Memory summary budget retry still exceeded budget; "
+                "using final fallback actual_tokens=%s summary_budget_tokens=%s "
+                "overage_tokens=%s",
+                actual_tokens,
+                summary_budget_tokens,
+                actual_tokens - summary_budget_tokens,
+            )
             third_system = (
                 f"Final fallback: write at most {summary_budget_tokens} tokens. Drop details. "
                 "Keep only current task, latest state, next step, key constraints or user "
@@ -3440,7 +3461,7 @@ class Session:
             third_user = truncate_text_to_token_budget(
                 third_user, material_budget, marker="", head_ratio=0.5
             )
-            return str(
+            third = str(
                 await vlm.get_completion_async(
                     messages=[
                         {"role": "system", "content": third_system},
@@ -3455,6 +3476,23 @@ class Session:
                 )
                 or ""
             )
+            third_tokens = estimate_text_tokens(third)
+            if third_tokens > summary_budget_tokens:
+                logger.warning(
+                    "Working Memory summary final fallback exceeded budget "
+                    "actual_tokens=%s summary_budget_tokens=%s overage_tokens=%s",
+                    third_tokens,
+                    summary_budget_tokens,
+                    third_tokens - summary_budget_tokens,
+                )
+            else:
+                logger.info(
+                    "Working Memory summary final fallback succeeded "
+                    "actual_tokens=%s summary_budget_tokens=%s",
+                    third_tokens,
+                    summary_budget_tokens,
+                )
+            return third
 
         # -------- Detect WM v2 format --------
         _is_wm_v2 = latest_archive_overview and any(
