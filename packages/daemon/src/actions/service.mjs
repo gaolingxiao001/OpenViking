@@ -43,6 +43,7 @@ const HANDLERS = {
   create_timer: 'createTimer',
   list_timers: 'listTimers',
   cancel_timer: 'cancelTimer',
+  complete_timer_occurrence: 'completeTimerOccurrence',
 };
 
 // A refusal the model can act on; `code` is what logs and activities record.
@@ -1261,6 +1262,21 @@ export class ActionService {
     return {
       text: cancelled ? `Timer cancelled: timer_id=${input.timer_id}.` : `Timer was not active: timer_id=${input.timer_id}.`,
       data: { timer_id: input.timer_id, cancelled },
+    };
+  }
+
+  completeTimerOccurrence(input) {
+    if (!this.timers) throw blocked('unknown_tool', 'timer tools are not available');
+    const check = this.timers.markOccurrenceCompleted(input.occurrence_id);
+    if (!check) {
+      return {
+        text: `Timer occurrence check was not pending: occurrence_id=${input.occurrence_id}.`,
+        data: { occurrence_id: input.occurrence_id, completed: false },
+      };
+    }
+    return {
+      text: `Timer occurrence completed: occurrence_id=${input.occurrence_id}.`,
+      data: { occurrence_id: input.occurrence_id, completed: true, status: check.status },
     };
   }
 }
