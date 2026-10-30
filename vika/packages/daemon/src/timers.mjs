@@ -258,6 +258,11 @@ export class TimerRepository {
       ORDER BY next_run_at_ms, created_at_ms LIMIT 1
     `);
     this.deleteTimer = this.db.prepare('DELETE FROM timers WHERE timer_id = ?');
+    this.deletePendingOccurrenceChecksForTimer = this.db.prepare(`
+      DELETE FROM timer_occurrence_checks
+      WHERE status = 'pending'
+        AND json_extract(event_json, '$.data.timer.id') = ?
+    `);
     this.advanceTimer = this.db.prepare(`
       UPDATE timers
       SET next_run_at_ms = ?, last_run_at_ms = ?, run_count = ?
@@ -361,6 +366,12 @@ export class TimerRepository {
 
   cancel(timerId) {
     return number(this.deleteTimer.run(timerId).changes) > 0;
+  }
+
+  cancelWithOccurrenceChecks(timerId) {
+    const deletedTimers = number(this.deleteTimer.run(timerId).changes);
+    const deletedChecks = number(this.deletePendingOccurrenceChecksForTimer.run(timerId).changes);
+    return deletedTimers > 0 || deletedChecks > 0;
   }
 
   finishOccurrence(timer, { scheduledTimeMs, completedAtMs, runCount }) {

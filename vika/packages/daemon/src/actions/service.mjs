@@ -1285,7 +1285,7 @@ export class ActionService {
 
   cancelTimer(input) {
     if (!this.timers) throw blocked('unknown_tool', 'timer tools are not available');
-    const cancelled = this.timers.cancel(input.timer_id);
+    const cancelled = this.timers.cancelWithOccurrenceChecks(input.timer_id);
     if (cancelled) this.onTimersChanged?.();
     return {
       text: cancelled ? `Timer cancelled: timer_id=${input.timer_id}.` : `Timer was not active: timer_id=${input.timer_id}.`,

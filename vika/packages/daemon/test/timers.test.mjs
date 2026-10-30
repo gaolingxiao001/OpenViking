@@ -255,6 +255,46 @@ describe('timer MCP tools', () => {
     assert.equal(check.nextCheckAtMs, 1_790_000_600_000);
   });
 
+  it('does not resend pending occurrence checks after the timer is cancelled', async (t) => {
+    let nowMs = 1_790_000_000_000;
+    const { call, repository } = setup(t, { now: () => nowMs });
+    const submitted = [];
+    repository.create({
+      timerId: 'tm_repeating_cancelled',
+      title: '报数',
+      text: '报数 10 个数',
+      timezone: 'Asia/Shanghai',
+      schedule: { type: 'interval', interval_ms: 20_000, anchor_at_ms: nowMs, timezone: 'Asia/Shanghai' },
+      nextRunAtMs: nowMs,
+      maxRuns: 10,
+      delivery: { mode: 'owner' },
+      createdFromEventId: 'evt-create',
+      createdFromSource: 'lark',
+      createdAtMs: nowMs - 60_000,
+    });
+    const connector = new TimerConnector({
+      repository,
+      submitEvent: (event) => submitted.push(event),
+      now: () => nowMs,
+      logger,
+      autoStart: false,
+    });
+
+    await connector.fireDueOnce();
+    assert.equal(submitted.length, 1);
+    assert.equal(repository.getOccurrenceCheck('tm_repeating_cancelled:1790000000000').status, 'pending');
+
+    const cancelled = await call('cancel_timer', { timer_id: 'tm_repeating_cancelled' });
+    assert.equal(cancelled.data.cancelled, true);
+    assert.equal(repository.getOccurrenceCheck('tm_repeating_cancelled:1790000000000'), null);
+
+    nowMs += 300_000;
+    await connector.fireDueOnce();
+
+    assert.equal(submitted.length, 1);
+    assert.equal(repository.nextWakeAtMs(), null);
+  });
+
   it('advances a daily timer to the next future planned wall-clock time', async (t) => {
     const { repository } = setup(t);
     repository.create({
@@ -415,6 +455,69 @@ describe('timer reminder delivery', () => {
       markdown: 'wrong target',
       decision_id: firstEventId,
     }), /configured for lark chat oc_report_group123/);
+  });
+
+  it('does not complete a timer occurrence after only an interim outbox send', async (t) => {
+    let nowMs = 1_790_000_000_000;
+    const { store, call, repository } = setup(t, { now: () => nowMs });
+    store.ingest(chatEvent({
+      messageId: 'om_seen_interim_timer_chat123',
+      eventId: 'evt-seen-interim-timer-chat',
+      chatId: 'oc_report_group123',
+      chatType: 'group',
+    }));
+    repository.create({
+      timerId: 'tm_interim_report_001',
+      title: '写日报',
+      text: '提醒我生成今天的日报',
+      timezone: 'Asia/Shanghai',
+      schedule: { type: 'once', run_at: '2026-10-20T09:00:00+08:00' },
+      nextRunAtMs: nowMs,
+      maxRuns: 1,
+      delivery: { mode: 'chat', source: 'lark', chat_id: 'oc_report_group123' },
+      createdFromEventId: 'evt-create',
+      createdFromSource: 'lark',
+      createdAtMs: nowMs - 60_000,
+    });
+    const connector = new TimerConnector({
+      repository,
+      submitEvent: (event) => store.ingest(normalizeEvent(event)),
+      now: () => nowMs,
+      logger,
+      autoStart: false,
+    });
+
+    await connector.fireDueOnce();
+    const occurrenceId = 'tm_interim_report_001:1790000000000';
+    const eventId = `timer:${occurrenceId}`;
+    const inbound = store.db.prepare('SELECT seq FROM connector_events WHERE event_id = ?').get(eventId);
+
+    const interim = store.reserveOutbox({
+      connector: 'lark',
+      action: 'message.send',
+      idempotencyKey: 'timer-interim-send',
+      payload: { chat_id: 'oc_report_group123', content: { msg_type: 'text', content: { text: '我在处理' } } },
+      summary: '我在处理',
+      caller: 'codex',
+      chatId: 'oc_report_group123',
+      inboundSeq: inbound.seq,
+      runtimeToken: TOKEN,
+      metadata: { interim: true },
+    }, nowMs);
+    store.settleOutbox(interim.id, 'SENT', { result: { message_id: 'om_interim_sent123' } }, nowMs);
+
+    const notCompleted = await call('complete_timer_occurrence', { occurrence_id: occurrenceId });
+    assert.equal(notCompleted.data.completed, false);
+    assert.equal(repository.getOccurrenceCheck(occurrenceId).status, 'pending');
+
+    await call('send_message', {
+      source: 'lark',
+      chat_id: 'oc_report_group123',
+      markdown: '日报已生成',
+      decision_id: eventId,
+    });
+    const completed = await call('complete_timer_occurrence', { occurrence_id: occurrenceId });
+    assert.equal(completed.data.completed, true);
   });
 
   it('allows a timer reminder to send to a chat and keeps other non-chat events owner-only', async (t) => {
