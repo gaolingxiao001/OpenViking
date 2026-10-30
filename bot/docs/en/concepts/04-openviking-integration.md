@@ -212,6 +212,8 @@ The `message.compact` Hook performs this synchronization. Important settings inc
 | `agents.session_context_token_budget` | Deprecated independent history read budget; explicit `context_window_tokens` takes precedence |
 | `agents.commit_retained_message_token_budget` | Deprecated retained token budget; explicit `retained_token_ratio` takes precedence |
 
+VikingBot does not expose `reasoning_effort` as an `agents` setting; Working Memory summary generation uses the OpenViking server VLM provider's default reasoning effort. To tune it for a single commit, call the OpenViking server commit API directly.
+
 A logical Turn starts with a real user query and includes every assistant Step before the next real user query. Each Step keeps the assistant text, tool calls, and corresponding tool results as an indivisible unit. The system first selects recent Turns using `commit_keep_recent_turn_count`, then applies `context_window_tokens * retained_token_ratio` to the retained content. If the newest Turn alone exceeds the budget, its user query and at least `commit_min_raw_tail_steps` latest Steps remain verbatim while earlier Steps are represented by the checkpoint generated during the same archive operation.
 
 Legacy budget fields retain their independent meanings and are not cleared when the read budget is smaller than the commit threshold. When the corresponding new setting is absent, the legacy read budget remains effective; a legacy trigger within the model window is mapped to a ratio, while a larger trigger remains a fixed threshold; the legacy retained budget is mapped to a ratio. Legacy fields never redefine the model window. For example, legacy budgets of `read=3000, trigger=200000, retained=6000` continue to use those values.
