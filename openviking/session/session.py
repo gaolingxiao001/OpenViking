@@ -1464,7 +1464,9 @@ class Session:
             )
         turn_mode = retention_mode == RETENTION_MODE_TURN_BUDGET
         effective_window_context = max(1, int(session_window_context or 128_000))
-        effective_summary_ratio = float(0.25 if summary_token_ratio is None else summary_token_ratio)
+        effective_summary_ratio = float(
+            0.25 if summary_token_ratio is None else summary_token_ratio
+        )
         effective_retained_ratio = float(
             0.05 if retained_token_ratio is None else retained_token_ratio
         )
@@ -2294,17 +2296,13 @@ class Session:
                         if checkpoint_requests:
                             summary_kwargs["checkpoint_requests"] = checkpoint_requests
                         material_limit = max(1, int(session_window_context * 0.7))
-                        material_tokens = estimate_extraction_message_tokens(
-                            extraction_messages
-                        )
+                        material_tokens = estimate_extraction_message_tokens(extraction_messages)
                         summary_material_tokens = (
                             estimate_text_tokens(latest_archive_overview)
                             if latest_archive_overview
                             else 0
                         )
-                        if (
-                            material_tokens + summary_material_tokens <= material_limit
-                        ):
+                        if material_tokens + summary_material_tokens <= material_limit:
                             generated = await self._generate_archive_summary_async(
                                 extraction_messages,
                                 **summary_kwargs,
@@ -3233,13 +3231,9 @@ class Session:
                             high = middle - 1
                     if low == 0:
                         raise ValueError("Rolling summary leaves no room for the next message")
-                    batch_messages.append(
-                        replace(message, parts=[TextPart(text[:low])])
-                    )
+                    batch_messages.append(replace(message, parts=[TextPart(text[:low])]))
                     if low < len(text):
-                        remaining.appendleft(
-                            replace(message, parts=[TextPart(text[low:])])
-                        )
+                        remaining.appendleft(replace(message, parts=[TextPart(text[low:])]))
                     batch_tokens = estimate_extraction_message_tokens(batch_messages)
                     break
                 batch_messages.append(remaining.popleft())

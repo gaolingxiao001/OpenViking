@@ -940,8 +940,7 @@ class OpenAPIChannel(BaseChannel):
                     raise HTTPException(
                         status_code=401,
                         detail=(
-                            "OpenViking credentials did not resolve to a usable "
-                            "User/Admin identity"
+                            "OpenViking credentials did not resolve to a usable User/Admin identity"
                         ),
                     )
                 api_key_type = "user"

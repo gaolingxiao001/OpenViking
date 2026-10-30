@@ -137,9 +137,7 @@ class OpenVikingCompactHook(Hook):
             pending_tokens = int(admin_session_state.get("pending_tokens", 0) or 0)
 
         should_commit = (
-            force_commit
-            or pending_tokens >= token_threshold
-            or reached_message_threshold
+            force_commit or pending_tokens >= token_threshold or reached_message_threshold
         )
         if should_commit:
             admin_commit_result = await client.commit_session(

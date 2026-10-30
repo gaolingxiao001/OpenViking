@@ -1282,7 +1282,7 @@ async def test_agent_loop_build_prompt_history_enforces_token_budget_for_live_to
                     for index in range(10)
                 ],
                 {"role": "assistant", "parts": [{"type": "text", "text": "final answer"}]},
-            ]
+            ],
         }
     )
 

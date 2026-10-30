@@ -33,6 +33,7 @@ from vikingbot.hooks import HookContext
 from vikingbot.hooks.manager import hook_manager
 from vikingbot.integrations.langfuse import LangfuseClient
 from vikingbot.observability.outcome import evaluate_response_outcome, should_update_outcome
+from vikingbot.openviking_mount.session_budget import session_budget
 from vikingbot.openviking_mount.session_state import (
     get_openviking_session_id,
     get_openviking_state,
@@ -44,7 +45,6 @@ from vikingbot.providers.base import LLMProvider
 from vikingbot.sandbox import SandboxManager
 from vikingbot.session.manager import Session, SessionManager
 from vikingbot.utils.helpers import cal_str_tokens, ensure_non_empty_assistant_content
-from vikingbot.openviking_mount.session_budget import session_budget
 from vikingbot.utils.tracing import set_response_id, trace
 
 if TYPE_CHECKING:

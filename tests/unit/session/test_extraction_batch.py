@@ -46,9 +46,7 @@ async def test_session_context_reserves_summary_before_active_messages():
 @pytest.mark.asyncio
 async def test_rolling_summary_stops_when_generated_summary_fills_material_window():
     session = Session(viking_fs=None)
-    session._get_vlm_config = AsyncMock(
-        return_value=SimpleNamespace(is_available=lambda: True)
-    )
+    session._get_vlm_config = AsyncMock(return_value=SimpleNamespace(is_available=lambda: True))
     generate = AsyncMock(return_value="x" * 280)
     session._generate_archive_summary_async = generate
     with pytest.raises(ValueError, match="summary exceeds the rolling material budget"):
@@ -63,17 +61,17 @@ async def test_rolling_summary_stops_when_generated_summary_fills_material_windo
 @pytest.mark.asyncio
 async def test_rolling_summary_splits_a_single_oversized_message():
     session = Session(viking_fs=None)
-    session._get_vlm_config = AsyncMock(
-        return_value=SimpleNamespace(is_available=lambda: True)
-    )
+    session._get_vlm_config = AsyncMock(return_value=SimpleNamespace(is_available=lambda: True))
     chunks = []
 
     async def generate(messages, **kwargs):
         chunks.append(messages[0].content)
         assert messages[0].created_at == "2026-10-28T23:59:00Z"
-        assert sum(message.estimated_tokens for message in messages) + estimate_text_tokens(
-            kwargs["latest_archive_overview"]
-        ) <= 70
+        assert (
+            sum(message.estimated_tokens for message in messages)
+            + estimate_text_tokens(kwargs["latest_archive_overview"])
+            <= 70
+        )
         return "summary"
 
     session._generate_archive_summary_async = generate
@@ -136,14 +134,15 @@ async def test_update_fallback_and_checkpoint_check_final_summary_budget(monkeyp
                 retained_message_token_budget=100,
                 estimated_active_tokens=100,
             )
-        ] if checkpoint else None,
+        ]
+        if checkpoint
+        else None,
     )
     assert (result.overview if checkpoint else result) == "compact"
     for call in completion.await_args_list:
         kwargs = call.kwargs
         input_tokens = estimate_text_tokens(kwargs.get("prompt")) + sum(
-            estimate_text_tokens(message["content"]) + 4
-            for message in kwargs.get("messages") or []
+            estimate_text_tokens(message["content"]) + 4 for message in kwargs.get("messages") or []
         )
         if kwargs.get("prompt"):
             input_tokens += 4
