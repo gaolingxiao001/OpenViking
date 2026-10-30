@@ -61,6 +61,16 @@ function eventRef(row) {
   return [row.connector_instance, row.event_id];
 }
 
+function timerDelivery(row) {
+  if (row?.connector_instance !== 'timer' || row?.kind !== 'reminder.due' || !row.event_json) return null;
+  try {
+    const delivery = JSON.parse(row.event_json).data?.timer?.delivery;
+    return delivery && typeof delivery === 'object' ? delivery : null;
+  } catch {
+    return null;
+  }
+}
+
 function messageLines(messages, { withChat = false } = {}) {
   return messages.map((message) => {
     const sender = message.sender.name || message.sender.id || 'unknown';
@@ -290,7 +300,7 @@ export class ActionService {
   // subject of a non-chat event).
   fence(input, caller) {
     const row = this.resolveDecision(input, caller);
-    this.assertFresh(row, caller);
+    if (!this.isTimerReminder(row)) this.assertFresh(row, caller);
     return row;
   }
 
@@ -420,6 +430,18 @@ export class ActionService {
     }
   }
 
+  authorizeTimerDelivery(fence, { connector, action, chatId = null, toOwner = false }) {
+    const delivery = timerDelivery(fence);
+    if (!delivery) return;
+    if (delivery.mode === 'owner') {
+      if (toOwner) return;
+      throw blocked('timer_delivery_target', `Delivery blocked: this timer occurrence is configured for the owner. Use notify_owner. ${NO_ACTION}`);
+    }
+    if (delivery.mode === 'chat' && ['message.send', 'message.reply'].includes(action)
+      && delivery.source === connector && delivery.chat_id === chatId) return;
+    throw blocked('timer_delivery_target', `Delivery blocked: this timer occurrence is configured for ${delivery.source ?? 'unknown'} chat ${delivery.chat_id ?? 'unknown'}. ${NO_ACTION}`);
+  }
+
   isTimerReminder(fence) {
     return fence.connector_instance === 'timer' && fence.kind === 'reminder.due';
   }
@@ -525,7 +547,7 @@ export class ActionService {
     if (caller.authority) {
       this.assertAuthority(caller.authority);
       if (fence) {
-        this.assertFresh(fence, caller);
+        if (!this.isTimerReminder(fence)) this.assertFresh(fence, caller);
         this.assertNoBotLoop(fence, action, scope, caller);
       }
     }
@@ -614,6 +636,7 @@ export class ActionService {
     const connector = this.route(caller, 'message.send', 'actions', input.source, { chatId: input.chat_id });
     const fence = this.fence(input, caller);
     this.authorize(fence);
+    this.authorizeTimerDelivery(fence, { connector, action: 'message.send', chatId: input.chat_id });
     // A plain send lands in the chat's main conversation.
     const interim = this.interim(input, caller, fence, connector,
       conversationKeyFor(connector, { tenant_id: fence.tenant_key, id: input.chat_id }));
@@ -643,6 +666,7 @@ export class ActionService {
     const fence = this.fence(input, caller);
     const { connector, owner } = this.ownerRoute(fence, input.source, caller);
     this.authorize(fence, { toOwner: true });
+    this.authorizeTimerDelivery(fence, { connector, action: 'message.send', toOwner: true });
     const responseTo = this.attribution(caller, input.response_to_id, fence);
     const content = await this.content(input, connector, 'message.send', { chatId: null, fence, caller, answerer: owner.id });
     try {
@@ -680,6 +704,7 @@ export class ActionService {
     const interim = this.interim(input, caller, fence, connector, target?.conv_key ?? null);
     if (this.manifest(connector).actions['message.reply'].approval) return this.proposeReply(input, caller, connector, fence);
     this.authorize(fence);
+    this.authorizeTimerDelivery(fence, { connector, action: 'message.reply', chatId });
     const responseTo = this.attribution(caller, input.response_to_id, fence, { connector, messageId: input.message_id });
     const content = await this.content(input, connector, 'message.reply', { chatId, fence, caller });
     try {
@@ -1267,6 +1292,12 @@ export class ActionService {
 
   completeTimerOccurrence(input) {
     if (!this.timers) throw blocked('unknown_tool', 'timer tools are not available');
+    if (!this.store.sentTimerOccurrenceDelivery(input.occurrence_id)) {
+      return {
+        text: `Timer occurrence is not complete: no successful delivery is recorded for occurrence_id=${input.occurrence_id}.`,
+        data: { occurrence_id: input.occurrence_id, completed: false },
+      };
+    }
     const check = this.timers.markOccurrenceCompleted(input.occurrence_id);
     if (!check) {
       return {

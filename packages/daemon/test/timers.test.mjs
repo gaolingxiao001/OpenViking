@@ -11,13 +11,14 @@ import { chatEvent } from './event-fixture.mjs';
 import { fakeConnectors } from './action-fixture.mjs';
 
 const TOKEN = 'runtime-token';
+const OWNER = { id: 'ou_owner12345678', target: { user_id: 'ou_owner12345678' } };
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return this; } };
 
 function setup(t, { now = 1_790_000_000_000, run = null } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'timers-'));
   const store = new Store(path.join(directory, 'state.sqlite3'), logger);
   store.initializeCognition('codex', TOKEN);
-  const connectors = fakeConnectors({ run });
+  const connectors = fakeConnectors({ run, owners: { lark: OWNER } });
   const repository = new TimerRepository(store.db);
   let wakeups = 0;
   const service = new ActionService({
@@ -168,7 +169,7 @@ describe('timer MCP tools', () => {
 
   it('marks a timer occurrence completed and deletes its check record when the check is due', async (t) => {
     let nowMs = 1_790_000_000_000;
-    const { call, repository } = setup(t, { now: () => nowMs });
+    const { store, call, repository } = setup(t, { now: () => nowMs });
     const submitted = [];
     repository.create({
       timerId: 'tm_once_pr_002',
@@ -192,6 +193,11 @@ describe('timer MCP tools', () => {
     });
 
     await connector.fireDueOnce();
+    store.ingest(normalizeEvent(submitted[0]));
+    await call('notify_owner', {
+      markdown: '提醒我看 PR #456',
+      decision_id: 'timer:tm_once_pr_002:1790000000000',
+    });
     const completed = await call('complete_timer_occurrence', { occurrence_id: 'tm_once_pr_002:1790000000000' });
     assert.equal(completed.data.completed, true);
     assert.equal(repository.getOccurrenceCheck('tm_once_pr_002:1790000000000').status, 'completed');
@@ -345,6 +351,67 @@ describe('timer reminder delivery', () => {
     `).all().map((row) => row.event_id);
     assert.deepEqual(timerEvents, [eventId]);
     assert.equal(repository.getOccurrenceCheck(occurrenceId), null);
+  });
+
+  it('allows timer occurrences to deliver after newer timer events but completes only after a sent message', async (t) => {
+    let nowMs = 1_790_000_000_000;
+    const { store, call, connectors, repository } = setup(t, { now: () => nowMs });
+    store.ingest(chatEvent({
+      messageId: 'om_seen_timer_chat123',
+      eventId: 'evt-seen-timer-chat',
+      chatId: 'oc_report_group123',
+      chatType: 'group',
+    }));
+    repository.create({
+      timerId: 'tm_count_001',
+      title: '报数',
+      text: '报数 10 个数',
+      timezone: 'Asia/Shanghai',
+      schedule: { type: 'interval', interval_ms: 20_000, anchor_at_ms: nowMs, timezone: 'Asia/Shanghai' },
+      nextRunAtMs: nowMs,
+      maxRuns: 10,
+      delivery: { mode: 'chat', source: 'lark', chat_id: 'oc_report_group123' },
+      createdFromEventId: 'evt-create',
+      createdFromSource: 'lark',
+      createdAtMs: nowMs - 60_000,
+    });
+    const connector = new TimerConnector({
+      repository,
+      submitEvent: (event) => store.ingest(normalizeEvent(event)),
+      now: () => nowMs,
+      logger,
+      autoStart: false,
+    });
+
+    await connector.fireDueOnce();
+    nowMs += 20_000;
+    await connector.fireDueOnce();
+
+    const firstOccurrenceId = 'tm_count_001:1790000000000';
+    const firstEventId = `timer:${firstOccurrenceId}`;
+    const notCompleted = await call('complete_timer_occurrence', { occurrence_id: firstOccurrenceId });
+    assert.equal(notCompleted.data.completed, false);
+    assert.equal(repository.getOccurrenceCheck(firstOccurrenceId).status, 'pending');
+
+    await call('send_message', {
+      source: 'lark',
+      chat_id: 'oc_report_group123',
+      markdown: '1',
+      decision_id: firstEventId,
+    });
+    assert.equal(connectors.calls.at(-1).action, 'message.send');
+    assert.equal(connectors.calls.at(-1).input.chat_id, 'oc_report_group123');
+
+    const completed = await call('complete_timer_occurrence', { occurrence_id: firstOccurrenceId });
+    assert.equal(completed.data.completed, true);
+    assert.equal(repository.getOccurrenceCheck(firstOccurrenceId).status, 'completed');
+
+    await assert.rejects(() => call('send_message', {
+      source: 'lark',
+      chat_id: 'oc_other_group123',
+      markdown: 'wrong target',
+      decision_id: firstEventId,
+    }), /configured for lark chat oc_report_group123/);
   });
 
   it('allows a timer reminder to send to a chat and keeps other non-chat events owner-only', async (t) => {
