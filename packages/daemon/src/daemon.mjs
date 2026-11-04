@@ -23,6 +23,7 @@ import { IdleLivenessExtension } from './extensions/idle-liveness.mjs';
 import { OVSessionClient, OVSessionContext } from './ov-session-context.mjs';
 import { OVUnavailableError } from './ov-connection.mjs';
 import { TimerConnector, TimerRepository } from './timers.mjs';
+import { OVTimerRepository } from './ov-timers.mjs';
 import { updateRuntimePreference } from './runtime-preference.mjs';
 import {
   MeetingPlugin,
@@ -133,7 +134,6 @@ export class PersonalAgentDaemon {
     this.lock.acquire();
     try {
       this.store = new Store(this.config.databasePath, this.logger.child({ component: 'store' }));
-      this.timers = new TimerRepository(this.store.db);
       const ovClient = this.ovClient ?? new OVSessionClient(this.config.openVikingConfigPath);
       this.ovContext = new OVSessionContext(this.store, ovClient, this.logger);
       this.recordSystemActivity('system.starting', {
@@ -141,6 +141,9 @@ export class PersonalAgentDaemon {
         status: 'STARTING',
       }, 'starting');
       await this.checkOpenViking(ovClient);
+      this.timers = this.config.timerStorage === 'sqlite'
+        ? new TimerRepository(this.store.db)
+        : await new OVTimerRepository(ovClient, this.config.instanceId).load();
       this.runMaintenance();
 
       this.connectors = new ConnectorManager(
@@ -335,6 +338,7 @@ export class PersonalAgentDaemon {
         this.httpServer = await startHttpApi({
           config: this.config,
           store: this.store,
+          timers: this.timers,
           logger: this.logger,
           serviceSnapshot: (options) => this.serviceSnapshot(options),
         });

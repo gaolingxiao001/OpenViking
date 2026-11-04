@@ -52,7 +52,7 @@ function send(response, status, contentType, body, extraHeaders = {}) {
 
 // serviceSnapshot: ({ includeState }) => { healthy, ready, body } — owned by
 // the daemon, which holds the subscriber/runtime state this surface reports.
-export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
+export async function startHttpApi({ config, store, timers = null, logger, serviceSnapshot }) {
   const server = http.createServer((request, response) => {
     try {
       if (!requestIsSameOrigin(request)) {
@@ -126,6 +126,7 @@ export async function startHttpApi({ config, store, logger, serviceSnapshot }) {
             uptimeSeconds: service.body.uptimeSeconds,
           },
           overview: store.activityOverview(),
+          timers: timers?.observation() ?? { active: [], pending: [] },
           sessions: store.listActivitySessions(),
           epoch,
           activities: feed.activities,
