@@ -99,6 +99,17 @@ describe('turn-end decision settlement', () => {
     assert.deepEqual(activities.map(({ status }) => status), ['MISSING']);
   });
 
+  it('keeps reminder counts for more than one thousand undecided inputs', async (t) => {
+    const { submitted, ingest, turn } = setup(t);
+    const first = ingest({ messageId: 'om_historyFirst123' });
+    for (let reminder = 0; reminder < 3; reminder += 1) await turn([first.seq]);
+    const others = Array.from({ length: 1_000 }, (_, index) =>
+      ingest({ messageId: `om_history${String(index).padStart(8, '0')}`, chatId: `oc_history${index}` }));
+    await turn(others.map((row) => row.seq));
+    await turn([first.seq]);
+    assert.equal(submitted.filter((item) => item.seq === first.seq).length, 3);
+  });
+
   it('lets one decision on the newest input cover a burst, but not one on an older input', async (t) => {
     const { activities, ingest, silence, settlement, turn } = setup(t);
     const burst = ['om_burstA1234567', 'om_burstB1234567', 'om_burstC1234567']
